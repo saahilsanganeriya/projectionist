@@ -17,7 +17,7 @@ that means every disruptive job pauses while anyone but the owner is watching.
  │      │                       │                                                                  │
  │      │            ┌──────────┼──────────────┬───────────────┬──────────────┐                    │
  │      │            ▼          ▼              ▼               ▼              ▼                    │
- │      │        gpu-guard   remote4k    details*   subtitles*   rename*  ingest*  jf-sync*  ssd*  │
+ │      │        gpu-guard   remote4k    details*   subtitles    rename*  ingest*  jf-sync*  ssd*  │
  │      │            │          │                                                                  │
  │      │   env: Plex client · Jellyfin client · viewers.Gate (pause rule) · probe (ffprobe cache)│
  │      │        fsx (renameat2 NOREPLACE, FICLONE, dir fsync) · store · FFmpeg paths              │
@@ -62,17 +62,19 @@ A throwaway probe in scratch folders of two non-media shares (deleted afterwards
 | Synology ACL | A plain `mkdir` or create under a folder that has its ACL **inherits it**. **`chmod` strips it**; `chown` keeps it. | This is the root cause of the pilot bug ("Plex marked items deleted"). The executor did `chown`+`chmod` on each new folder, then repaired the damage with one `synoacltool` subprocess per folder. The Go stages never chmod, so they need no ACL work and no `synoacltool`, which the container does not have anyway. |
 | Durability | | **One fsync per unit, not per op.** The rename executor writes all intended moves of a unit in one SQLite transaction (the "log before acting" rule, one commit). It then performs the renames, fsyncs each touched directory once (`fsx.SyncDir`), and commits `unit-done`. On restart, a unit with intents but no `unit-done` is resolved per op from the filesystem: src present and dst absent means not done, the reverse means done. The old executor's ~18 ops/s came from a per-op fsync of `undo.tsv` plus a `synoacltool` exec per new folder. Both costs disappear here. |
 
-## Where Rust would earn its place: not yet
+## Where Rust earns its place: one vendored tool
 
 Every stage so far is bound by I/O or subprocesses: ffmpeg/ffprobe, Plex and Jellyfin HTTP, renames on a RAID5
 volume. Go reaches the needed syscalls directly (`renameat2`, `FICLONE`, `setpriority` through `x/sys`) and
 ships as a single 12 MB static binary (stripped). The CPU-heavy candidates are small:
-- subtitle alignment: cue-time fitting over 7 frame-rate ratios, milliseconds per title;
+- subtitle alignment against a PGS track: cue-time fitting over 3 frame-rate ratios, milliseconds per title;
 - hashing for deduplication: Go's SHA-256 uses the J4125's SHA extensions.
 
 Rust earns a crate when a stage needs a library only Rust has, or when a profile on the J4125 shows a ≥2× wall-time
-win on a stage's critical path. One example: voice-activity-based subtitle sync (what ffsubsync does) without
-spawning Python. It would ship as a static binary that the Go stage execs, measured before and after.
+win on a stage's critical path. The first case is subtitle sync to the speech in the audio (voice-activity
+detection plus split-aware alignment), which subtitles needs for titles without an English image track:
+[alass](https://github.com/kaegi/alass), built from a pinned commit as a static musl binary in the image
+(`/usr/local/bin/alass`) and exec'd by the stage.
 
 ## Migration: one script at a time, deleted at its cutover
 
@@ -86,7 +88,7 @@ image, enables the stage's `[stages.<name>]` table, and imports any legacy state
 | 1 | gpu-guard | `scripts/gpu_guard.py`, DSM task 8 | **Ported.** Table tests on every decision, plus a fake-server run: drift repaired, each transcode alerted once, log offset kept across rotation, self-test only when idle and once a day. On the NAS: `projectionist run gpu-guard` gives the same alert set as the Python run in the same window (none expected), and both GPU self-tests pass (>100 frames). |
 | 2 | remote4k | `scripts/remote4k.py`, DSM task 9 | **Ported.** Table tests (selection, encode arguments, quoting) and an end-to-end fake run (real SIGSTOP/SIGCONT, DV5 skip, rerun does nothing). On the NAS: for one playlist film, the Go ffmpeg argument list equals the Python's, the copy's ffprobe colour tags and HDR10 match, and a guest session pauses the encode. |
 | 3 | details | `rename/write_details.py` | For every video, the `.details` text equals the Python output on every field from the rename log. Probe-derived fields (codec, bit depth, HDR, audio, subtitles) agree on ≥99.5 %, and every difference is listed with its cause (Plex analysis vs ffprobe). |
-| 4 | subtitles | `scripts/sub_stats.py`, `scripts/subfetch2.py` | `sub_stats` TSV byte-identical on the full library. subfetch: identical keep/reject decisions and offsets on a 50-title sample replayed from recorded Plex search responses. Never overwrites (`O_EXCL`). |
+| 4 | subtitles | `scripts/sub_stats.py`, `scripts/subfetch2.py` | **Ported** (providers called directly, never Plex). Build-tagged replay harness (`gate_test.go`) against the scripts' own code on the NAS: `sub_stats` TSV byte-identical on 378 real subtitle files, the OpenSubtitles hash on 20 videos, `align`/`retime` numbers on 32 (reference, candidate) pairs. End to end in scratch on 24 titles lacking English subtitles; median cue offset against the PGS captions under 300 ms. Never overwrites (`O_EXCL`). |
 | 5 | rename planner + executor | `rename_engine.py`, `apply_ops.py` | Planner: **byte-identical `ops.tsv` on the full library listing** (same input TSVs). Executor: sandbox run + undo restores 89/89 like the Python did; `undo.tsv` stays readable for the old undo path; then a 12-unit pilot with the fingerprint compare showing no lost customizations; throughput measured against 18 ops/s. |
 | 6 | autorename | `rename/autorename.py` | GOAL item 7: one dropped folder is renamed, gets `.details` and a subtitle queue entry, and both servers rescan. An unmatched folder goes to `_needs-review.txt`. |
 | 7 | ingest | qBittorrent hook (in progress) | Hardlink within the `Plex Media` share, reflink across shares. Same bytes and inode/extent sharing verified, zero extra space used, the torrent keeps seeding. |
