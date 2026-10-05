@@ -294,7 +294,7 @@ func (w *watcher) watch(dir string) {
 	case errors.Is(err, errWatchLimit):
 		w.full = true
 		limit, _ := os.ReadFile("/proc/sys/fs/inotify/max_user_watches")
-		w.rep.Alert("inotify watch limit reached after %d watches (fs.inotify.max_user_watches=%s, shared by every root process): "+
+		w.rep.Alert("inotify watch limit reached after %d watches (fs.inotify.max_user_watches=%s, shared by every process of this user): "+
 			"folders past it are only seen by the %s sweep; raise it with sysctl fs.inotify.max_user_watches=65536",
 			w.src.Len(), strings.TrimSpace(string(limit)), w.opt.Sweep)
 	default:
