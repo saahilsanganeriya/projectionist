@@ -176,19 +176,24 @@ func run(t *testing.T, h *fake.Harness) *stage.Report {
 	return rep
 }
 
-// push sends a webhook ("plex" or "jellyfin") to the stage and returns the status it answered.
-func push(h *fake.Harness, app, payload string) int {
-	req := httptest.NewRequest("POST", "/hooks/"+app, strings.NewReader(payload))
-	if app == plexApp {
-		var body bytes.Buffer
-		mw := multipart.NewWriter(&body)
-		mw.WriteField("payload", payload)
-		mw.Close()
-		req = httptest.NewRequest("POST", "/hooks/plex", &body)
-		req.Header.Set("Content-Type", mw.FormDataContentType())
+// hookRequest is what a Plex (multipart, a "payload" field) or a Jellyfin (JSON) webhook posts.
+func hookRequest(app, payload string) *http.Request {
+	if app != plexApp {
+		return httptest.NewRequest("POST", "/hooks/"+app, strings.NewReader(payload))
 	}
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	mw.WriteField("payload", payload)
+	mw.Close()
+	req := httptest.NewRequest("POST", "/hooks/plex", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	return req
+}
+
+// push sends a webhook to the stage and returns the status it answered.
+func push(h *fake.Harness, app, payload string) int {
 	rec := httptest.NewRecorder()
-	(Stage{}).Hooks(h.Env)["POST /hooks/"+app].ServeHTTP(rec, req)
+	(Stage{}).Hooks(h.Env)["POST /hooks/"+app].ServeHTTP(rec, hookRequest(app, payload))
 	return rec.Code
 }
 
@@ -295,12 +300,7 @@ func TestWriteFailuresBackOff(t *testing.T) {
 		w.status["/UserItems/"+id+"/UserData"] = 500
 	}
 	w.status["/:/rate"] = 500
-	count := func(calls []string, s string) (n int) {
-		for _, c := range calls {
-			n += strings.Count(c, s)
-		}
-		return n
-	}
+	count := func(calls []string, s string) int { return strings.Count(strings.Join(calls, "\n"), s) }
 	rep := run(t, h)
 	if calls := w.since(0); count(calls, "/UserItems/") != maxFailRun || rep.Counts["deferred.jellyfin"] != 1 ||
 		count(calls, "friend /:/") != 2 {
@@ -403,20 +403,11 @@ func TestParseHooks(t *testing.T) {
 		{"our own write echoed", "jellyfin", jf("UpdateUserData", `,"Played":true`), "dropped: save reason UpdateUserData"},
 	}
 	for _, c := range cases {
-		var req *http.Request
 		parse := parseJellyfin
-		if c.hook == "plex" {
-			var body bytes.Buffer
-			mw := multipart.NewWriter(&body)
-			mw.WriteField("payload", c.payload)
-			mw.Close()
-			req = httptest.NewRequest("POST", "/", &body)
-			req.Header.Set("Content-Type", mw.FormDataContentType())
+		if c.hook == plexApp {
 			parse = parsePlex
-		} else {
-			req = httptest.NewRequest("POST", "/", strings.NewReader(c.payload))
 		}
-		e, drop, err := parse(req, opt, time.Unix(0, 0))
+		e, drop, err := parse(hookRequest(c.hook, c.payload), opt, time.Unix(0, 0))
 		got := "dropped: " + drop.reason
 		if drop.reason == "" {
 			got = fmt.Sprintf("%s %d %v %s", e.Kind, e.PositionMs, e.Rating, e.Ref)
