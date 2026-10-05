@@ -426,11 +426,21 @@ func (p *planner) nameSubtitles(owner map[string]subOwner, videos *videoPlan) ma
 				s.forced = true // a handful of lines: foreign-dialogue-only track
 			}
 		}
+		// A track already at its scheme name beside the video keeps it; only the others are ranked into the roles left.
+		// Re-ranking named tracks would swap .en and .eng onto each other's names: the aligner's log names files as they
+		// were before the rename, so "aligned" no longer tells them apart (rename_engine.py had this churn too).
+		settled := map[string]bool{}
 		rest = nil
 		for _, s := range live {
-			if _, done := result[s.sub]; !done {
-				rest = append(rest, s)
+			if _, done := result[s.sub]; done {
+				continue
 			}
+			if role, ok := namedRole(s, v); ok {
+				settled[role], taken[s.sub] = true, true
+				result[s.sub] = subDecision{v.unit, s.sub, roleReason(role, s.aligned)}
+				continue
+			}
+			rest = append(rest, s)
 		}
 		live = rest
 		for _, lang := range keepLangs {
@@ -459,7 +469,7 @@ func (p *planner) nameSubtitles(owner map[string]subOwner, videos *videoPlan) ma
 				}
 				return a.sub < b.sub
 			})
-			if len(plain) == 0 { // the only full track is SDH: name it plain so 'subtitles always on' picks it in both apps
+			if len(plain) == 0 && !settled[lang] { // the only full track is SDH: name it plain so 'subtitles always on' picks it in both apps
 				for _, s := range mine {
 					if s.sdh && !s.forced {
 						sdhFull = append(sdhFull, s)
@@ -480,17 +490,16 @@ func (p *planner) nameSubtitles(owner map[string]subOwner, videos *videoPlan) ma
 					plain = sdhFull[:1]
 				}
 			}
+			var free []string // full-track roles in order: primary, then (English only) a second ".eng"
+			for _, role := range []string{lang, "eng"} {
+				if (role == lang || lang == "en") && !settled[role] {
+					free = append(free, role)
+				}
+			}
 			for i, s := range plain {
-				switch {
-				case i == 0:
-					why := lang + " primary"
-					if s.aligned {
-						why += " (aligned)"
-					}
-					assign(s, lang, why)
-				case i == 1 && lang == "en":
-					assign(s, "eng", "english, second full track")
-				default:
+				if i < len(free) {
+					assign(s, free[i], roleReason(free[i], s.aligned))
+				} else {
 					archive(s, "extra "+lang+" track")
 				}
 			}
@@ -513,7 +522,7 @@ func (p *planner) nameSubtitles(owner map[string]subOwner, videos *videoPlan) ma
 			}
 			byCues(sdhOnes)
 			for i, s := range sdhOnes {
-				if i == 0 {
+				if i == 0 && !settled[lang+".sdh"] {
 					assign(s, lang+".sdh", lang+" sdh")
 				} else {
 					archive(s, "extra "+lang+" sdh track")
@@ -521,7 +530,7 @@ func (p *planner) nameSubtitles(owner map[string]subOwner, videos *videoPlan) ma
 			}
 			byCues(forcedOnes)
 			for i, s := range forcedOnes {
-				if i == 0 {
+				if i == 0 && !settled[lang+".forced"] {
 					assign(s, lang+".forced", lang+" forced")
 				} else {
 					archive(s, "extra "+lang+" forced track")
@@ -540,6 +549,37 @@ func (p *planner) nameSubtitles(owner map[string]subOwner, videos *videoPlan) ma
 		}
 	}
 	return result
+}
+
+// namedRole is the role a subtitle's current name already gives it beside its video (".en", ".eng", ".en.sdh",
+// ".en.forced", ...), when that name fits the language its text and name decided.
+func namedRole(s *subEntry, v planned) (string, bool) {
+	name, prefix := path.Base(s.sub), v.stem+"."
+	if path.Dir(s.sub) != v.folder || !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, s.ext) || len(name) < len(prefix)+len(s.ext) {
+		return "", false
+	}
+	role := name[len(prefix) : len(name)-len(s.ext)]
+	for _, lang := range keepLangs {
+		if s.lang == lang && (role == lang || role == lang+".sdh" || role == lang+".forced" || (lang == "en" && role == "eng")) {
+			return role, true
+		}
+	}
+	return "", false
+}
+
+// roleReason is the reason rename_engine.py wrote for a track given role.
+func roleReason(role string, aligned bool) string {
+	switch {
+	case role == "eng":
+		return "english, second full track"
+	case strings.HasSuffix(role, ".sdh"):
+		return strings.TrimSuffix(role, ".sdh") + " sdh"
+	case strings.HasSuffix(role, ".forced"):
+		return strings.TrimSuffix(role, ".forced") + " forced"
+	case aligned:
+		return role + " primary (aligned)"
+	}
+	return role + " primary"
 }
 
 // langOrNone is Python's f"{lang}" for a language that may be None.

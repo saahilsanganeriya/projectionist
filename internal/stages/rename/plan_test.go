@@ -200,7 +200,8 @@ func srtFacts(sha string, cues int, size int64, sdh float64) SubFacts {
 
 // Catches the subtitle rules: identical bytes kept once (the copy beside the video wins), an English track made SDH
 // by its cue share (the fuller SDH track wins), the aligner's copy winning the primary name over a longer track, a few-line track becoming
-// "forced", the only full track being SDH named plain, and a track of unknown language left in place.
+// "forced", the only full track being SDH named plain, a track of unknown language left in place, and tracks already
+// named by the scheme re-ranked onto each other's names (a swap the executor refuses, blocking the unit every run).
 func TestPlanSubtitles(t *testing.T) {
 	d := mv + "Heat.1995/"
 	video := d + "Heat.1995.mkv"
@@ -232,6 +233,20 @@ func TestPlanSubtitles(t *testing.T) {
 	dup.Subs[d+"Heat.1995.en.srt"], dup.Subs[d+"Subs/English.forced.srt"] = srtFacts("x", 900, 70000, 0), srtFacts("x", 900, 70000, 0)
 	expect(t, Build(dup), map[string]string{d + "Heat.1995.en.srt": "move " + h + ".en.forced.srt",
 		d + "Subs/English.forced.srt": "archive _archive/subtitles/Movies/Heat.1995/Subs/English.forced.srt"})
+
+	// tracks already at their scheme names keep them, though their ranking would now swap them (more cues on .eng)
+	named := newInput(map[string]int64{mv + "Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv": 9_000_000_000,
+		mv + "Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.en.srt": 70000, mv + "Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.eng.srt": 90000,
+		mv + "Heat (1995) {tmdb-949}/Heat.1995.English.srt": 80000})
+	named.Movies[mv+"Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv"] = heat
+	named.Subs[mv+"Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.en.srt"] = srtFacts("p", 900, 70000, 0)
+	named.Subs[mv+"Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.eng.srt"] = srtFacts("q", 1500, 90000, 0)
+	named.Subs[mv+"Heat (1995) {tmdb-949}/Heat.1995.English.srt"] = srtFacts("r", 1600, 80000, 0)
+	expect(t, Build(named), map[string]string{
+		mv + "Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.en.srt":  "keep " + h + ".en.srt",
+		mv + "Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.eng.srt": "keep " + h + ".eng.srt",
+		mv + "Heat (1995) {tmdb-949}/Heat.1995.English.srt":          "archive _archive/subtitles/Movies/Heat (1995) {tmdb-949}/Heat.1995.English.srt",
+	})
 
 	only := newInput(map[string]int64{video: 9_000_000_000, d + "Heat.1995.eng.sdh.srt": 70000})
 	only.Movies[video] = heat
