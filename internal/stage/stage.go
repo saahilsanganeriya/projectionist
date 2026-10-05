@@ -61,6 +61,9 @@ type Report struct {
 	Alerts  []string
 	Counts  map[string]int
 	Summary string
+	// Wake asks the scheduler to run the stage again no later than this, inside its window, though the cadence would
+	// wait longer. Not kept across a restart: the next run on the cadence asks again.
+	Wake time.Time
 }
 
 // Alert records a condition the owner must hear about: the run's outcome becomes "alert" and /health turns 503

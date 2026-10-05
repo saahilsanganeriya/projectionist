@@ -177,3 +177,17 @@ func (w Window) Contains(t time.Time, loc *time.Location) bool {
 	}
 	return off >= w.Start || off < w.End // wraps past midnight
 }
+
+// Next is the earliest time at or after t inside the window evaluated in loc: t itself when inside, else the next
+// opening.
+func (w Window) Next(t time.Time, loc *time.Location) time.Time {
+	if w.Contains(t, loc) {
+		return t
+	}
+	lt := t.In(loc)
+	open := time.Date(lt.Year(), lt.Month(), lt.Day(), int(w.Start/time.Hour), int(w.Start%time.Hour/time.Minute), 0, 0, loc)
+	if !open.After(t) {
+		open = open.AddDate(0, 0, 1)
+	}
+	return open
+}

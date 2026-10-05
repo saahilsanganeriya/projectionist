@@ -7,7 +7,7 @@
 //	first, skipping any already rejected for this file:
 //	  release-matched                  -> written WITHOUT reading the video once cheapCheck passes: an OpenSubtitles
 //	                                      file-hash match, or a subtitle naming the file's original release group
-//	  quick mode (the default), also:
+//	  quick mode (careful is the default), also:
 //	    any plausible candidate        -> written WITHOUT reading the video once cheapCheck passes, release matches
 //	                                      first, then by rank: labelled with this title and naming no other episode
 //	                                      or edition; a special only when its original name carries its S00Exx
@@ -15,25 +15,28 @@
 //	                                      cheapCheck; the subtitle is written retimed onto them
 //	  otherwise                        -> the alignment queue
 //	the queue, while nobody but the owner watches, at most align_per_day titles in any 24 h (quick mode: only inside
-//	align_window, the night), best first, each candidate downloaded only once the one before it failed:
+//	align_window, the night, and a run outside it asks the scheduler for one at its opening), best first, each candidate
+//	downloaded only once the one before it failed:
 //	  English PGS/VobSub track         -> cue starts fitted to its caption starts (that stream alone demuxed); one
 //	                                      that does not fit is rescued if alass's alignment to the speech does
 //	  else                             -> alass aligns the candidate to the speech in the audio
 //	accepted                           -> <video>.en.srt, else .eng.srt: created O_EXCL, never overwritten
 //
 // OpenSubtitles is searched only once no other provider's release-matched subtitle passed, and only its hash match is
-// used, unless no other provider has any candidate; while it is out it holds back only a title no other provider has a
-// candidate for. A queued title waits until it is aligned: nothing is written unverified. The duration, frame rate and
-// tracks come from the probe cache, else the .details note (ffprobe runs only for a video that has neither); the
-// original release name from that note, else the rename logs. Three titles at a time look for a release match; the
-// queue aligns one at a time, and an alignment counts against align_per_day only once it is about to read the video.
-// While anyone but the owner is watching no title starts, and every running ffmpeg/alass is stopped. Every attempt is
-// an event, each verdict with the bytes read from the video; a title that got no subtitle is tried again after
-// retry_after, then after 2, 4 and 8 times it, and a queued title is searched again for a release match on the same
-// schedule. A title is recorded only once TMDB and every provider it needs answered (and alass ran, where it is
-// needed); else it is deferred, not recorded, and an alert names the cause (a spent download quota is routine and only
-// logged). Each run also refreshes sub_stats.py's TSV over the whole library. Jellyfin hears of each new sidecar
-// through a queue kept in the store; Plex watches the disk.
+// used, unless no other provider has any candidate (then the queue may try its others); while it is out it holds back
+// only a title no other provider has a candidate for. In careful mode nothing is written unverified: a queued title
+// waits until it is aligned. Quick mode writes a plausible candidate whose timing nothing checked beyond its length and
+// stated frame rate, and that file is final: never overwritten, and its video no longer lacks a subtitle, so no later
+// run looks at it again. The duration, frame rate and tracks come from the probe cache, else the .details note (ffprobe
+// runs only for a video that has neither); the original release name from that note, else the rename logs. Three titles
+// at a time look for a release match; the queue aligns one at a time, and an alignment counts against align_per_day
+// only once it is about to read the video. While anyone but the owner is watching no title starts, and every running
+// ffmpeg/alass is stopped. Every attempt is an event, each verdict with the bytes read from the video; a title that got
+// no subtitle is tried again after retry_after, then after 2, 4 and 8 times it, and a queued title is searched again
+// for a release match on the same schedule. A title is recorded only once TMDB and every provider it needs answered
+// (and alass ran, where it is needed); else it is deferred, not recorded, and an alert names the cause (a spent
+// download quota is routine and only logged). Each run also refreshes sub_stats.py's TSV over the whole library.
+// Jellyfin hears of each new sidecar through a queue kept in the store; Plex watches the disk.
 package subtitles
 
 import (
@@ -90,9 +93,9 @@ type Options struct {
 	// subfetch2.py's OUT folder: its quota.csv and downloads.csv seed the OpenSubtitles quota once, at cutover.
 	LegacyQuota string `toml:"legacy_quota"`
 	AlignPerDay int    `toml:"align_per_day"` // queued titles aligned in any 24 h; each reads its video once or twice
-	// quick: a downloaded subtitle that passes the cheap check is written even when it was not made for this release,
-	// and the queue aligns only inside align_window (HH:MM-HH:MM in the config timezone). careful: only a release
-	// match is written unaligned, and the queue aligns at any hour.
+	// careful (the default): only a release match is written unaligned, and the queue aligns at any hour. quick: a
+	// downloaded subtitle that passes the cheap check is written even when it was not made for this release (its
+	// timing unverified, for good), and the queue aligns only inside align_window (HH:MM-HH:MM, config timezone).
 	Mode        string `toml:"mode"`
 	AlignWindow string `toml:"align_window"`
 	// Rename logs, oldest first: the original release name of a video whose .details note does not give one.
@@ -110,7 +113,7 @@ func defaults() Options {
 		Providers:   []string{"gestdown", "sitec", "subdl", "opensubtitles", "opensubtitles-com"},
 		LegacyQuota: "/volume1/PlexMediaServer/subtitle-downloads",
 		AlignPerDay: 20,
-		Mode:        "quick",
+		Mode:        "careful",
 		AlignWindow: "01:00-07:00",
 		UndoLogs: []string{"/volume1/PlexMediaServer/rename/undo.tsv", "/volume1/PlexMediaServer/rename/undo_auto.tsv",
 			"/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv",
@@ -243,6 +246,11 @@ feed:
 	err = r.workQueue(ctx, titles)
 	r.tellJellyfin(ctx, "", true)
 	r.summarise(ctx, len(titles), len(due))
+	// Quick mode outside its window: the cadence alone may reach the window late or not at all. Never inside it,
+	// where the next opening is now: a capped queue would be run again at once, over and over.
+	if rep.Counts["queue_waiting"] > 0 && !r.alignNow() {
+		rep.Wake = window.Next(env.Now(), env.Loc)
+	}
 	if err != nil {
 		return err
 	}
@@ -843,11 +851,10 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 			if rejected[c.key()] == "aligned" {
 				continue
 			}
-			poolable := !last || cheaper == 0 || c.HashMatch && c.ours
 			matched := t.releaseMatched(c)
 			try := matched
-			if r.quick() {
-				try = poolable && (matched || t.plausible(c)) && t.specialSure()
+			if r.quick() { // OpenSubtitles' downloads (180 a day, 8 min apart) go only to its hash match, as in careful mode
+				try = (matched || !last && t.plausible(c)) && t.specialSure()
 			}
 			if rejected[c.key()] == "" && tried < maxTries && try {
 				tried++
@@ -873,7 +880,7 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 				}
 				r.event(ctx, t.path, outcome{result: "rejected_cheap", detail: why, fields: attempt})
 			}
-			if poolable {
+			if !last || cheaper == 0 || c.HashMatch && c.ours {
 				pool = append(pool, c)
 			}
 		}

@@ -233,8 +233,9 @@ var idxStampRe = regexp.MustCompile(`^timestamp:\s*(\d+):(\d\d):(\d\d):(\d{3})`)
 
 // vobsubReference is the caption starts of the video's English VobSub sidecar, <stem>.en.idx, read from that text
 // alone (the .sub images are never opened): its first English stream with at least minCues captions over half the
-// video. Nil when there is none. Every .idx in the library (50 on 2026-10-05) has "time offset: 0" and no "delay:"
-// lines, so the timestamps are taken as they are.
+// video and none after its end (an .idx left from a longer cut). Nil when there is none. On 2026-10-05 the roots held
+// 50 .idx, each a <stem>.en.idx beside its video with "time offset: 0" and no "delay:" line, so the timestamps are
+// taken as they are (the NAS's 23 others, untagged or not English, sit in _archive beside no video).
 func vobsubReference(video string, duration float64) *reference {
 	raw, err := os.ReadFile(strings.TrimSuffix(video, filepath.Ext(video)) + ".en.idx")
 	if err != nil {
@@ -257,7 +258,7 @@ func vobsubReference(video string, duration float64) *reference {
 		}
 	}
 	for _, ev := range streams {
-		if starts, bits, ok := captionReference(ev, duration); ok {
+		if starts, bits, ok := captionReference(ev, duration); ok && starts[len(starts)-1] <= duration {
 			return &reference{label: "idx", starts: starts, bits: bits}
 		}
 	}

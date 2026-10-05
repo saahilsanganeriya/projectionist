@@ -183,3 +183,44 @@ func TestTrigger(t *testing.T) {
 		<-done
 	})
 }
+
+// Catches a run's Report.Wake ignored: a stage that asks to run again in 2 h (subtitles, for its night window) would
+// wait for its 6 h cadence instead.
+func TestReportWake(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) { // fake clock: starts 2000-01-01 00:00 UTC
+		st, err := store.Open(filepath.Join(t.TempDir(), "s.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer st.Close()
+		var mu sync.Mutex
+		var runs []time.Time
+		s := &Scheduler{Loc: time.UTC, Runner: &Runner{
+			Store: st, Log: obs.NewLogger(io.Discard, "text", "error"), Metrics: obs.NewMetrics(),
+			Now:    func() time.Time { return time.Now().UTC() },
+			NewEnv: func(stage.Stage, *slog.Logger) *stage.Env { return &stage.Env{} },
+		}, Jobs: []Job{{Stage: fakeStage{name: "wake", run: func(_ context.Context, _ *stage.Env, rep *stage.Report) error {
+			mu.Lock()
+			defer mu.Unlock()
+			if runs = append(runs, time.Now().UTC()); len(runs) == 1 {
+				rep.Wake = time.Now().Add(2 * time.Hour)
+			}
+			return nil
+		}}, Every: 6 * time.Hour}}}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		done := make(chan struct{})
+		go func() { s.Run(ctx); close(done) }()
+		time.Sleep(9 * time.Hour)
+		synctest.Wait()
+		mu.Lock()
+		got := slices.Clone(runs)
+		mu.Unlock()
+		day := time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+		if want := []time.Time{day, day.Add(2 * time.Hour), day.Add(8 * time.Hour)}; !slices.EqualFunc(got, want, time.Time.Equal) {
+			t.Errorf("runs at %v, want %v: the first run asked for one 2 h later, then the 6 h cadence", got, want)
+		}
+		cancel()
+		<-done
+	})
+}

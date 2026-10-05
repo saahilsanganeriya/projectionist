@@ -137,15 +137,7 @@ func NextRun(last time.Time, every time.Duration, w config.Window, loc *time.Loc
 	if !last.IsZero() && last.Add(every).After(now) {
 		next = last.Add(every)
 	}
-	if w.Contains(next, loc) {
-		return next
-	}
-	lt := next.In(loc)
-	open := time.Date(lt.Year(), lt.Month(), lt.Day(), int(w.Start/time.Hour), int(w.Start%time.Hour/time.Minute), 0, 0, loc)
-	if !open.After(next) {
-		open = open.AddDate(0, 0, 1)
-	}
-	return open
+	return w.Next(next, loc)
 }
 
 // Scheduler drives every job until ctx ends; each job has its own goroutine, so a long encode delays only itself.
@@ -205,10 +197,14 @@ func (s *Scheduler) loop(ctx context.Context, job Job, wake <-chan struct{}) {
 		s.Runner.set(name, func(st *Status) { st.LastStart, st.LastFinish, st.Outcome = run.StartedAt, run.FinishedAt, run.Outcome })
 	}
 	triggered := false
+	var wakeAt time.Time // the last run's Report.Wake
 	for {
 		next := NextRun(last, job.Every, job.Window, s.Loc, s.Runner.Now())
 		if triggered {
 			next = NextRun(time.Time{}, job.Every, job.Window, s.Loc, s.Runner.Now()) // due now, inside the window
+		}
+		if w := job.Window.Next(wakeAt, s.Loc); !wakeAt.IsZero() && w.Before(next) {
+			next = w
 		}
 		s.Runner.set(name, func(st *Status) { st.NextRun = next })
 		select {
@@ -221,6 +217,7 @@ func (s *Scheduler) loop(ctx context.Context, job Job, wake <-chan struct{}) {
 		}
 		triggered = false
 		last = s.Runner.Now()
-		s.Runner.RunOnce(ctx, job.Stage)
+		rep, _ := s.Runner.RunOnce(ctx, job.Stage)
+		wakeAt = rep.Wake
 	}
 }
