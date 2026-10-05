@@ -454,7 +454,7 @@ func TestPlexOutageBacksOffAndNeverFailsTheRun(t *testing.T) {
 
 // Catches: one collection whose write always answers 5xx backing the whole sink off, so the collections after it are
 // never reached; that collection tried again on every run instead of on its own backoff; it failing for a day
-// without the owner hearing which one; and its parking outliving the fix.
+// without the owner hearing which one; a dry run wiping its failure history; and its parking outliving the fix.
 func TestPoisonWriteParksOnlyItsCollection(t *testing.T) {
 	h := fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "mid"})
 	px := &app{fail: map[string]int{"create Christopher Nolan": http.StatusInternalServerError}}
@@ -475,6 +475,13 @@ func TestPoisonWriteParksOnlyItsCollection(t *testing.T) {
 	rep = runOnce(t, h)
 	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], `plex: 1 collection(s) failing for over a day, retried with backoff; first: create "Christopher Nolan"`) {
 		t.Fatalf("alerts after a day = %v", rep.Alerts)
+	}
+	h.Now = h.Now.Add(time.Hour) // past its 30-minute wait: a dry run "makes" it, and must not forget that it failed
+	setup(t, h, "sinks = [\"plex\"]\ndry_run = true", 1, 2, 3, 4)
+	runOnce(t, h)
+	setup(t, h, `sinks = ["plex"]`, 1, 2, 3, 4)
+	if rep = runOnce(t, h); len(rep.Alerts) != 1 {
+		t.Fatalf("alerts after a dry run = %v; want the day-long failure still alerted", rep.Alerts)
 	}
 	px.mu.Lock()
 	px.fail = nil
