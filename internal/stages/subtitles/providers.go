@@ -549,7 +549,7 @@ type subdl struct {
 
 func (o *subdl) Name() string { return "subdl" }
 
-// Search asks by TMDB id (else IMDb id, else the show's name); season packs are skipped, a sidecar is one episode.
+// Search asks by TMDB id (else IMDb id, else the show's name); an episode's results must name that episode.
 func (o *subdl) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	key, err := os.ReadFile(o.keyFile)
 	if err != nil {
@@ -581,7 +581,6 @@ func (o *subdl) Search(ctx context.Context, q Query) ([]Candidate, error) {
 			Name       string          `json:"name"`
 			URL        string          `json:"url"`
 			HI         bool            `json:"hi"`
-			FullSeason bool            `json:"full_season"`
 			Season     json.RawMessage `json:"season"`
 			Episode    json.RawMessage `json:"episode"`
 		} `json:"subtitles"`
@@ -592,7 +591,7 @@ func (o *subdl) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	var out []Candidate
 	for _, r := range res.Subtitles {
 		season, episode := string(bytes.Trim(r.Season, `"`)), string(bytes.Trim(r.Episode, `"`))
-		if r.FullSeason || q.Season != 0 && (season != strconv.Itoa(q.Season) || episode != strconv.Itoa(q.Episode)) {
+		if q.Season != 0 && (season != strconv.Itoa(q.Season) || episode != strconv.Itoa(q.Episode)) {
 			continue
 		}
 		out = append(out, Candidate{Source: "subdl", ID: r.URL, Release: r.Release, FileName: r.Name, HearingImpaired: r.HI,
@@ -601,7 +600,8 @@ func (o *subdl) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	return out, nil
 }
 
-// Download fetches the zip and returns its one SRT; anything but a zip is the quota (or a block page): park.
+// Download fetches the zip and returns its one SRT (a season pack or a multi-CD set is not one sidecar); anything
+// but a zip is the quota (or a block page): park.
 func (o *subdl) Download(ctx context.Context, c Candidate) (string, error) {
 	body, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) { return http.NewRequest(http.MethodGet, c.link, nil) })
 	if err != nil {

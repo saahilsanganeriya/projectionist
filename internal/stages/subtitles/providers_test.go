@@ -188,8 +188,8 @@ func containsDuration(ds []time.Duration, d time.Duration) bool {
 	return false
 }
 
-// Catches: Subdl asked without the key, the TMDB id or the episode, a season pack or another episode kept, the
-// zip's SRT not returned, a block page taken for a subtitle instead of parking Subdl, and the key (it rides in the
+// Catches: Subdl asked without the key, the TMDB id or the episode, another episode kept, the zip's SRT not returned
+// or a two-SRT zip (a season pack, a multi-CD set) taken as one, a block page taken for a subtitle instead of parking Subdl, and the key (it rides in the
 // query string) leaking into an error.
 func TestSubdl(t *testing.T) {
 	var queries []string
@@ -209,6 +209,13 @@ func TestSubdl(t *testing.T) {
 			zw := zip.NewWriter(&b)
 			f, _ := zw.Create("Show.S01E02.WEB-GRP.srt")
 			f.Write([]byte("1\n00:00:01,000 --> 00:00:02,000\ncaf\xe9\n"))
+			zw.Close()
+			w.Write(b.Bytes())
+		case "/s/cds.zip":
+			var b bytes.Buffer
+			zw := zip.NewWriter(&b)
+			zw.Create("cd1.srt")
+			zw.Create("cd2.srt")
 			zw.Close()
 			w.Write(b.Bytes())
 		default:
@@ -232,6 +239,9 @@ func TestSubdl(t *testing.T) {
 	}
 	if txt, err := o.Download(context.Background(), got[0]); err != nil || txt != "1\n00:00:01,000 --> 00:00:02,000\ncafé\n" {
 		t.Errorf("download: %q %v", txt, err)
+	}
+	if _, err := o.Download(context.Background(), Candidate{link: srv.URL + "/s/cds.zip"}); err == nil {
+		t.Error("a two-SRT zip was accepted")
 	}
 	if _, err := o.Download(context.Background(), Candidate{link: srv.URL + "/blocked"}); !errors.Is(err, errQuota) {
 		t.Errorf("block page: %v", err)
