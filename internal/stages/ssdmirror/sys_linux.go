@@ -2,11 +2,16 @@ package ssdmirror
 
 import "golang.org/x/sys/unix"
 
-// lowerPriority gives the calling OS thread idle I/O priority (the NAS disks and the SSD use CFQ, which honours
-// it) and nice 19. Both are per thread on Linux; Run locks the copying goroutine to this thread.
-func lowerPriority() error {
-	const ioprioWhoProcess, ioprioClassIdle = 1, 3 // who=0 with WHO_PROCESS means the calling thread
-	if _, _, errno := unix.Syscall(unix.SYS_IOPRIO_SET, ioprioWhoProcess, 0, ioprioClassIdle<<13); errno != 0 {
+// setPriority sets the calling OS thread to nice 19 and the idle I/O class, or else the lowest best-effort level
+// (what nice 19 alone gives). The NAS disks and the SSD use CFQ, which honours both; on Linux both are per thread,
+// and Run locks the run's goroutine to its thread.
+func setPriority(idle bool) error {
+	const whoProcess, classBestEffort, classIdle = 1, 2, 3 // who=0 with WHO_PROCESS is the calling thread
+	prio := classBestEffort<<13 | 7
+	if idle {
+		prio = classIdle << 13
+	}
+	if _, _, errno := unix.Syscall(unix.SYS_IOPRIO_SET, whoProcess, 0, uintptr(prio)); errno != 0 {
 		return errno
 	}
 	return unix.Setpriority(unix.PRIO_PROCESS, unix.Gettid(), 19)

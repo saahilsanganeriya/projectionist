@@ -64,4 +64,5 @@ library_archive = "/volume1/media/_archive"               # an SSD file is delet
 ssd_archive     = "/volumeUSB1/usbshare1-2/_archive/ssdmirror" # stale SSD copies move here (on the SSD)
 margin_gb       = 15                                           # free space always left on the SSD (decimal GB)
 mbps            = 50                                           # cap on bulk reads, MB/s
+io_class        = "idle"                                       # copies yield all disk time; "best-effort" = fill.py's nice 19
 status_file     = "/volume1/PlexMediaServer/ssd-copy/PROGRESS.txt"

@@ -50,6 +50,7 @@ type Options struct {
 	MBps           float64 `toml:"mbps"`            // cap on bulk reads, MB/s; 0 = none
 	StatusFile     string  `toml:"status_file"`     // PROGRESS.txt the owner reads
 	ReportFile     string  `toml:"report_file"`     // optional: this run's plan and actions as TSV
+	IOClass        string  `toml:"io_class"`        // copies: "idle" (disk time only when no one else wants it) or "best-effort" (lowest level, as fill.py's nice 19)
 	DryRun         bool    `toml:"dry_run"`         // plan, report and status only; the SSD is not touched
 }
 
@@ -62,6 +63,7 @@ func defaults() Options {
 		MarginGB:       15,
 		MBps:           50,
 		StatusFile:     "/volume1/PlexMediaServer/ssd-copy/PROGRESS.txt",
+		IOClass:        "idle",
 	}
 }
 
@@ -75,7 +77,7 @@ type file struct {
 // ".", "@" or "#", and nothing under a directory whose name contains "@eaDir" (DSM's thumbnails).
 type tree map[string][]file
 
-func listTree(root string) (tree, error) {
+func listTree(ctx context.Context, root string) (tree, error) {
 	ents, err := os.ReadDir(root)
 	if err != nil {
 		return nil, err
@@ -87,6 +89,9 @@ func listTree(root string) (tree, error) {
 		}
 		var files []file
 		err := filepath.WalkDir(filepath.Join(root, e.Name()), func(p string, d fs.DirEntry, err error) error {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil // renamed or archived while we walked; the next run sees where it went
 			}
@@ -310,6 +315,9 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if err := env.Options(&opt); err != nil {
 		return err
 	}
+	if opt.IOClass != "idle" && opt.IOClass != "best-effort" {
+		return fmt.Errorf("io_class %q: want \"idle\" or \"best-effort\"", opt.IOClass)
+	}
 	sleep := s.Sleep
 	if sleep == nil {
 		sleep = sleepCtx
@@ -319,9 +327,7 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	done := make(chan error, 1)
 	go func() {
 		runtime.LockOSThread() // never unlocked: the lowered priority dies with this thread when the run ends
-		if err := lowerPriority(); err != nil {
-			env.Log.Warn("could not lower priority", "event", "priority_error", "err", err)
-		}
+		m.lowerPriority(false)
 		done <- m.run()
 	}()
 	return <-done
@@ -329,11 +335,11 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 
 func (m *mirror) run() error {
 	opt := m.opt
-	lib, err := listTree(opt.Source)
+	lib, err := listTree(m.ctx, opt.Source)
 	if err != nil {
 		return err
 	}
-	ssd, err := listTree(opt.Target) // an absent Target is an error, never created: the SSD is not mounted
+	ssd, err := listTree(m.ctx, opt.Target) // an absent Target is an error, never created: the SSD is not mounted
 	if err != nil {
 		return fmt.Errorf("SSD not mounted? %w", err)
 	}

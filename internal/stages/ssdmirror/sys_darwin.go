@@ -2,7 +2,7 @@ package ssdmirror
 
 import "golang.org/x/sys/unix"
 
-func lowerPriority() error { return nil } // macOS is only for development and tests
+func setPriority(bool) error { return nil } // macOS is only for development and tests
 
 func freeBytes(path string) (int64, error) {
 	var st unix.Statfs_t

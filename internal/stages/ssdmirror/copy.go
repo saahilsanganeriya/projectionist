@@ -54,6 +54,7 @@ type mirror struct {
 }
 
 func (m *mirror) execute(acts []action) error {
+	m.lowerPriority(m.opt.IOClass == "idle") // only now: CFQ starves idle-class I/O under load, and the plan's walk must finish
 	failures, film, filmFiles, filmBytes := 0, "", 0, int64(0)
 	flush := func() {
 		if film != "" && filmFiles > 0 {
@@ -350,6 +351,13 @@ func (m *mirror) ensureDir(dir string) error {
 func (m *mirror) pruneEmpty(dir string) {
 	for dir != m.opt.Target && strings.HasPrefix(dir, m.opt.Target) && os.Remove(dir) == nil {
 		dir = filepath.Dir(dir)
+	}
+}
+
+// lowerPriority sets this run's OS thread to nice 19 and the lowest best-effort I/O level, or the idle I/O class.
+func (m *mirror) lowerPriority(idle bool) {
+	if err := setPriority(idle); err != nil {
+		m.env.Log.Warn("could not lower priority", "event", "priority_error", "idle", idle, "err", err)
 	}
 }
 
