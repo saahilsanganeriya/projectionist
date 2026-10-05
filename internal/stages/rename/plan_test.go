@@ -98,7 +98,7 @@ func TestPlanMovieLabelsKeptOrLeft(t *testing.T) {
 
 	twins := newInput(map[string]int64{mv + "a/Heat.mkv": 4_000_000_000, mv + "b/Heat.mkv": 4_000_000_001})
 	for f := range twins.Files {
-		twins.Movies[f] = heat
+		twins.Movies[f], twins.Video[f] = heat, VideoFacts{1920, 1080, "h264"} // same resolution, codec, no group, 4.0GB
 	}
 	expect(t, Build(twins), map[string]string{mv + "a/Heat.mkv": "leave", mv + "b/Heat.mkv": "leave"})
 
