@@ -213,8 +213,9 @@ func decodeStats(raw []byte) string {
 
 // decodeDownload is subfetch2.py's decode(raw, encoding): the provider's declared encoding, then UTF-8, then cp1252,
 // each strict, leading BOMs dropped. Declared encodings other than UTF-8, UTF-16, cp1252, Latin-1 and ASCII are
-// skipped here where Python would use them (cp1250, ISO-8859-2, ...): such a file decodes as UTF-8 or cp1252
-// instead, so its cue times are the same and only letters outside ASCII can differ from the Python's.
+// skipped here where Python would use them (GB18030 is the commonest for English results, then cp1255, MacRoman):
+// such a file decodes as UTF-8 or cp1252 instead, so its cue times are the same and only letters outside ASCII can
+// differ from the Python's.
 func decodeDownload(raw []byte, encoding string) string {
 	for _, enc := range []string{encoding, "utf-8", "cp1252"} {
 		var s string
