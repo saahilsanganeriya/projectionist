@@ -892,6 +892,7 @@ var (
 	sitecRowRe    = regexp.MustCompile(`(?s)<tr data-id="\d+">.*?</tr>`)
 	sitecLinkRe   = regexp.MustCompile(`<a href="/subtitles/([^"]+)"><span class="text-muted">subtitle</span>([^<]*)</a>`)
 	sitecRatingRe = regexp.MustCompile(`class="label[^"]*">(-?\d+)<`)
+	sitecZipRe    = regexp.MustCompile(`href="(/subtitle/[^"]+\.zip)"`)
 )
 
 type sitec struct {
@@ -925,7 +926,7 @@ func (o *sitec) Search(ctx context.Context, q Query) ([]Candidate, error) {
 			continue
 		}
 		c := Candidate{Source: "sitec", ID: link[1], Release: html.UnescapeString(strings.TrimSpace(link[2])),
-			HearingImpaired: strings.Contains(row, `class="hi-subtitle"`), link: o.base + "/subtitle/" + link[1] + ".zip", provider: o}
+			HearingImpaired: strings.Contains(row, `class="hi-subtitle"`), link: o.base + "/subtitles/" + link[1], provider: o}
 		if m := sitecRatingRe.FindStringSubmatch(row); m != nil {
 			c.Rating, _ = strconv.ParseFloat(m[1], 64)
 		}
@@ -934,23 +935,39 @@ func (o *sitec) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	return out, nil
 }
 
-// Download fetches the zip, sent from the subtitle's own page as a browser would: without that Referer the site
-// answers with a challenge page, which parks the provider.
+// Download reads the subtitle's page for its zip (whose name can differ from the page's: Amélie's page is
+// le-fabuleux-destin-damelie-poulain-2001-..., its zip amelie-2001-...), then fetches it from that page as a browser
+// would: without the Referer the site answers a challenge page, which parks the provider, as a 403 does.
 func (o *sitec) Download(ctx context.Context, c Candidate) (string, error) {
-	body, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) {
-		r, err := http.NewRequest(http.MethodGet, c.link, nil)
-		if err == nil {
-			r.Header.Set("Referer", o.base+"/subtitles/"+c.ID)
+	get := func(link, referer string) ([]byte, error) {
+		body, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) {
+			r, err := http.NewRequest(http.MethodGet, link, nil)
+			if err == nil && referer != "" {
+				r.Header.Set("Referer", referer)
+			}
+			return r, err
+		})
+		if se := (*statusError)(nil); errors.As(err, &se) && se.code == http.StatusForbidden {
+			o.pace.park(errors.New("sitec answered 403"))
+			return nil, o.pace.parkedErr()
 		}
-		return r, err
-	})
-	var se *statusError
-	if errors.As(err, &se) && se.code == http.StatusForbidden || err == nil && !bytes.HasPrefix(body, []byte("PK")) {
-		o.pace.park(errors.New("sitec answered a challenge page instead of the zip"))
-		return "", o.pace.parkedErr()
+		return body, err
 	}
+	page, err := get(c.link, "")
 	if err != nil {
 		return "", err
+	}
+	zipLink := sitecZipRe.FindSubmatch(page)
+	if zipLink == nil {
+		return "", errors.New("sitec: no zip on the subtitle's page")
+	}
+	body, err := get(o.base+string(zipLink[1]), c.link)
+	if err != nil {
+		return "", err
+	}
+	if !bytes.HasPrefix(body, []byte("PK")) {
+		o.pace.park(errors.New("sitec answered a challenge page instead of the zip"))
+		return "", o.pace.parkedErr()
 	}
 	return zipSRT(body)
 }

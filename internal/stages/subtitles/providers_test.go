@@ -387,35 +387,45 @@ func TestGestdown(t *testing.T) {
 }
 
 // Catches SITEC asked by anything but the film's IMDb id, another language's row kept, the hearing-impaired mark or
-// the vote score lost, the zip fetched without the subtitle page as Referer, or the challenge page (what SITEC
-// answers without it) taken for a subtitle instead of parking SITEC.
+// the vote score lost, the zip guessed from the page's name instead of read from the page (Amélie's differ), the zip
+// fetched without its page as Referer, or the challenge page (what SITEC answers without it) or a 403 taken for a
+// subtitle instead of parking SITEC.
 func TestSitec(t *testing.T) {
 	row := func(id, lang, release, extra string) string {
 		return `<tr data-id="` + id + `"><td class="rating-cell"><span class="label label-success">3</span></td><td class="flag-cell">` +
-			`<span class="sub-lang">` + lang + `</span></td><td><a href="/subtitles/heat-1995-` + id + `"><span class="text-muted">subtitle</span> ` +
+			`<span class="sub-lang">` + lang + `</span></td><td><a href="/subtitles/destin-` + id + `"><span class="text-muted">subtitle</span> ` +
 			release + `</a></td><td class="other-cell">` + extra + `</td></tr>`
 	}
 	srv, _ := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
 		switch {
-		case r.URL.Path == "/movie-imdb/tt0113277":
-			w.Write([]byte(row("1", "French", "Heat", "") + row("2", "English", "Heat.1995.1080p.BluRay.x264.[SITEB.AG] &amp; more", `<span class="hi-subtitle"></span>`)))
-		case r.URL.Path == "/subtitle/heat-1995-2.zip" && r.Header.Get("Referer") == "http://"+r.Host+"/subtitles/heat-1995-2":
-			w.Write(zipOf("Heat-English.srt", "1\n00:00:01,000 --> 00:00:02,000\nHi\n"))
+		case r.URL.Path == "/movie-imdb/tt0211915":
+			w.Write([]byte(row("1", "French", "Amelie", "") + row("2", "English", "Amelie.2001.720p.BluRay.x264.[SITEB.AG] &amp; more", `<span class="hi-subtitle"></span>`)))
+		case r.URL.Path == "/subtitles/destin-2":
+			w.Write([]byte(`<a class="btn-icon download-subtitle" href="/subtitle/amelie-2001-2.zip">download</a>`))
+		case r.URL.Path == "/subtitles/destin-403":
+			w.WriteHeader(403)
+		case r.URL.Path == "/subtitle/amelie-2001-2.zip" && r.Header.Get("Referer") == "http://"+r.Host+"/subtitles/destin-2":
+			w.Write(zipOf("Amelie-English.srt", "1\n00:00:01,000 --> 00:00:02,000\nHi\n"))
+		case r.URL.Path == "/subtitles/destin-x":
+			w.Write([]byte(`<a href="/subtitle/x.zip">download</a>`))
 		default:
 			w.Write([]byte("<html>Just a moment...</html>"))
 		}
 	})
 	now := time.Unix(0, 0)
 	o := &sitec{base: srv.URL, hc: srv.Client(), pace: testPacer(&recorder{}, &now)}
-	got, err := o.Search(context.Background(), Query{IMDb: 113277})
-	if err != nil || len(got) != 1 || got[0].Release != "Heat.1995.1080p.BluRay.x264.[SITEB.AG] & more" || !got[0].HearingImpaired || got[0].Rating != 3 {
+	got, err := o.Search(context.Background(), Query{IMDb: 211915})
+	if err != nil || len(got) != 1 || got[0].Release != "Amelie.2001.720p.BluRay.x264.[SITEB.AG] & more" || !got[0].HearingImpaired || got[0].Rating != 3 {
 		t.Fatalf("search: %+v %v", got, err)
 	}
 	if txt, err := o.Download(context.Background(), got[0]); err != nil || txt != "1\n00:00:01,000 --> 00:00:02,000\nHi\n" {
 		t.Errorf("download: %q %v", txt, err)
 	}
-	if _, err := o.Download(context.Background(), Candidate{ID: "x", link: srv.URL + "/subtitle/x.zip"}); !errors.Is(err, errParked) {
-		t.Errorf("challenge page: %v; want SITEC parked", err)
+	for _, page := range []string{"destin-x", "destin-403"} {
+		o.pace = testPacer(&recorder{}, &now)
+		if _, err := o.Download(context.Background(), Candidate{ID: page, link: srv.URL + "/subtitles/" + page}); !errors.Is(err, errParked) {
+			t.Errorf("%s: %v; want SITEC parked", page, err)
+		}
 	}
 }
 
