@@ -577,12 +577,12 @@ func (o *subdl) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	}
 	var res struct {
 		Subtitles []struct {
-			Release    string          `json:"release_name"`
-			Name       string          `json:"name"`
-			URL        string          `json:"url"`
-			HI         bool            `json:"hi"`
-			Season     json.RawMessage `json:"season"`
-			Episode    json.RawMessage `json:"episode"`
+			Release string          `json:"release_name"`
+			Name    string          `json:"name"`
+			URL     string          `json:"url"`
+			HI      bool            `json:"hi"`
+			Season  json.RawMessage `json:"season"`
+			Episode json.RawMessage `json:"episode"`
 		} `json:"subtitles"`
 	}
 	if err := json.Unmarshal(raw, &res); err != nil {
