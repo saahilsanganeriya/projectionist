@@ -41,6 +41,32 @@ cache_ttl    = "24h"
 # every  = "15m"
 # window = "02:00-08:00"
 
+# Movies collections in Plex and Jellyfin: the owner's backed-up collections + the approved list + new arrivals.
+# Facts from the folder names and TMDB; the apps only receive writes. Never removes a member or a collection.
+[stages.collections]
+every           = "6h"
+movies_dir      = "/volume1/media/Movies"
+# The owner's 111 collections, frozen once from Plex's customizations export (a one-time migration; Plex is never
+# read for them again): config/collections.owner.json in this repo, and their posters copied once beside it.
+owner_file      = "/config/collections.owner.json"
+poster_dir      = "/config/collection-posters" # <ratingKey>.jpg
+approved_file   = "/config/collections.approved.json" # config/collections.approved.json in this repo
+plex_section    = 4
+sinks           = ["plex", "jellyfin"] # reconciled concurrently; a slow or down app never fails or holds up the run
+sink_budget     = "20m" # each app's share of a run; out of time, it triggers the next run, which carries on
+call_timeout    = "2m"  # each request, on this stage's own clients ([plex] and [jellyfin] timeouts stay short)
+# A director here gets a "zz<name>" collection once their third film is on disk (names as TMDB spells them).
+canon_directors = [
+  "Paul Greengrass", "Vishal Bhardwaj", "George Miller", "Robert Zemeckis", "Nicolas Winding Refn", "Hayao Miyazaki",
+  "Ang Lee", "Todd Haynes", "Lynne Ramsay", "Andrew Stanton", "Kathryn Bigelow", "The Wachowskis", "Joachim Trier",
+  "Steve McQueen", "Gus Van Sant", "Gaspar Noé", "Chloé Zhao", "Sean Baker", "Barry Jenkins", "David Lean",
+  "Roman Polanski", "David Cronenberg", "Edward Yang", "Alexander Payne", "Kenneth Lonergan", "Miloš Forman",
+  "Jacques Demy", "John Carpenter", "Peter Weir", "Robert Wise", "Elaine May", "Julia Ducournau", "Masaki Kobayashi",
+  "Pablo Larraín", "Satoshi Kon"
+]
+# only    = ["Scary Movie"] # reconcile just these collections (gate runs)
+# dry_run = true            # log every create/add/sort/poster instead of sending it
+
 # Keeps Plex and Jellyfin transcoding on the GPU; replaces scripts/gpu_guard.py (DSM task 8).
 [stages.gpu-guard]
 every           = "15m"
@@ -55,6 +81,23 @@ sample          = "/volume1/PlexMediaServer/scripts/gpu_sample.mkv"
 self_test_every = "24h"
 legacy_state    = "/volume1/PlexMediaServer/scripts/gpu_guard.state.json" # imported once at cutover
 plex_timeout    = "5s" # each Plex API call; a slower Plex never fails the run
+
+# Probes Plex, Jellyfin, qBittorrent, the Cloudflare hostnames and the containers; restarts a Jellyfin that stopped
+# answering when nobody is playing on it. New: no Python original. Needs /var/run/docker.sock (compose.yaml).
+[stages.health]
+every                 = "5m"
+timeout               = "30s"          # per probe, all at once (Cloudflare: up to 9.8 s seen); Plex/Jellyfin: also [plex]/[jellyfin] timeout
+fail_threshold        = 3              # consecutive failed runs before an alert (and a restart)
+restart_cooldown      = "1h"           # at most one restart per container per cooldown; at least 1h
+restartable           = ["jellyfin"]   # the ONLY containers projectionist may restart; left out or [] = alert only
+docker_socket         = "/var/run/docker.sock"
+jellyfin_container    = "jellyfin"
+qbittorrent_container = "qbittorrent"
+qbittorrent_url       = "http://127.0.0.1:8080" # 403 counts as up: the WebUI answers and wants a login
+[stages.health.public] # URL = the status it must answer through the Cloudflare tunnel; redirects are not followed
+"https://jellyfin.example.com"    = 302
+"https://plex.example.com"    = 401
+"https://nas.example.com" = 200
 
 # Small 4K copies of the films listed as "Remote 4K" (Plex playlist, Jellyfin playlist or Jellyfin collection);
 # replaces scripts/remote4k.py (DSM task 9).
@@ -92,6 +135,42 @@ users = [
   { name = "roger",  plex = "roger",             jellyfin = "roger" },
 ]
 
+# Keeps "<dir>/.details/<video>.txt" true for every video in the scheme, from ffprobe and the rename logs;
+# replaces rename/write_details_files.py. Bounds are per run; probed and scanned files are cached.
+[stages.details]
+every             = "15m"
+library           = "/volume1/media"
+sections          = ["Movies", "TV"]
+# Rename logs, oldest first: the Python renamers', the rename stage's legacy copies of them, then its own. A missing
+# log is skipped and a row read twice counts once, but a run that finds no move row at all fails ([] = no logs).
+undo_logs         = ["/volume1/PlexMediaServer/rename/undo.tsv", "/volume1/PlexMediaServer/rename/undo_auto.tsv",
+                     "/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv",
+                     "/volume1/media/.projectionist/rename/undo.tsv"]
+max_probes        = 400  # new ffprobe runs per run
+max_peak_scans    = 2    # whole-file packet scans per run (files above peak_above_kbps only; ~20 min per 50 GB)
+max_decode_checks = 60   # 3 x 5 s decode samples per file
+peak_above_kbps   = 20000
+retry_unreadable  = "24h"
+# notes_root      = "/volume1/PlexMediaServer/projectionist-test/details/notes" # dry run: notes into a mirror tree
+# paths_file      = "/path/to/list.txt"                                          # only these videos
+
+# Keeps Movies/ and TV/ in the naming scheme (replaces rename/rename_engine.py + apply_ops.py and autorename.py).
+# Identity from the names and TMDB (env.TMDB, direct); never from Plex or Jellyfin.
+[stages.rename]
+every        = "15m"
+root         = "/volume1/media"
+mode         = "apply" # "plan": write ops.tsv, review.tsv, problems.tsv to plan_dir and touch nothing; "undo": replay undo_log backwards
+plan_dir     = "/volume1/media/.projectionist/rename/plan"
+undo_log     = "/volume1/media/.projectionist/rename/undo.tsv" # apply_ops.py's format: either tool can undo the other's moves
+undo_units   = [] # undo mode: only these units (e.g. "movie:tmdb-348"); empty = the whole log
+redo_undone  = false # false: a file undo put back stays until you rename or move it; true: apply plans it again
+ghost_logs   = ["/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv"]
+review_file  = "/volume1/media/_needs-review.txt"
+aligned_log  = "/volume1/PlexMediaServer/subtitle-downloads/log2.csv" # the aligner's copy wins the primary subtitle name
+sublang_file = "" # optional JSON {path: {lang, sdh}} for subtitles whose language neither name nor text gives
+notify       = true  # tell Jellyfin which folders changed (one /Library/Media/Updated push per run; Plex watches the disk)
+quiet        = "10m" # a folder written to more recently is still arriving
+
 # The USB SSD (exFAT) as a mirror of Movies A→Z, as many as fit; replaces ssd-copy/fill.py. Idle I/O priority, capped,
 # paused while anyone but the owner is watching. Nothing on the SSD is overwritten, or deleted without proof.
 [stages.ssdmirror]
@@ -104,6 +183,24 @@ margin_gb       = 15                                           # free space alwa
 mbps            = 50                                           # cap on bulk reads, MB/s
 io_class        = "idle"                                       # copies yield all disk time; "best-effort" = fill.py's nice 19
 status_file     = "/volume1/PlexMediaServer/ssd-copy/PROGRESS.txt"
+
+# An English text subtitle beside every movie and episode; replaces scripts/sub_stats.py and scripts/subfetch2.py.
+# Providers are called directly, never through Plex: OpenSubtitles' legacy REST API, Gestdown (Addic7ed, episodes) and
+# SITEC Subtitles (films) need no key; OpenSubtitles.com and Subdl join only when <secrets_dir>/<name>_api_key exists
+# (opensubtitles_api_key, subdl_api_key). IMDb and TheTVDB ids come from TMDB. A title waits until every listed
+# provider has answered, so drop a provider that cannot be reached from this network (Subdl, 2026-10-05) from the list.
+[stages.subtitles]
+every       = "6h"
+roots       = ["/volume1/media/Movies", "/volume1/media/TV"]
+stats_file  = "/state/sub_stats.tsv" # sub_stats.py's TSV over the whole library, refreshed each run
+retry_after = "168h"                 # a title that got no subtitle is searched again after this, then 2, 4, 8x it
+workers     = 3
+max_titles  = 0                      # per run; 0 = every due title
+secrets_dir = "/run/secrets"
+alass       = "/usr/local/bin/alass" # aligns to the audio when there is no English image track, and rescues misfits
+providers   = ["opensubtitles", "opensubtitles-com", "subdl", "gestdown", "sitec"]
+legacy_quota = "/volume1/PlexMediaServer/subtitle-downloads" # subfetch2.py's quota files, read once while the store has none
+# output_dir = "/volume1/PlexMediaServer/projectionist-test/subtitles/out" # test runs: write sidecars here instead
 
 # Real-time trigger: inotify on the library and finished downloads. A top-level folder (a movie, a show, a download)
 # that changed and then stayed quiet for `quiet` triggers each stage in `trigger`; each is a reconciler that finds its
@@ -119,3 +216,56 @@ roots   = ["/volume1/media/Movies", "/volume1/media/TV", "/volume1/media/_downlo
 trigger = ["rename", "details", "subtitles", "posters", "collections", "jfsync"]
 ignore  = ["@eaDir", "#recycle", "#snapshot", "_archive", "_assets"] # never watched or counted; dot folders (.details) too
 partial_suffixes = [".part", ".!qB"] # in-progress files (and dot files): keep a folder busy, never trigger on their own
+
+# Read-only library audit: names outside the scheme, unreadable videos, orphan sidecars, identical copies, episodes
+# without English subtitles. Writes <root>/_audit.txt and alerts when a category grows; never moves or deletes.
+[stages.audit]
+every         = "24h"
+window        = "04:00-07:00"
+root          = "/volume1/media"          # holds Movies/ and TV/
+report        = "/volume1/media/_audit.txt"
+max_listed    = 50                             # examples per category in the report
+settle        = "15m"                          # a file or folder changed more recently may still be moving: judged next run
+probe_workers = 2                              # ffprobes on cache misses, only while no guest is watching
+quiet         = ["missing_english_subs"]       # grows with every download until the subtitles stage catches up
+
+# The most artistic poster for every movie, show and season, on Jellyfin and Plex; replaces posters/posters.py.
+# Candidates: the owner's poster (from a Plex DB backup and the export taken with it), TMDB and fanart.tv (the shared
+# clients). Judge: Claude on the owner's own Anthropic key (secrets_dir/anthropic_api_key), the model chosen by
+# [[llm.policy]], one vision call per title; a backlog goes through Message Batches (half price). Off until enabled:
+# even with dry_run, judging spends: the 3,023-title backlog costs about $4.70 in batches with Sonnet 5.5 at low
+# effort ($0.00155 a title on the 12-title pilot, 2026-10-05), about half that with Haiku 4.5. A batch request holds
+# its worst case (about $0.0064) against budget_usd until it settles, so the first run submits about 1,880 titles and
+# a later run the rest; that wait is no alert.
+[stages.posters]
+enabled            = false
+every              = "6h"
+dry_run            = true            # judge only; review posters_items, then set false to upload
+budget_usd         = 12              # all judge calls ever; a hard stop
+max_tokens         = 1024            # thinking included
+batch_min          = 25              # fewer titles to judge than this: the normal API
+batch_size         = 200
+secrets_dir        = "/run/secrets"
+cache_dir          = "/state/posters" # thumbnails
+# One export: items.json and posters/ from export_customizations.py, and the Plex DB backup taken with them. Pointing
+# these at a newer export (before dry_run = false) merges it in: its uploads and picks win, its defaults never do.
+owner_items        = "/volume1/PlexMediaServer/backups/customizations/items.json"
+owner_posters      = "/volume1/PlexMediaServer/backups/customizations/posters"
+owner_backup_db    = "/volume1/PlexMediaServer/backups/pre-rename-20261005T0328Z/com.plexapp.plugins.library.db"
+plex_movie_section = 4
+plex_tv_section    = 2
+sink_index_every   = "24h"           # one item listing per app per day maps titles to the apps' ids; a title an app
+                                     # re-created under a new id (Jellyfin: any rename) gets its poster again
+sink_alert_after   = "72h"           # an app whose listing fails this long raises an alert (its posters wait)
+mark               = "poster-curator 2026-10" # EXIF ImageDescription on the images the stage uploads, the owner's own
+                                     # uploads excepted; a later export reads a marked upload as the stage's
+
+# Which Claude model the stages that call one use, by date: the first rule whose `until` is still in the future wins
+# (`until` is exclusive; no `until` = for good). "<family>:latest" is the newest model whose id contains <family>,
+# looked up daily in the Models API, so a new model is used the day it ships. This is the default when no rule is set.
+[[llm.policy]]
+model = "sonnet:latest"
+until = 2026-11-05T08:00:00Z # 00:00 PST
+
+[[llm.policy]]
+model = "haiku:latest"

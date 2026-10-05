@@ -41,6 +41,7 @@ func TestParseEpisode(t *testing.T) {
 		{"/tv/Adolescence (2025) {tmdb-249042}/Season 01/Adolescence (2025) - S01E01.mkv",
 			Episode{"Adolescence", 2025, ID{"tmdb", "249042"}, 1, []int{1}, "", ".mkv"}, true},
 		{"/tv/The Wire (2002) {tmdb-1438}/Season 02/The Wire (2002) - S01E01 - The Target.mkv", Episode{}, false},
+		{"/tv/The Wire (2002) {tmdb-1438}/Season 01/The Wire (2002) - S01E01The Target.mkv", Episode{}, false},
 		{"/tv/The Wire (2002) {tmdb-1438}/Specials/The Wire (2002) - S00E01 - x.mkv", Episode{}, false},
 		{"/tv/The Wire (2002) {tmdb-1438}/Season 01/Other (2002) - S01E01 - x.mkv", Episode{}, false},
 	}

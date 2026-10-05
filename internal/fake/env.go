@@ -53,7 +53,7 @@ func NewEnv(t testing.TB, prefs map[string]string) *Harness {
 	fa, faKey := Fanart(t)
 	h.Plex, h.Jellyfin, h.TMDB, h.Fanart, h.PrefsPath = px, jf, tm, fa, prefsPath
 	h.Env = &stage.Env{
-		Log: log, Store: st, Plex: pc, Jellyfin: jc, Probe: prober, FFmpeg: ff, Loc: time.UTC,
+		Log: log, Store: st, Plex: pc, Jellyfin: jc, Probe: prober, FFmpeg: ff, Loc: time.UTC, Metrics: obs.NewMetrics(),
 		TMDB:   tmdb.New(tmdb.Options{ReadTokenFile: tmToken, BaseURL: tm.URL, Rate: 1e6}, st), // no throttle sleeps in tests
 		Fanart: fanart.New(fanart.Options{APIKeyFile: faKey, BaseURL: fa.URL}, st),
 		Viewers: &viewers.Gate{Plex: pc, Jellyfin: jc, Owners: map[string]bool{"saahilsanganeriya": true, "saahil": true},

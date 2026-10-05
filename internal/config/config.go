@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
+
+	"projectionist/internal/llm"
 )
 
 type Config struct {
@@ -20,6 +22,7 @@ type Config struct {
 	FFmpeg   FFmpeg   `toml:"ffmpeg"`
 	TMDB     TMDB     `toml:"tmdb"`
 	Fanart   Fanart   `toml:"fanart"`
+	LLM      LLM      `toml:"llm"`
 
 	Stages map[string]toml.Primitive `toml:"stages"`
 
@@ -54,6 +57,11 @@ type TMDB struct {
 type Fanart struct {
 	APIKeyFile string        `toml:"api_key_file"`
 	CacheTTL   time.Duration `toml:"cache_ttl"`
+}
+
+// LLM is which Claude model the stages that call one use, by date ([[llm.policy]]); none = llm.DefaultPolicy.
+type LLM struct {
+	Policy llm.Policy `toml:"policy"`
 }
 
 type FFmpeg struct {

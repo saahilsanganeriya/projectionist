@@ -6,6 +6,7 @@
 package plex
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -15,7 +16,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -30,11 +30,10 @@ func New(baseURL, prefsPath string, timeout time.Duration) *Client {
 	return &Client{base: baseURL, prefsPath: prefsPath, http: &http.Client{Timeout: timeout}}
 }
 
-// WithTimeout is a copy of c whose requests may take up to d, e.g. a whole-section listing on a busy server.
-func (c *Client) WithTimeout(d time.Duration) *Client {
-	cp := *c
-	cp.http = &http.Client{Timeout: d}
-	return &cp
+// WithTimeout is a copy of c whose requests each get timeout instead: for a stage whose slow calls hold up no one but
+// itself, while the viewer gate and the other stages keep the short process-wide bound.
+func (c *Client) WithTimeout(timeout time.Duration) *Client {
+	return &Client{base: c.base, prefsPath: c.prefsPath, http: &http.Client{Timeout: timeout}}
 }
 
 // ReadPrefs returns the attributes of Preferences.xml's root element. It never touches the API.
@@ -75,45 +74,50 @@ func (c *Client) token() (string, error) {
 }
 
 func (c *Client) do(ctx context.Context, method, path, accept string) ([]byte, error) {
+	return c.owner(ctx, method, c.base+path, accept, "", nil)
+}
+
+// owner sends as the server owner, whose token Preferences.xml holds.
+func (c *Client) owner(ctx context.Context, method, rawURL, accept, contentType string, body []byte) ([]byte, error) {
 	tok, err := c.token()
 	if err != nil {
 		return nil, err
 	}
-	return c.send(ctx, tok, method, c.base+path, accept, nil)
+	return c.send(ctx, tok, method, rawURL, accept, contentType, body)
 }
 
-// send puts the token in a header, never in the URL, so request logs cannot leak it.
-func (c *Client) send(ctx context.Context, tok, method, rawURL, accept string, form url.Values) ([]byte, error) {
-	var body io.Reader
-	if form != nil {
-		body = strings.NewReader(form.Encode())
+// send carries the token as a header, never in the URL, so request logs cannot leak it.
+func (c *Client) send(ctx context.Context, tok, method, rawURL, accept, contentType string, body []byte) ([]byte, error) {
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, rawURL, body)
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, rd)
 	if err != nil {
 		return nil, err
 	}
-	path := req.URL.Path
+	path := req.URL.RequestURI()
 	req.Header.Set("X-Plex-Token", tok)
 	req.Header.Set("X-Plex-Client-Identifier", "projectionist") // plex.tv v2 refuses requests without one
 	if accept != "" {
 		req.Header.Set("Accept", accept)
 	}
-	if form != nil {
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("plex %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	answer, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
 		return nil, fmt.Errorf("plex %s %s: %w", method, path, err)
 	}
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("plex %s %s: HTTP %d", method, path, resp.StatusCode)
 	}
-	return raw, nil
+	return answer, nil
 }
 
 // Do sends a request whose answer does not matter (PUT /:/prefs).
@@ -122,20 +126,25 @@ func (c *Client) Do(ctx context.Context, method, path string) error {
 	return err
 }
 
+// Send is Do with a request body, e.g. a poster's bytes for POST /library/metadata/<id>/posters.
+func (c *Client) Send(ctx context.Context, method, path, contentType string, body []byte) error {
+	_, err := c.owner(ctx, method, c.base+path, "", contentType, body)
+	return err
+}
+
 // DoAs is Do with another account's token, e.g. a friend's, to write that friend's watch state.
 func (c *Client) DoAs(ctx context.Context, token, method, path string) error {
-	_, err := c.send(ctx, token, method, c.base+path, "", nil)
+	_, err := c.send(ctx, token, method, c.base+path, "", "", nil)
 	return err
 }
 
 // Account calls plex.tv (an absolute URL) as the server owner, e.g. to manage webhooks or read shared users'
 // server tokens; form, when not nil, is the urlencoded body. The answer is plex.tv's XML.
 func (c *Client) Account(ctx context.Context, method, rawURL string, form url.Values) ([]byte, error) {
-	tok, err := c.token()
-	if err != nil {
-		return nil, err
+	if form == nil {
+		return c.owner(ctx, method, rawURL, "", "", nil)
 	}
-	return c.send(ctx, tok, method, rawURL, "", form)
+	return c.owner(ctx, method, rawURL, "", "application/x-www-form-urlencoded", []byte(form.Encode()))
 }
 
 // GetJSON decodes the response's MediaContainer object into v; an empty body leaves v untouched.
