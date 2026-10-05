@@ -164,8 +164,16 @@ func TestGateAlass(t *testing.T) {
 				if fit, fok := align(first, spanBits(cues(string(speech)), 1)); len(first) >= minCues {
 					check = fmt.Sprintf("%v z=%.1f agree=%d ratio=%.5f off=%.2f", fok, fit.Z, fit.Agree, fit.Ratio, fit.Offset)
 				}
-				out[i] += fmt.Sprintf("%s\t%s\t%v\t%s\t%v\t%v\t%v\t%s\t%s\n", f[0], filepath.Base(cand), ok, result,
-					attempt["offset_ms"], attempt["ratio"], attempt["agree"], med, check)
+				var raw []span // the same test on the candidate as downloaded
+				for _, c := range cues(string(txt)) {
+					raw = append(raw, span{c.start, min(c.end, c.start+1)})
+				}
+				asIs := ""
+				if fit, fok := align(raw, spanBits(cues(string(speech)), 1)); len(raw) >= minCues {
+					asIs = fmt.Sprintf("as-is %v z=%.1f agree=%d ratio=%.5f off=%.2f", fok, fit.Z, fit.Agree, fit.Ratio, fit.Offset)
+				}
+				out[i] += fmt.Sprintf("%s\t%s\t%v\t%s\t%v\t%v\t%v\t%s\t%s\t%s\n", f[0], filepath.Base(cand), ok, result,
+					attempt["offset_ms"], attempt["ratio"], attempt["agree"], med, check, asIs)
 			}
 		}()
 	}
