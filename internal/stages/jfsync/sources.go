@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -511,11 +512,17 @@ func readPlexBackup(ctx context.Context, file string, accounts []any, movies, tv
 	return out, rows.Err()
 }
 
-// backfillJellyfin imports, once per person, the user's played, resumable and rated items from Jellyfin. It reads
-// every item's user data: on Jellyfin 12.1 the isPlayed and IsResumable filters miss most items whose user data was
-// written through the API (149 of 1,090 on the NAS). A user Jellyfin does not have yet is imported once it exists.
+// backfillJellyfin imports, once per person, the user's played, resumable and rated items from Jellyfin, asking for
+// each addressed item's user data in turn. User-scoped item queries are no substitute: on the NAS (Jellyfin 12.1,
+// mid first scan) they return about a tenth of the library, with or without the isPlayed / IsResumable filters (923
+// of 8,473 items; 20 of a batch of 200 ids), while the per-item answer is complete and takes about 10 ms. A user
+// Jellyfin does not have yet is imported once it exists.
 func (s *syncer) backfillJellyfin(ctx context.Context, addr *addresses) error {
-	jf := s.env.Jellyfin.WithTimeout(s.opt.ListTimeout)
+	ids := make([]string, 0, len(addr.Targets))
+	for id := range addr.Targets {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
 	for _, u := range s.opt.Users {
 		done, err := s.migrated(ctx, jellyfinApp, u.Name)
 		if err != nil {
@@ -525,39 +532,33 @@ func (s *syncer) backfillJellyfin(ctx context.Context, addr *addresses) error {
 		if done || !ok {
 			continue
 		}
-		var list struct {
-			Items []struct {
-				ID, Path string
-				UserData struct {
-					Played                bool
-					PlayCount             int
-					PlaybackPositionTicks int64
-					Rating                *float64
-					LastPlayedDate        string
-				}
-			}
-		}
-		if err := jf.GetJSON(ctx, "/Items?userId="+userID+"&Recursive=true&IncludeItemTypes=Movie,Episode&Fields=Path&enableImages=false&enableUserData=true", &list); err != nil {
-			s.env.Log.Warn("jellyfin history import failed", "event", "migrate_failed", "person", u.Name, "err", err)
-			return nil // retried next run: nothing marks it done
-		}
 		n := 0
-		for _, it := range list.Items {
-			ud := it.UserData
+		for _, id := range ids {
+			var ud struct {
+				Played                bool
+				PlayCount             int
+				PlaybackPositionTicks int64
+				Rating                *float64
+				LastPlayedDate        string
+			}
+			if err := s.env.Jellyfin.GetJSON(ctx, "/UserItems/"+id+"/UserData?userId="+userID, &ud); err != nil {
+				s.env.Log.Warn("jellyfin history import failed", "event", "migrate_failed", "person", u.Name, "item", id, "err", err)
+				return nil // retried next run: nothing marks it done
+			}
 			if !ud.Played && ud.PlaybackPositionTicks <= 0 && ud.Rating == nil {
 				continue
 			}
 			at, _ := time.Parse(time.RFC3339Nano, ud.LastPlayedDate) // absent: the zero time, older than any other source
 			e := history(ud.Played, ud.PlayCount, ud.PlaybackPositionTicks/10_000, ud.Rating)
-			e.Person, e.Ref, e.Source, e.At = u.Name, jellyfinApp+":"+it.ID, "jellyfin-backfill", at
-			added, err := s.migrate(ctx, e, watch.ItemsForPath(it.Path, 0))
+			e.Person, e.Ref, e.Source, e.At = u.Name, jellyfinApp+":"+id, "jellyfin-backfill", at
+			added, err := s.migrate(ctx, e, addr.Targets[id])
 			if err != nil {
 				return err
 			}
 			n += added
 		}
 		s.env.Log.Info("jellyfin history imported", "event", "migrated", "app", jellyfinApp, "person", u.Name,
-			"items", len(list.Items), "events", n)
+			"items", len(ids), "events", n)
 		if err := s.markMigrated(ctx, jellyfinApp, u.Name, "jellyfin", n); err != nil {
 			return err
 		}
