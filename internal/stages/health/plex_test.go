@@ -101,8 +101,9 @@ func TestPlexOptimizeTriggers(t *testing.T) {
 // Catches, over one optimize's life: a due optimize sent outside the window or under a guest, a refused request
 // spending the day's optimize, the optimize sent before it is recorded, the hubs timed (or a second optimize sent)
 // while Plex still lists it, an unrelated activity taken for it, no re-timing once it ends, a still-slow Plex alerted
-// on one run only (DSM polls /health every 15 min) or after a fast load, the changes counted before an optimize
-// making the next one due again, the 24 h cooldown ignored, and an optimize Plex lists for over an hour not alerted.
+// on one run only (DSM polls /health every 15 min) or again after a fast load, the changes counted before an optimize
+// or the reason it was due making the next one due again, the 24 h cooldown ignored, and an optimize Plex lists for
+// an hour not alerted.
 func TestPlexOptimizeLifecycle(t *testing.T) {
 	p := newPlexEnv(t, time.Date(2026, 10, 5, 21, 0, 0, 0, time.UTC)) // 14:00 Pacific
 	ctx := context.Background()
@@ -159,14 +160,19 @@ func TestPlexOptimizeLifecycle(t *testing.T) {
 	}
 
 	p.Env.Store.AddLibraryChanges(ctx, "collections", 500)
-	step("500 changes since the optimize", 2, "")
+	p.clk.hub(6*time.Second, 200)
+	step("slow again after a fast load, 500 changes since the optimize", 2, "")
 	p.Env.Store.AddLibraryChanges(ctx, "details", 1)
+	p.clk.hub(10*time.Millisecond, 200)
 	step("501, inside the cooldown", 2, "")
 	p.clk.set(time.Date(2026, 10, 7, 10, 30, 0, 0, time.UTC)) // the next night, 24 h 10 min after the send
 	step("501, the next night", 3, "")
 	p.Plex.Handle("GET", "/activities", 200, optimizing)
 	p.clk.add(55 * time.Minute)
 	step("optimizing for an hour", 3, "still runs after 1h0m0s")
+	p.Plex.Handle("GET", "/activities", 200, `{"MediaContainer":{"size":0}}`)
+	p.clk.set(time.Date(2026, 10, 8, 10, 40, 0, 0, time.UTC))
+	step("a quiet night after", 3, "")
 }
 
 // plexEnv is a harness on which every probe but Plex's passes. Its clock moves only when a hub is loaded, by that

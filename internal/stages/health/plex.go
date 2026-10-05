@@ -105,7 +105,7 @@ func upkeepPlex(ctx context.Context, env *stage.Env, opt Options, window config.
 	}
 
 	prev := *ps
-	ps.Running, ps.LastOptimize, ps.Before, ps.Changes, ps.Due, ps.SlowStreak = true, now, took, changes, "", 0
+	ps.Running, ps.LastOptimize, ps.Before, ps.Changes, ps.Due = true, now, took, changes, ""
 	// Recorded before it is sent: a crash in between can only skip an optimize, never repeat one inside the cooldown.
 	if err := env.Store.PutJSON(context.WithoutCancel(ctx), name, "state", st); err != nil {
 		return err
