@@ -2,6 +2,7 @@ package subtitles
 
 import (
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,7 +46,8 @@ type fixture struct {
 	quota    bool   // downloads answer 429: the day's quota is spent
 	dead     bool   // every download link answers a plain 404, and Ran's IMDb search finds four subtitles
 	cut      bool   // Ran's candidate does not fit its captions (another cut) until alass aligns it
-	hashIMDb string // when set, Ran's file hash finds a misaligned subtitle labelled with this IMDb id
+	hashIMDb string // when set, Ran's file hash finds a subtitle labelled with this IMDb id
+	hashText string // that subtitle (default: another film's timing)
 	ranHash  string
 }
 
@@ -93,10 +96,12 @@ func newFixture(t *testing.T) *fixture {
 	f.h.Script(t, "ffprobe", `echo "$*" >> "`+ff+`/ffprobe.calls"
 for n in Ran Heat Clerks Show; do case "$*" in *"/$n "*) cat "`+ff+`/$n.json"; exit 0;; esac; done; exit 1
 `)
-	f.h.Script(t, "ffmpeg", `case "$*" in *framecrc*) cat "`+ff+`/ran.framecrc";; *"-f srt"*) cat "`+ff+`/heat.srt";; *) exit 1;; esac
+	f.h.Script(t, "ffmpeg", `echo "$*" >> "`+ff+`/helper.calls"
+case "$*" in *framecrc*) cat "`+ff+`/ran.framecrc";; *"-f srt"*) cat "`+ff+`/heat.srt";; *) exit 1;; esac
 `)
 	// alass's real CLI: <reference> <incorrect> <output> [--index <audio stream>]; it exits 1 on any other flag.
-	f.h.Script(t, "alass", `if [ "$2" = "_" ]; then [ "$4 $5" = "--index 1" ] || exit 1; cp "`+ff+`/speech.srt" "$3"; exit 0; fi
+	f.h.Script(t, "alass", `echo "$*" >> "`+ff+`/helper.calls"
+if [ "$2" = "_" ]; then [ "$4 $5" = "--index 1" ] || exit 1; cp "`+ff+`/speech.srt" "$3"; exit 0; fi
 cp "`+ff+`/realign.srt" "$3" 2>/dev/null || cp "$2" "$3"; echo "info: 'reference file FPS/input file FPS' ratio is 1"
 `)
 	f.h.TMDB.Handle("GET", "/movie/11645", 200, `{"id":11645,"external_ids":{"imdb_id":"tt0089881"}}`)
@@ -115,11 +120,13 @@ cp "`+ff+`/realign.srt" "$3" 2>/dev/null || cp "$2" "$3"; echo "info: 'reference
 			w.Write([]byte(`[{"IDSubtitleFile":"h","MatchedBy":"moviehash","SubFormat":"srt","IDMovieImdb":"` + f.hashIMDb +
 				`","SubDownloadLink":"` + osSrv.URL + `/dl/hash.gz"}]`))
 		case r.URL.Path == "/dl/hash.gz":
-			w.Write(gz(srt(otherTimes(), 0)))
+			w.Write(gz(cmp.Or(f.hashText, srt(otherTimes(), 0))))
 		case strings.Contains(r.URL.Path, "imdbid-0089881") && f.dead:
 			w.Write([]byte(strings.ReplaceAll(cand("ran", "Ran")+cand("ran2", "Ran")+cand("ran3", "Ran")+cand("ran4", "Ran"), "][", ",")))
 		case strings.HasPrefix(r.URL.Path, "/dl/") && f.dead:
 			http.NotFound(w, r)
+		case strings.Contains(r.URL.Path, "imdbid-0000001"): // Show's episode
+			w.Write([]byte(`[{"IDSubtitleFile":"showos","SubFormat":"srt","SeriesSeason":"1","SeriesEpisode":"1","SubDownloadLink":"` + osSrv.URL + `/dl/showos.gz"}]`))
 		case strings.Contains(r.URL.Path, "imdbid-0089881"):
 			w.Write([]byte(cand("ran", "Ran.1985.BluRay")))
 		case strings.Contains(r.URL.Path, "imdbid-0109445"):
@@ -233,6 +240,19 @@ func TestRunWritesSidecarsAndReconciles(t *testing.T) {
 	}
 }
 
+// queued is the alignment queue, in the order it is worked.
+func (f *fixture) queued() []string {
+	var out []string
+	rows, _ := f.h.Env.Store.DB().Query(`SELECT path FROM subtitles_queue ORDER BY priority, queued_at, path`)
+	defer rows.Close()
+	for rows.Next() {
+		var p string
+		rows.Scan(&p)
+		out = append(out, p)
+	}
+	return append(out, "")
+}
+
 func (f *fixture) outcomes() map[string]string {
 	out := map[string]string{}
 	rows, _ := f.h.Env.Store.DB().Query(`SELECT path, outcome FROM subtitles_titles`)
@@ -247,8 +267,9 @@ func (f *fixture) outcomes() map[string]string {
 
 // Catches titles recorded (a week lost, silently) that a provider never searched or let be tried: an outage, TMDB
 // out, or the download quota, which must also stop every OpenSubtitles request until it resumes 24 h later with no
-// alert (it is routine), and at cutover until subfetch2.py's own recorded resume time (its last 24 h of downloads
-// carried over); a candidate already rejected for the file downloaded again while its title waits; a refused
+// alert (it is routine) and cost no alignment (the video is read only once a download succeeded), and at cutover until
+// subfetch2.py's own recorded resume time (its last 24 h of downloads carried over); a candidate already rejected for
+// the file downloaded again when its title is due again; a refused
 // search deferring its own title too (one title's refusal would hold up every run), or recording it while another
 // provider is out for the quota; and dead download links (plain 404s) parking OpenSubtitles with an alert instead of
 // moving on as subfetch2.py does.
@@ -269,8 +290,9 @@ func TestRunProviderTrouble(t *testing.T) {
 
 	quota := newFixture(t)
 	quota.quota = true
-	if rep := quota.run(t); len(rep.Alerts) != 0 || len(quota.outcomes()) != 1 {
-		t.Errorf("a spent quota: alerts %q, recorded %v; want none, only Heat's extraction", rep.Alerts, quota.outcomes())
+	if rep := quota.run(t); len(rep.Alerts) != 0 || rep.Counts["cap_used"] != 0 || quota.outcomes()[quota.path(ran)] != "queued" {
+		t.Errorf("a spent quota: alerts %q, %d alignments, recorded %v; want none, none (no video read for a refused download), Ran queued",
+			rep.Alerts, rep.Counts["cap_used"], quota.outcomes())
 	}
 	quota.mu.Lock()
 	quota.quota = false
@@ -284,16 +306,14 @@ func TestRunProviderTrouble(t *testing.T) {
 	quota.run(t)
 	quota.sidecar(t, ran)
 
-	waits := newFixture(t) // Ran's one candidate is rejected while OpenSubtitles.com is down
+	waits := newFixture(t) // Ran's one candidate is another cut, and alass cannot rescue it
 	waits.cut = true
 	os.Remove(filepath.Join(waits.h.Env.FFmpeg.Dir, "realign.srt"))
-	os.WriteFile(filepath.Join(waits.dir, "opensubtitles_api_key"), []byte("k\n"), 0o600)
-	waits.st.openSubtitlesCom = gone.URL
-	waits.options(`providers = ["opensubtitles", "opensubtitles-com"]`)
 	waits.run(t)
+	waits.h.Now = waits.h.Now.Add(169 * time.Hour)
 	waits.run(t)
-	if n := strings.Count(strings.Join(waits.requests, " ")+" ", "/dl/ran.gz "); n != 1 || waits.outcomes()[waits.path(ran)] != "" {
-		t.Errorf("Ran's rejected candidate downloaded %d times in two runs, recorded %v; want once, Ran waiting", n, waits.outcomes())
+	if n := strings.Count(strings.Join(waits.requests, " ")+" ", "/dl/ran.gz "); n != 1 || waits.outcomes()[waits.path(ran)] != "no_aligned_candidate" {
+		t.Errorf("Ran's rejected candidate downloaded %d times in two runs, recorded %v; want once, Ran without a subtitle", n, waits.outcomes())
 	}
 
 	refuses := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(403) }))
@@ -397,28 +417,15 @@ func TestRunEpisodeFromGestdown(t *testing.T) {
 	}
 }
 
-// Catches: a file-hash match labelled with this film thrown away because its timing could not be confirmed (the
-// Python keeps it as is: a laugh track fools speech alignment), or one labelled with another film kept.
-func TestRunTrustsOwnHashMatch(t *testing.T) {
-	for imdb, trusted := range map[string]bool{"89881": true, "1234567": false} {
-		f := newFixture(t)
-		os.Remove(filepath.Join(f.h.Env.FFmpeg.Dir, "realign.srt")) // alass cannot rescue it either
-		f.hashIMDb = imdb
-		f.run(t)
-		if got := cues(f.sidecar(t, ran))[0].start == otherTimes()[0]; got != trusted {
-			t.Errorf("hash match labelled tt%s: kept %v, want %v", imdb, got, trusted)
-		}
-	}
-}
-
 // Catches a missing or broken alass parking titles for a week, or failing quietly: missing, every title that needs it
-// waits; failing, the title it failed on is recorded (it may be that title's audio) and the titles behind it wait;
+// waits in the queue; failing, the title it failed on is recorded (it may be that title's audio) and the titles behind it wait;
 // one alert either way.
 func TestRunWhenAlassBreaks(t *testing.T) {
 	missing := newFixture(t)
 	os.Remove(filepath.Join(missing.h.Env.FFmpeg.Dir, "alass"))
-	if rep := missing.run(t); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "alass not found") || missing.outcomes()[missing.path(clerks)] != "" {
-		t.Errorf("alass missing: alerts %q, recorded %v; want one alert and Clerks deferred", rep.Alerts, missing.outcomes())
+	if rep := missing.run(t); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "alass not found") || missing.outcomes()[missing.path(clerks)] != "queued" ||
+		missing.queued()[0] != missing.path(clerks) {
+		t.Errorf("alass missing: alerts %q, recorded %v, queue %v; want one alert and Clerks still queued", rep.Alerts, missing.outcomes(), missing.queued())
 	}
 	broken := newFixture(t)
 	alass := broken.h.Script(t, "alass", "exit 1\n")
@@ -497,7 +504,7 @@ func TestHelperStopsWhileGuestsWatch(t *testing.T) {
 	served := sessions(h, &mu, &body)
 	out := make(chan string, 1)
 	go func() {
-		b, err := (&run{env: h.Env}).cmd(context.Background(), helper)
+		b, err := (&run{env: h.Env}).cmd(context.Background(), nil, helper)
 		out <- fmt.Sprint(string(b), err)
 	}()
 	raw, _ := os.ReadFile(pidPipe)
@@ -535,8 +542,8 @@ func TestRunStoppedAfterAWrite(t *testing.T) {
 		w.WriteHeader(500)
 	})
 	f.st.Run(ctx, f.h.Env, &stage.Report{})
-	if o := f.outcomes()[f.path(ran)]; o != "retimed" {
-		t.Errorf("Ran's sidecar, written as the run stopped, recorded as %q", o)
+	if o := f.outcomes()[f.path(heat)]; o != "extracted" {
+		t.Errorf("Heat's sidecar, written as the run stopped, recorded as %q", o)
 	}
 	n := len(f.h.Jellyfin.Calls("POST", "/Library/Media/Updated"))
 	f.h.Jellyfin.Handle("POST", "/Library/Media/Updated", 204, "")
@@ -545,8 +552,8 @@ func TestRunStoppedAfterAWrite(t *testing.T) {
 	for _, c := range f.h.Jellyfin.Calls("POST", "/Library/Media/Updated")[n:] {
 		told = append(told, c.Body...)
 	}
-	if !bytes.Contains(told, []byte(filepath.Base(strings.TrimSuffix(ran, ".mkv"))+".en.srt")) {
-		t.Errorf("the next run told Jellyfin %s; want Ran's sidecar too", told)
+	if !bytes.Contains(told, []byte(filepath.Base(strings.TrimSuffix(heat, ".mkv"))+".en.srt")) {
+		t.Errorf("the next run told Jellyfin %s; want Heat's sidecar too", told)
 	}
 }
 
@@ -617,5 +624,176 @@ func TestAlassFit(t *testing.T) {
 		if ok != c.want || ok && (result != "retimed" || out != uniform.String() || attempt["offset_ms"] != 1500.0) {
 			t.Errorf("%s against its speech %v: ok %v result %q attempt %v", c.mode, c.want, ok, result, attempt)
 		}
+	}
+}
+
+// note writes the .details note of rel: its original name and the duration a Container line gives.
+func (f *fixture) note(rel, original, duration string) {
+	dir := filepath.Join(filepath.Dir(f.path(rel)), ".details")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, filepath.Base(rel)+".txt"), []byte("Title:           x\nOriginal name:   "+original+"\nOriginal folder: x\n"+
+		"Video:           x264 (AVC) · 8-bit · SDR · 23.976 fps · 5.0 Mb/s\nAudio:           eng AAC 5.1\nSubtitles:       none\n"+
+		"Container:       matroska · 1.00 GB · "+duration+" · 0 chapters\n"), 0o644)
+}
+
+// gestdownNTb has Gestdown serve Show's episode two subtitles: CtrlHD's, popular and 3 s late, and NTb's, on time; TMDB
+// gives the show its TheTVDB and IMDb ids.
+func (f *fixture) gestdownNTb(t *testing.T) {
+	f.h.TMDB.Handle("GET", "/tv/1", 200, `{"id":1,"external_ids":{"tvdb_id":81189,"imdb_id":"tt0000001"}}`)
+	gd, _ := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+		switch r.URL.Path {
+		case "/shows/external/tvdb/81189":
+			w.Write([]byte(`{"shows":[{"id":"s"}]}`))
+		case "/subtitles/get/s/1/1/English":
+			w.Write([]byte(`{"matchingSubtitles":[{"subtitleId":"c","version":"CtrlHD","completed":true,"downloadUri":"/dl/c","language":"English","downloadCount":999},` +
+				`{"subtitleId":"n","version":"WEB-DL-NTb","completed":true,"downloadUri":"/dl/n","language":"English"}],"episode":{"season":1,"number":1}}`))
+		case "/dl/c":
+			w.Write([]byte(srt(f.ts, 3)))
+		case "/dl/n":
+			w.Write([]byte(srt(f.ts, 0)))
+		}
+	})
+	f.st.gestdownAPI = gd.URL
+}
+
+// verdict is the fields of the title's last event with the given status.
+func (f *fixture) verdict(rel, status string) map[string]any {
+	var raw string
+	f.h.Env.Store.DB().QueryRow(`SELECT fields FROM events WHERE item=? AND status=? ORDER BY id DESC LIMIT 1`, f.path(rel), status).Scan(&raw)
+	out := map[string]any{}
+	json.Unmarshal([]byte(raw), &out)
+	return out
+}
+
+// Catches the cheap route reading or aligning the video: a release-matched subtitle must be written as downloaded,
+// with no ffprobe, ffmpeg or alass run on its video and no byte of it read (the note gives its duration and frame
+// rate), and OpenSubtitles never searched for a title a cheaper provider served (it is last, whatever the list's
+// order); an OpenSubtitles hash match labelled with the film is written reading only the hash's 2 x 64 KiB (the whole
+// 4 KiB file twice here). Also a hash match labelled with another film, or a release match the note says cannot fit
+// (8 % short), written instead of queued untouched; OpenSubtitles' other candidates queued beside a cheaper provider's;
+// and a release match that failed cheapCheck dropped from the alignment, or tested cheaply again.
+func TestRunReleaseMatchedReadsNoVideo(t *testing.T) {
+	for _, c := range []struct {
+		why                  string
+		showLength, hashIMDb string
+		want                 map[string]string
+	}{
+		{"matched and fitting", "0h 45m", "89881", map[string]string{show: "release_matched", ran: "release_matched", clerks: "queued"}},
+		{"cannot fit, another film", "0h 50m", "1234567", map[string]string{show: "queued", ran: "queued", clerks: "queued"}},
+	} {
+		f := newFixture(t)
+		f.gestdownNTb(t)
+		f.options(`providers = ["opensubtitles", "gestdown"]` + "\nalign_per_day = 0")
+		f.note(show, "Show.S01E01.1080p.WEB-DL.DD5.1.H.264-NTb.mkv", c.showLength)
+		f.note(ran, "Ran.1985.1080p.BluRay.x264-GRP.mkv", "0h 45m")
+		f.note(clerks, "Clerks.1994.DVDRip.XviD-GRP.avi", "0h 45m")
+		f.hashIMDb, f.hashText = c.hashIMDb, srt(f.ts, 0)
+		f.run(t)
+		ff := f.h.Env.FFmpeg.Dir
+		probed, _ := os.ReadFile(filepath.Join(ff, "ffprobe.calls"))
+		helpers, _ := os.ReadFile(filepath.Join(ff, "helper.calls"))
+		for rel, want := range c.want {
+			fields := f.verdict(rel, want)
+			_, err := os.Stat(strings.TrimSuffix(f.path(rel), ".mkv") + ".en.srt")
+			name := filepath.Base(filepath.Dir(rel))
+			wantRead := 8192.0 // OpenSubtitles' hash: searched once no cheaper subtitle was written
+			if rel == show && want == "release_matched" {
+				wantRead = 0
+			}
+			if got := f.outcomes()[f.path(rel)]; got != want || fields["video_bytes"] != wantRead || fields["ffprobe"] != false ||
+				strings.Contains(string(probed)+string(helpers), name) || (err == nil) != (want == "release_matched") {
+				t.Errorf("%s, %s: %q (want %q), fields %v (want video_bytes %v), sidecar %v, ffprobe/helpers ran on it: %v", c.why, name, got,
+					want, fields, wantRead, err == nil, strings.Contains(string(probed)+string(helpers), name))
+			}
+		}
+		searchedShow := strings.Contains(strings.Join(f.requests, " "), "season-1")
+		if c.want[show] == "release_matched" {
+			if f.sidecar(t, show) != stripAds(srt(f.ts, 0)) || searchedShow {
+				t.Errorf("%s: Show's NTb subtitle not written as downloaded, or OpenSubtitles searched for Show (%v)", c.why, searchedShow)
+			}
+			continue
+		}
+		// Show's NTb subtitle failed cheapCheck: its pool holds Gestdown's two, not OpenSubtitles' episode match (Gestdown
+		// has candidates), and an alignment later tries NTb's first, without testing it cheaply again.
+		f.options(`providers = ["opensubtitles", "gestdown"]` + "\nalign_per_day = 20")
+		f.run(t)
+		var cheap int
+		f.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM events WHERE item=? AND status='rejected_cheap'`, f.path(show)).Scan(&cheap)
+		if f.verdict(show, "queued")["detail"] != "2 candidate(s)" || f.verdict(show, "retimed")["id"] != "gestdown:n" || cheap != 1 {
+			t.Errorf("%s: Show queued with %v, aligned %v, tested cheaply %d times; want Gestdown's 2, NTb's aligned, once", c.why,
+				f.verdict(show, "queued")["detail"], f.verdict(show, "retimed")["id"], cheap)
+		}
+	}
+}
+
+// Catches the queue aligning more than align_per_day titles in any 24 h (also across runs: the count is kept in the
+// store), aligning while a guest watches, losing a title it could not reach yet (it stays queued), or working the
+// queue in another order than a title without English audio first.
+func TestRunQueueCapAndIdle(t *testing.T) {
+	f := newFixture(t)
+	f.options(`providers = ["opensubtitles"]` + "\nalign_per_day = 1")
+	rep := f.run(t)
+	if o := f.outcomes(); o[f.path(ran)] != "retimed" || o[f.path(clerks)] != "queued" || rep.Counts["cap_used"] != 1 || f.queued()[0] != f.path(clerks) {
+		t.Fatalf("first run: recorded %v, %d alignments, queue %v; want Ran (Japanese audio) aligned, Clerks queued", o, rep.Counts["cap_used"], f.queued())
+	}
+	f.h.Now = f.h.Now.Add(23 * time.Hour)
+	if rep := f.run(t); rep.Counts["cap_used"] != 1 || f.queued()[0] != f.path(clerks) {
+		t.Fatalf("23 h later: %d alignments in 24 h, queue %v; want 1, Clerks still waiting", rep.Counts["cap_used"], f.queued())
+	}
+	f.h.Now = f.h.Now.Add(2 * time.Hour)
+	var mu sync.Mutex
+	body := guest
+	served := sessions(f.h, &mu, &body)
+	done := make(chan struct{})
+	go func() { f.st.Run(context.Background(), f.h.Env, &stage.Report{}); close(done) }()
+	for range 3 {
+		select {
+		case <-served:
+		case <-done:
+			t.Fatal("the queue was worked without waiting for the guest to stop")
+		}
+	}
+	helpers, _ := os.ReadFile(filepath.Join(f.h.Env.FFmpeg.Dir, "helper.calls"))
+	if strings.Contains(string(helpers), "Clerks") || strings.Contains(strings.Join(f.requests, " "), "/dl/clerks.gz") {
+		t.Fatal("Clerks downloaded or its audio heard while a guest watched")
+	}
+	mu.Lock()
+	body = nobody
+	mu.Unlock()
+	<-done
+	if f.sidecar(t, clerks); f.queued()[0] != "" {
+		t.Errorf("queue %v after Clerks was aligned; want empty", f.queued())
+	}
+}
+
+// Catches a helper's reads of the video left out of the title's bytes, which would make the gate's "no byte read"
+// evidence prove nothing. Linux only: the count is rchar from /proc/<pid>/io.
+func TestHelperReadsAreCounted(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("rchar is read from /proc/<pid>/io")
+	}
+	h := fake.NewEnv(t, nil)
+	video := filepath.Join(t.TempDir(), "v.mkv")
+	os.WriteFile(video, make([]byte, 3<<20), 0o644)
+	helper := h.Script(t, "helper", `cat "$1" > /dev/null`+"\n")
+	ti := &title{}
+	if _, err := (&run{env: h.Env}).cmd(context.Background(), ti, helper, video); err != nil || ti.read < 3<<20 || ti.read > 4<<20 {
+		t.Errorf("helper reading 3 MiB counted %d bytes (err %v)", ti.read, err)
+	}
+}
+
+// Catches a video without a .details note losing its original release name: the rename log names it, so its
+// release-matched subtitle is still written unaligned.
+func TestRunOriginalNameFromRenameLog(t *testing.T) {
+	f := newFixture(t)
+	f.gestdownNTb(t)
+	log := filepath.Join(f.dir, "undo.tsv")
+	os.WriteFile(log, []byte("t\tmove\t/dl/Show.S01E01.1080p.WEB-DL.DD5.1.H.264-NTb.mkv\t"+f.path(show)+"\tshow:1\n"), 0o644)
+	os.WriteFile(filepath.Join(f.h.Env.FFmpeg.Dir, "Show.json"), []byte(strings.Replace(probeJSON(`{"index":1,"codec_type":"audio","codec_name":"aac"}`),
+		"3000.0", "2700.0", 1)), 0o644)
+	f.options(`providers = ["gestdown"]` + "\nalign_per_day = 0\nundo_logs = [\"" + log + "\"]")
+	f.run(t)
+	if o := f.outcomes()[f.path(show)]; o != "release_matched" || f.sidecar(t, show) != stripAds(srt(f.ts, 0)) {
+		t.Errorf("Show %q; want NTb's subtitle written unaligned", o)
 	}
 }

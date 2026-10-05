@@ -185,21 +185,28 @@ io_class        = "idle"                                       # copies yield al
 status_file     = "/volume1/PlexMediaServer/ssd-copy/PROGRESS.txt"
 
 # An English text subtitle beside every movie and episode; replaces scripts/sub_stats.py and scripts/subfetch2.py.
-# Providers are called directly, never through Plex: OpenSubtitles' legacy REST API, Gestdown (Addic7ed, episodes) and
-# SITEC Subtitles (films) need no key; OpenSubtitles.com and Subdl join only when <secrets_dir>/<name>_api_key exists
-# (opensubtitles_api_key, subdl_api_key). IMDb and TheTVDB ids come from TMDB. A title waits until every listed
-# provider has answered, so drop a provider that cannot be reached from this network (Subdl, 2026-10-05) from the list.
+# Cheap first: a subtitle made for the file's own release (its original name's group, from the .details note or the
+# rename logs; or an OpenSubtitles file-hash match) is written without reading the video once its last cue fits the
+# note's duration and frame rate. Anything else waits in the alignment queue, worked while nobody but the owner
+# watches, at most align_per_day titles in any 24 h. Providers are called directly, never through Plex: Gestdown
+# (Addic7ed, episodes) and SITEC Subtitles (films) need no key; OpenSubtitles' legacy REST API comes last whatever this
+# list's order (180 downloads a day), and is used for a hash match, or when no other provider has a candidate;
+# OpenSubtitles.com and Subdl join only when <secrets_dir>/<name>_api_key exists (opensubtitles_api_key,
+# subdl_api_key). IMDb and TheTVDB ids come from TMDB. A title waits until every listed provider has answered, so drop
+# a provider that cannot be reached from this network (Subdl, 2026-10-05) from the list.
 [stages.subtitles]
-every       = "6h"
-roots       = ["/volume1/media/Movies", "/volume1/media/TV"]
-stats_file  = "/state/sub_stats.tsv" # sub_stats.py's TSV over the whole library, refreshed each run
-retry_after = "168h"                 # a title that got no subtitle is searched again after this, then 2, 4, 8x it
-workers     = 3
-max_titles  = 0                      # per run; 0 = every due title
-secrets_dir = "/run/secrets"
-alass       = "/usr/local/bin/alass" # aligns to the audio when there is no English image track, and rescues misfits
-providers   = ["opensubtitles", "opensubtitles-com", "subdl", "gestdown", "sitec"]
-legacy_quota = "/volume1/PlexMediaServer/subtitle-downloads" # subfetch2.py's quota files, read once while the store has none
+every         = "6h"
+roots         = ["/volume1/media/Movies", "/volume1/media/TV"]
+stats_file    = "/state/sub_stats.tsv" # sub_stats.py's TSV over the whole library, refreshed each run
+retry_after   = "168h"                 # a title that got no subtitle is searched again after this, then 2, 4, 8x it
+workers       = 3                      # titles searched at once; the queue aligns one at a time
+max_titles    = 0                      # per run; 0 = every due title
+secrets_dir   = "/run/secrets"
+alass         = "/usr/local/bin/alass" # the queue: aligns to the audio when there is no English image track, and rescues misfits
+providers     = ["gestdown", "sitec", "subdl", "opensubtitles", "opensubtitles-com"]
+align_per_day = 20                     # queued titles aligned in any 24 h; each reads its whole video once or twice; 0 = none
+legacy_quota  = "/volume1/PlexMediaServer/subtitle-downloads" # subfetch2.py's quota files, read once while the store has none
+# undo_logs = [...]                    # rename logs for original names a note lacks; default: the details stage's list
 # output_dir = "/volume1/PlexMediaServer/projectionist-test/subtitles/out" # test runs: write sidecars here instead
 
 # Real-time trigger: inotify on the library and finished downloads. A top-level folder (a movie, a show, a download)

@@ -55,9 +55,10 @@ type Candidate struct {
 	HearingImpaired bool
 	Downloads       int
 	Rating          float64 // OpenSubtitles' SubRating (0-10), SITEC's vote score: rank() adds 100 a point
+	FPS             float64 // the frame rate it was timed for, where the provider says (OpenSubtitles); 0 otherwise
 	Encoding        string
 	Season, Episode string
-	ours            bool // labelled with this title: its IMDb id (a movie) or its season and episode (an episode)
+	ours            bool // labelled with this title: its film (IMDb id, or found by it) or its season and episode
 	unusable        bool // not SRT, foreign parts only or marked bad: counted by the search logic, never tried
 	link            string
 	provider        Provider
@@ -77,6 +78,9 @@ var (
 )
 
 func (c Candidate) key() string { return c.provider.Name() + ":" + c.ID }
+
+// metered providers ration their downloads (OpenSubtitles: 180 a day per IP), so they come last.
+func metered(p Provider) bool { return p.Name() == "opensubtitles" || p.Name() == "opensubtitles-com" }
 
 // ---- ports of subfetch2.py ----
 
@@ -142,23 +146,6 @@ func rank(c Candidate, release string) int {
 		}
 	}
 	return score + min(c.Downloads, 99999)/100 + int(c.Rating*100)
-}
-
-// releaseName is the video's pre-rename file and folder names from its .details note (the rename dropped the release
-// group and source), else the file name.
-func releaseName(video string) string {
-	note, err := os.ReadFile(filepath.Join(filepath.Dir(video), ".details", filepath.Base(video)+".txt"))
-	if err != nil {
-		return filepath.Base(video)
-	}
-	var names []string
-	for _, m := range originalRe.FindAllStringSubmatch(string(note), -1) {
-		names = append(names, m[1])
-	}
-	if len(names) == 0 {
-		return filepath.Base(video)
-	}
-	return strings.Join(names, " ")
 }
 
 // stripAds drops the cue blocks OpenSubtitles adds to every download.
@@ -349,6 +336,7 @@ type legacyResult struct {
 	SubDownloadsCnt     flexString
 	SubRating           flexString
 	SubEncoding         flexString
+	MovieFPS            flexString
 	SubDownloadLink     flexString
 	SeriesSeason        flexString
 	SeriesEpisode       flexString
@@ -446,11 +434,12 @@ func (o *legacy) search(ctx context.Context, q Query, source string, params ...s
 	for _, r := range res {
 		downloads, _ := strconv.Atoi(string(r.SubDownloadsCnt))
 		rating, _ := strconv.ParseFloat(string(r.SubRating), 64)
+		fps, _ := strconv.ParseFloat(string(r.MovieFPS), 64)
 		imdb, _ := strconv.Atoi(string(r.IDMovieImdb))
 		out = append(out, Candidate{
 			Source: source, ID: string(r.IDSubtitleFile), Release: string(r.MovieReleaseName), FileName: string(r.SubFileName),
 			HashMatch: r.MatchedBy == "moviehash", HearingImpaired: r.SubHearingImpaired == "1", Downloads: downloads,
-			Rating: rating, Encoding: string(r.SubEncoding), Season: string(r.SeriesSeason), Episode: string(r.SeriesEpisode),
+			Rating: rating, FPS: fps, Encoding: string(r.SubEncoding), Season: string(r.SeriesSeason), Episode: string(r.SeriesEpisode),
 			link: string(r.SubDownloadLink), provider: o,
 			unusable: r.SubFormat != "srt" || r.SubSumCD != "" && r.SubSumCD != "1" || r.SubForeignPartsOnly == "1" || r.SubBad == "1",
 			ours:     imdb != 0 && imdb == q.IMDb, // an episode's own test replaces this in Search
@@ -616,6 +605,7 @@ func (o *dotCom) Search(ctx context.Context, q Query) ([]Candidate, error) {
 				ForeignPartsOnly  bool    `json:"foreign_parts_only"`
 				MachineTranslated bool    `json:"machine_translated"`
 				AITranslated      bool    `json:"ai_translated"`
+				FPS               float64 `json:"fps"`
 				MoviehashMatch    bool    `json:"moviehash_match"`
 				Files             []struct {
 					FileID   int    `json:"file_id"`
@@ -640,9 +630,11 @@ func (o *dotCom) Search(ctx context.Context, q Query) ([]Candidate, error) {
 		c := Candidate{
 			Source: "opensubtitles-com", ID: strconv.Itoa(a.Files[0].FileID), Release: a.Release, FileName: a.Files[0].FileName,
 			HashMatch: a.MoviehashMatch, HearingImpaired: a.HearingImpaired, Downloads: a.DownloadCount, Rating: a.Ratings, provider: o,
-			Season: strconv.Itoa(a.Feature.Season), Episode: strconv.Itoa(a.Feature.Episode),
+			FPS: a.FPS, Season: strconv.Itoa(a.Feature.Season), Episode: strconv.Itoa(a.Feature.Episode),
 		}
-		if !q.Show || c.HashMatch || (c.Season == strconv.Itoa(q.Season) && c.Episode == strconv.Itoa(q.Episode)) {
+		// searched by the film's IMDb id, or labelled with the episode
+		c.ours = !q.Show && q.IMDb != 0 || q.Show && c.Season == strconv.Itoa(q.Season) && c.Episode == strconv.Itoa(q.Episode)
+		if !q.Show || c.HashMatch || c.ours {
 			out = append(out, c)
 		}
 	}
@@ -926,7 +918,8 @@ func (o *sitec) Search(ctx context.Context, q Query) ([]Candidate, error) {
 			continue
 		}
 		c := Candidate{Source: "sitec", ID: link[1], Release: html.UnescapeString(strings.TrimSpace(link[2])),
-			HearingImpaired: strings.Contains(row, `class="hi-subtitle"`), link: o.base + "/subtitles/" + link[1], provider: o}
+			HearingImpaired: strings.Contains(row, `class="hi-subtitle"`), link: o.base + "/subtitles/" + link[1], provider: o,
+			ours: true} // the film's own page
 		if m := sitecRatingRe.FindStringSubmatch(row); m != nil {
 			c.Rating, _ = strconv.ParseFloat(m[1], 64)
 		}
