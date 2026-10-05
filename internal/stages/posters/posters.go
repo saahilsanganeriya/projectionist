@@ -1,5 +1,6 @@
 // Package posters picks the most artistic poster for every movie, show and season and puts it on Jellyfin and Plex
-// (port of posters/posters.py, which ran on the Mac).
+// (port of posters/posters.py, which ran on the Mac), and gives every Movies collection without a poster of the
+// owner's one (collections.go).
 //
 // Each run reconciles the library against the posters_items table, so an early trigger or a crash only resumes:
 //
@@ -44,8 +45,8 @@ const name = "posters"
 type Options struct {
 	MoviesRoot       string        `toml:"movies_root"`
 	TVRoot           string        `toml:"tv_root"`
-	Only             []string      `toml:"only"`    // title keys ("movie:tmdb-422", "season:tmdb-1400:2") to limit a run to
-	DryRun           bool          `toml:"dry_run"` // candidates and judge only: Plex and Jellyfin are not touched
+	Only             []string      `toml:"only"`    // title keys ("movie:tmdb-422", "season:tmdb-1400:2", "collection:scary movie") to limit a run to
+	DryRun           bool          `toml:"dry_run"` // titles: candidates and judge only, no poster uploaded
 	CacheDir         string        `toml:"cache_dir"`
 	SecretsDir       string        `toml:"secrets_dir"`     // anthropic_api_key (TMDB and fanart.tv are the shared clients')
 	OwnerItems       string        `toml:"owner_items"`     // customizations/items.json: ratingKey, guid, external ids per item
@@ -65,6 +66,14 @@ type Options struct {
 	Mark             string        `toml:"mark"`             // EXIF ImageDescription on the images the stage chose
 	AnthropicAPI     string        `toml:"anthropic_api"`
 	TMDBImages       string        `toml:"tmdb_images"`
+	// Collections: both files set (the collections stage's) turn them on.
+	CollectionsOwner    string  `toml:"collections_owner_file"`    // the owner's collections: never given a poster here
+	CollectionsApproved string  `toml:"collections_approved_file"` // with the arrivals the collections stage stored
+	CollectionDryRun    bool    `toml:"collection_dry_run"`        // collections: candidates and judge only (default)
+	CollectionBudgetUSD float64 `toml:"collection_budget_usd"`     // every collection judge call ever, apart from budget_usd
+	DirectorMinScore    float64 `toml:"director_min_score"`        // a director's photo needs this judge score or no poster
+	CommonsAPI          string  `toml:"commons_api"`
+	CommonsContact      string  `toml:"commons_contact"` // a URL or e-mail for the User-Agent: Wikimedia then allows 20× the rate
 }
 
 func defaults() Options {
@@ -91,6 +100,11 @@ func defaults() Options {
 		Mark:             "poster-curator 2026-10",
 		AnthropicAPI:     "https://api.anthropic.com",
 		TMDBImages:       "https://image.tmdb.org/t/p",
+
+		CollectionDryRun:    true,
+		CollectionBudgetUSD: 5,
+		DirectorMinScore:    4,
+		CommonsAPI:          "https://commons.wikimedia.org/w/api.php",
 	}
 }
 
@@ -147,12 +161,18 @@ func (Stage) Name() string { return name }
 
 // row is a title with its stored state.
 type row struct {
-	Title    Title
-	Gathered bool // Cands holds the pool, which may be empty
-	Cands    []Candidate
-	Sig      string
-	Verdict  *Verdict
+	Title      Title
+	Gathered   bool      // Cands holds the pool, which may be empty
+	GatheredAt time.Time // when it was gathered (an empty pool is gathered again a day later)
+	Cands      []Candidate
+	Sig        string
+	Verdict    *Verdict
 }
+
+const (
+	emptyRegather = 24 * time.Hour     // an empty pool is gathered again after this: a source may have gained art
+	emptyAlert    = 3 * 24 * time.Hour // a title or collection empty this long raises an alert
+)
 
 // run carries one Run's clients and counters; the steps fan out, so shared state is guarded.
 type run struct {
@@ -164,11 +184,18 @@ type run struct {
 
 	mu            sync.Mutex
 	rep           *stage.Report
-	budgetAlerted bool
+	budgetAlerted map[bool]bool // titles (false), collections (true)
 
 	gateMu   sync.Mutex
 	gateAt   time.Time
 	gateBusy bool
+
+	collections map[string]bool // this run's collections (keys): only their outbox rows are sent
+	ownerKeys   map[string]bool // the owner's collections' Plex ratingKeys: never a target
+
+	wikiMu    sync.Mutex // requests to Wikimedia go one at a time, WikimediaPace apart (wikimediaTurn)
+	wikiLast  time.Time
+	wikiPause time.Time // no Wikimedia request before this: the last Retry-After
 }
 
 // guestsWatching is the viewer gate, asked at most once a minute; a gate that cannot tell counts as busy.
@@ -213,7 +240,7 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 			return strings.TrimSpace(string(b)), err
 		}
 	}
-	r := &run{env: env, opt: opt, http: &http.Client{Timeout: 2 * time.Minute}, rep: rep,
+	r := &run{env: env, opt: opt, http: &http.Client{Timeout: 2 * time.Minute}, rep: rep, budgetAlerted: map[bool]bool{},
 		// 10 minutes, the Anthropic SDKs' default: a batch upload of ~30 MB needs it on a slow uplink.
 		llm: &llm.Client{API: opt.AnthropicAPI, HTTP: &http.Client{Timeout: 10 * time.Minute},
 			Key: func() (string, error) { return secret("anthropic_api_key") }},
@@ -250,8 +277,23 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if err != nil {
 		return err
 	}
+	if opt.CollectionsApproved != "" {
+		// A collections file that cannot be read stops the collections only; the titles go on.
+		if cs, keys, err := collectionTitles(ctx, db, opt); err != nil {
+			rep.Alert("posters: collections skipped this run: %v", err)
+		} else {
+			titles, r.ownerKeys = append(titles, cs...), keys
+			rep.Count("collections", len(cs))
+		}
+	}
 	if len(opt.Only) > 0 {
 		titles = slices.DeleteFunc(titles, func(t Title) bool { return !slices.Contains(opt.Only, t.Key) })
+	}
+	r.collections = map[string]bool{}
+	for _, t := range titles {
+		if t.Kind.collection() {
+			r.collections[t.Key] = true
+		}
 	}
 	rows, err := loadRows(ctx, db, titles, env.Now())
 	if err != nil {
@@ -261,7 +303,8 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 
 	var stale []*row
 	for _, it := range rows {
-		if !it.Gathered || it.Sig != r.poolSig(it.Title) {
+		empty := it.Gathered && len(it.Cands) == 0 && env.Now().Sub(it.GatheredAt) >= emptyRegather
+		if !it.Gathered || it.Sig != r.poolSig(it.Title) || empty {
 			stale = append(stale, it)
 		}
 	}
@@ -291,23 +334,44 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if err := context.Cause(gctx); err != nil {
 		return err
 	}
+	if err := r.emptyPools(ctx, rows); err != nil {
+		return err
+	}
 	if err := r.judge(ctx, rows); err != nil {
 		return err
 	}
-	if !opt.DryRun {
-		if err := r.enqueue(ctx, rows); err != nil {
+	r.noPoster(rows)
+	if live := r.live(); live[false] || live[true] {
+		var send []*row
+		for _, it := range rows {
+			if live[it.Title.Kind.collection()] {
+				send = append(send, it)
+			}
+		}
+		if err := r.enqueue(ctx, send); err != nil {
 			return err
 		}
 		if err := r.apply(ctx); err != nil {
 			return err
 		}
 	}
-	spent, err := spentUSD(ctx, db)
+	spent, err := spentUSD(ctx, db, false)
 	if err != nil {
 		return err
 	}
 	rep.Summary = fmt.Sprintf("%d titles; %d judged this run; $%.4f of $%.2f spent or held", len(rows), rep.Counts["judged"], spent, opt.BudgetUSD)
+	if opt.CollectionsApproved != "" {
+		if spent, err = spentUSD(ctx, db, true); err != nil {
+			return err
+		}
+		rep.Summary += fmt.Sprintf("; collections $%.4f of $%.2f", spent, opt.CollectionBudgetUSD)
+	}
 	return ctx.Err()
+}
+
+// live is, for titles (false) and collections (true), whether their posters are uploaded this run.
+func (r *run) live() map[bool]bool {
+	return map[bool]bool{false: !r.opt.DryRun, true: r.opt.CollectionsApproved != "" && !r.opt.CollectionDryRun}
 }
 
 // ---- store ----
@@ -327,10 +391,13 @@ func loadRows(ctx context.Context, db *sql.DB, titles []Title, now time.Time) ([
 			return nil, err
 		}
 		var cands, verdict sql.NullString
+		var at string
 		it := &row{Title: t}
-		if err := tx.QueryRowContext(ctx, `SELECT cands, sig, verdict FROM posters_items WHERE key=?`, t.Key).Scan(&cands, &it.Sig, &verdict); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT cands, sig, verdict, updated_at FROM posters_items WHERE key=?`, t.Key).
+			Scan(&cands, &it.Sig, &verdict, &at); err != nil {
 			return nil, err
 		}
+		it.GatheredAt, _ = time.Parse(store.TimeFormat, at)
 		if it.Gathered = cands.Valid; cands.Valid {
 			if err := json.Unmarshal([]byte(cands.String), &it.Cands); err != nil {
 				return nil, fmt.Errorf("%s candidates: %w", t.Key, err)
@@ -349,6 +416,12 @@ func loadRows(ctx context.Context, db *sql.DB, titles []Title, now time.Time) ([
 
 // poolSig names what a title's pool is gathered from: a new owner poster (a newer export) gathers it again.
 func (r *run) poolSig(t Title) string {
+	switch t.Kind {
+	case franchise:
+		return "tmdb-collection+fanart+film"
+	case director:
+		return "commons+tmdb-person"
+	}
 	sig := "tmdb+fanart"
 	if p, ok := r.owners[t.Key]; ok {
 		sig += " owner=" + p.State + ":" + p.File
@@ -357,6 +430,32 @@ func (r *run) poolSig(t Title) string {
 }
 
 // Stores run detached from ctx: finished work is recorded even while the run is being cancelled.
+// emptyPools keeps, per title, since when its pool has been empty, and alerts those empty for emptyAlert or longer.
+func (r *run) emptyPools(ctx context.Context, rows []*row) error {
+	since := map[string]time.Time{}
+	if _, err := r.env.Store.GetJSON(ctx, name, "empty_since", &since); err != nil {
+		return err
+	}
+	var long []string
+	for _, it := range rows {
+		k := it.Title.Key
+		switch _, known := since[k]; {
+		case !it.Gathered:
+		case len(it.Cands) > 0:
+			delete(since, k)
+		case !known:
+			since[k] = r.env.Now()
+		case r.env.Now().Sub(since[k]) >= emptyAlert:
+			long = append(long, k)
+		}
+	}
+	if len(long) > 0 {
+		slices.Sort(long)
+		r.alert("posters: %d title(s) have had no poster candidate for %v or more (gathered again daily); first: %s", len(long), emptyAlert, long[0])
+	}
+	return r.env.Store.PutJSON(context.WithoutCancel(ctx), name, "empty_since", since)
+}
+
 func (r *run) saveCandidates(ctx context.Context, it *row) error {
 	enc, _ := json.Marshal(it.Cands)
 	_, err := r.env.Store.DB().ExecContext(context.WithoutCancel(ctx), `UPDATE posters_items SET cands=?, sig=?, updated_at=? WHERE key=?`,
