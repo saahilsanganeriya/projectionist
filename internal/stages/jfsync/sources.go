@@ -461,7 +461,7 @@ func history(played bool, plays int, positionMs int64, rating *float64) watch.Ev
 
 // migrate records a migrated row once per item it holds, and folds it into what the app item holds.
 func (s *syncer) migrate(ctx context.Context, e watch.Event, items []string) (int, error) {
-	app, _, _ := strings.Cut(e.Ref, ":")
+	app, id, _ := strings.Cut(e.Ref, ":")
 	if len(items) == 0 {
 		s.rep.Count("outside_scheme."+app, 1)
 		return 0, nil
@@ -473,7 +473,7 @@ func (s *syncer) migrate(ctx context.Context, e watch.Event, items []string) (in
 		}
 	}
 	s.rep.Count("imported."+app, len(items))
-	return len(items), applySink(ctx, s.env.Store.DB(), app, e.Person, items, e)
+	return len(items), applySink(ctx, s.env.Store.DB(), app, e.Person, sinkKeys(app, id, items), e)
 }
 
 type backupRow struct {

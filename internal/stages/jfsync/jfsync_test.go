@@ -171,7 +171,7 @@ users = [{ name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" }, {
 		"u1/c1": `"PlaybackPositionTicks":12000000000,"LastPlayedDate":"2025-03-01T00:00:00Z"`,
 		"u2/b1": `"Played":true,"PlayCount":1,"Rating":7,"LastPlayedDate":"2025-02-01T00:00:00Z"`,
 	}
-	for _, id := range []string{"a1", "b1", "c1", "d1", "e1", "f1"} {
+	for _, id := range []string{"a1", "b1", "c1", "d1", "e1", "f1", "a2"} { // a2: Heat, if Jellyfin re-creates it
 		h.Jellyfin.HandleFunc("GET", "/UserItems/"+id+"/UserData", func(rw http.ResponseWriter, r *http.Request) {
 			rw.Write([]byte(`{` + userData[r.URL.Query().Get("userId")+"/"+id] + `}`))
 		})
@@ -361,6 +361,21 @@ func TestPlexEchoesNeverRescrobble(t *testing.T) {
 		if n := strings.Count(got, call); n != want {
 			t.Errorf("%q sent %d times in 4 runs, want %d", call, n, want)
 		}
+	}
+}
+
+// Catches: what Jellyfin holds kept by library item, so Heat re-created by Jellyfin under a new id without its user
+// data (a renamed folder of an item it had not identified) is never written again and the apps diverge silently.
+func TestJellyfinRecreatedItemIsWritten(t *testing.T) {
+	h, w, _, _ := newHarness(t)
+	run(t, h)
+	h.Jellyfin.Handle("GET", "/Items", 200, `{"Items":[{"Id":"a2","Path":"`+heat+`"}]}`)
+	h.Now = h.Now.Add(25 * time.Hour) // the run relists after its writes
+	run(t, h)
+	done := len(w.since(0))
+	run(t, h)
+	if got := strings.Join(w.since(done), "\n"); got != `/UserItems/a2/UserData?userId=u1 {"LastPlayedDate":"2024-08-09T00:00:00Z","PlayCount":2,"PlaybackPositionTicks":0,"Played":true}` {
+		t.Fatalf("after Jellyfin re-created Heat:\n%s", got)
 	}
 }
 

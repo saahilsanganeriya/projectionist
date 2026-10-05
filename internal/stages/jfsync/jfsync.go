@@ -10,8 +10,10 @@
 // only inside them, and addressing: one listing per app per day maps each app item id to the library identity
 // read from its file path. A run is a reconciler: it folds the events into each person's state per item and writes
 // to an app each field the record knows and the app is not believed to hold. What an app holds (jfsync_sink) is
-// everything it pushed, was migrated from it, or was given, kept per person and library item, so an item the app
-// re-creates under a new id still holds it. Failed writes are retried on later runs with backoff and never fail the
+// everything it pushed, was migrated from it, or was given, kept per person: for Plex per library item, so an item
+// Plex re-creates under a new ratingKey still holds its plays (a repeated scrobble adds a view nobody can remove);
+// for Jellyfin per Jellyfin item, so an item it re-creates without its user data is written again (its writes are
+// explicit values, safe to repeat). Failed writes are retried on later runs with backoff and never fail the
 // run. The heavy reads (listings, history imports) wait while anyone but the owner is watching; the writes do not.
 // A listing is refreshed after the writes, so it never delays them; an item added since it waits for the next one.
 package jfsync
@@ -201,7 +203,7 @@ func (s *syncer) resolve(ctx context.Context, addrs map[string]*addresses) error
 		}
 		err = watch.Resolve(ctx, tx, e, items)
 		if err == nil {
-			err = applySink(ctx, tx, app, e.Person, items, e)
+			err = applySink(ctx, tx, app, e.Person, sinkKeys(app, id, items), e)
 		}
 		if err == nil {
 			err = tx.Commit()
@@ -284,7 +286,11 @@ func (s *syncer) reconcile(ctx context.Context, app string, addr *addresses, sta
 			if !ok {
 				continue
 			}
-			row := have[k]
+			keys := sinkKeys(app, id, items)
+			if app == plexApp {
+				keys = []string{k.Item} // the row of the item whose state is wanted
+			}
+			row := have[watch.Key{Person: u.Name, Item: keys[0]}]
 			w, h := view(app, want, row.State)
 			if w.Same(h) {
 				continue
@@ -301,7 +307,7 @@ func (s *syncer) reconcile(ctx context.Context, app string, addr *addresses, sta
 			}
 			held, wrote, err := s.write(ctx, app, userID, id, w, row.State, want.PlayedAt)
 			if wrote != 0 {
-				if err := wroteSink(ctx, db, app, u.Name, items, held, wrote, s.readAt, s.env.Now()); err != nil {
+				if err := wroteSink(ctx, db, app, u.Name, sinkKeys(app, id, items), held, wrote, s.readAt, s.env.Now()); err != nil {
 					return err
 				}
 			}
@@ -310,7 +316,7 @@ func (s *syncer) reconcile(ctx context.Context, app string, addr *addresses, sta
 				s.rep.Count("write_failed."+app, 1)
 				s.env.Log.Warn("write failed", "event", "sink_write_failed", "app", app, "person", u.Name, "item", id,
 					"attempt", row.Failures+1, "err", err)
-				if err := failSink(ctx, db, app, u.Name, items, row.Failures+1, now); err != nil {
+				if err := failSink(ctx, db, app, u.Name, sinkKeys(app, id, items), row.Failures+1, now); err != nil {
 					return err
 				}
 				if stopped = failures >= maxFailRun; stopped {
@@ -442,7 +448,7 @@ func summary(counts map[string]int) string {
 	return strings.Join(parts, " ")
 }
 
-// ---- jfsync_sink: what each app is believed to hold, per person and library item ----
+// ---- jfsync_sink: what each app is believed to hold, per person and sink key ----
 
 // fields are the parts of a watch state one app call sets.
 type fields uint8
@@ -452,6 +458,15 @@ const (
 	positionField
 	ratingField
 )
+
+// sinkKeys names the jfsync_sink rows behind one app item: its library items for Plex, its own id for Jellyfin
+// (see the package doc).
+func sinkKeys(app, id string, items []string) []string {
+	if app == jellyfinApp {
+		return []string{id}
+	}
+	return items
+}
 
 type sinkRow struct {
 	watch.State
@@ -472,7 +487,7 @@ func openTables(ctx context.Context, env *stage.Env) error {
 		return err
 	}
 	_, err := env.Store.DB().ExecContext(ctx, `CREATE TABLE IF NOT EXISTS jfsync_sink (
-		app TEXT NOT NULL, person TEXT NOT NULL, item TEXT NOT NULL,
+		app TEXT NOT NULL, person TEXT NOT NULL, item TEXT NOT NULL, -- sinkKeys: a library item, or a Jellyfin item id
 		played INTEGER NOT NULL DEFAULT 0, plays INTEGER NOT NULL DEFAULT 0, position_ms INTEGER NOT NULL DEFAULT 0,
 		rating REAL, knows_play INTEGER NOT NULL DEFAULT 0, knows_position INTEGER NOT NULL DEFAULT 0,
 		failures INTEGER NOT NULL DEFAULT 0, retry_at TEXT NOT NULL DEFAULT '',
@@ -533,9 +548,9 @@ func holdSink(ctx context.Context, db watch.Execer, app, person, item string, st
 	return err
 }
 
-// wroteSink records what this stage's write to an app item put into each item it holds; it clears their backoff.
-func wroteSink(ctx context.Context, db *sql.DB, app, person string, items []string, st watch.State, wrote fields, readAt, writtenAt time.Time) error {
-	for _, it := range items {
+// wroteSink records what this stage's write to an app item put into each of its rows; it clears their backoff.
+func wroteSink(ctx context.Context, db *sql.DB, app, person string, keys []string, st watch.State, wrote fields, readAt, writtenAt time.Time) error {
+	for _, it := range keys {
 		if err := holdSink(ctx, db, app, person, it, st); err != nil {
 			return err
 		}
@@ -548,10 +563,10 @@ func wroteSink(ctx context.Context, db *sql.DB, app, person string, items []stri
 	return nil
 }
 
-// failSink backs the items off: 5 min after the first failure, doubling up to a day.
-func failSink(ctx context.Context, db *sql.DB, app, person string, items []string, failures int, now time.Time) error {
+// failSink backs the rows off: 5 min after the first failure, doubling up to a day.
+func failSink(ctx context.Context, db *sql.DB, app, person string, keys []string, failures int, now time.Time) error {
 	retry := now.Add(backoff(firstBackoff, failures, maxBackoff)).UTC().Format(store.TimeFormat)
-	for _, it := range items {
+	for _, it := range keys {
 		if _, err := db.ExecContext(ctx, `INSERT INTO jfsync_sink(app, person, item, failures, retry_at) VALUES (?,?,?,?,?)
 			ON CONFLICT(app, person, item) DO UPDATE SET failures=excluded.failures, retry_at=excluded.retry_at`,
 			app, person, it, failures, retry); err != nil {
@@ -575,9 +590,9 @@ type querier interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// applySink folds an event an app pushed (or a migrated row of its history) into what that app holds for each item.
-func applySink(ctx context.Context, q querier, app, person string, items []string, e watch.Event) error {
-	for _, it := range items {
+// applySink folds an event an app pushed (or a migrated row of its history) into what that app holds for each row.
+func applySink(ctx context.Context, q querier, app, person string, keys []string, e watch.Event) error {
+	for _, it := range keys {
 		r, err := scanSink(q.QueryRowContext(ctx, `SELECT `+sinkColumns+` FROM jfsync_sink
 			WHERE app = ? AND person = ? AND item = ?`, app, person, it).Scan)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
