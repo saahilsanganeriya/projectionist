@@ -142,7 +142,7 @@ func TestPlanHubMoves(t *testing.T) {
 	}
 }
 
-// Catches: a configured canon entry inheriting a default's limit or reverse (TOML fills an existing slice element
+// Catches: a configured canon entry inheriting a default's limit (TOML fills an existing slice element
 // by element: the second entry here would keep the Top 250's limit), and the shared defaults changed by a decode.
 func TestConfiguredCanonStartsClean(t *testing.T) {
 	h := fake.NewEnv(t, nil)

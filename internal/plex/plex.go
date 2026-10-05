@@ -66,6 +66,9 @@ func (c *Client) token() (string, error) {
 	return prefs["PlexOnlineToken"], nil
 }
 
+// ErrNotFound is wrapped by every call Plex answers with 404: the item is gone.
+var ErrNotFound = errors.New("not found")
+
 func (c *Client) do(ctx context.Context, method, path, accept string) ([]byte, error) {
 	return c.send(ctx, method, path, accept, "", nil)
 }
@@ -99,6 +102,9 @@ func (c *Client) send(ctx context.Context, method, path, accept, contentType str
 	answer, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
 		return nil, fmt.Errorf("plex %s %s: %w", method, path, err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("plex %s %s: HTTP 404: %w", method, path, ErrNotFound)
 	}
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("plex %s %s: HTTP %d", method, path, resp.StatusCode)

@@ -74,22 +74,42 @@ func shelvedKeys(ctx context.Context, db *sql.DB) ([]string, error) {
 	return keys, rows.Err()
 }
 
-// madeIDs returns the ids of the collections the stage made in app.
-func madeIDs(ctx context.Context, db *sql.DB, app string) (map[string]bool, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id FROM lists_sinks WHERE app=? AND id != ''`, app)
+// made returns the ids of the collections the stage made in app, and the times of its creates still unconfirmed.
+func made(ctx context.Context, db *sql.DB, app string) (ids map[string]bool, intents []time.Time, err error) {
+	rows, err := db.QueryContext(ctx, `SELECT id, intent_at FROM lists_sinks WHERE app=?`, app)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
-	ids := map[string]bool{}
+	ids = map[string]bool{}
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
+		var id, intent string
+		if err := rows.Scan(&id, &intent); err != nil {
+			return nil, nil, err
 		}
-		ids[id] = true
+		if id != "" {
+			ids[id] = true
+		}
+		if at, err := time.Parse(store.TimeFormat, intent); err == nil {
+			intents = append(intents, at)
+		}
 	}
-	return ids, rows.Err()
+	return ids, intents, rows.Err()
+}
+
+// adoptWindow bounds adoption by intent: a collection with a shelf's title is taken for the answer to a create the
+// stage sent (its answer lost) only if the app made it between a minute before the create (rounding) and this long
+// after. One made later is someone else's — the owner's, the collections stage's — and is never adopted.
+const adoptWindow = 10 * time.Minute
+
+// answersCreate tells whether a collection made at created can be the result of a create sent at one of intents.
+func answersCreate(created time.Time, intents ...time.Time) bool {
+	for _, at := range intents {
+		if !at.IsZero() && !created.Before(at.Add(-time.Minute)) && !created.After(at.Add(adoptWindow)) {
+			return true
+		}
+	}
+	return false
 }
 
 func deleteRow(ctx context.Context, db *sql.DB, app, key string) error {

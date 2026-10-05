@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"projectionist/internal/fake"
 )
@@ -55,10 +56,11 @@ type fakePlex struct {
 	calls   []string // "METHOD path?query" of every request
 	next    int
 	now     func() int64
-	fail    bool          // answer 500 to everything
-	failAt  int           // answer 500 to section listings starting here (0 = never)
-	hold    chan struct{} // when set, every request waits until it is closed: a Plex too busy to answer
-	failOn  string        // answer 500 to requests starting with this "METHOD /path"
+	fail    bool            // answer 500 to everything
+	failAt  int             // answer 500 to section listings starting here (0 = never)
+	hold    chan struct{}   // when set, every request waits until it is closed: a Plex too busy to answer
+	failOn  string          // answer 500 to requests starting with this "METHOD /path"
+	hidden  map[string]bool // collections left out of the section's collections listing
 }
 
 func (p *fakePlex) coll(key string) *plexColl0 {
@@ -83,7 +85,7 @@ func (p *fakePlex) writes() []string {
 }
 
 func newFakePlex(t *testing.T, movies map[string]int, now func() int64) *fakePlex {
-	p := &fakePlex{movies: movies, watched: map[string]bool{}, next: 9000, now: now}
+	p := &fakePlex{movies: movies, watched: map[string]bool{}, next: 9000, now: now, hidden: map[string]bool{}}
 	p.hubs = []map[string]any{{"identifier": "movie.recentlyreleased"}, {"identifier": "movie.recentlyadded", "promotedToOwnHome": true},
 		{"identifier": "movie.curated", "promotedToOwnHome": true}}
 	mc := func(w http.ResponseWriter, v any) { json.NewEncoder(w).Encode(map[string]any{"MediaContainer": v}) }
@@ -144,9 +146,19 @@ func newFakePlex(t *testing.T, movies map[string]int, now func() int64) *fakePle
 	mux.HandleFunc("GET /library/sections/4/collections", func(w http.ResponseWriter, r *http.Request) {
 		var md []map[string]any
 		for _, c := range p.colls {
-			md = append(md, collJSON(c))
+			if !p.hidden[c.key] {
+				md = append(md, collJSON(c))
+			}
 		}
 		mc(w, map[string]any{"Metadata": md})
+	})
+	mux.HandleFunc("GET /library/metadata/{id}", func(w http.ResponseWriter, r *http.Request) {
+		c := p.coll(r.PathValue("id"))
+		if c == nil {
+			http.NotFound(w, r)
+			return
+		}
+		mc(w, map[string]any{"Metadata": []any{collJSON(c)}})
 	})
 	mux.HandleFunc("POST /library/collections", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -297,6 +309,7 @@ func without(xs []string, x string) []string {
 
 type boxSet0 struct {
 	id, name, overview, forcedSort, order string
+	created                               time.Time
 	items                                 []string
 	poster                                []byte
 }
@@ -312,6 +325,9 @@ type fakeJellyfin struct {
 	scanning string            // "library": Movies is Active; "task": only the scan task runs. Half the movies drop out
 	onWrite  func(call string) // called with each write, after it is applied
 	failOn   string            // answer 500 to requests starting with this "METHOD /path"
+	loseOn   string            // like failOn, but the request is applied first: its answer is lost
+	hidden   map[string]bool   // BoxSets missing from every answer while it scans, as its movies are
+	now      func() time.Time
 }
 
 func (j *fakeJellyfin) set(id string) *boxSet0 {
@@ -335,8 +351,9 @@ func (j *fakeJellyfin) writes() []string {
 	return out
 }
 
-func newFakeJellyfin(t *testing.T, movies map[string]int) *fakeJellyfin {
-	j := &fakeJellyfin{movies: movies, played: map[string]bool{}}
+func newFakeJellyfin(t *testing.T, movies map[string]int, now func() time.Time) *fakeJellyfin {
+	j := &fakeJellyfin{movies: movies, played: map[string]bool{}, hidden: map[string]bool{}, now: now}
+	visible := func(s *boxSet0) bool { return s != nil && !(j.scanning != "" && j.hidden[s.id]) }
 	js := func(w http.ResponseWriter, v any) { json.NewEncoder(w).Encode(v) }
 	ids := func(r *http.Request) []string { return strings.Split(r.URL.Query().Get("ids"), ",") }
 	mux := http.NewServeMux()
@@ -369,7 +386,9 @@ func newFakeJellyfin(t *testing.T, movies map[string]int) *fakeJellyfin {
 			}
 		case q.Get("IncludeItemTypes") == "BoxSet":
 			for _, s := range j.sets {
-				items = append(items, map[string]any{"Id": s.id, "Name": s.name, "Overview": s.overview, "DateCreated": "2026-10-05T06:00:00Z"})
+				if visible(s) {
+					items = append(items, map[string]any{"Id": s.id, "Name": s.name, "Overview": s.overview, "DateCreated": s.created})
+				}
 			}
 		case q.Get("ParentId") != "":
 			s := j.set(q.Get("ParentId"))
@@ -388,6 +407,10 @@ func newFakeJellyfin(t *testing.T, movies map[string]int) *fakeJellyfin {
 	})
 	mux.HandleFunc("GET /Items/{id}", func(w http.ResponseWriter, r *http.Request) {
 		s := j.set(r.PathValue("id"))
+		if !visible(s) {
+			http.NotFound(w, r)
+			return
+		}
 		js(w, map[string]any{"Id": s.id, "Name": s.name, "Overview": nilIfEmpty(s.overview), "ForcedSortName": nilIfEmpty(s.forcedSort),
 			"DisplayOrder": s.order, "LockData": true, "ProviderIds": map[string]string{}})
 	})
@@ -407,7 +430,7 @@ func newFakeJellyfin(t *testing.T, movies map[string]int) *fakeJellyfin {
 	})
 	mux.HandleFunc("POST /Collections", func(w http.ResponseWriter, r *http.Request) {
 		j.next++
-		s := &boxSet0{id: fmt.Sprintf("bs%d", j.next), name: r.URL.Query().Get("name"), order: "PremiereDate", items: ids(r)}
+		s := &boxSet0{id: fmt.Sprintf("bs%d", j.next), name: r.URL.Query().Get("name"), order: "PremiereDate", items: ids(r), created: j.now()}
 		j.sets = append(j.sets, s)
 		js(w, map[string]string{"Id": s.id})
 	})
@@ -441,6 +464,11 @@ func newFakeJellyfin(t *testing.T, movies map[string]int) *fakeJellyfin {
 		}
 		if j.failOn != "" && strings.HasPrefix(r.Method+" "+r.URL.Path, j.failOn) {
 			http.Error(w, "busy", http.StatusInternalServerError)
+			return
+		}
+		if j.loseOn != "" && strings.HasPrefix(r.Method+" "+r.URL.Path, j.loseOn) {
+			mux.ServeHTTP(httptest.NewRecorder(), r)
+			http.Error(w, "timeout", http.StatusGatewayTimeout)
 			return
 		}
 		mux.ServeHTTP(w, r)

@@ -79,7 +79,7 @@ func newWorld(t *testing.T) *world {
 	h.Env.Plex = plex.New(w.px.srv.URL, h.PrefsPath, 5*time.Second)
 
 	w.jf = newFakeJellyfin(t, map[string]int{"j14537": 14537, "j389": 389, "j670": 670, "j25237": 25237, "j157336": 157336,
-		"j77": 77, "j27205": 27205})
+		"j77": 77, "j27205": 27205}, w.clock.Now)
 	w.jf.played["j157336"] = true
 	key := filepath.Join(dir, "jellyfin_key")
 	os.WriteFile(key, []byte(fake.JellyfinKey), 0o600)
@@ -336,15 +336,35 @@ func TestPlexDownNeverFailsAndStateLossAdopts(t *testing.T) {
 	}
 }
 
-// Catches: limit ignored (the Top 250 would shelve all 500) or applied after reversing (it would keep the
-// list's last films), and reverse ignored (the Criterion list runs newest-first, its shelf runs by spine).
-func TestLimitAndReverse(t *testing.T) {
+// Catches: limit ignored (the Top 250 would shelve all 500), and a limited shelf's summary linking the whole list as
+// if it were the shelf's (Letterboxd has no Top 250 list of its own any more).
+func TestLimit(t *testing.T) {
 	w := newWorld(t)
-	w.h.SetOptions(w.opts + fmt.Sprintf("home = []\n[[canon]]\nname = \"Top 4 reversed\"\nurl = %q\nlimit = 4\nreverse = true\n", w.top))
+	w.h.SetOptions(w.opts + fmt.Sprintf("home = []\n[[canon]]\nname = \"Top 4\"\nurl = %q\nlimit = 4\n", w.top))
 	w.run(t)
-	// the first four: Harakiri, The Human Condition III (not owned), 12 Angry Men, Come and See — reversed
-	if want := []string{"k25237", "k389", "k14537"}; !reflect.DeepEqual(w.plexColl(t, "Top 4 reversed").items, want) {
-		t.Errorf("plex = %v, want %v", w.plexColl(t, "Top 4 reversed").items, want)
+	// the first four: Harakiri, The Human Condition III (not owned), 12 Angry Men, Come and See
+	top4 := w.plexColl(t, "Top 4")
+	if want := []string{"k14537", "k389", "k25237"}; !reflect.DeepEqual(top4.items, want) {
+		t.Errorf("plex = %v, want %v", top4.items, want)
+	}
+	if want := "On the NAS: 3 of 4 · seen 2 · the first 4 of " + w.top; top4.summary != want {
+		t.Errorf("summary = %q, want %q", top4.summary, want)
+	}
+}
+
+// Catches: a default canon shelf out of its list's published order — the Criterion shelf reversed, as it once was:
+// the list runs newest spine first and ends with box-set films that have no spine, so its reverse opened on Full
+// Metal Jacket rather than on the newest release.
+func TestDefaultCanonKeepsPublishedOrder(t *testing.T) {
+	w := newWorld(t)
+	w.h.SetOptions(w.opts) // the default canon and Home rows
+	w.lb.pages["/jbutts15/list/the-complete-criterion-collection/"] = w.lb.pages["/official/list/letterboxds-top-500-films/"]
+	w.run(t)
+	if want := []string{"k14537", "k389", "k25237", "k670"}; !reflect.DeepEqual(w.plexColl(t, "Criterion Collection").items, want) {
+		t.Errorf("plex Criterion = %v, want %v", w.plexColl(t, "Criterion Collection").items, want)
+	}
+	if want := []string{"j14537", "j389", "j25237", "j670"}; !reflect.DeepEqual(jfOrder(w.boxSet(t, "Criterion Collection")), want) {
+		t.Errorf("jellyfin Criterion = %v, want %v", w.boxSet(t, "Criterion Collection").items, want)
 	}
 }
 
@@ -451,7 +471,7 @@ func TestOwnShelfNeverTakesItsOwnTitle(t *testing.T) {
 // Catches: a shelf left in both apps (and on Home) after its list is gone — made private on Letterboxd (also one
 // found only on his lists page, which drops it), left out by skip_own, dropped from the canon config — so a private
 // list stays visible to every account sharing the library; a shelf deleted because its list was merely unreadable
-// this run (a refusal); and a shelf deleted after the owner made it his (rewrote its summary).
+// this run (a refusal, a state read that fails); and a shelf deleted after the owner made it his (rewrote its summary).
 func TestRetiresShelvesOfGoneLists(t *testing.T) {
 	nolan := "/saahilsan/list/nolan/"
 	canonTop := func(w *world, extra string) {
@@ -477,6 +497,11 @@ func TestRetiresShelvesOfGoneLists(t *testing.T) {
 		{"left out by skip_own", nil, func(w *world) { canonTop(w, "skip_own = [\"nolan\"]\n") }, "nolan · Letterboxd", "nolan · Letterboxd", 2},
 		{"dropped from the canon", nil, func(w *world) { w.h.SetOptions(w.opts + "canon = []\n") }, "Top", "Top", 2},
 		{"refused this run", nil, func(w *world) { w.lb.status[nolan] = 403 }, "", "", 0},
+		{"unreadable in the state", nil, func(w *world) {
+			if _, err := w.h.Env.Store.DB().Exec(`UPDATE lists_pages SET page='{' WHERE path=?`, nolan); err != nil {
+				t.Fatal(err)
+			}
+		}, "", "", 0},
 		{"made his own, then dropped", nil, func(w *world) {
 			w.plexColl(t, "Top").summary = "my favourites from the Top 500"
 			w.h.SetOptions(w.opts + "canon = []\n")
@@ -572,5 +597,132 @@ func TestUnreadablePagesChangeNothing(t *testing.T) {
 	}
 	if got := w.plexColl(t, "Top").items; !reflect.DeepEqual(got, want) {
 		t.Errorf("plex Top = %v, want %v", got, want)
+	}
+}
+
+// Catches: a retired shelf's record forgotten while its collection still exists — because this run's listing left it
+// out (Plex), or because Jellyfin, mid-scan, answered 404 for a BoxSet it still holds — after which nothing deletes
+// the orphan, and a list gone private stays on a library every shared account sees.
+func TestRetireForgetsOnlyConfirmedGone(t *testing.T) {
+	w := newWorld(t)
+	w.run(t)
+	px, jf := w.plexColl(t, "nolan · Letterboxd"), w.boxSet(t, "nolan · Letterboxd")
+	delete(w.lb.pages, "/saahilsan/list/nolan/") // made private
+	w.px.hidden[px.key] = true
+	w.jf.hidden[jf.id], w.jf.scanning = true, "task"
+	w.clock.Sleep(context.Background(), 21*time.Hour) // past own_refresh
+	w.run(t)
+	w.px.hidden, w.jf.hidden, w.jf.scanning = map[string]bool{}, map[string]bool{}, ""
+	w.clock.Sleep(context.Background(), time.Hour)
+	w.run(t)
+	if c := w.px.coll(px.key); c != nil {
+		t.Errorf("plex collection of a private list left: %+v", c)
+	}
+	if b := w.jf.set(jf.id); b != nil {
+		t.Errorf("jellyfin BoxSet of a private list left: %+v", b)
+	}
+}
+
+// Catches: adoption by intent that is unbounded or skips the title check — a collection the owner (or the
+// collections stage) makes with a shelf's title a day after a failed create adopted and rewritten (members, summary,
+// poster, lock), or a BoxSet adopted while another BoxSet holds the title — and, for a create whose answer was lost
+// but which went through, the result not adopted on the next run, or reported as an owner's title (the shelf would
+// be renamed "… · Letterboxd" the run after it is adopted).
+func TestAdoptsOnlyItsOwnCreate(t *testing.T) {
+	ctx := context.Background()
+	t.Run("lost answer adopted on the next run", func(t *testing.T) {
+		w := newWorld(t)
+		w.jf.loseOn = "POST /Collections" // the first create, Top's: Jellyfin makes it, the answer never arrives
+		w.run(t)
+		w.jf.loseOn = ""
+		w.clock.Sleep(ctx, 24*time.Hour)
+		w.run(t)
+		w.clock.Sleep(ctx, time.Hour)
+		before := len(w.jf.writes())
+		w.run(t)
+		if got := w.jf.writes()[before:]; len(got) > 0 {
+			t.Errorf("third run wrote to Jellyfin: %v", got)
+		}
+		n := 0
+		for _, s := range w.jf.sets {
+			if strings.HasPrefix(strings.ToLower(s.name), "top") {
+				n++
+			}
+		}
+		if top := w.boxSet(t, "Top"); n != 1 || !strings.HasPrefix(top.overview, summaryMarker) {
+			t.Errorf("%d Top BoxSets; Top overview %q", n, top.overview)
+		}
+	})
+	t.Run("a collection made a day later is never adopted", func(t *testing.T) {
+		w := newWorld(t)
+		w.px.failOn = "POST /library/collections" // refused: no collection
+		w.jf.loseOn = "POST /Collections"         // made, answer lost
+		w.run(t)
+		w.px.failOn, w.jf.loseOn = "", ""
+		w.clock.Sleep(ctx, 24*time.Hour)
+		w.px.colls = append(w.px.colls, &plexColl0{key: "700", title: "top", summary: "mine", added: w.clock.Now().Unix(), items: []string{"k11"}})
+		w.jf.sets = append(w.jf.sets, &boxSet0{id: "mine", name: "TOP", overview: "mine", created: w.clock.Now(), items: []string{"j77"}})
+		orphan := w.jf.sets[0]
+		pxBefore, jfBefore := len(w.px.writes()), len(w.jf.writes())
+		rep := w.run(t)
+		if c := w.px.coll("700"); c.title != "top" || c.summary != "mine" || !reflect.DeepEqual(c.items, []string{"k11"}) {
+			t.Errorf("the owner's Plex collection changed: %+v", c)
+		}
+		for _, c := range w.px.writes()[pxBefore:] {
+			if strings.Contains(c, "/700/") || strings.Contains(c, "/700?") || strings.Contains(c, "id=700") {
+				t.Errorf("write to the owner's Plex collection: %s", c)
+			}
+		}
+		for _, c := range w.jf.writes()[jfBefore:] {
+			if strings.Contains(c, "/mine") || strings.Contains(c, "/"+orphan.id) {
+				t.Errorf("write to a BoxSet holding the title %q: %s", "Top", c)
+			}
+		}
+		if rep.Counts["name_taken"] != 2 {
+			t.Errorf("name_taken = %d, want 2 (both apps hold Top back)", rep.Counts["name_taken"])
+		}
+	})
+}
+
+// Catches: one of the owner's lists named like a canon shelf but for case ("TOP" beside "Top") given the canon
+// shelf's title: Plex files both under one tag, and the two shelves adopt it by its summary and fight every run.
+func TestOwnListNamedLikeACanonShelf(t *testing.T) {
+	w := newWorld(t)
+	w.lb.pages["/saahilsan/list/nolan/"] = []byte(strings.Replace(string(fixture(t, "list_nolan.html")), `content="nolan"`, `content="TOP"`, 1))
+	w.run(t)
+	if want := []string{"k14537", "k389", "k25237", "k670"}; !reflect.DeepEqual(w.plexColl(t, "Top").items, want) {
+		t.Errorf("plex Top = %v, want %v", w.plexColl(t, "Top").items, want)
+	}
+	if want := []string{"k157336", "k77"}; !reflect.DeepEqual(w.plexColl(t, "TOP · my list").items, want) {
+		t.Errorf("plex TOP · my list = %v, want %v", w.plexColl(t, "TOP · my list").items, want)
+	}
+	w.boxSet(t, "TOP · my list")
+}
+
+// Catches: a list the owner keeps for himself ("private reviews and notes", public on Letterboxd) shelved on a
+// library every shared account sees, and skip_own names matched as substrings ("nolan" would leave out "nolan
+// ranked") or with case.
+func TestPrivateOwnListsStayOff(t *testing.T) {
+	w := newWorld(t)
+	w.lb.pages["/saahilsan/list/nolan/"] = []byte(strings.Replace(string(fixture(t, "list_nolan.html")), `content="nolan"`,
+		`content="Private Reviews and Notes"`, 1))
+	w.run(t)
+	for _, c := range w.px.colls {
+		if strings.Contains(strings.ToLower(c.title), "private") {
+			t.Errorf("plex shelf %q", c.title)
+		}
+	}
+	for _, s := range w.jf.sets {
+		if strings.Contains(strings.ToLower(s.name), "private") {
+			t.Errorf("jellyfin shelf %q", s.name)
+		}
+	}
+	for _, c := range []struct {
+		pattern, name string
+		skip          bool
+	}{{"nolan", "NOLAN", true}, {"nolan", "nolan ranked", false}, {"*private*", "my private notes", true}, {"a.c", "abc", false}} {
+		if got := skipped([]string{c.pattern}, c.name); got != c.skip {
+			t.Errorf("skip_own %q on %q = %v, want %v", c.pattern, c.name, got, c.skip)
+		}
 	}
 }

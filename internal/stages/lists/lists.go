@@ -13,6 +13,7 @@ package lists
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -34,11 +35,10 @@ const name = "lists"
 
 // Source is one canon list.
 type Source struct {
-	Name    string `toml:"name"`
-	URL     string `toml:"url"`
-	Limit   int    `toml:"limit"`   // keep the first N entries: the Top 250 is the Top 500's first 250
-	Reverse bool   `toml:"reverse"` // the list runs newest-first; shelve it oldest-first (Criterion spine order)
-	Poster  string `toml:"poster"`  // an image file to use instead of the generated poster
+	Name   string `toml:"name"`
+	URL    string `toml:"url"`
+	Limit  int    `toml:"limit"`  // keep the first N entries: the Top 250 is the Top 500's first 250
+	Poster string `toml:"poster"` // an image file to use instead of the generated poster
 }
 
 type Options struct {
@@ -52,7 +52,7 @@ type Options struct {
 	OwnRefresh     time.Duration `toml:"own_refresh"`   // the owner's lists, films page and diary feed
 	ExportDir      string        `toml:"export_dir"`
 	OwnLists       bool          `toml:"own_lists"`
-	SkipOwn        []string      `toml:"skip_own"` // the owner's lists to leave out, by name or slug
+	SkipOwn        []string      `toml:"skip_own"` // the owner's lists to leave out: names or slugs, "*" matches any text
 	MoviesDir      string        `toml:"movies_dir"`
 	MissingFile    string        `toml:"missing_file"`
 	PlexSection    int           `toml:"plex_section"`
@@ -91,12 +91,16 @@ func defaults() Options {
 // would change for the next run).
 var defaultHome = []string{"Letterboxd Top 500", "Criterion Collection", "Sight & Sound 2022"}
 
+// defaultSkipOwn keeps lists like "private reviews and notes" off a library every shared account sees, though
+// Letterboxd shows them publicly.
+var defaultSkipOwn = []string{"*private*"}
+
 // defaultCanon was checked on 2026-10-05. Letterboxd retired its standalone Top 250 when the Top 500 launched
 // (2026-02-23; the old list answers 404), so the Top 250 is the Top 500's first 250 and costs no extra request.
 var defaultCanon = []Source{
 	{Name: "Letterboxd Top 500", URL: "https://letterboxd.com/official/list/letterboxds-top-500-films/"},
 	{Name: "Letterboxd Top 250", URL: "https://letterboxd.com/official/list/letterboxds-top-500-films/", Limit: 250},
-	{Name: "Criterion Collection", URL: "https://letterboxd.com/jbutts15/list/the-complete-criterion-collection/", Reverse: true},
+	{Name: "Criterion Collection", URL: "https://letterboxd.com/jbutts15/list/the-complete-criterion-collection/"},
 	{Name: "Sight & Sound 2022", URL: "https://letterboxd.com/sight_and_sound/list/the-greatest-films-of-all-time-2022/"},
 	{Name: "Sight & Sound 2022 Directors", URL: "https://letterboxd.com/sight_and_sound/list/directors-100-greatest-films-of-all-time/"},
 	{Name: "TSPDT 1000", URL: "https://letterboxd.com/tspdtfanaccount/list/the-1000-greatest-films-21st-edition-2026/"},
@@ -111,6 +115,7 @@ type list struct {
 	URL      string
 	Canon    bool
 	Order    int // canon position, for the sort title
+	Limit    int // the shelf holds the list's first Limit entries
 	Slug     string
 	Poster   string
 	Entries  []entry
@@ -128,6 +133,9 @@ func options(env *stage.Env) (Options, error) {
 	}
 	if opt.Home == nil {
 		opt.Home = defaultHome
+	}
+	if opt.SkipOwn == nil {
+		opt.SkipOwn = defaultSkipOwn
 	}
 	return opt, nil
 }
@@ -234,9 +242,15 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	seen.plex, seen.jf = lanes[0].report.watched(), lanes[1].report.watched()
 
 	unresolved := 0
-	for _, l := range lists {
+	canonTitles := map[string]bool{}
+	for _, l := range lists { // the canon comes first
 		s := plan(l, known, owned, seen)
 		s.Title = shelfTitle(l.Name, taken)
+		if l.Canon {
+			canonTitles[fold(s.Title)] = true
+		} else if canonTitles[fold(s.Title)] { // Plex would file both shelves under one tag
+			s.Title += " · my list"
+		}
 		shelves = append(shelves, s)
 		unresolved += s.Total - s.Resolved
 		env.Log.Info("list counted", "event", "list_counts", "list", l.Name, "complete", l.Complete, "total", s.Total,
@@ -370,15 +384,12 @@ func gather(ctx context.Context, env *stage.Env, opt Options, lb *letterboxd, re
 		if err != nil {
 			env.Log.Warn("canon list unavailable", "event", "list_unavailable", "list", src.Name, "err", err)
 		}
-		if src.Reverse {
-			entries = reversed(entries)
-		}
 		key := src.URL
 		if src.Limit > 0 {
 			key += "#" + strconv.Itoa(src.Limit)
 		}
 		canon[key] = true
-		out = append(out, list{Key: key, Name: src.Name, URL: src.URL, Canon: true, Order: i, Poster: src.Poster,
+		out = append(out, list{Key: key, Name: src.Name, URL: src.URL, Canon: true, Order: i, Limit: src.Limit, Poster: src.Poster,
 			Entries: entries, Complete: complete && err == nil})
 	}
 	for _, key := range made {
@@ -443,10 +454,13 @@ func ownLists(ctx context.Context, env *stage.Env, opt Options, lb *letterboxd, 
 		switch {
 		case err != nil && ctx.Err() != nil:
 			return nil, nil, err
-		case err != nil: // 404: private or deleted; it leaves the shared library
+		case errors.Is(err, errNotFound): // private or deleted; it leaves the shared library
 			private++
 			retire = append(retire, keysOf(path)...)
 			env.Log.Info("own list not public", "event", "own_list_skipped", "path", path)
+			continue
+		case err != nil: // unreadable this run (the state database): the shelf stays as it is
+			env.Log.Warn("own list unreadable", "event", "list_unavailable", "path", path, "err", err)
 			continue
 		case first.Title == "" && !complete:
 			continue // never read and unreadable now
@@ -460,7 +474,7 @@ func ownLists(ctx context.Context, env *stage.Env, opt Options, lb *letterboxd, 
 				env.Log.Warn("state write failed", "event", "store_error", "err", err)
 			}
 		}
-		if contains(opt.SkipOwn, first.Title) || contains(opt.SkipOwn, slug) {
+		if skipped(opt.SkipOwn, first.Title) || skipped(opt.SkipOwn, slug) {
 			retire = append(retire, append(keysOf(path), key)...)
 			continue
 		}
@@ -507,12 +521,15 @@ func firstLine(s string, max int) string {
 	return strings.TrimSpace(string(r[:max])) + "…"
 }
 
-func reversed(es []entry) []entry {
-	out := make([]entry, len(es))
-	for i, e := range es {
-		out[len(es)-1-i] = e
+// skipped tells whether name matches one of the skip_own patterns, ignoring case; "*" matches any text.
+func skipped(patterns []string, name string) bool {
+	for _, p := range patterns {
+		expr := strings.ReplaceAll(regexp.QuoteMeta(strings.TrimSpace(p)), `\*`, ".*")
+		if regexp.MustCompile(`(?i)^` + expr + `$`).MatchString(strings.TrimSpace(name)) {
+			return true
+		}
 	}
-	return out
+	return false
 }
 
 func contains(xs []string, s string) bool {
@@ -608,7 +625,11 @@ func plan(l list, films map[string]film, owned map[int]bool, seen seenSet) shelf
 			s.Missing = append(s.Missing, missing{pos, e.Title, ""})
 		}
 	}
-	s.Summary = fmt.Sprintf("On the NAS: %d of %d · seen %d · %s", s.Owned, s.Total, s.Seen, l.URL)
+	link := l.URL
+	if l.Limit > 0 { // no list of its own on Letterboxd: the Top 250 is the Top 500's head
+		link = fmt.Sprintf("the first %d of %s", l.Limit, l.URL)
+	}
+	s.Summary = fmt.Sprintf("On the NAS: %d of %d · seen %d · %s", s.Owned, s.Total, s.Seen, link)
 	return s
 }
 

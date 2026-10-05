@@ -98,8 +98,9 @@ partial_suffixes = [".part", ".!qB"] # in-progress files (and dot files): keep a
 # Letterboxd lists as Plex collections and Jellyfin BoxSets: the canon plus the owner's own public lists, owned films
 # in list order, "On the NAS: N of M · seen S · <url>" summaries, generated posters, Plex Home rows for `home`.
 # Letterboxd is read politely (one request per 2 s for the whole process, page 1 only of user pages) and cached in
-# SQLite. A shelf whose title an owner's collection already has (ignoring case) is named "<list> · Letterboxd". A
-# shelf whose list is gone (private or deleted, in skip_own, dropped from the canon) is deleted from both apps.
+# SQLite. A shelf whose title an owner's collection already has (ignoring case) is named "<list> · Letterboxd", and an
+# own list named like a canon shelf "<list> · my list". A shelf whose list is gone (private or deleted, in skip_own,
+# dropped from the canon) is deleted from both apps. Shelves keep each list's published order.
 [stages.lists]
 every            = "24h"
 window           = "03:00-08:00"
@@ -110,7 +111,8 @@ canon_refresh    = "168h"     # canon list pages are re-read weekly
 own_refresh      = "20h"      # the owner's lists, films page and diary feed: daily
 export_dir       = "/volume1/docker/projectionist/data/letterboxd" # the unzipped Letterboxd export (lists/*.csv, watched.csv)
 own_lists        = true
-skip_own         = []         # the owner's lists to leave out (names or slugs); private lists are never shelved
+skip_own         = ["*private*"] # the owner's lists to leave out: names or slugs, any case, "*" = any text; lists
+                                 # private on Letterboxd are never shelved
 movies_dir       = "/volume1/media/Movies"
 missing_file     = "/volume1/media/_lists-missing.txt"
 plex_section     = 4
@@ -124,6 +126,5 @@ home_after       = "movie.recentlyadded"
 # [[stages.lists.canon]]
 # name    = "Criterion Collection"
 # url     = "https://letterboxd.com/jbutts15/list/the-complete-criterion-collection/"
-# reverse = true   # the list runs newest-first; shelve it in spine order
 # limit   = 0      # keep only the first N (the Top 250 is the Top 500 with limit = 250)
 # poster  = ""     # an image file instead of the generated poster

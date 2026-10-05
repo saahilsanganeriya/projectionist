@@ -3,6 +3,7 @@ package lists
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"projectionist/internal/plex"
 	"projectionist/internal/stage"
 )
 
@@ -120,14 +122,15 @@ func (p *plexSink) load(ctx context.Context) appReport {
 	if !ok {
 		return r // the writer is stopped: reconcile waits for the next run
 	}
-	mine, err := madeIDs(ctx, p.env.Store.DB(), "plex")
+	mine, intents, err := made(ctx, p.env.Store.DB(), "plex")
 	if err != nil {
 		p.w.stopped = "state: " + err.Error()
 		return r
 	}
 	p.colls = colls
 	for _, c := range colls {
-		if !mine[c.RatingKey] && !strings.HasPrefix(c.Summary, summaryMarker) {
+		// a collection a lost create answer made is the shelf's, still to be adopted, not an owner's title
+		if !mine[c.RatingKey] && !strings.HasPrefix(c.Summary, summaryMarker) && !answersCreate(time.Unix(c.AddedAt, 0), intents...) {
 			r.Taken = append(r.Taken, fold(c.Title))
 		}
 	}
@@ -187,8 +190,10 @@ func (p *plexSink) reconcile(ctx context.Context, shelves []shelf, retire []stri
 	p.home(ctx, shelves, ids)
 }
 
-// retire deletes the collections of retired lists. Only a collection that still carries the stage's summary is
-// deleted (that also drops its Home row, measured on 1.43); the record of any other is just forgotten.
+// retire deletes the collections of retired lists. Each is looked up by its id, never judged by the collections
+// listing: only one that still carries the stage's summary is deleted (that also drops its Home row, measured on
+// 1.43). A record is forgotten only once Plex has confirmed the collection gone (a DELETE, or a 404) or the owner's
+// (he rewrote its summary); a record whose create was never confirmed has no id to look up and is kept.
 func (p *plexSink) retire(ctx context.Context, keys []string) {
 	db := p.env.Store.DB()
 	for _, key := range keys {
@@ -197,17 +202,37 @@ func (p *plexSink) retire(ctx context.Context, keys []string) {
 			p.w.stopped = "state: " + err.Error()
 			return
 		}
-		for _, c := range p.colls {
-			if row.ID == "" || c.RatingKey != row.ID || !strings.HasPrefix(c.Summary, summaryMarker) {
-				continue
+		if row.ID == "" {
+			continue
+		}
+		var found struct {
+			Metadata []plexColl `json:"Metadata"`
+		}
+		gone := false
+		if !p.w.read(ctx, "look up "+key, func(ctx context.Context) error {
+			err := p.env.Plex.GetJSON(ctx, "/library/metadata/"+row.ID, &found)
+			if errors.Is(err, plex.ErrNotFound) {
+				gone = true
+				return nil
 			}
-			if !p.w.write(ctx, "retire "+c.Title, func(ctx context.Context) error {
-				return p.env.Plex.Do(ctx, "DELETE", "/library/collections/"+c.RatingKey)
+			return err
+		}) {
+			return
+		}
+		if !gone && len(found.Metadata) != 1 {
+			continue // an answer that is neither the collection nor a 404 confirms nothing
+		}
+		if !gone && strings.HasPrefix(found.Metadata[0].Summary, summaryMarker) {
+			if !p.w.write(ctx, "retire "+found.Metadata[0].Title, func(ctx context.Context) error {
+				if err := p.env.Plex.Do(ctx, "DELETE", "/library/collections/"+row.ID); !errors.Is(err, plex.ErrNotFound) {
+					return err
+				}
+				return nil
 			}) {
 				return
 			}
 			p.retired++
-			p.log.Info("shelf retired", "event", "collection_retired", "app", "plex", "list", key, "title", c.Title, "id", c.RatingKey)
+			p.log.Info("shelf retired", "event", "collection_retired", "app", "plex", "list", key, "title", found.Metadata[0].Title, "id", row.ID)
 		}
 		if err := deleteRow(ctx, db, "plex", key); err != nil {
 			p.log.Warn("state write failed", "event", "store_error", "err", err)
@@ -333,8 +358,9 @@ func (p *plexSink) children(ctx context.Context, key string) ([]string, bool) {
 }
 
 // adoptOrCreate finds the shelf's collection when the state lost track of it, or makes it. A collection with the
-// shelf's title is adopted only when it is provably this stage's (its summary, or a create this stage sent); any
-// other is the owner's and is left alone.
+// shelf's title is adopted only when it is provably this stage's: it carries the stage's summary, or — when no
+// other collection holds the title — Plex made it within adoptWindow of a create this stage sent. Any other is
+// the owner's and is left alone.
 func (p *plexSink) adoptOrCreate(ctx context.Context, s shelf, row *sinkRow, colls []plexColl, want []string) *plexColl {
 	db := p.env.Store.DB()
 	if c := p.adoptable(s, row, colls); c != nil {
@@ -379,14 +405,21 @@ func (p *plexSink) adoptOrCreate(ctx context.Context, s shelf, row *sinkRow, col
 	return nil
 }
 
+// adoptable returns the collection that is provably the shelf's: one with its title carrying the stage's summary,
+// else the only one with its title, made in answer to the shelf's pending create.
 func (p *plexSink) adoptable(s shelf, row *sinkRow, colls []plexColl) *plexColl {
+	var same []int
 	for i, c := range colls {
 		if !sameTitle(c.Title, s.Title) {
 			continue
 		}
-		if strings.HasPrefix(c.Summary, summaryMarker) || (!row.IntentAt.IsZero() && c.AddedAt >= row.IntentAt.Unix()-60) {
+		if strings.HasPrefix(c.Summary, summaryMarker) {
 			return &colls[i]
 		}
+		same = append(same, i)
+	}
+	if len(same) == 1 && answersCreate(time.Unix(colls[same[0]].AddedAt, 0), row.IntentAt) {
+		return &colls[same[0]]
 	}
 	return nil
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"projectionist/internal/jellyfin"
 	"projectionist/internal/stage"
 )
 
@@ -129,14 +130,14 @@ func (j *jellyfinSink) load(ctx context.Context) appReport {
 	if !ok {
 		return r
 	}
-	mine, err := madeIDs(ctx, j.env.Store.DB(), "jellyfin")
+	mine, intents, err := made(ctx, j.env.Store.DB(), "jellyfin")
 	if err != nil {
 		j.w.stopped = "state: " + err.Error()
 		return r
 	}
 	j.sets = sets
 	for _, b := range sets {
-		if !mine[b.ID] && !strings.HasPrefix(b.Overview, summaryMarker) {
+		if !mine[b.ID] && !strings.HasPrefix(b.Overview, summaryMarker) && !answersCreate(b.DateCreated, intents...) {
 			r.Taken = append(r.Taken, fold(b.Name))
 		}
 	}
@@ -186,7 +187,9 @@ func (j *jellyfinSink) reconcile(ctx context.Context, shelves []shelf, retire []
 	}
 }
 
-// retire deletes the BoxSets of retired lists; only one that still carries the stage's overview is deleted.
+// retire deletes the BoxSets of retired lists, each looked up by its id; only one that still carries the stage's
+// overview is deleted. As for Plex, a record is forgotten only once the BoxSet is confirmed gone or the owner's, and
+// a 404 confirms nothing while Jellyfin scans: items drop out of its answers then and come back.
 func (j *jellyfinSink) retire(ctx context.Context, keys []string) {
 	db := j.env.Store.DB()
 	for _, key := range keys {
@@ -195,15 +198,35 @@ func (j *jellyfinSink) retire(ctx context.Context, keys []string) {
 			j.w.stopped = "state: " + err.Error()
 			return
 		}
-		for _, b := range j.sets {
-			if row.ID == "" || b.ID != row.ID || !strings.HasPrefix(b.Overview, summaryMarker) {
-				continue
+		if row.ID == "" {
+			continue
+		}
+		var b boxSet
+		gone := false
+		if !j.w.read(ctx, "look up "+key, func(ctx context.Context) error {
+			err := j.env.Jellyfin.GetJSON(ctx, "/Items/"+row.ID+"?userId="+j.user, &b)
+			if errors.Is(err, jellyfin.ErrNotFound) {
+				gone = true
+				return nil
 			}
-			if !j.w.write(ctx, "retire "+b.Name, func(ctx context.Context) error { return j.env.Jellyfin.Delete(ctx, "/Items/"+b.ID) }) {
+			return err
+		}) {
+			return
+		}
+		switch {
+		case gone && j.scanning, !gone && b.ID != row.ID:
+			continue
+		case !gone && strings.HasPrefix(b.Overview, summaryMarker):
+			if !j.w.write(ctx, "retire "+b.Name, func(ctx context.Context) error {
+				if err := j.env.Jellyfin.Delete(ctx, "/Items/"+row.ID); !errors.Is(err, jellyfin.ErrNotFound) {
+					return err
+				}
+				return nil
+			}) {
 				return
 			}
 			j.retired++
-			j.log.Info("shelf retired", "event", "collection_retired", "app", "jellyfin", "list", key, "title", b.Name, "id", b.ID)
+			j.log.Info("shelf retired", "event", "collection_retired", "app", "jellyfin", "list", key, "title", b.Name, "id", row.ID)
 		}
 		if err := deleteRow(ctx, db, "jellyfin", key); err != nil {
 			j.log.Warn("state write failed", "event", "store_error", "err", err)
@@ -308,12 +331,20 @@ func (j *jellyfinSink) shelf(ctx context.Context, s shelf, sets []boxSet) {
 
 func (j *jellyfinSink) adoptOrCreate(ctx context.Context, s shelf, row *sinkRow, sets []boxSet, want []string) *boxSet {
 	db := j.env.Store.DB()
+	// as for Plex: the stage's overview, else the only BoxSet with the title, made in answer to the pending create
 	adoptable := func(sets []boxSet) *boxSet {
+		var same []int
 		for i, b := range sets {
-			if sameTitle(b.Name, s.Title) && (strings.HasPrefix(b.Overview, summaryMarker) ||
-				(!row.IntentAt.IsZero() && !b.DateCreated.Before(row.IntentAt.Add(-time.Minute)))) {
+			if !sameTitle(b.Name, s.Title) {
+				continue
+			}
+			if strings.HasPrefix(b.Overview, summaryMarker) {
 				return &sets[i]
 			}
+			same = append(same, i)
+		}
+		if len(same) == 1 && answersCreate(sets[same[0]].DateCreated, row.IntentAt) {
+			return &sets[same[0]]
 		}
 		return nil
 	}

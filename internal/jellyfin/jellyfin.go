@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,6 +19,9 @@ type Client struct {
 	keyFile string
 	http    *http.Client
 }
+
+// ErrNotFound is wrapped by every call Jellyfin answers with 404: the item is gone.
+var ErrNotFound = errors.New("not found")
 
 func New(baseURL, keyFile string, timeout time.Duration) *Client {
 	return &Client{base: baseURL, keyFile: keyFile, http: &http.Client{Timeout: timeout}}
@@ -59,6 +63,9 @@ func (c *Client) send(ctx context.Context, method, path, contentType string, bod
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
 		return fmt.Errorf("jellyfin %s %s: %w", method, path, err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("jellyfin %s %s: HTTP 404: %w", method, path, ErrNotFound)
 	}
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("jellyfin %s %s: HTTP %d", method, path, resp.StatusCode)
