@@ -420,7 +420,8 @@ func media(t *testing.T, size int, zeros ...[2]int) string {
 
 // Catches: a GPU hiccup reported as a broken file (it must be retried on the CPU), a truncated end sample
 // passing (too few frames), a 2 s extra failing for lacking 5 s of frames, the error budget off (two errors after
-// a seek pass, three fail), a missing piece between the samples passing (Amélie's "Home Movie" had 8 MiB of zeros
+// a seek pass, three fail; the null muxer's timestamp complaints are not the file's errors), a missing piece
+// between the samples passing (Amélie's "Home Movie" had 8 MiB of zeros
 // at 8 %), header or tail padding taken for a hole, and the end sample timed by the container when the video ends
 // sooner (a Clone Wars episode: video 1355.4 s, audio 1359.4 s, 48 of 59 frames).
 func TestDecodeCheck(t *testing.T) {
@@ -428,6 +429,7 @@ func TestDecodeCheck(t *testing.T) {
 		{`case "$*" in *-hwaccel*) echo "hwaccel init failed" >&2; exit 1;; esac; echo frame=120`, ""},
 		{`case "$*" in *"-ss 0.000 "*|*"-ss 2997.500 "*) echo frame=120;; *) echo frame=0;; esac`, "end (1h 39m 54s): 0 frames decoded, want at least 60"},
 		{`echo "ref missing" >&2; echo "ref missing" >&2; echo frame=118`, ""},
+		{`for i in 1 2 3 4; do echo "[null @ 0x7fc7e14bbc80] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 2 >= 2" >&2; done; echo frame=120`, ""},
 		{`for i in 1 2 3; do echo "error while decoding MB 1 2" >&2; done; echo frame=120`, "start (0h 00m 00s): 3 decode errors, first: error while decoding MB 1 2"},
 	}
 	const mib = 1 << 20

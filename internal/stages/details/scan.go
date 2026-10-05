@@ -204,9 +204,13 @@ func decodeSample(ctx context.Context, ff config.FFmpeg, path string, v *probe.V
 			frames, _ = strconv.Atoi(strings.TrimSpace(n))
 		}
 	}
-	errs := strings.Split(strings.TrimSpace(stderr.String()), "\n")
-	if errs[0] == "" {
-		errs = nil
+	// Lines from the null muxer ("[null @ 0x…] … non monotonically increasing dts") describe ffmpeg's output
+	// timestamps, not the file: on the NAS one fired 40 times on an episode that decodes cleanly on re-run.
+	var errs []string
+	for _, l := range strings.Split(strings.TrimSpace(stderr.String()), "\n") {
+		if l != "" && !strings.HasPrefix(l, "[null @") {
+			errs = append(errs, l)
+		}
 	}
 	want := max(1, int(v.FPS*seconds/2))
 	switch {
