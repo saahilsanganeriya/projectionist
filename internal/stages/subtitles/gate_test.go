@@ -148,12 +148,24 @@ func TestGateAlass(t *testing.T) {
 				txt, _ := os.ReadFile(cand)
 				attempt := map[string]any{}
 				aligned, result, ok := r.fit(context.Background(), ref, string(txt), attempt)
-				med := ""
+				med, check := "", ""
 				if ok {
 					med = strconv.FormatFloat(medianOffsetMS(cues(aligned), starts), 'f', 0, 64)
 				}
-				out[i] += fmt.Sprintf("%s\t%s\t%v\t%s\t%v\t%v\t%v\t%s\n", f[0], filepath.Base(cand), ok, result,
-					attempt["offset_ms"], attempt["ratio"], attempt["agree"], med)
+				if aligned == "" { // what alass made of it, even when rejected
+					b, _ := os.ReadFile(filepath.Join(dir, "aligned.srt"))
+					aligned = string(b)
+				}
+				speech, _ := os.ReadFile(ref.speech)
+				var first []span // the Python's speech test: each cue's first second against the speech segments
+				for _, c := range cues(aligned) {
+					first = append(first, span{c.start, min(c.end, c.start+1)})
+				}
+				if fit, fok := align(first, spanBits(cues(string(speech)), 1)); len(first) >= minCues {
+					check = fmt.Sprintf("%v z=%.1f agree=%d ratio=%.5f off=%.2f", fok, fit.Z, fit.Agree, fit.Ratio, fit.Offset)
+				}
+				out[i] += fmt.Sprintf("%s\t%s\t%v\t%s\t%v\t%v\t%v\t%s\t%s\n", f[0], filepath.Base(cand), ok, result,
+					attempt["offset_ms"], attempt["ratio"], attempt["agree"], med, check)
 			}
 		}()
 	}

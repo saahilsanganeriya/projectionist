@@ -259,3 +259,40 @@ func TestSubdl(t *testing.T) {
 		t.Errorf("failing search error %v must not carry the key", err)
 	}
 }
+
+// Catches: OpenSubtitles.com asked without its Api-Key or for the episode by anything but the show's IMDb id plus
+// season and episode, a multi-file or machine-translated subtitle kept, and a 406 (the day's downloads spent) not
+// parking the provider.
+func TestDotCom(t *testing.T) {
+	var query string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Api-Key") != "k" || r.Header.Get("User-Agent") == "" {
+			w.WriteHeader(401)
+			return
+		}
+		switch r.URL.Path {
+		case "/subtitles":
+			query = r.URL.RawQuery
+			w.Write([]byte(`{"data":[{"attributes":{"release":"two-cd","files":[{"file_id":1},{"file_id":2}]}},` +
+				`{"attributes":{"release":"mt","machine_translated":true,"files":[{"file_id":3}]}},` +
+				`{"attributes":{"release":"Show.S01E02","moviehash_match":true,"files":[{"file_id":4,"file_name":"a.srt"}],` +
+				`"feature_details":{"season_number":1,"episode_number":2}}}]}`))
+		case "/download":
+			w.WriteHeader(406)
+		}
+	}))
+	defer srv.Close()
+	key := filepath.Join(t.TempDir(), "opensubtitles_api_key")
+	os.WriteFile(key, []byte("k\n"), 0o600)
+	o := &dotCom{base: srv.URL, keyFile: key, userAgent: userAgent, hc: srv.Client(), pace: testPacer(&recorder{})}
+	got, err := o.Search(context.Background(), Query{Hash: "00ff", IMDb: 1400, Show: true, Season: 1, Episode: 2})
+	if err != nil || len(got) != 1 || got[0].ID != "4" || !got[0].HashMatch {
+		t.Fatalf("search: %+v %v", got, err)
+	}
+	if want := "episode_number=2&languages=en&moviehash=00ff&parent_imdb_id=1400&season_number=1"; query != want {
+		t.Errorf("query %q, want %q", query, want)
+	}
+	if _, err := o.Download(context.Background(), got[0]); !errors.Is(err, errQuota) {
+		t.Errorf("406: %v", err)
+	}
+}
