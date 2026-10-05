@@ -394,7 +394,9 @@ func TestRunSampled(t *testing.T) {
 			f.run(t)
 			again, _ := os.ReadFile(filepath.Join(ff, "ffprobe.calls"))
 			more, _ := os.ReadFile(filepath.Join(ff, "helper.calls"))
-			reads := func(b []byte) int { return strings.Count(string(b), "-read_intervals") + strings.Count(string(b), "-ss ") }
+			reads := func(b []byte) int {
+				return strings.Count(string(b), "-read_intervals") + strings.Count(string(b), "-ss ")
+			}
 			if n != 2 || reads(again)+reads(more) != reads(probes)+reads(helpers) || f.outcomes()[f.path(show)] != "queued" {
 				t.Errorf("%s: %d rejected_sampled events, windows read %d times, then %d after a second run; want both candidates refused once",
 					c.why, n, reads(probes)+reads(helpers), reads(again)+reads(more))
