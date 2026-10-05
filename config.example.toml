@@ -66,19 +66,18 @@ status_file     = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
 default_section = 4
 
 # Keeps Movies/ and TV/ in the naming scheme (replaces rename/rename_engine.py + apply_ops.py and autorename.py).
-# Identity from the names, the library's own scheme folders and TMDB (direct); never from Plex or Jellyfin.
+# Identity from the names and TMDB (env.TMDB, direct); never from Plex or Jellyfin.
 [stages.rename]
-every         = "15m"
-root          = "/volume1/media"
-mode          = "apply" # "plan": write ops.tsv, review.tsv, problems.tsv to plan_dir and touch nothing; "undo": replay undo_log backwards
-plan_dir      = "/volume1/media/.projectionist/rename/plan"
-undo_log      = "/volume1/media/.projectionist/rename/undo.tsv" # apply_ops.py's format: either tool can undo the other's moves
-undo_units    = [] # undo mode: only these units (e.g. "movie:tmdb-348"); empty = the whole log
-ghost_logs    = ["/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv"]
-review_file   = "/volume1/media/_needs-review.txt"
-tmdb_key_file = "/run/secrets/tmdb_api_key"
-aligned_log   = "/volume1/PlexMediaServer/subtitle-downloads/log2.csv" # the aligner's copy wins the primary subtitle name
-sublang_file  = "" # optional JSON {path: {lang, sdh}} for subtitles whose language neither name nor text gives
-notify        = true  # tell Jellyfin which folders changed (one /Library/Media/Updated push per run; Plex watches the disk)
-quiet         = "10m" # a folder written to more recently is still arriving
-retry         = "6h"  # a title TMDB could not match is asked again after this
+every        = "15m"
+root         = "/volume1/media"
+mode         = "apply" # "plan": write ops.tsv, review.tsv, problems.tsv to plan_dir and touch nothing; "undo": replay undo_log backwards
+plan_dir     = "/volume1/media/.projectionist/rename/plan"
+undo_log     = "/volume1/media/.projectionist/rename/undo.tsv" # apply_ops.py's format: either tool can undo the other's moves
+undo_units   = [] # undo mode: only these units (e.g. "movie:tmdb-348"); empty = the whole log
+redo_undone  = false # false: a file undo put back stays until you rename or move it; true: apply plans it again
+ghost_logs   = ["/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv"]
+review_file  = "/volume1/media/_needs-review.txt"
+aligned_log  = "/volume1/PlexMediaServer/subtitle-downloads/log2.csv" # the aligner's copy wins the primary subtitle name
+sublang_file = "" # optional JSON {path: {lang, sdh}} for subtitles whose language neither name nor text gives
+notify       = true  # tell Jellyfin which folders changed (one /Library/Media/Updated push per run; Plex watches the disk)
+quiet        = "10m" # a folder written to more recently is still arriving
