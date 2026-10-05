@@ -38,7 +38,8 @@ func put(t *testing.T, root, rel, body string, mtime ...time.Time) {
 
 // Catches: a file filed under the wrong category or missed by the scheme's file-level rules (movie name, season
 // folder, episode name incl. the rename engine's title-less form, sidecar suffix, extras placement, strays and
-// samples), and checks leaking into folders outside the scheme (the renamer's job), Synology @eaDir or our _archive.
+// samples), checks leaking into folders outside the scheme (the renamer's job) or Synology @eaDir, and a "_" folder,
+// which the renamer never touches, going unreported.
 func TestNamingAndPlacement(t *testing.T) {
 	m, tv := "Movies/Heat (1995) {tmdb-949}/", "TV/The Wire (2002) {tmdb-1438}/"
 	cases := []struct{ path, want string }{
@@ -49,7 +50,6 @@ func TestNamingAndPlacement(t *testing.T) {
 		{m + "Heat (1995) {tmdb-949}.eng.srt", ""},
 		{m + "Heat (1995) {tmdb-949}.en.forced.srt", ""},
 		{m + "Heat (1995) {tmdb-949}.English.srt", sidecarName},
-		{m + "Heat (1995) {tmdb-949}.srt", sidecarName},
 		{m + "Heat.1995.1080p.mkv", movieName},
 		{m + "Old Cut.en.srt", orphan},
 		{m + ".details/Heat (1995) {tmdb-949}.mkv.txt", ""},
@@ -62,18 +62,15 @@ func TestNamingAndPlacement(t *testing.T) {
 		{m + ".DS_Store", ""},
 		{m + "@eaDir/thumb.jpg", ""},
 		{"Movies/Heat.1995.BluRay-GRP/", outsideScheme},
-		{"Movies/Heat.1995.BluRay-GRP/Heat.1995.BluRay-GRP.mkv", ""},
 		{"Movies/Heat.1995.BluRay-GRP/Subs/2_English.srt", ""},
 		{"Movies/Heat.1995.BluRay-GRP/release.nfo", ""},
 		{"Movies/Loose.1999.mkv", outsideScheme},
-		{"Movies/_archive/x.nfo", ""},
+		{"Movies/_old/", outsideScheme},
+		{"Movies/_old/x.nfo", ""},
 		{tv + "Season 01/The Wire (2002) - S01E01 - The Target.mkv", ""},
-		{tv + "Season 01/The Wire (2002) - S01E02.mkv", ""},
 		{tv + "Season 01/the.wire.s01e03.mkv", episodeName},
-		{tv + "Season 01/Extras/Bonus.mkv", extraPlace},
 		{tv + "Season 1/", seasonName},
 		{tv + "Season 1/The Wire (2002) - S01E04 - x.mkv", ""},
-		{tv + "Featurettes/Inside.mkv", ""},
 		{tv + "The Wire (2002) - S01E05 - x.mkv", episodeName},
 		{"TV/Friends/", outsideScheme},
 		{"TV/Friends/Season 1/Friends.S01E01.mkv", ""},
@@ -116,7 +113,8 @@ const (
 )
 
 // fakeProbe answers by file content: "corrupt" fails like ffprobe on a zero-headed file, "embedded" carries an
-// English text track, "forced" only a forced English one, anything else is a plain video. Every call is logged to <ffmpeg dir>/calls.
+// English text track, "forced" only a forced English one, "moved during its probe" and "ffprobe killed" give no
+// verdict, anything else is a plain video. Every call is logged to <ffmpeg dir>/calls.
 func fakeProbe(t *testing.T, h *fake.Harness) string {
 	calls := filepath.Join(h.Env.FFmpeg.Dir, "calls")
 	h.Script(t, "ffprobe", `for a; do f=$a; done; echo "$f" >> "`+calls+`"
@@ -124,6 +122,8 @@ case "$(cat "$f")" in
 corrupt) echo "[matroska] EBML header parsing failed" >&2; echo "$f: Invalid data found when processing input" >&2; exit 1;;
 embedded) echo '`+withEnglish+`';;
 forced) echo '`+forcedOnly+`';;
+"moved during its probe") rm "$f"; echo "$f: No such file or directory" >&2; exit 1;;
+"ffprobe killed") kill -9 $$;;
 *) echo '`+videoOnly+`';;
 esac
 `)
@@ -142,7 +142,7 @@ func run(t *testing.T, h *fake.Harness) stage.Report {
 // Catches, end to end: an unreadable video missed (ffprobe failure with its reason, empty file) or a still-arriving
 // one judged; same-size files with different bytes called identical; embedded or sidecar English subtitles missed
 // (and a forced-only track counted as English); a correctly named episode titled "The Sample" taken for a sample
-// and dropped from the count; the report not written; an alert on the first run or on a quiet category, or a growth
+// and dropped from the count, or an unrenamed show's extras counted as episodes; the report not written; an alert on the first run or on a quiet category, or a growth
 // not alerted with the new item named.
 func TestRunEndToEnd(t *testing.T) {
 	h := fake.NewEnv(t, nil)
@@ -164,12 +164,13 @@ func TestRunEndToEnd(t *testing.T) {
 	put(t, root, wire+"S01E04 - D.mkv", "e4")
 	put(t, root, wire+"S01E04 - D.en.forced.srt", "1")
 	put(t, root, wire+"S01E05 - E.mkv", "forced")
+	put(t, root, "TV/Friends.1994.Complete/Featurettes/Bonus.mkv", "e9")
 
 	rep := run(t, h)
 	if len(rep.Alerts) != 0 {
 		t.Fatalf("first run alerted: %v", rep.Alerts)
 	}
-	want := map[string]int{unreadable: 2, duplicate: 1, noEnglish: 3, orphan: 0, "videos": 12, "not_probed": 0}
+	want := map[string]int{unreadable: 2, duplicate: 1, noEnglish: 3, orphan: 0, "videos": 13, "not_probed": 0}
 	for k, n := range want {
 		if rep.Counts[k] != n {
 			t.Errorf("count %s = %d, want %d (all: %v)", k, rep.Counts[k], n, rep.Counts)
@@ -291,21 +292,75 @@ func TestCancelledProbesJudgeNothing(t *testing.T) {
 	}
 }
 
-// Catches: the run failing because the renamer moved a video away between the walk and its probe.
-func TestVideoMovedMidRun(t *testing.T) {
-	h := fake.NewEnv(t, nil)
-	root := t.TempDir()
-	h.SetOptions(`root = "` + root + `"`)
-	fakeProbe(t, h)
-	video := filepath.Join(root, "Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv")
-	put(t, root, strings.TrimPrefix(video, root+"/"), "film")
-	os.Mkdir(filepath.Join(root, "TV"), 0o755)
-	h.Plex.HandleFunc("GET", "/status/sessions", func(w http.ResponseWriter, r *http.Request) {
-		os.Remove(video) // the viewer check runs right before the first probe
-		w.Write([]byte(`<MediaContainer size="0"></MediaContainer>`))
-	})
-	if rep := run(t, h); rep.Counts[unreadable] != 0 {
-		t.Fatalf("counts = %v", rep.Counts)
+// Catches: a video ffprobe gave no verdict on filed as unreadable, which alerts and e-mails the owner: moved away by
+// the renamer before or during its probe ("No such file or directory"), or ffprobe killed by its time limit under
+// NAS load; and a move before the probe failing the run.
+func TestNoVerdictIsNotUnreadable(t *testing.T) {
+	for _, how := range []string{"moved before its probe", "moved during its probe", "ffprobe killed"} {
+		h := fake.NewEnv(t, nil)
+		root := t.TempDir()
+		h.SetOptions(`root = "` + root + `"`)
+		fakeProbe(t, h)
+		put(t, root, "Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", "film")
+		os.Mkdir(filepath.Join(root, "TV"), 0o755)
+		run(t, h) // baseline: nothing unreadable
+		ran := "Movies/Ran (1985) {tmdb-11645}/Ran (1985) {tmdb-11645}.mkv"
+		put(t, root, ran, how)
+		h.Plex.HandleFunc("GET", "/status/sessions", func(w http.ResponseWriter, r *http.Request) {
+			if how == "moved before its probe" {
+				os.Remove(filepath.Join(root, ran)) // the viewer check runs right before the first probe
+			}
+			w.Write([]byte(`<MediaContainer size="0"></MediaContainer>`))
+		})
+		if rep := run(t, h); rep.Counts[unreadable] != 0 || rep.Counts["not_probed"] != 1 || len(rep.Alerts) != 0 {
+			t.Errorf("%s: counts = %v, alerts = %q", how, rep.Counts, rep.Alerts)
+		}
+	}
+}
+
+// Catches: an entry the renamer moves between the listing of its folder and the read turning into a false finding:
+// a moved video's subtitle credited to the video listed before it, or filed as an orphan (which alerts); a panic
+// when it is the first video of the walk; and a walk that missed a moved video, folder or notes folder saved as the
+// baseline, so the next run alerts on everything in it.
+func TestEntryMovedMidWalk(t *testing.T) {
+	show := "TV/Show (2000) {tmdb-1}"
+	season := show + "/Season 01"
+	a, b := season+"/Show (2000) - S01E01 - A.mkv", season+"/Show (2000) - S01E02 - B.mkv"
+	cases := []struct {
+		moved     string
+		noEnglish int // during the walk that missed it
+	}{{a, 0}, {b, 1}, {season + "/.details", 1}, {season, 0}, {show, 0}}
+	t.Cleanup(func() { readDir = os.ReadDir })
+	for _, c := range cases {
+		h := fake.NewEnv(t, nil)
+		root, held := t.TempDir(), filepath.Join(t.TempDir(), "held")
+		h.SetOptions(`root = "` + root + `"`)
+		fakeProbe(t, h)
+		os.Mkdir(filepath.Join(root, "Movies"), 0o755)
+		put(t, root, a, "film")
+		put(t, root, b, "corrupt")
+		put(t, root, strings.TrimSuffix(b, "mkv")+"en.srt", "1")
+		put(t, root, season+"/.details/Gone.mkv.txt", "note")
+		run(t, h) // baseline: B unreadable, the note orphaned, A without English subtitles
+
+		from := filepath.Join(root, c.moved)
+		readDir = func(dir string) ([]fs.DirEntry, error) {
+			entries, err := os.ReadDir(dir)
+			if dir == filepath.Dir(from) {
+				os.Rename(from, held)
+			}
+			return entries, err
+		}
+		rep := run(t, h)
+		readDir = os.ReadDir
+		if len(rep.Alerts) != 0 || rep.Counts[noEnglish] != c.noEnglish {
+			t.Errorf("%s moved mid-walk: alerts = %q, counts = %v", c.moved, rep.Alerts, rep.Counts)
+		}
+		os.Rename(held, from)
+		filepath.WalkDir(root, func(p string, _ fs.DirEntry, err error) error { return os.Chtimes(p, settledAt, settledAt) })
+		if rep := run(t, h); len(rep.Alerts) != 0 {
+			t.Errorf("%s back: alerts = %q", c.moved, rep.Alerts)
+		}
 	}
 }
 

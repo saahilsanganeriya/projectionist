@@ -7,7 +7,9 @@
 // Read-only otherwise: it never moves, renames or deletes anything in the library.
 //
 // Probing a video that is not in the probe cache is the only heavy step, so while anyone but the owner is watching
-// those probes are left for a later run (the cache makes every run resume where the last one stopped).
+// those probes are left for a later run (the cache makes every run resume where the last one stopped). The renamer
+// works alongside: whatever moves while a run reads it is judged by the next run, and a run that missed something
+// is not kept as the baseline, so its return never reads as growth.
 package audit
 
 import (
@@ -25,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"projectionist/internal/library"
@@ -96,6 +99,9 @@ var (
 	sidecarSuffix = regexp.MustCompile(`^\.([a-z]{2,3})(\.sdh|\.forced)?$`)
 )
 
+// readDir lists a folder; a test swaps it to move an entry away between the listing and the read, as the renamer can.
+var readDir = os.ReadDir
+
 func set(items ...string) map[string]bool {
 	m := make(map[string]bool, len(items))
 	for _, it := range items {
@@ -137,6 +143,7 @@ type scan struct {
 	found   map[string][]string // category -> findings
 	fresh   map[string][]string // findings in a folder that changed after settled; see hold
 	videos  []*video
+	moved   int // entries listed but gone when read
 }
 
 func newScan(root string, settled time.Time) *scan {
@@ -171,6 +178,15 @@ func (s *scan) hold(prev map[string][]string) (held int) {
 	return held
 }
 
+// vanished counts a listed entry that has moved away since and drops its error; any other error passes through.
+func (s *scan) vanished(err error) error {
+	if errors.Is(err, fs.ErrNotExist) {
+		s.moved++
+		return nil
+	}
+	return err
+}
+
 func (s *scan) isFresh(info fs.FileInfo) bool { return info.ModTime().After(s.settled) }
 
 func (s *scan) rel(path string) string { return strings.TrimPrefix(path, s.root+"/") }
@@ -184,26 +200,26 @@ func lowerExt(name string) string { return strings.ToLower(filepath.Ext(name)) }
 // library walks one of Movies/ or TV/. A missing library is an error: a vanished mount must not read as "all clean".
 func (s *scan) library(ctx context.Context, lib string) error {
 	dir := filepath.Join(s.root, lib)
-	entries, err := os.ReadDir(dir)
+	entries, err := readDir(dir)
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
 		n, p := e.Name(), filepath.Join(dir, e.Name())
-		if skipped(n) || strings.HasPrefix(n, "_") || ignored[n] {
+		if skipped(n) || ignored[n] {
 			continue
 		}
 		info, err := e.Info()
-		if errors.Is(err, fs.ErrNotExist) {
-			continue // moved away mid-walk (the renamer runs alongside)
-		}
 		if err != nil {
-			return err
+			if err := s.vanished(err); err != nil {
+				return err
+			}
+			continue
 		}
 		if !e.IsDir() {
 			s.flag(s.isFresh(info), outsideScheme, s.rel(p)+" (loose file)")
 			if videoExts[lowerExt(n)] {
-				if err := s.addVideo(e, p, ""); err != nil {
+				if _, err := s.addVideo(e, p, ""); err != nil {
 					return err
 				}
 			}
@@ -213,7 +229,9 @@ func (s *scan) library(ctx context.Context, lib string) error {
 		if lib == "TV" {
 			at, show = showDir, n
 		}
-		if !(lib == "Movies" && library.IsMovieFolder(n) || lib == "TV" && library.IsShowFolder(n)) {
+		_, isMovie := library.ParseMovieFolder(n)
+		_, isShow := library.ParseShowFolder(n)
+		if !(lib == "Movies" && isMovie || lib == "TV" && isShow) {
 			at = outside
 			s.flag(s.isFresh(info), outsideScheme, s.rel(p))
 		}
@@ -224,16 +242,15 @@ func (s *scan) library(ctx context.Context, lib string) error {
 	return nil
 }
 
-func (s *scan) addVideo(e fs.DirEntry, path, show string) error {
+// addVideo records a listed video; it returns nil when the video has moved away since its folder was listed.
+func (s *scan) addVideo(e fs.DirEntry, path, show string) (*video, error) {
 	info, err := e.Info()
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil // moved away mid-walk (the renamer runs alongside)
-	}
 	if err != nil {
-		return err
+		return nil, s.vanished(err)
 	}
-	s.videos = append(s.videos, &video{path: path, size: info.Size(), settled: !info.ModTime().After(s.settled), show: show})
-	return nil
+	v := &video{path: path, size: info.Size(), settled: !info.ModTime().After(s.settled), show: show}
+	s.videos = append(s.videos, v)
+	return v, nil
 }
 
 // dir checks one directory's files, then descends. Videos come first so subtitles can find theirs.
@@ -242,19 +259,13 @@ func (s *scan) dir(ctx context.Context, dir string, at place, show string) error
 		return err
 	}
 	st, err := os.Stat(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
 	if err != nil {
-		return err
+		return s.vanished(err)
 	}
 	fresh := s.isFresh(st)
-	entries, err := os.ReadDir(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
+	entries, err := readDir(dir)
 	if err != nil {
-		return err
+		return s.vanished(err)
 	}
 	files := map[string]bool{}
 	stems := map[string]*video{}
@@ -280,11 +291,12 @@ func (s *scan) dir(ctx context.Context, dir string, at place, show string) error
 		if sample || at == extrasDir || at == misplaced {
 			episode = ""
 		}
-		if err := s.addVideo(e, p, episode); err != nil {
+		v, err := s.addVideo(e, p, episode)
+		if err != nil {
 			return err
 		}
-		stems[strings.TrimSuffix(n, filepath.Ext(n))] = s.videos[len(s.videos)-1]
-		if !named {
+		stems[strings.TrimSuffix(n, filepath.Ext(n))] = v // nil keeps a moved video's sidecars off its neighbours
+		if v != nil && !named {
 			s.misnamedVideo(fresh, s.rel(p), at, sample)
 		}
 	}
@@ -338,6 +350,9 @@ func (s *scan) checkSidecar(fresh bool, path string, at place, stems map[string]
 		}
 		return
 	}
+	if stems[stem] == nil {
+		return // its video moved away mid-walk: judged next run
+	}
 	m := sidecarSuffix.FindStringSubmatch(strings.TrimSuffix(n[len(stem):], filepath.Ext(n)))
 	if m == nil && at != outside {
 		s.flag(fresh, sidecarName, s.rel(path))
@@ -354,7 +369,9 @@ func (s *scan) subdir(ctx context.Context, path string, at place, show string, p
 		return s.notes(path, parentFresh, parentFiles)
 	case skipped(n) || n == "Plex Versions": // Synology thumbnails, hidden folders, Plex's own optimized copies
 		return nil
-	case extrasDirs[n] && at != outside:
+	case extrasDirs[n] && at == outside:
+		return s.dir(ctx, path, outside, "") // an unrenamed folder's extras are no episodes either
+	case extrasDirs[n]:
 		return s.dir(ctx, path, extrasDir, show)
 	}
 	next := at
@@ -363,7 +380,7 @@ func (s *scan) subdir(ctx context.Context, path string, at place, show string, p
 		next = misplaced
 	case showDir:
 		next = seasonDir
-		if !library.IsSeasonFolder(n) {
+		if _, ok := library.ParseSeasonFolder(n); !ok {
 			s.flag(parentFresh, seasonName, s.rel(path))
 			next = badSeason
 		}
@@ -375,16 +392,13 @@ func (s *scan) subdir(ctx context.Context, path string, at place, show string, p
 // video and the rename of its note are two steps, so a change in either folder holds the finding.
 func (s *scan) notes(dir string, parentFresh bool, parentFiles map[string]bool) error {
 	st, err := os.Stat(dir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
 	if err != nil {
-		return err
+		return s.vanished(err)
 	}
 	fresh := parentFresh || s.isFresh(st)
-	entries, err := os.ReadDir(dir)
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
+	entries, err := readDir(dir)
+	if err != nil {
+		return s.vanished(err)
 	}
 	for _, e := range entries {
 		if n := e.Name(); strings.HasSuffix(n, ".txt") && !parentFiles[strings.TrimSuffix(n, ".txt")] {
@@ -395,8 +409,8 @@ func (s *scan) notes(dir string, parentFresh bool, parentFiles map[string]bool) 
 }
 
 // probeAll probes every settled, non-empty video: cache hits always, cache misses only while no one but the owner
-// is watching (checked before the first miss and again every Viewers.Poll). It returns how many were deferred.
-func probeAll(ctx context.Context, env *stage.Env, workers int, videos []*video) (deferred int, err error) {
+// is watching (checked before the first miss and again every Viewers.Poll). A deferred video stays unprobed.
+func probeAll(ctx context.Context, env *stage.Env, workers int, videos []*video) error {
 	var pending []*video
 	for _, v := range videos {
 		switch {
@@ -406,10 +420,10 @@ func probeAll(ctx context.Context, env *stage.Env, workers int, videos []*video)
 		default:
 			info, ok, err := env.Probe.Lookup(ctx, v.path)
 			if errors.Is(err, fs.ErrNotExist) {
-				continue
+				continue // moved away since the walk
 			}
 			if err != nil {
-				return 0, err
+				return err
 			}
 			if ok {
 				v.read(info, nil)
@@ -436,8 +450,7 @@ func probeAll(ctx context.Context, env *stage.Env, workers int, videos []*video)
 			others, err := env.Viewers.Count(ctx)
 			lastCheck = env.Now()
 			if err != nil || others > 0 { // unknown counts as busy
-				deferred = len(pending) - i
-				env.Log.Info("probes deferred: a guest is watching or the servers did not answer", "event", "probe_deferred", "deferred", deferred, "others", others, "err", err)
+				env.Log.Info("probes deferred: a guest is watching or the servers did not answer", "event", "probe_deferred", "deferred", len(pending)-i, "others", others, "err", err)
 				break
 			}
 		}
@@ -446,14 +459,14 @@ func probeAll(ctx context.Context, env *stage.Env, workers int, videos []*video)
 	close(jobs)
 	wg.Wait()
 	if err := ctx.Err(); err != nil {
-		return 0, err // a cancelled ffprobe looks like a failed one: judge nothing from this pass
+		return err // a cancelled run judges nothing and writes no report
 	}
 	for _, v := range pending {
 		if v.fatal != nil {
-			return 0, v.fatal
+			return v.fatal
 		}
 	}
-	return deferred, nil
+	return nil
 }
 
 // read records a probe result. Only ffprobe's own verdict (it failed, or found no video) makes a video unreadable.
@@ -468,9 +481,15 @@ func (v *video) read(info probe.Info, err error) {
 		for _, sub := range info.Subtitles {
 			v.embeddedEnglish = v.embeddedEnglish || (sub.Text && !sub.Forced && (sub.Language == "eng" || sub.Language == "en"))
 		}
+	case errors.Is(err, fs.ErrNotExist): // moved away before its probe
 	case errors.As(err, &exitErr):
+		if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() && ws.Signal() == syscall.SIGKILL {
+			return // the probe's time limit (or the OOM killer) stopped ffprobe: no verdict on the file
+		}
+		if _, err := os.Stat(v.path); errors.Is(err, fs.ErrNotExist) {
+			return // moved away while ffprobe read it
+		}
 		v.probed, v.problem = true, ffprobeReason(err, v.path)
-	case errors.Is(err, fs.ErrNotExist): // moved away mid-run
 	default:
 		v.fatal = err
 	}
@@ -602,17 +621,18 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 			return err
 		}
 	}
-	deferred, err := probeAll(ctx, env, opt.ProbeWorkers, s.videos)
-	if err != nil {
+	if err := probeAll(ctx, env, opt.ProbeWorkers, s.videos); err != nil {
 		return err
 	}
-	unsettled := 0
+	unsettled, notProbed := 0, 0
 	for _, v := range s.videos {
-		if v.problem != "" {
-			s.add(unreadable, s.rel(v.path)+": "+v.problem)
-		}
-		if !v.settled {
+		switch {
+		case !v.settled:
 			unsettled++
+		case !v.probed: // deferred, moved away, or ffprobe killed
+			notProbed++
+		case v.problem != "":
+			s.add(unreadable, s.rel(v.path)+": "+v.problem)
 		}
 	}
 	s.found[duplicate] = s.duplicates(env)
@@ -621,10 +641,11 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	for _, items := range s.found {
 		sort.Strings(items)
 	}
-	// A partial pass keeps the last complete baseline for what it could not see, and a partial first pass is no
-	// baseline at all: either way the next full pass does not alert on problems that were there all along.
-	next, save := snapshot{At: env.Now(), Items: s.found}, hadPrev || deferred == 0
-	if deferred > 0 && hadPrev {
+	// A partial pass keeps the last complete baseline for what it could not see, a partial first pass is no baseline
+	// at all, and a walk that missed moved entries keeps the last one whole: either way the next full pass does not
+	// alert on problems that were there all along.
+	next, save := snapshot{At: env.Now(), Items: s.found}, (hadPrev || notProbed == 0) && s.moved == 0
+	if notProbed > 0 && hadPrev {
 		next.Items = maps.Clone(s.found)
 		for k := range probeBound {
 			next.Items[k] = prev.Items[k]
@@ -640,10 +661,11 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		}
 	}
 	rep.Count("videos", len(s.videos))
-	rep.Count("not_probed", deferred)
+	rep.Count("not_probed", notProbed)
 	rep.Count("held", held)
+	rep.Count("moved_mid_run", s.moved)
 
-	text := report(env, started, opt.MaxListed, s, shows, deferred, unsettled+held, prev, hadPrev)
+	text := report(env, started, opt.MaxListed, s, shows, notProbed, unsettled+held, prev, hadPrev)
 	if err := writeReport(opt.Report, text); err != nil {
 		return err
 	}
@@ -662,7 +684,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if !hadPrev {
 		rep.Summary += " (no baseline yet: no growth alerts)"
 	}
-	env.Log.Info("audit written", "event", "audit_report", "path", opt.Report, "videos", len(s.videos), "not_probed", deferred, "unsettled", unsettled, "held", held)
+	env.Log.Info("audit written", "event", "audit_report", "path", opt.Report, "videos", len(s.videos), "not_probed", notProbed, "unsettled", unsettled, "held", held, "moved", s.moved)
 	return nil
 }
 
@@ -677,7 +699,7 @@ func firstNew(now, before []string) string {
 }
 
 // report is the owner's short text: a count table against the last run, then up to max examples per category.
-func report(env *stage.Env, started time.Time, maxListed int, s *scan, shows []showCount, deferred, waiting int, prev snapshot, hadPrev bool) string {
+func report(env *stage.Env, started time.Time, maxListed int, s *scan, shows []showCount, notProbed, waiting int, prev snapshot, hadPrev bool) string {
 	loc := env.Loc
 	if loc == nil {
 		loc = time.UTC
@@ -687,8 +709,11 @@ func report(env *stage.Env, started time.Time, maxListed int, s *scan, shows []s
 	fmt.Fprintf(&b, "Library audit of the files as of %s (written %s). Read-only: nothing was moved or deleted.\n",
 		started.In(loc).Format(stamp), env.Now().In(loc).Format(stamp))
 	fmt.Fprintf(&b, "%d videos in Movies/ and TV/.", len(s.videos))
-	if deferred > 0 {
-		fmt.Fprintf(&b, " %d not probed yet (a guest was watching, or Plex/Jellyfin did not answer): the unreadable and English-subtitle counts are partial.", deferred)
+	if notProbed > 0 {
+		fmt.Fprintf(&b, " %d not probed yet (a guest was watching, Plex/Jellyfin did not answer, the file moved, or ffprobe ran out of time): the unreadable and English-subtitle counts are partial.", notProbed)
+	}
+	if s.moved > 0 {
+		fmt.Fprintf(&b, " %d files or folders moved while the walk read them, so some counts are low; the next run compares against the run before this one.", s.moved)
 	}
 	if waiting > 0 {
 		fmt.Fprintf(&b, " %d videos or findings changed in the last few minutes and are judged next run.", waiting)
