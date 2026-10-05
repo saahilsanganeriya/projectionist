@@ -174,8 +174,8 @@ func (r *run) repend(ctx context.Context, sink string, idx map[string]sinkItem) 
 		}
 		r.env.Log.Info("app lists the title under a new item; its poster goes again", "event", "sink_item_moved", "item", item,
 			"sink", sink, "target", idx[item].ID)
+		r.count("moved_"+sink, 1)
 	}
-	r.count("moved_"+sink, len(moved))
 	return nil
 }
 
