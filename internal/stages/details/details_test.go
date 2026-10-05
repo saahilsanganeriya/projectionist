@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -401,9 +402,24 @@ esac
 	}
 }
 
+// media writes size bytes of noise (compressed media has no runs of zeros) with [zeroFrom, zeroTo) cleared.
+func media(t *testing.T, size int, zeros ...[2]int) string {
+	b := make([]byte, size)
+	rand.NewChaCha8([32]byte{1}).Read(b)
+	for _, z := range zeros {
+		clear(b[z[0]:z[1]])
+	}
+	p := filepath.Join(t.TempDir(), "x.mkv")
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 // Catches: a GPU hiccup reported as a broken file (it must be retried on the CPU), a truncated end sample
-// passing (too few frames), a 2 s extra failing for lacking 5 s of frames, and the error budget off: two errors
-// after a seek pass, three fail.
+// passing (too few frames), a 2 s extra failing for lacking 5 s of frames, the error budget off (two errors after
+// a seek pass, three fail), a missing piece between the samples passing (Amélie's "Home Movie" had 8 MiB of zeros
+// at 8 %), and header or tail padding taken for a hole.
 func TestDecodeCheck(t *testing.T) {
 	cases := []struct{ script, wantDetail string }{
 		{`case "$*" in *-hwaccel*) echo "hwaccel init failed" >&2; exit 1;; esac; echo frame=120`, ""},
@@ -411,17 +427,44 @@ func TestDecodeCheck(t *testing.T) {
 		{`echo "ref missing" >&2; echo "ref missing" >&2; echo frame=118`, ""},
 		{`for i in 1 2 3; do echo "error while decoding MB 1 2" >&2; done; echo frame=120`, "start (0h 00m 00s): 3 decode errors, first: error while decoding MB 1 2"},
 	}
+	const mib = 1 << 20
+	noise := media(t, mib)
 	for _, c := range cases {
 		h := fake.NewEnv(t, nil)
 		h.Script(t, "ffmpeg", c.script+"\n")
-		clean, detail, err := decodeCheck(context.Background(), h.Env.FFmpeg, "/m/x.mkv", &probe.Video{Codec: "hevc", FPS: 24}, 6000)
+		clean, detail, err := decodeCheck(context.Background(), h.Env.FFmpeg, noise, &probe.Video{Codec: "hevc", FPS: 24}, 6000)
 		if err != nil || clean != (c.wantDetail == "") || detail != c.wantDetail {
 			t.Errorf("script %q: clean=%v detail=%q err=%v; want detail %q", c.script, clean, detail, err, c.wantDetail)
 		}
 	}
 	h := fake.NewEnv(t, nil)
-	h.Script(t, "ffmpeg", "echo frame=48\n") // all of a 2 s clip at 24 fps
-	if clean, detail, err := decodeCheck(context.Background(), h.Env.FFmpeg, "/m/clip.mkv", &probe.Video{Codec: "av1", FPS: 24}, 2); !clean {
+	h.Script(t, "ffmpeg", "echo frame=48\n") // all of a 2 s clip at 24 fps, and of 5 s at 24 fps when asked
+	if clean, detail, err := decodeCheck(context.Background(), h.Env.FFmpeg, noise, &probe.Video{Codec: "av1", FPS: 24}, 2); !clean {
 		t.Errorf("2 s clip: clean=false detail=%q err=%v", detail, err)
+	}
+	h.Script(t, "ffmpeg", "echo frame=120\n")
+	hole := media(t, mib, [2]int{mib / 2, mib/2 + 64<<10})
+	if clean, detail, _ := decodeCheck(context.Background(), h.Env.FFmpeg, hole, &probe.Video{Codec: "hevc", FPS: 24}, 6000); clean || !strings.HasPrefix(detail, "4 KiB of zeros at 5") {
+		t.Errorf("hole in the middle: clean=%v detail=%q", clean, detail)
+	}
+	padded := media(t, mib, [2]int{0, 20 << 10}, [2]int{mib - 20<<10, mib})
+	if clean, detail, _ := decodeCheck(context.Background(), h.Env.FFmpeg, padded, &probe.Video{Codec: "hevc", FPS: 24}, 6000); !clean {
+		t.Errorf("zero padding in the first and last 2 %%: clean=false detail=%q", detail)
+	}
+}
+
+// Catches: a run failing because the rename stage moved a video away mid-run, either before its turn (lookup)
+// or between its probe and its decode check.
+func TestVanishedVideosAreSkipped(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	l := lib{t, t.TempDir()}
+	newer := l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", 1)
+	older := l.add("Movies/Ran (1985) {tmdb-11645}/Ran (1985) {tmdb-11645}.mkv", 2)
+	fixture, _ := filepath.Abs("testdata/cronos_dtshdma.json")
+	h.Script(t, "ffprobe", fmt.Sprintf("rm -f %q %q\ncat %q\n", newer, older, fixture))
+	h.Script(t, "ffmpeg", "echo frame=120\n")
+	h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []", l.root))
+	if rep := runOnce(t, h.Env); rep.Counts["probed"] != 1 || rep.Counts["decode_checked"] != 0 {
+		t.Fatalf("counts %v", rep.Counts)
 	}
 }

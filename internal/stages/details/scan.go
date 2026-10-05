@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -105,9 +106,18 @@ var gpuCodecs = map[string]bool{"h264": true, "hevc": true, "vp9": true, "mpeg2v
 
 const sampleSeconds = 5
 
-// decodeCheck decodes 5 s of the video at its start, middle and end. Truncated or zero-filled files fail here
-// even when their headers probe fine. A sample the GPU rejects is decoded again on the CPU before it counts.
+// decodeCheck looks for holes (see holeAt), then decodes 5 s of the video at its start, middle and end:
+// truncated or zero-filled files fail here even when their headers probe fine. A sample the GPU rejects is decoded
+// again on the CPU before it counts.
 func decodeCheck(ctx context.Context, ff config.FFmpeg, path string, v *probe.Video, duration float64) (clean bool, detail string, err error) {
+	var off, size int64
+	var found bool
+	if err := idleIO(func() error { off, size, found, err = holeAt(ctx, path); return err }); err != nil {
+		return false, "", err
+	}
+	if found {
+		return false, fmt.Sprintf("4 KiB of zeros at %.1f%% (byte %d): part of the file never arrived", 100*float64(off)/float64(size), off), nil
+	}
 	samples := []struct {
 		name string
 		at   float64
@@ -127,6 +137,40 @@ func decodeCheck(ctx context.Context, ff config.FFmpeg, path string, v *probe.Vi
 		}
 	}
 	return true, "", nil
+}
+
+const holeProbes, holeBlock = 256, 4096
+
+// holeAt reads 4 KiB at 256 evenly spaced offsets between 2 % and 98 % of the file and reports the first block
+// that is all zeros. A torrent piece that never arrived reads that way (Amélie's extras hold 8 MiB runs of them),
+// and three decode samples can miss it; compressed media never holds 4 KiB of zeros. The ends are skipped because
+// muxers pad headers and reserved cue space with zeros. ~1 MiB read per file, whatever its size.
+func holeAt(ctx context.Context, path string) (off, size int64, found bool, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, 0, false, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return 0, 0, false, err
+	}
+	size = st.Size()
+	lo, hi := size*2/100, size*98/100-holeBlock
+	block := make([]byte, holeBlock)
+	for i := int64(0); i < holeProbes && hi > lo; i++ {
+		if ctx.Err() != nil {
+			return 0, 0, false, ctx.Err()
+		}
+		off = lo + (hi-lo)*i/(holeProbes-1)
+		if _, err := f.ReadAt(block, off); err != nil {
+			return 0, 0, false, err
+		}
+		if bytes.Count(block, []byte{0}) == holeBlock {
+			return off, size, true, nil
+		}
+	}
+	return 0, size, false, nil
 }
 
 // decodeSample returns "" when the sample decodes cleanly: ffmpeg exits 0, at least half the frames of `seconds`

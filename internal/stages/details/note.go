@@ -67,7 +67,7 @@ func render(v video, info probe.Info, orig string, sidecars []string, row *fileR
 	}
 	switch {
 	case row.Clean.Valid && row.Clean.Bool:
-		line("Streams cleanly", "yes (5 s decoded at the start, middle and end)")
+		line("Streams cleanly", "yes (no zero-filled blocks in 256 probes; 5 s decoded at the start, middle and end)")
 	case row.Clean.Valid:
 		line("Streams cleanly", "NO: "+row.CleanDetail)
 	}

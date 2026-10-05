@@ -319,6 +319,8 @@ func (r *run) heavyFacts(ctx context.Context, v video, info probe.Info, row *fil
 		case !done && err == nil:
 			r.heavyOK = false
 			r.rep.Count("heavy_deferred", 1)
+		case errors.Is(err, fs.ErrNotExist):
+			return nil // moved away since the walk
 		case err != nil:
 			return err // the decoder could not be run at all, or the stage is stopping
 		default:
