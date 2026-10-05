@@ -183,6 +183,14 @@ func TestNotePath(t *testing.T) {
 	}
 }
 
+// newEnv is the fake env with the viewer re-check during heavy work pushed out of every test's reach: only
+// TestHeavyStopsWhenAGuestStarts drives it, with ticks of its own.
+func newEnv(t *testing.T) *fake.Harness {
+	h := fake.NewEnv(t, nil)
+	h.Env.Viewers.Poll = time.Hour
+	return h
+}
+
 type lib struct {
 	t    *testing.T
 	root string
@@ -228,7 +236,7 @@ func row(t *testing.T, env *stage.Env, path string) (status, errText string) {
 // 20 Mb/s peak-scanned, stale rows kept for deleted files, and a paths_file run processing other videos or
 // deleting their rows.
 func TestRunReconciles(t *testing.T) {
-	h := fake.NewEnv(t, nil)
+	h := newEnv(t)
 	l := lib{t, t.TempDir()}
 	audioOnly := l.add("Movies/Audio Only (2000) {tmdb-2}/Audio Only (2000) {tmdb-2}.mkv", 0)
 	pilot := l.add("TV/Show (2008) {tmdb-1396}/Season 01/Show (2008) - S01E01 - Pilot.mkv", 1)
@@ -339,19 +347,19 @@ cat "`+fixture+`"
 	}
 }
 
-// Catches: heavy work (the whole-file packet scan, the decode samples) started while a guest watches or kept
-// running when one starts, the viewer count asked again per file once a guest is seen, the peak window miscounted
+// Catches: heavy work (the whole-file packet scan, the decode samples) started while a guest watches, the viewer
+// count asked again per file once a guest is seen, the peak window miscounted
 // (TS timestamp offset, a packet before the first, a broken far-future timestamp), a scanned file scanned again,
 // the scan bound ignored, and a changed file not re-scanned.
 func TestHeavyWorkWaitsForGuests(t *testing.T) {
-	h := fake.NewEnv(t, nil)
+	h := newEnv(t)
 	l := lib{t, t.TempDir()}
 	heat := l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", 1)
 	fixture, _ := filepath.Abs("testdata/cronos_dtshdma.json") // 15.7 Mb/s average
 	dir := h.Env.FFmpeg.Dir
 	// Packets: 1 MB/s for 300 s, except 5 MB/s from 100 s to 109 s, timestamps offset as in a TS file.
 	h.Script(t, "ffprobe", `case "$*" in
-*packet=*) echo scan >> "`+dir+`/scans"; [ -f "`+dir+`/block" ] && exec sleep 30
+*packet=*) echo scan >> "`+dir+`/scans"
   awk 'BEGIN { for (s = 0; s < 300; s++) { b = (s >= 100 && s < 110) ? 5000000 : 1000000
     printf "pts_time=N/A|dts_time=%.3f|size=%d\n", 3600 + s, b; if (s == 0) print "pts_time=3598.000|dts_time=N/A|size=0" }
     print "pts_time=N/A|dts_time=703600.000|size=999999999999" }';;
@@ -375,31 +383,13 @@ esac
 	}
 
 	guest.Store(true)
-	h.Env.Viewers.Poll = time.Hour // only the check before starting can keep the work from running
 	rep := runOnce(t, h.Env)
-	h.Env.Viewers.Poll = 5 * time.Millisecond
 	if read("scans") != "" || read("decodes") != "" || rep.Counts["heavy_deferred"] != 2 || strings.Contains(note(), "Peak bitrate") ||
 		len(h.Plex.Calls("GET", "/status/sessions")) != 1 {
 		t.Fatalf("guest watching: scans %q decodes %q counts %v", read("scans"), read("decodes"), rep.Counts)
 	}
 
-	// A guest who starts during the scan stops it; the result is not stored.
 	guest.Store(false)
-	os.WriteFile(filepath.Join(dir, "block"), nil, 0o644)
-	h.Plex.HandleFunc("GET", "/status/sessions", func(w http.ResponseWriter, _ *http.Request) {
-		if read("scans") != "" { // idle until the scan has started, then a guest
-			fmt.Fprint(w, `<MediaContainer size="1"><Video type="movie" title="Ran"><User title="guest"/></Video></MediaContainer>`)
-			return
-		}
-		fmt.Fprint(w, `<MediaContainer size="0"></MediaContainer>`)
-	})
-	rep = runOnce(t, h.Env)
-	if read("scans") != "scan\n" || rep.Counts["heavy_deferred"] != 2 || strings.Contains(note(), "Peak bitrate") {
-		t.Fatalf("interrupted scan: scans %q counts %v", read("scans"), rep.Counts)
-	}
-
-	os.Remove(filepath.Join(dir, "block"))
-	h.Plex.Handle("GET", "/status/sessions", 200, `<MediaContainer size="0"></MediaContainer>`)
 	runOnce(t, h.Env)
 	n := note()
 	if !strings.Contains(n, "Peak bitrate:    40.0 Mb/s over 10 s at 0h 01m 40s (all streams)\n") || !strings.Contains(n, "Streams cleanly: yes") ||
@@ -407,18 +397,64 @@ esac
 		t.Fatalf("note:\n%s\ndecodes:\n%s", n, read("decodes"))
 	}
 	runOnce(t, h.Env)
-	if strings.Count(read("scans"), "scan") != 2 || strings.Count(read("decodes"), "\n") != 3 {
+	if strings.Count(read("scans"), "scan") != 1 || strings.Count(read("decodes"), "\n") != 3 {
 		t.Fatalf("a scanned file was scanned again: scans %q", read("scans"))
 	}
 
 	os.WriteFile(heat, []byte("video, re-muxed"), 0o644)
 	h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []\npeak_above_kbps = 10000\nmax_peak_scans = 0", l.root))
-	if runOnce(t, h.Env); strings.Count(read("scans"), "scan") != 2 {
+	if runOnce(t, h.Env); strings.Count(read("scans"), "scan") != 1 {
 		t.Fatal("max_peak_scans = 0 still scanned")
 	}
 	h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []\npeak_above_kbps = 10000", l.root))
-	if runOnce(t, h.Env); strings.Count(read("scans"), "scan") != 3 {
+	if runOnce(t, h.Env); strings.Count(read("scans"), "scan") != 2 {
 		t.Fatal("a changed file kept its old peak")
+	}
+}
+
+// Catches: heavy work kept running when a guest starts watching part-way (a 45-minute scan would stutter their
+// stream), and work stopped by a re-check that found nobody but the owner (no long scan would ever finish).
+func TestHeavyStopsWhenAGuestStarts(t *testing.T) {
+	h := newEnv(t)
+	var guest, armed atomic.Bool
+	asked := make(chan struct{}, 1)
+	h.Plex.HandleFunc("GET", "/status/sessions", func(w http.ResponseWriter, _ *http.Request) {
+		if guest.Load() {
+			fmt.Fprint(w, `<MediaContainer size="1"><Video type="movie" title="Ran"><User title="guest"/></Video></MediaContainer>`)
+		} else {
+			fmt.Fprint(w, `<MediaContainer size="0"></MediaContainer>`)
+		}
+		if armed.Load() {
+			select {
+			case asked <- struct{}{}:
+			default:
+			}
+		}
+	})
+	ticks := make(chan time.Time)
+	r := &run{env: h.Env, tick: func() (<-chan time.Time, func()) { return ticks, func() {} }}
+	var stoppedEarly, keptRunning bool
+	done, err := r.heavy(context.Background(), func(ctx context.Context) error {
+		armed.Store(true)
+		ticks <- time.Time{}
+		<-asked // this re-check found nobody but the owner...
+		guest.Store(true)
+		select {
+		case ticks <- time.Time{}: // ...and left the work running; this one finds the guest
+		case <-ctx.Done():
+			stoppedEarly = true
+			return ctx.Err()
+		}
+		select {
+		case ticks <- time.Time{}:
+			keptRunning = true // the re-check loop came back for more after finding the guest
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	if done || err != nil || stoppedEarly || keptRunning {
+		t.Fatalf("done=%v err=%v; stopped with nobody else watching=%v, kept running with a guest=%v", done, err, stoppedEarly, keptRunning)
 	}
 }
 
@@ -455,14 +491,14 @@ func TestDecodeCheck(t *testing.T) {
 	const mib = 1 << 20
 	noise := media(t, mib)
 	for _, c := range cases {
-		h := fake.NewEnv(t, nil)
+		h := newEnv(t)
 		h.Script(t, "ffmpeg", c.script+"\n")
 		clean, detail, err := decodeCheck(context.Background(), h.Env.FFmpeg, noise, &probe.Video{Codec: "hevc", FPS: 24}, 6000)
 		if err != nil || clean != (c.wantDetail == "") || detail != c.wantDetail {
 			t.Errorf("script %q: clean=%v detail=%q err=%v; want detail %q", c.script, clean, detail, err, c.wantDetail)
 		}
 	}
-	h := fake.NewEnv(t, nil)
+	h := newEnv(t)
 	h.Script(t, "ffmpeg", "echo frame=48\n") // all of a 2 s clip at 24 fps, and of 5 s at 24 fps when asked
 	if clean, detail, err := decodeCheck(context.Background(), h.Env.FFmpeg, noise, &probe.Video{Codec: "av1", FPS: 24}, 2); !clean {
 		t.Errorf("2 s clip: clean=false detail=%q err=%v", detail, err)
@@ -490,7 +526,7 @@ func TestDecodeCheck(t *testing.T) {
 // Catches: a run failing because the rename stage moved a video away mid-run, either before its turn (lookup)
 // or between its probe and its decode check.
 func TestVanishedVideosAreSkipped(t *testing.T) {
-	h := fake.NewEnv(t, nil)
+	h := newEnv(t)
 	l := lib{t, t.TempDir()}
 	newer := l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", 1)
 	older := l.add("Movies/Ran (1985) {tmdb-11645}/Ran (1985) {tmdb-11645}.mkv", 2)
@@ -507,7 +543,7 @@ func TestVanishedVideosAreSkipped(t *testing.T) {
 // rewriting every note without its original name, and a missing ffmpeg skipping every decode check in silence
 // (its exec error is an ErrNotExist, like a video moved away).
 func TestMissingInputsFailTheRun(t *testing.T) {
-	h := fake.NewEnv(t, nil)
+	h := newEnv(t)
 	l := lib{t, t.TempDir()}
 	heat := l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", 1)
 	options := fmt.Sprintf("library = %q\nsections = [\"Movies\"]\n", l.root)
@@ -532,7 +568,7 @@ func TestMissingInputsFailTheRun(t *testing.T) {
 // announced, by that run or by the next one, which finds the verdict already set; a verdict announced again by
 // every run; and one left unannounced by a run that died before its end.
 func TestAlertsSurviveAnEarlyReturn(t *testing.T) {
-	h := fake.NewEnv(t, nil)
+	h := newEnv(t)
 	l := lib{t, t.TempDir()}
 	broken := l.add("Movies/Broken (2001) {tmdb-1}/Broken (2001) {tmdb-1}.mkv", 1)
 	l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", 2)
@@ -556,7 +592,7 @@ func TestAlertsSurviveAnEarlyReturn(t *testing.T) {
 // Catches: heavy work done inline, file by file, so a long scan of one film holds back every later file's note
 // (a 50 GB remux scans for ~45 min on the busy NAS).
 func TestNotesComeBeforeHeavyWork(t *testing.T) {
-	h := fake.NewEnv(t, nil)
+	h := newEnv(t)
 	l := lib{t, t.TempDir()}
 	l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", 1)
 	ran := l.add("Movies/Ran (1985) {tmdb-11645}/Ran (1985) {tmdb-11645}.mkv", 2)

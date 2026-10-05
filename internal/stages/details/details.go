@@ -158,7 +158,8 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) (err er
 	}
 
 	r := &run{env: env, opt: opt, rep: rep, db: db, orig: orig, subtitles: subtitles,
-		probes: opt.MaxProbes, peaks: opt.MaxPeakScans, decodes: opt.MaxDecodeChecks, heavyOK: true}
+		probes: opt.MaxProbes, peaks: opt.MaxPeakScans, decodes: opt.MaxDecodeChecks, heavyOK: true,
+		tick: func() (<-chan time.Time, func()) { t := time.NewTicker(env.Viewers.Poll); return t.C, t.Stop }}
 	defer func() { // on every return: a verdict saved before an early return is still raised
 		if aerr := r.raiseAlerts(context.WithoutCancel(ctx)); err == nil {
 			err = aerr
@@ -217,6 +218,7 @@ type run struct {
 	probes, peaks, decodes int  // what is left of this run's bounds
 	heavyOK                bool // false once a guest was seen: heavy work waits for a later run
 	queue                  []pending
+	tick                   func() (<-chan time.Time, func()) // the viewer re-check during heavy work, and its stop
 }
 
 // pending is a video whose heavy facts are missing, queued behind the notes pass.
@@ -384,13 +386,13 @@ func (r *run) heavy(ctx context.Context, fn func(context.Context) error) (done b
 	hctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
-		t := time.NewTicker(r.env.Viewers.Poll)
-		defer t.Stop()
+		ticks, stop := r.tick()
+		defer stop()
 		for {
 			select {
 			case <-hctx.Done():
 				return
-			case <-t.C:
+			case <-ticks:
 				if n, err := r.env.Viewers.Count(hctx); hctx.Err() == nil && (err != nil || n > 0) {
 					r.env.Log.Info("heavy work interrupted", "event", "heavy_interrupted", "others", n, "err", err)
 					cancel()
