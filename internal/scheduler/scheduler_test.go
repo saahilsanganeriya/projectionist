@@ -148,6 +148,7 @@ func TestTrigger(t *testing.T) {
 			}}, Every: 48 * time.Hour, Window: night0200},
 		}
 		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel() // a failed check must still stop the scheduler, or the bubble deadlocks over the message
 		done := make(chan struct{})
 		go func() { s.Run(ctx); close(done) }()
 		synctest.Wait() // "busy" has never run, so it runs at once and holds until released
