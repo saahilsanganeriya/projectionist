@@ -653,7 +653,20 @@ func (p *planner) planRoot(root string, videos *videoPlan, files []string, speci
 	in := p.in
 	var ops []Op
 	rootName := path.Base(root)
-	owner := p.attachSubtitles(root, files, videos)
+	var left []string
+	for _, f := range files {
+		if videoExt[lowerExt(f)] && !videos.has(f) && (in.Unidentified[f] != "" || special[f].Op == "leave") {
+			left = append(left, f)
+		}
+	}
+	owner := p.attachSubtitles(root, files, videos, left)
+	staying := map[string]bool{}
+	for f, o := range owner {
+		if o.video == "" {
+			staying[f] = true
+			delete(owner, f)
+		}
+	}
 	subs := p.nameSubtitles(owner, videos)
 	taken := map[string]bool{}
 	unitHome := map[string]string{}
@@ -708,6 +721,10 @@ func (p *planner) planRoot(root string, videos *videoPlan, files []string, speci
 				dst := v.folder + "/" + v.stem + v.ext
 				ops = append(ops, Op{v.unit, keepOr(dst, f), f, dst, v.kind})
 			}
+			continue
+		}
+		if staying[f] {
+			ops = append(ops, Op{"misc", "leave", f, "", "subtitle of a video left where it is"})
 			continue
 		}
 		if s, ok := subs[f]; ok {

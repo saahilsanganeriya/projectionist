@@ -107,6 +107,7 @@ func newLibrary(t *testing.T) *library4test {
 	write(t, filepath.Join(movies, "Heat.1995.1080p.BluRay.x264-GRP", "@eaDir", "x.jpg"), "thumbnail")
 	write(t, filepath.Join(movies, "Heat.1995.2160p.UHD.BluRay-GRP", "Heat.1995.2160p.UHD.BluRay-GRP.mkv"), "a second version")
 	write(t, filepath.Join(movies, "Mystery.2001.mkv"), "unmatched")
+	write(t, filepath.Join(movies, "Mystery.2001.en.srt"), englishSRT(120)) // waits with its film
 	write(t, filepath.Join(movies, "Gone.2010", "@eaDir", "thumb.jpg"), "a shell left by an earlier move")
 	write(t, filepath.Join(movies, "Gone.2010", ".DS_Store"), "")
 	// earlier archives already hold these names: the new ones must not be skipped forever
@@ -139,7 +140,8 @@ func (l *library4test) run(t *testing.T) stage.Report {
 // Catches, end to end: a new film or show not reaching its scheme name (TMDB identity, two versions labelled by
 // the resolutions ffprobe reads — and nothing else probed —, episode titles, subtitle language from its text, junk
 // archived, the emptied folder pruned), an ambiguous TMDB match being renamed instead of listed for review, junk
-// archived out of a folder whose video waits for review, an episode already named being renamed to TMDB's spelling,
+// archived out of a folder whose video waits for review, the subtitle of a loose film waiting for review archived
+// (it is no folder's junk: it stays with its video), an episode already named being renamed to TMDB's spelling,
 // an empty shell (only @eaDir/.DS_Store) left behind or a recycle bin swept, clutter deleted instead of archived, an
 // archive skipped (every run, silently) because an older archive holds its name, Jellyfin not told, a second run
 // changing anything, undo not restoring the tree exactly (clutter included), a second undo run writing to the log
@@ -155,6 +157,7 @@ func TestRunNewArrivalsThenUndo(t *testing.T) {
 		"Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949} - 1080p.mkv",
 		"Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949} - 2160p.mkv",
 		"Movies/Kept.2011/#recycle/x.mkv",
+		"Movies/Mystery.2001.en.srt",
 		"Movies/Mystery.2001.mkv",
 		"Movies/Unknown.Thing.2001/Unknown.Thing.2001.mkv",
 		"Movies/Unknown.Thing.2001/Unknown.Thing.2001.nfo",
@@ -295,5 +298,34 @@ func TestSweepThatCannotArchiveAlerts(t *testing.T) {
 	rep := l.run(t)
 	if !strings.Contains(strings.Join(rep.Alerts, "\n"), "sweep stopped") || !lexists(filepath.Join(l.root, "Movies/Gone.2010/.DS_Store")) {
 		t.Fatalf("alerts = %q, shell kept = %v", rep.Alerts, lexists(filepath.Join(l.root, "Movies/Gone.2010/.DS_Store")))
+	}
+}
+
+// Catches a failed TMDB episode list (an outage, a missing token, 429/5xx after retries) moving episodes that are
+// already in their show's scheme folder out of it, to a yearless "TV/Show/Season 01/Show - S01E04.mkv" with the
+// release tags stripped, where the next run can no longer identify them. Every video of that show without an
+// episode number waits for the next run; its subtitle stays beside it.
+func TestEpisodeListFailureLeavesShowInPlace(t *testing.T) {
+	l := newLibrary(t)
+	filed := "TV/Show (2019) {tmdb-77}/Season 01/Show.S01E04.1080p.WEB-GRP"
+	write(t, filepath.Join(l.root, filed+".mkv"), "ep4")
+	write(t, filepath.Join(l.root, filed+".en.srt"), englishSRT(120))
+	l.h.TMDB.Handle("GET", "/tv/77", 401, "")
+	l.h.TMDB.Handle("GET", "/tv/77/season/1", 401, "")
+	rep := l.run(t)
+	got := strings.Join(tree(t, filepath.Join(l.root, "TV")), "\n")
+	want := strings.Join([]string{
+		"Show (2019) {tmdb-77}/Season 01/Show (2019) - S01E03 - Wait For It.mkv",
+		"Show (2019) {tmdb-77}/Season 01/Show.S01E04.1080p.WEB-GRP.en.srt",
+		"Show (2019) {tmdb-77}/Season 01/Show.S01E04.1080p.WEB-GRP.mkv",
+		"Show.S01.1080p.WEB-GRP/Show.S01E01.1080p.WEB-GRP.mkv",
+		"Show.S01.1080p.WEB-GRP/Show.S01E02.1080p.WEB-GRP.mkv",
+	}, "\n")
+	if got != want || rep.Counts["tmdb_errors"] == 0 {
+		t.Fatalf("TV after a failed episode list (tmdb_errors=%d):\n%s\nwant every episode where it was:\n%s",
+			rep.Counts["tmdb_errors"], got, want)
+	}
+	if review, _ := os.ReadFile(l.review); !strings.Contains(string(review), filed+".mkv\tTMDB unreachable: retried next run") {
+		t.Fatalf("review file does not say why the episode waits:\n%s", review)
 	}
 }

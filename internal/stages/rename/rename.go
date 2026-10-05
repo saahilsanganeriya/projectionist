@@ -282,6 +282,11 @@ func gather(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options,
 		if err := episodeRows(ctx, env, id, lib, in, in.Shows[showVideos[sid][0]], showVideos[sid]); err != nil {
 			rep.Count("tmdb_errors", 1)
 			env.Log.Warn("episode list failed", "event", "tmdb_error", "item", sid, "err", err)
+			for _, f := range showVideos[sid] { // unnumbered, the planner would file them as a show with no source
+				if len(in.Episodes[f]) == 0 {
+					in.Unidentified[f] = "TMDB unreachable: retried next run"
+				}
+			}
 		}
 	}
 	return in, review, nil

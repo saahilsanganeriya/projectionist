@@ -96,8 +96,9 @@ type stemVideo struct{ stem, video string }
 
 // attachSubtitles ties every subtitle it can to a video (live or deleted), keyed by subtitle path. moved maps a video's
 // old path to its current one (the rename logs), so a subtitle left in the old folder still finds its video: there it
-// is matched against the name and folder the video had when the subtitle was made.
-func (p *planner) attachSubtitles(root string, files []string, videos *videoPlan) map[string]subOwner {
+// is matched against the name and folder the video had when the subtitle was made. The videos left where they are
+// compete for subtitles too: one that wins gets owner video "" (it stays), never a planned neighbour.
+func (p *planner) attachSubtitles(root string, files []string, videos *videoPlan, left []string) map[string]subOwner {
 	vidsInDir := map[string][]stemVideo{}
 	videoDirs := map[string]bool{}
 	for _, f := range files {
@@ -131,6 +132,9 @@ func (p *planner) attachSubtitles(root string, files []string, videos *videoPlan
 		if v := p.in.Moved[o]; videos.has(v) && !videos.has(o) {
 			add(o, v)
 		}
+	}
+	for _, v := range left {
+		vidsInDir[path.Dir(v)] = append(vidsInDir[path.Dir(v)], stemVideo{stem(path.Base(v)), ""})
 	}
 	owner := map[string]subOwner{}
 	for _, f := range files {
