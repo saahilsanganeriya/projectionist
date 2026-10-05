@@ -107,7 +107,7 @@ func TestNames(t *testing.T) {
 	}
 	for settings, want := range map[string]string{
 		"x265 (build 209) - 3.6+28-8f16d2257:[Windows][GCC 14.1.0][64 bit] 10bit - H.265/HEVC codec - options: cpuid=1111039 rc=crf crf=20.0 qcomp=0.60": "x265 3.6+28 · crf 20.0",
-		"x264 - core 152 r2851M ba24899 - H.264/MPEG-4 AVC codec - options: cabac=1 rc=2pass mbtree=1 bitrate=8000 ratetol=1.0":                      "x264 core 152 · 2pass 8000 kb/s",
+		"x264 - core 152 r2851M ba24899 - H.264/MPEG-4 AVC codec - options: cabac=1 rc=2pass mbtree=1 bitrate=8000 ratetol=1.0":                          "x264 core 152 · 2pass 8000 kb/s",
 	} {
 		if got := encoder(&probe.Video{EncoderSettings: settings}); got != want {
 			t.Errorf("encoder(%.30q) = %q, want %q", settings, got, want)
@@ -202,9 +202,10 @@ func row(t *testing.T, env *stage.Env, path string) (status, errText string) {
 // Catches, end to end: notes for files outside the scheme or in hidden folders, the probe bound not deferring
 // (or not putting the newest file first), an unchanged note rewritten or an unchanged file re-probed, an
 // unreadable or video-less file not listed, alerted twice or re-probed before its retry time, the original name
-// lost across two moves, another version's sidecar listed, a stale temp file blocking a write, an SDR file probed
-// for frames or a file under 20 Mb/s peak-scanned, stale rows kept for deleted files, and a paths_file run
-// processing other videos or deleting their rows.
+// lost across two moves, another version's sidecar listed, a stale temp file blocking a write, a note left stale
+// when its text changes (a new sidecar) or when someone edits it, an SDR file probed for frames or a file under
+// 20 Mb/s peak-scanned, stale rows kept for deleted files, and a paths_file run processing other videos or
+// deleting their rows.
 func TestRunReconciles(t *testing.T) {
 	h := fake.NewEnv(t, nil)
 	l := lib{t, t.TempDir()}
@@ -273,7 +274,12 @@ cat "`+fixture+`"
 	h.Now = h.Now.Add(25 * time.Hour)
 	os.WriteFile(heat, []byte("video, re-muxed"), 0o644)
 	os.Remove(extra)
+	pilotNote := filepath.Join(filepath.Dir(pilot), ".details", filepath.Base(pilot)+".txt")
+	os.WriteFile(pilotNote, []byte("edited by hand\n"), 0o644)
 	rep = runOnce(t, h.Env)
+	if !strings.HasPrefix(note(pilot), "Title:") {
+		t.Fatalf("run 3: a hand-edited note was not repaired: %q", note(pilot))
+	}
 	log, _ := os.ReadFile(calls)
 	last := strings.Split(strings.TrimSpace(string(log)), "\n")
 	if probes() != 7 || !strings.Contains(strings.Join(last[len(last)-2:], "\n"), heat) || len(rep.Alerts) != 0 {
@@ -288,12 +294,16 @@ cat "`+fixture+`"
 
 	paths := filepath.Join(t.TempDir(), "paths.txt")
 	os.WriteFile(paths, []byte(pilot+"\n"), 0o644)
+	l.add("TV/Show (2008) {tmdb-1396}/Season 01/Show (2008) - S01E01 - Pilot.en.sdh.srt", 0)
 	h.SetOptions(options + fmt.Sprintf("paths_file = %q\n", paths))
 	if rep = runOnce(t, h.Env); !strings.HasPrefix(rep.Summary, "1 videos:") {
 		t.Fatalf("paths_file run: %s", rep.Summary)
 	}
 	if status, _ := row(t, h.Env, heat); status != "ok" {
 		t.Fatal("a paths_file run deleted the rows of videos it did not list")
+	}
+	if !strings.Contains(note(pilot), "en.sdh.srt (file beside video)") {
+		t.Fatalf("a new sidecar did not reach the note:\n%s", note(pilot))
 	}
 }
 

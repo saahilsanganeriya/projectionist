@@ -16,7 +16,9 @@ package details
 import (
 	"bufio"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -73,7 +75,10 @@ const schema = `CREATE TABLE IF NOT EXISTS details_files (
   peak_at_s    INTEGER,                  -- where that window starts
   clean        INTEGER,                  -- 1 = start, middle and end decode cleanly; 0 = not; NULL = not checked
   clean_detail TEXT NOT NULL DEFAULT '',
-  checked_at   TEXT NOT NULL             -- when status was last decided (UTC)
+  checked_at   TEXT NOT NULL,            -- when status was last decided (UTC)
+  note_sha     TEXT NOT NULL DEFAULT '', -- the note as last written or confirmed, and its size/mtime then:
+  note_size    INTEGER NOT NULL DEFAULT 0, -- a run only stats a note whose text is unchanged (a read costs
+  note_mtime   INTEGER NOT NULL DEFAULT 0  -- ~100x a stat on the busy NAS)
 )`
 
 // fileRow is one details_files row. A row whose size or mtime no longer match the file is forgotten.
@@ -86,6 +91,9 @@ type fileRow struct {
 	Clean       sql.NullBool
 	CleanDetail string
 	CheckedAt   time.Time
+	NoteSHA     string
+	NoteSize    int64
+	NoteMTime   int64
 }
 
 type video struct {
@@ -183,7 +191,7 @@ type run struct {
 
 func (r *run) one(ctx context.Context, v video, row *fileRow) error {
 	if row == nil || row.Size != v.size || row.MTime != v.mtime {
-		row = &fileRow{Size: v.size, MTime: v.mtime} // new or changed file: earlier verdicts no longer apply
+		row = &fileRow{Size: v.size, MTime: v.mtime} // new or changed file: earlier verdicts (and note state) no longer apply
 	}
 	before := *row
 	info, ok, err := r.env.Probe.Lookup(ctx, v.path)
@@ -228,13 +236,27 @@ func (r *run) one(ctx context.Context, v video, row *fileRow) error {
 	if err := r.heavyFacts(ctx, v, info, row); err != nil {
 		return err
 	}
-	if *row != before {
-		if err := r.save(ctx, v.path, row); err != nil {
-			return err
-		}
+	if err := r.note(v, info, row); err != nil {
+		return err
 	}
+	if *row != before {
+		return r.save(ctx, v.path, row)
+	}
+	return nil
+}
+
+// note brings the note in line with the file. When the text is what the row says was last written and the note
+// still has that size and mtime, a stat suffices; otherwise the note is read, compared and rewritten if needed.
+func (r *run) note(v video, info probe.Info, row *fileRow) error {
 	text := render(v, info, r.original(v.path), r.sidecarsOf(v.path), row)
-	written, err := writeNote(notePath(r.opt, v.path), text)
+	sum := sha256.Sum256([]byte(text))
+	sha := hex.EncodeToString(sum[:])
+	path := notePath(r.opt, v.path)
+	st, err := os.Stat(path)
+	if err == nil && sha == row.NoteSHA && st.Size() == row.NoteSize && st.ModTime().UnixNano() == row.NoteMTime {
+		return nil
+	}
+	written, err := writeNote(path, text)
 	if err != nil {
 		return err
 	}
@@ -242,6 +264,10 @@ func (r *run) one(ctx context.Context, v video, row *fileRow) error {
 		r.rep.Count("written", 1)
 		r.env.Log.Debug("note written", "event", "note_written", "item", v.path)
 	}
+	if st, err = os.Stat(path); err != nil {
+		return err
+	}
+	row.NoteSHA, row.NoteSize, row.NoteMTime = sha, st.Size(), st.ModTime().UnixNano()
 	return nil
 }
 
@@ -376,16 +402,20 @@ func (r *run) sidecarsOf(path string) []string {
 }
 
 func (r *run) save(ctx context.Context, path string, row *fileRow) error {
-	_, err := r.db.ExecContext(ctx, `INSERT INTO details_files(path, size, mtime_ns, status, error, peak_kbps, peak_at_s, clean, clean_detail, checked_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	_, err := r.db.ExecContext(ctx, `INSERT INTO details_files(path, size, mtime_ns, status, error, peak_kbps, peak_at_s, clean, clean_detail, checked_at,
+		  note_sha, note_size, note_mtime)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime_ns=excluded.mtime_ns, status=excluded.status, error=excluded.error,
-		  peak_kbps=excluded.peak_kbps, peak_at_s=excluded.peak_at_s, clean=excluded.clean, clean_detail=excluded.clean_detail, checked_at=excluded.checked_at`,
-		path, row.Size, row.MTime, row.Status, row.Error, row.PeakKbps, row.PeakAt, row.Clean, row.CleanDetail, row.CheckedAt.UTC().Format(time.RFC3339Nano))
+		  peak_kbps=excluded.peak_kbps, peak_at_s=excluded.peak_at_s, clean=excluded.clean, clean_detail=excluded.clean_detail, checked_at=excluded.checked_at,
+		  note_sha=excluded.note_sha, note_size=excluded.note_size, note_mtime=excluded.note_mtime`,
+		path, row.Size, row.MTime, row.Status, row.Error, row.PeakKbps, row.PeakAt, row.Clean, row.CleanDetail, row.CheckedAt.UTC().Format(time.RFC3339Nano),
+		row.NoteSHA, row.NoteSize, row.NoteMTime)
 	return err
 }
 
 func loadRows(ctx context.Context, db *sql.DB) (map[string]*fileRow, error) {
-	q, err := db.QueryContext(ctx, `SELECT path, size, mtime_ns, status, error, peak_kbps, peak_at_s, clean, clean_detail, checked_at FROM details_files`)
+	q, err := db.QueryContext(ctx, `SELECT path, size, mtime_ns, status, error, peak_kbps, peak_at_s, clean, clean_detail, checked_at,
+		note_sha, note_size, note_mtime FROM details_files`)
 	if err != nil {
 		return nil, err
 	}
@@ -394,7 +424,8 @@ func loadRows(ctx context.Context, db *sql.DB) (map[string]*fileRow, error) {
 	for q.Next() {
 		var path, checked string
 		row := &fileRow{}
-		if err := q.Scan(&path, &row.Size, &row.MTime, &row.Status, &row.Error, &row.PeakKbps, &row.PeakAt, &row.Clean, &row.CleanDetail, &checked); err != nil {
+		if err := q.Scan(&path, &row.Size, &row.MTime, &row.Status, &row.Error, &row.PeakKbps, &row.PeakAt, &row.Clean, &row.CleanDetail, &checked,
+			&row.NoteSHA, &row.NoteSize, &row.NoteMTime); err != nil {
 			return nil, err
 		}
 		if row.CheckedAt, err = time.Parse(time.RFC3339Nano, checked); err != nil {
