@@ -114,9 +114,12 @@ func (r *Runner) RunOnce(ctx context.Context, st stage.Stage) (rep stage.Report,
 		attrs = append(attrs, "count_"+k, v)
 		r.Metrics.Add("projectionist_stage_items_total", float64(v), "stage", name, "kind", k)
 	}
-	if err != nil {
+	switch {
+	case outcome == stage.Interrupted:
+		log.Info("run interrupted", append(attrs, "err", err)...)
+	case err != nil:
 		log.Error("run failed", append(attrs, "err", err)...)
-	} else {
+	default:
 		log.Info("run finished", attrs...)
 	}
 	r.Metrics.Add("projectionist_stage_runs_total", 1, "stage", name, "outcome", string(outcome))
