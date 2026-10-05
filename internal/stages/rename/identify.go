@@ -89,8 +89,9 @@ func (id *identifier) canonical(t Title) Title {
 	return t
 }
 
-// resolve names the film or show a top-level folder (or loose file) holds; Why is set when it cannot.
-func (id *identifier) resolve(ctx context.Context, kind, top string) (cachedIdentity, error) {
+// resolve names the film or show a top-level folder (or loose file) holds; Why is set when it cannot. videos are the
+// folder's video paths: a name without a year borrows one from them ('Shogun/S01/Shogun.2024.S01E01...').
+func (id *identifier) resolve(ctx context.Context, kind, top string, videos []string) (cachedIdentity, error) {
 	name := path.Base(top)
 	if strings.Contains(name, ".") && videoExt[lowerExt(name)] { // a loose file
 		name = stem(name)
@@ -106,7 +107,7 @@ func (id *identifier) resolve(ctx context.Context, kind, top string) (cachedIden
 	key := "identity:" + kind + ":" + top
 	if !id.cache.get(ctx, key, &c) || (c.Why != "" && id.now.Sub(c.At) >= id.retry) {
 		var err error
-		if c, err = id.lookup(ctx, kind, name); err != nil {
+		if c, err = id.lookup(ctx, kind, name, videos); err != nil {
 			return cachedIdentity{}, err // TMDB unreachable: nothing is cached, the next run asks again
 		}
 		c.At = id.now
@@ -116,8 +117,16 @@ func (id *identifier) resolve(ctx context.Context, kind, top string) (cachedIden
 	return c, nil
 }
 
-func (id *identifier) lookup(ctx context.Context, kind, name string) (cachedIdentity, error) {
+func (id *identifier) lookup(ctx context.Context, kind, name string, videos []string) (cachedIdentity, error) {
 	title, year := parseRelease(name)
+	for _, v := range videos {
+		if year != 0 {
+			break
+		}
+		if t, y := parseRelease(stem(path.Base(v))); y != 0 && normTitle(t) == normTitle(title) {
+			year = y
+		}
+	}
 	if m := tagInName.FindStringSubmatch(name); m != nil {
 		return id.byTag(ctx, kind, m[1], m[2], title, year)
 	}

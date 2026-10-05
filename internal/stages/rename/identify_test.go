@@ -65,23 +65,30 @@ func (m mapCache) get(_ context.Context, key string, v any) bool { return false 
 func (m mapCache) put(_ context.Context, key string, v any)      { m[key] = v }
 
 // Catches identity sources out of order: a season pack of a show already in the library must take that show's folder
-// without asking TMDB (which would also list "Breaking Bad: Original Minisodes"), and an {imdb-tt} tag must become
-// the TMDB id TMDB maps it to, under the folder's own spelling.
+// without asking TMDB (which would also list "Breaking Bad: Original Minisodes"), an {imdb-tt} tag must become the
+// TMDB id TMDB maps it to under the folder's own spelling, and a folder without a year takes it from its episodes
+// (two "Shōgun" on TMDB: only the year tells them apart).
 func TestResolveOrder(t *testing.T) {
 	srv := fakeTMDB(t, map[string]string{
 		"/find/tt0113277": `{"movie_results":[{"id":949,"title":"Heat","release_date":"1995-12-15"}]}`,
+		"/search/tv?Shogun": `{"results":[{"id":126308,"name":"Shōgun","first_air_date":"2024-02-27"},
+			{"id":13862,"name":"Shōgun","first_air_date":"1980-09-15"}]}`,
 	})
 	key := filepath.Join(t.TempDir(), "key")
 	write(t, key, "test-tmdb-key")
 	id := newIdentifier(&tmdb.Client{KeyFile: key, API: srv.URL}, mapCache{}, time.Unix(0, 0), time.Hour)
 	id.learn("show", []string{"/lib/TV/Breaking Bad (2008) {tmdb-1396}"})
-	c, err := id.resolve(context.Background(), "show", "/lib/TV/Breaking.Bad.S05.1080p.BluRay.x264-ROVERS")
+	c, err := id.resolve(context.Background(), "show", "/lib/TV/Breaking.Bad.S05.1080p.BluRay.x264-ROVERS", nil)
 	if err != nil || c.Title != (Title{ID: "tmdb-1396", Name: "Breaking Bad", Year: 2008}) {
 		t.Fatalf("season pack: %+v, %v", c, err)
 	}
-	c, err = id.resolve(context.Background(), "movie", "/lib/Movies/Remote Versions/Heat (1995) {imdb-tt0113277}")
+	c, err = id.resolve(context.Background(), "movie", "/lib/Movies/Remote Versions/Heat (1995) {imdb-tt0113277}", nil)
 	if err != nil || c.Title.ID != "tmdb-949" || c.Title.Name != "Heat" || c.Title.Year != 1995 {
 		t.Fatalf("imdb tag: %+v, %v", c, err)
+	}
+	c, err = id.resolve(context.Background(), "show", "/lib/TV/Shogun", []string{"/lib/TV/Shogun/S01/Shogun.2024.S01E01.1080p.x265-AMBER.mkv"})
+	if err != nil || c.Title.ID != "tmdb-126308" {
+		t.Fatalf("year from the episode names: %+v, %v", c, err)
 	}
 }
 

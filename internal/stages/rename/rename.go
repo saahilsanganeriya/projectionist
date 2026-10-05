@@ -244,7 +244,7 @@ func gather(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options,
 	showVideos := map[string][]string{}
 	for _, k := range sortedKeys(tops) {
 		kind, top, _ := strings.Cut(k, ":")
-		c, err := id.resolve(ctx, kind, top)
+		c, err := id.resolve(ctx, kind, top, tops[k])
 		if err != nil {
 			rep.Count("tmdb_errors", 1)
 			env.Log.Warn("identity lookup failed", "event", "tmdb_error", "item", top, "err", err)
@@ -564,22 +564,25 @@ func apply(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, 
 		}
 	}()
 	for _, u := range sortedKeys(units) {
+		started := time.Now()
 		if others, err := env.Viewers.Count(ctx); err != nil || others > 0 { // unknown counts as busy
 			env.Log.Info("viewers: units wait for the next run", "event", "viewer_wait", "others", others, "err", err)
 			rep.Count("units_viewer_wait", 1)
 			return touched, nil
 		}
+		gated := time.Now()
 		err := x.runUnit(ctx, u, units[u], touched)
+		timing := []any{"gate_ms", gated.Sub(started).Milliseconds(), "act_ms", time.Since(gated).Milliseconds()}
 		switch {
 		case errors.Is(err, ErrUnitStopped):
 			rep.Count("units_stopped", 1)
 			rep.Alert("%s stopped: %v", u, err)
-			env.Log.Warn("unit stopped", "event", "unit_stopped", "unit", u, "err", err)
+			env.Log.Warn("unit stopped", append([]any{"event", "unit_stopped", "unit", u, "err", err}, timing...)...)
 		case err != nil:
 			return touched, fmt.Errorf("%s: %w", u, err)
 		default:
 			rep.Count("units_done", 1)
-			env.Log.Info("unit done", "event", "unit_done", "unit", u, "ops", len(units[u]))
+			env.Log.Info("unit done", append([]any{"event", "unit_done", "unit", u, "ops", len(units[u])}, timing...)...)
 		}
 	}
 	return touched, nil
