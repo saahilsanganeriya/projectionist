@@ -52,7 +52,9 @@ owner_file      = "/config/collections.owner.json"
 poster_dir      = "/config/collection-posters" # <ratingKey>.jpg
 approved_file   = "/config/collections.approved.json" # config/collections.approved.json in this repo
 plex_section    = 4
-sinks           = ["plex", "jellyfin"]
+sinks           = ["plex", "jellyfin"] # reconciled concurrently; a slow or down app never fails or holds up the run
+sink_budget     = "20m" # each app's share of a run; out of time, it triggers the next run, which carries on
+call_timeout    = "2m"  # each request, on this stage's own clients ([plex] and [jellyfin] timeouts stay short)
 # A director here gets a "zz<name>" collection once their third film is on disk (names as TMDB spells them).
 canon_directors = [
   "Paul Greengrass", "Vishal Bhardwaj", "George Miller", "Robert Zemeckis", "Nicolas Winding Refn", "Hayao Miyazaki",

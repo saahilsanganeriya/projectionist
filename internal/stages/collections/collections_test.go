@@ -1,6 +1,7 @@
 package collections
 
 import (
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,6 +20,8 @@ import (
 	"time"
 
 	"projectionist/internal/fake"
+	"projectionist/internal/jellyfin"
+	"projectionist/internal/plex"
 	"projectionist/internal/stage"
 	"projectionist/internal/tmdb"
 )
@@ -77,10 +81,12 @@ type coll struct {
 }
 
 type app struct {
-	mu     sync.Mutex
-	colls  []*coll
-	writes int
-	refuse map[string]bool // "<create|poster> <title>": Jellyfin answers 400
+	mu         sync.Mutex
+	colls      []*coll
+	writes     int
+	fail       map[string]int        // "<create|poster> <title>" → the status the app answers instead
+	stall      func(r *http.Request) // runs once inside the next collection-list request (Plex)
+	afterWrite func()                // runs after each write, under the app's lock
 }
 
 func (a *app) find(id string) *coll {
@@ -107,7 +113,7 @@ func addNew(have, add []string) []string {
 	return have
 }
 
-// read and write wrap a fake handler in the app's lock; write also counts the call.
+// read wraps a fake handler in the app's lock.
 func (a *app) read(fn func(w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
@@ -116,8 +122,19 @@ func (a *app) read(fn func(w http.ResponseWriter, r *http.Request)) http.Handler
 	}
 }
 
-func (a *app) write(fn func(r *http.Request)) http.HandlerFunc {
-	return a.read(func(_ http.ResponseWriter, r *http.Request) { a.writes++; fn(r) })
+// change applies one write under the app's lock, or answers fail[what] instead when that is set.
+func (a *app) change(w http.ResponseWriter, what string, fn func()) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if code := a.fail[what]; code != 0 {
+		w.WriteHeader(code)
+		return
+	}
+	a.writes++
+	fn()
+	if a.afterWrite != nil {
+		a.afterWrite()
+	}
 }
 
 func writeJSON(w http.ResponseWriter, v any) { json.NewEncoder(w).Encode(v) }
@@ -165,39 +182,47 @@ func servePlex(h *fake.Harness, a *app, ids ...int) {
 			}
 			plexJSON(w, out)
 		}))
-		h.Plex.HandleFunc("PUT", "/library/collections/"+c.ID+"/items", a.write(func(r *http.Request) { c.Members = addNew(c.Members, members(r)) }))
+		h.Plex.HandleFunc("PUT", "/library/collections/"+c.ID+"/items", func(w http.ResponseWriter, r *http.Request) {
+			a.change(w, "add "+c.Title, func() { c.Members = addNew(c.Members, members(r)) })
+		})
 	}
 	for _, c := range a.colls {
 		route(c)
 	}
-	h.Plex.HandleFunc("GET", "/library/sections/4/collections", a.read(func(w http.ResponseWriter, _ *http.Request) {
+	h.Plex.HandleFunc("GET", "/library/sections/4/collections", a.read(func(w http.ResponseWriter, r *http.Request) {
+		if stall := a.stall; stall != nil {
+			a.stall = nil
+			stall(r)
+		}
 		var out []any
 		for _, c := range a.colls {
 			out = append(out, map[string]any{"ratingKey": c.ID, "title": c.Title, "titleSort": c.Sort, "childCount": len(c.Members)})
 		}
 		plexJSON(w, out)
 	}))
-	h.Plex.HandleFunc("POST", "/library/collections", a.write(func(r *http.Request) {
-		route(a.create(fmt.Sprint(900+len(a.colls)), r.URL.Query().Get("title"), members(r)))
-	}))
-	h.Plex.HandleFunc("PUT", "/library/sections/4/all", a.write(func(r *http.Request) {
-		a.find(r.URL.Query().Get("id")).Sort = r.URL.Query().Get("titleSort.value")
-	}))
+	h.Plex.HandleFunc("POST", "/library/collections", func(w http.ResponseWriter, r *http.Request) {
+		title := r.URL.Query().Get("title")
+		a.change(w, "create "+title, func() { route(a.create(fmt.Sprint(900+len(a.colls)), title, members(r))) })
+	})
+	h.Plex.HandleFunc("PUT", "/library/sections/4/all", func(w http.ResponseWriter, r *http.Request) {
+		a.change(w, "sort", func() { a.find(r.URL.Query().Get("id")).Sort = r.URL.Query().Get("titleSort.value") })
+	})
+}
+
+// jfSortName is the SortName Jellyfin 12.1 shows for a sort title: lowercased, '-' dropped, digit runs padded to 10.
+func jfSortName(s string) string {
+	s = strings.ToLower(strings.ReplaceAll(s, "-", ""))
+	return regexp.MustCompile(`\d+`).ReplaceAllStringFunc(s, func(d string) string { return strings.Repeat("0", 10-len(d)) + d })
 }
 
 // serveJellyfin is servePlex for Jellyfin 12.1: items "jf<id>", BoxSets in a, which count and list their children
-// only for a userId, and posters (base64 bodies) recorded per collection title.
+// only for a userId and name their ForcedSortName only for Fields=Settings, and posters (base64 bodies) recorded
+// per collection title.
 func serveJellyfin(h *fake.Harness, a *app, posters map[string]string, ids ...int) {
-	refused := func(w http.ResponseWriter, what string) bool {
-		if a.refuse[what] {
-			w.WriteHeader(http.StatusBadRequest)
-		}
-		return a.refuse[what]
-	}
 	route := func(c *coll) {
-		h.Jellyfin.HandleFunc("POST", "/Collections/"+c.ID+"/Items", a.write(func(r *http.Request) {
-			c.Members = addNew(c.Members, strings.Split(r.URL.Query().Get("ids"), ","))
-		}))
+		h.Jellyfin.HandleFunc("POST", "/Collections/"+c.ID+"/Items", func(w http.ResponseWriter, r *http.Request) {
+			a.change(w, "add "+c.Title, func() { c.Members = addNew(c.Members, strings.Split(r.URL.Query().Get("ids"), ",")) })
+		})
 		h.Jellyfin.HandleFunc("GET", "/Items/"+c.ID, a.read(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Query().Get("userId") != "admin" { // as Jellyfin 12.1 answers
 				w.WriteHeader(http.StatusBadRequest)
@@ -205,23 +230,23 @@ func serveJellyfin(h *fake.Harness, a *app, posters map[string]string, ids ...in
 			}
 			writeJSON(w, map[string]string{"Id": c.ID, "Name": c.Title, "ForcedSortName": c.Sort, "Other": c.Other})
 		}))
-		h.Jellyfin.HandleFunc("POST", "/Items/"+c.ID, a.write(func(r *http.Request) {
+		h.Jellyfin.HandleFunc("POST", "/Items/"+c.ID, func(w http.ResponseWriter, r *http.Request) {
 			var body map[string]string
 			json.NewDecoder(r.Body).Decode(&body)
-			c.Sort, c.Other = body["ForcedSortName"], body["Other"]
-		}))
+			a.change(w, "sort "+c.Title, func() { c.Sort, c.Other = body["ForcedSortName"], body["Other"] })
+		})
 		h.Jellyfin.HandleFunc("POST", "/Items/"+c.ID+"/Images/Primary", func(w http.ResponseWriter, r *http.Request) {
 			raw, _ := io.ReadAll(r.Body)
 			img, err := base64.StdEncoding.DecodeString(string(raw))
-			if refused(w, "poster "+c.Title) {
-				return
-			}
 			if err != nil {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			a.write(func(r *http.Request) { posters[c.Title] = r.Header.Get("Content-Type") + " " + string(img) })(w, r)
+			a.change(w, "poster "+c.Title, func() { posters[c.Title] = r.Header.Get("Content-Type") + " " + string(img) })
 		})
+	}
+	for _, c := range a.colls {
+		route(c)
 	}
 	h.Jellyfin.Handle("GET", "/Users", 200, `[{"Id":"guest","Policy":{"IsAdministrator":false}},{"Id":"admin","Policy":{"IsAdministrator":true}}]`)
 	h.Jellyfin.HandleFunc("GET", "/Items", a.read(func(w http.ResponseWriter, r *http.Request) {
@@ -239,7 +264,10 @@ func serveJellyfin(h *fake.Harness, a *app, posters map[string]string, ids ...in
 			}
 		case q.Get("IncludeItemTypes") == "BoxSet":
 			for _, c := range a.colls {
-				box := map[string]any{"Id": c.ID, "Name": c.Title, "SortName": c.Sort}
+				box := map[string]any{"Id": c.ID, "Name": c.Title, "SortName": jfSortName(cmp.Or(c.Sort, c.Title))}
+				if strings.Contains(q.Get("Fields"), "Settings") && c.Sort != "" {
+					box["ForcedSortName"] = c.Sort
+				}
 				if asUser {
 					box["ChildCount"] = len(c.Members)
 				}
@@ -254,16 +282,14 @@ func serveJellyfin(h *fake.Harness, a *app, posters map[string]string, ids ...in
 	}))
 	h.Jellyfin.HandleFunc("POST", "/Collections", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		if !refused(w, "create "+q.Get("name")) {
-			a.write(func(*http.Request) {
-				route(a.create(fmt.Sprint("box", len(a.colls)), q.Get("name"), strings.Split(q.Get("ids"), ",")))
-			})(w, r)
-		}
+		a.change(w, "create "+q.Get("name"), func() {
+			route(a.create(fmt.Sprint("box", len(a.colls)), q.Get("name"), strings.Split(q.Get("ids"), ",")))
+		})
 	})
 }
 
-// setup writes the owner's collections (one, with a poster), the approved list (one franchise), movie folders for
-// ids, and the stage options; extra is appended to the options.
+// setup writes the owner's collections (one, with a poster), the approved list (one franchise, its sort title with
+// characters Jellyfin rewrites in SortName), movie folders for ids, and the stage options; extra is appended.
 func setup(t *testing.T, h *fake.Harness, extra string, ids ...int) (moviesDir string) {
 	dir := t.TempDir()
 	moviesDir = filepath.Join(dir, "Movies")
@@ -275,7 +301,7 @@ func setup(t *testing.T, h *fake.Harness, extra string, ids ...int) (moviesDir s
 	os.WriteFile(filepath.Join(dir, "posters", "40699.jpg"), []byte("JPEG"), 0o644)
 	os.WriteFile(filepath.Join(dir, "collections.json"), []byte(`[{"ratingKey":"40699","title":"\u200eChristopher Nolan",
 		"titleSort":"zzChristopher Nolan","members":[{"ids":["imdb://tt1","tmdb://1"]},{"ids":["tmdb://2"]}]}]`), 0o644)
-	os.WriteFile(filepath.Join(dir, "approved.json"), []byte(`[{"name":"Scary Movie","kind":"franchise","sort_title":null,
+	os.WriteFile(filepath.Join(dir, "approved.json"), []byte(`[{"name":"Scary Movie","kind":"franchise","sort_title":"Scary Movie 1-5",
 		"tmdb_collection":["Scary Movie Collection"],"members":[{"title":"Scary Movie","year":2000,"tmdb":3},{"tmdb":4}]}]`), 0o644)
 	h.SetOptions(fmt.Sprintf("movies_dir = %q\nowner_file = %q\nposter_dir = %q\napproved_file = %q\n%s",
 		moviesDir, filepath.Join(dir, "collections.json"), filepath.Join(dir, "posters"), filepath.Join(dir, "approved.json"), extra))
@@ -292,16 +318,22 @@ func runOnce(t *testing.T, h *fake.Harness) *stage.Report {
 }
 
 // Catches: re-adding members an app already holds, removing the owner's extra member, rewriting a sort title that is
-// already right, a partial Jellyfin update that blanks the item's other fields, a poster not sent as base64 JPEG, a
-// second run that writes anything or re-reads unchanged member lists (Jellyfin read without a userId: every
-// collection looks empty, so every run re-adds every member), a changed collection whose list is not re-read, and
-// an item list read as one page, which times out on the real library.
+// already right (Jellyfin's SortName is not the sort title it was given), a partial Jellyfin update that blanks the
+// item's other fields, a poster not sent as base64 JPEG, a second run that writes anything or re-reads unchanged
+// member lists (Jellyfin read without a userId: every collection looks empty, so every run re-adds every member), a
+// collection just created whole read back, a changed collection whose list is not re-read, an item list read as one
+// page, which times out on the real library, and calls bounded by the shared clients' timeout, not call_timeout.
 func TestRunMakesBothAppsMatchThenStops(t *testing.T) {
 	defer func(size int) { pageSize = size }(pageSize)
 	pageSize = 3 // four films: the item lists come in two pages
 	h := fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "mid"})
+	// The shared clients give up at once: the stage must use clients bounded by its own call_timeout.
+	h.Env.Plex = plex.New(h.Plex.URL, h.PrefsPath, time.Nanosecond)
+	keyFile := filepath.Join(t.TempDir(), "key")
+	os.WriteFile(keyFile, []byte(fake.JellyfinKey), 0o600)
+	h.Env.Jellyfin = jellyfin.New(h.Jellyfin.URL, keyFile, time.Nanosecond)
 	px := &app{colls: []*coll{{ID: "900", Title: "\u200eChristopher Nolan", Sort: "zzChristopher Nolan", Members: []string{"101", "177"}}}}
-	jf := &app{}
+	jf := &app{colls: []*coll{{ID: "box0", Title: "Christopher Nolan", Sort: "zzChristopher Nolan", Members: []string{"jf1", "jf77"}, Other: "kept"}}}
 	posters := map[string]string{}
 	servePlex(h, px, 1, 2, 3, 4)
 	serveJellyfin(h, jf, posters, 1, 2, 3, 4)
@@ -312,48 +344,50 @@ func TestRunMakesBothAppsMatchThenStops(t *testing.T) {
 	if len(add) != 1 || !strings.HasSuffix(add[0].RawQuery, "uri=server%3A%2F%2Fmid%2Fcom.plexapp.plugins.library%2Flibrary%2Fmetadata%2F102") {
 		t.Fatalf("plex adds to the owner's collection = %+v; want only 102", add)
 	}
+	if add := h.Jellyfin.Calls("POST", "/Collections/box0/Items"); len(add) != 1 || add[0].RawQuery != "ids=jf2" {
+		t.Fatalf("jellyfin adds to the owner's collection = %+v; want only jf2", add)
+	}
 	want := []coll{
 		{ID: "900", Title: "\u200eChristopher Nolan", Sort: "zzChristopher Nolan", Members: []string{"101", "177", "102"}},
-		{ID: "901", Title: "Scary Movie", Members: []string{"103", "104"}, Other: "kept"},
-	}
-	for i, c := range px.colls {
-		if !reflect.DeepEqual(*c, want[i]) {
-			t.Errorf("plex collection %d = %+v; want %+v", i, *c, want[i])
-		}
-	}
-	if len(h.Plex.Calls("PUT", "/library/sections/4/all")) != 0 {
-		t.Error("plex sort title rewritten although it was already right")
+		{ID: "901", Title: "Scary Movie", Sort: "Scary Movie 1-5", Members: []string{"103", "104"}, Other: "kept"},
 	}
 	wantJF := []coll{
-		{ID: "box0", Title: "Christopher Nolan", Sort: "zzChristopher Nolan", Members: []string{"jf1", "jf2"}, Other: "kept"},
-		{ID: "box1", Title: "Scary Movie", Members: []string{"jf3", "jf4"}, Other: "kept"},
+		{ID: "box0", Title: "Christopher Nolan", Sort: "zzChristopher Nolan", Members: []string{"jf1", "jf77", "jf2"}, Other: "kept"},
+		{ID: "box1", Title: "Scary Movie", Sort: "Scary Movie 1-5", Members: []string{"jf3", "jf4"}, Other: "kept"},
 	}
-	for i, c := range jf.colls {
-		if !reflect.DeepEqual(*c, wantJF[i]) {
-			t.Errorf("jellyfin collection %d = %+v; want %+v", i, *c, wantJF[i])
+	for name, got := range map[string][]*coll{"plex": px.colls, "jellyfin": jf.colls} {
+		w := map[string][]coll{"plex": want, "jellyfin": wantJF}[name]
+		for i, c := range got {
+			if i >= len(w) || !reflect.DeepEqual(*c, w[i]) {
+				t.Errorf("%s collection %d = %+v; want %+v", name, i, *c, w)
+			}
+		}
+	}
+	for _, c := range h.Plex.Calls("PUT", "/library/sections/4/all") {
+		if strings.Contains(c.RawQuery, "id=900") {
+			t.Error("plex sort title rewritten although it was already right")
 		}
 	}
 	if !reflect.DeepEqual(posters, map[string]string{"Christopher Nolan": "image/jpeg JPEG"}) {
 		t.Errorf("jellyfin posters = %v", posters)
 	}
 
-	if n := len(h.Jellyfin.Calls("POST", "/Collections/box0/Items")); n != 0 {
-		t.Errorf("jellyfin got %d member adds for a collection it was just given whole", n)
-	}
-	jfMemberReads := func() (n int) {
+	memberReads := func() (plex901, jfBox0, jfBox1 int) {
 		for _, c := range h.Jellyfin.Calls("GET", "/Items") {
-			n += strings.Count(c.RawQuery, "ParentId=")
+			jfBox0 += strings.Count(c.RawQuery, "ParentId=box0")
+			jfBox1 += strings.Count(c.RawQuery, "ParentId=box1")
 		}
-		return n
+		return len(h.Plex.Calls("GET", "/library/collections/901/children")), jfBox0, jfBox1
 	}
-	before, jfReads := px.writes+jf.writes, jfMemberReads()
+	before := px.writes + jf.writes
 	runOnce(t, h)
 	if after := px.writes + jf.writes; after != before {
 		t.Errorf("second run sent %d writes; want none", after-before)
 	}
-	if n := len(h.Plex.Calls("GET", "/library/collections/900/children")); n != 1 || jfMemberReads() != jfReads {
-		t.Errorf("members of unchanged collections read again: plex %d times over two runs (want 1), jellyfin %d times on the second run (want 0)",
-			n, jfMemberReads()-jfReads)
+	plex900 := len(h.Plex.Calls("GET", "/library/collections/900/children"))
+	if plex901, jfBox0, jfBox1 := memberReads(); plex900 != 1 || jfBox0 != 1 || plex901 != 0 || jfBox1 != 0 {
+		t.Errorf("member lists read over two runs: plex owner %d, jellyfin owner %d (want 1 each), created plex %d, jellyfin %d (want 0)",
+			plex900, jfBox0, plex901, jfBox1)
 	}
 	px.colls[0].Members = px.colls[0].Members[:1] // someone took films out: the count moves, so the list is read again
 	runOnce(t, h)
@@ -376,7 +410,7 @@ func TestDryAndOnlyRunsKeepNoState(t *testing.T) {
 		t.Fatalf("dry run sent %d writes", n)
 	}
 	want := map[string]int{"plex_create": 2, "plex_create_members": 4, "jellyfin_create": 2, "jellyfin_create_members": 4,
-		"plex_sort": 1, "jellyfin_sort": 1, "jellyfin_poster": 1}
+		"plex_sort": 2, "jellyfin_sort": 2, "jellyfin_poster": 1}
 	for k, v := range want {
 		if rep.Counts[k] != v {
 			t.Errorf("count %s = %d; want %d (all %v)", k, rep.Counts[k], v, rep.Counts)
@@ -393,13 +427,12 @@ func TestDryAndOnlyRunsKeepNoState(t *testing.T) {
 	}
 }
 
-// Catches: a Plex that answers 5xx holding up Jellyfin, a 5xx taken for a refusal (the next collection tried at once,
-// with no backoff), a Plex that is asked again on every run instead of backing off, and a Plex that stays broken
-// without the owner hearing of it.
+// Catches: a Plex that is down (its collection list answers 503) holding Jellyfin up or failing the run, a Plex
+// asked again on every run instead of backing off, and a Plex that stays down without the owner hearing of it.
 func TestPlexOutageBacksOffAndNeverFailsTheRun(t *testing.T) {
 	h := fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "mid"})
 	servePlex(h, &app{}, 1, 2, 3, 4)
-	h.Plex.Handle("POST", "/library/collections", http.StatusServiceUnavailable, "busy scanning")
+	h.Plex.Handle("GET", "/library/sections/4/collections", http.StatusServiceUnavailable, "busy scanning")
 	jf := &app{}
 	serveJellyfin(h, jf, map[string]string{}, 1, 2, 3, 4)
 	setup(t, h, "", 1, 2, 3, 4)
@@ -409,8 +442,8 @@ func TestPlexOutageBacksOffAndNeverFailsTheRun(t *testing.T) {
 		t.Fatalf("jellyfin %d collections, alerts %v, counts %v", len(jf.colls), rep.Alerts, rep.Counts)
 	}
 	runOnce(t, h)
-	if n := len(h.Plex.Calls("POST", "/library/collections")); n != 1 {
-		t.Fatalf("plex create tried %d times over two runs; want 1, then a backoff", n)
+	if n := len(h.Plex.Calls("GET", "/library/sections/4/collections")); n != 1 {
+		t.Fatalf("plex collection list asked %d times over two runs; want 1, then a backoff", n)
 	}
 	h.Now = h.Now.Add(25 * time.Hour)
 	rep = runOnce(t, h)
@@ -419,12 +452,104 @@ func TestPlexOutageBacksOffAndNeverFailsTheRun(t *testing.T) {
 	}
 }
 
+// Catches: one collection whose write always answers 5xx backing the whole sink off, so the collections after it are
+// never reached; that collection tried again on every run instead of on its own backoff; it failing for a day
+// without the owner hearing which one; and its parking outliving the fix.
+func TestPoisonWriteParksOnlyItsCollection(t *testing.T) {
+	h := fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "mid"})
+	px := &app{fail: map[string]int{"create Christopher Nolan": http.StatusInternalServerError}}
+	servePlex(h, px, 1, 2, 3, 4)
+	setup(t, h, `sinks = ["plex"]`, 1, 2, 3, 4)
+
+	rep := runOnce(t, h)
+	if len(px.colls) != 1 || px.colls[0].Title != "Scary Movie" || rep.Counts["plex_failed"] != 0 || len(rep.Alerts) != 0 {
+		t.Fatalf("plex %+v, counts %v, alerts %v; want Scary Movie made past the failing Christopher Nolan, no backoff, no alert yet",
+			px.colls, rep.Counts, rep.Alerts)
+	}
+	h.Now = h.Now.Add(time.Minute)
+	runOnce(t, h)
+	if n := len(h.Plex.Calls("POST", "/library/collections")); n != 2 {
+		t.Fatalf("plex creates over two runs = %d; want 2 (the failing one waits on its own backoff)", n)
+	}
+	h.Now = h.Now.Add(25 * time.Hour)
+	rep = runOnce(t, h)
+	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], `plex: 1 collection(s) failing for over a day, retried with backoff; first: create "Christopher Nolan"`) {
+		t.Fatalf("alerts after a day = %v", rep.Alerts)
+	}
+	px.mu.Lock()
+	px.fail = nil
+	px.mu.Unlock()
+	h.Now = h.Now.Add(25 * time.Hour)
+	if rep = runOnce(t, h); len(px.colls) != 2 || len(rep.Alerts) != 0 {
+		t.Errorf("after the fix: plex %d collections, alerts %v; want 2 and none", len(px.colls), rep.Alerts)
+	}
+}
+
+// Catches: the sinks reconciled one after another, so a slow Plex holds Jellyfin up; a Plex pass with no time budget,
+// which then holds the run up; a pass cut by its budget backed off like a failure (the next run would skip Plex); and
+// that next run not triggered at once.
+func TestSlowPlexHoldsUpNeitherJellyfinNorTheRun(t *testing.T) {
+	h := fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "mid"})
+	var mu sync.Mutex
+	now := h.Now
+	h.Env.Now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	var triggered []string
+	h.Env.Trigger = func(s string) bool { triggered = append(triggered, s); return true }
+	jfDone := make(chan struct{})
+	jf, px := &app{}, &app{}
+	jf.afterWrite = func() { // Jellyfin's whole pass: two creates, two sort titles, one poster
+		if jf.writes == 5 {
+			close(jfDone)
+		}
+	}
+	px.stall = func(r *http.Request) { // Plex's collection list answers only once Jellyfin is done, 25 minutes in
+		select {
+		case <-jfDone:
+		case <-r.Context().Done():
+		}
+		mu.Lock()
+		now = now.Add(25 * time.Minute)
+		mu.Unlock()
+	}
+	servePlex(h, px, 1, 2, 3, 4)
+	serveJellyfin(h, jf, map[string]string{}, 1, 2, 3, 4)
+	setup(t, h, "sink_budget = \"20m\"\ncall_timeout = \"5s\"", 1, 2, 3, 4)
+
+	rep := runOnce(t, h)
+	if len(jf.colls) != 2 || len(px.colls) != 0 || rep.Counts["plex_unfinished"] != 1 || rep.Counts["plex_failed"] != 0 ||
+		len(rep.Alerts) != 0 || !slices.Equal(triggered, []string{"collections"}) {
+		t.Fatalf("run 1: jellyfin %d collections, plex %d, counts %v, alerts %v, triggered %v; want 2, 0 (out of time before "+
+			"its creates), plex_unfinished 1, no alert, one trigger", len(jf.colls), len(px.colls), rep.Counts, rep.Alerts, triggered)
+	}
+	runOnce(t, h)
+	if len(px.colls) != 2 {
+		t.Errorf("plex collections after the triggered run = %d; want 2 (a pass out of time is no failure to back off from)", len(px.colls))
+	}
+}
+
+// Catches: the app's item list read again on every run, up to hourly, for as long as a wanted film is missing from it
+// (Jellyfin lacks 120 of them), instead of once a day plus one more look an hour or more after it was first missed.
+func TestItemListIsReadOnceADay(t *testing.T) {
+	h := fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "mid"})
+	servePlex(h, &app{}, 1, 2, 3) // 4 is on disk and in Scary Movie, but Plex has not scanned it
+	setup(t, h, `sinks = ["plex"]`, 1, 2, 3, 4)
+	var reads []int
+	for _, after := range []time.Duration{0, 2 * time.Hour, 2 * time.Hour, 23 * time.Hour} {
+		h.Now = h.Now.Add(after)
+		runOnce(t, h)
+		reads = append(reads, len(h.Plex.Calls("GET", "/library/sections/4/all")))
+	}
+	if want := []int{1, 2, 2, 3}; !slices.Equal(reads, want) {
+		t.Errorf("item list reads after runs at 0, 2 h, 4 h, 27 h = %v; want %v", reads, want)
+	}
+}
+
 // Catches: a change Jellyfin refuses holding the sink's other collections up behind a backoff, a refusal passing
 // without an alert, a refused poster recorded as sent (so never tried again), and a poster file missing from
 // poster_dir (the deploy copy skipped) passing in silence.
 func TestRefusalsAreSkippedPerCollection(t *testing.T) {
 	h := fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "mid"})
-	jf := &app{refuse: map[string]bool{"create Scary Movie": true, "poster Christopher Nolan": true}}
+	jf := &app{fail: map[string]int{"create Scary Movie": http.StatusBadRequest, "poster Christopher Nolan": http.StatusBadRequest}}
 	serveJellyfin(h, jf, map[string]string{}, 1, 2, 3, 4)
 	movies := setup(t, h, `sinks = ["jellyfin"]`, 1, 2, 3, 4)
 	for run := range 2 {

@@ -9,9 +9,11 @@
 //
 // Facts come from the files (movie folders carry {tmdb-N}) and from TMDB directly. Plex and Jellyfin are only sinks:
 // each run diffs the desired members against what each app holds and sends just the missing creates, member adds,
-// sort titles and (Jellyfin) posters. Nothing is ever removed. A request the app refuses (4xx) is skipped for that
-// collection and alerted; a sink that is down is backed off and never fails the run, and one that stays down for a
-// day raises an alert.
+// sort titles and (Jellyfin) posters. Nothing is ever removed. The two apps are reconciled concurrently, each within
+// its own time budget (sink_budget) on its own clients (call_timeout): a slow app holds up neither the other nor the
+// run, and a pass out of time triggers the next run, which carries on. A change the app refuses (4xx) is skipped and
+// alerted; one it answers 5xx parks just that collection on its own backoff; an app that does not answer is backed
+// off. None of it fails the run, and anything still failing after a day raises an alert.
 //
 // Arrivals: the first run records every film on disk as the baseline, so the curated lists stay as approved. A film
 // first seen later is an arrival: its TMDB record, directors and their filmographies decide its joins, which are
@@ -30,6 +32,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"projectionist/internal/library"
 	"projectionist/internal/stage"
@@ -43,15 +47,17 @@ const (
 )
 
 type Options struct {
-	MoviesDir      string   `toml:"movies_dir"`
-	OwnerFile      string   `toml:"owner_file"` // the owner's collections, frozen from the Plex export
-	PosterDir      string   `toml:"poster_dir"` // <ratingKey>.jpg for each of them, copied once from the export
-	ApprovedFile   string   `toml:"approved_file"`
-	PlexSection    int      `toml:"plex_section"`
-	Sinks          []string `toml:"sinks"`
-	CanonDirectors []string `toml:"canon_directors"` // such a director gets a collection at their third film on disk
-	Only           []string `toml:"only"`            // reconcile just these collections; empty means all
-	DryRun         bool     `toml:"dry_run"`         // log every write instead of sending it
+	MoviesDir      string        `toml:"movies_dir"`
+	OwnerFile      string        `toml:"owner_file"` // the owner's collections, frozen from the Plex export
+	PosterDir      string        `toml:"poster_dir"` // <ratingKey>.jpg for each of them, copied once from the export
+	ApprovedFile   string        `toml:"approved_file"`
+	PlexSection    int           `toml:"plex_section"`
+	Sinks          []string      `toml:"sinks"`
+	CanonDirectors []string      `toml:"canon_directors"` // such a director gets a collection at their third film on disk
+	Only           []string      `toml:"only"`            // reconcile just these collections; empty means all
+	DryRun         bool          `toml:"dry_run"`         // log every write instead of sending it
+	SinkBudget     time.Duration `toml:"sink_budget"`     // each app's share of a run; no request starts after it
+	CallTimeout    time.Duration `toml:"call_timeout"`    // each request to an app, on this stage's own clients
 }
 
 func defaults() Options {
@@ -62,6 +68,8 @@ func defaults() Options {
 		ApprovedFile: "/config/collections.approved.json",
 		PlexSection:  4,
 		Sinks:        []string{"plex", "jellyfin"},
+		SinkBudget:   20 * time.Minute,
+		CallTimeout:  2 * time.Minute, // a member list took over 90 s while Jellyfin ran its first scan
 	}
 }
 
@@ -524,9 +532,6 @@ type run struct {
 	disk    map[int]bool
 	canon   map[string]bool
 	targets []*collection // the desired collections this run reconciles (all, or the `only` list)
-
-	skipped   int    // collection changes the current sink refused or could not be given this run
-	firstSkip string // the first of them, for the alert
 }
 
 func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
@@ -567,11 +572,21 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 			r.targets = append(r.targets, c)
 		}
 	}
-	for _, s := range sinks {
-		if err := ctx.Err(); err != nil {
-			return err
+	passes := make([]*pass, len(sinks))
+	var wg sync.WaitGroup
+	for i, s := range sinks {
+		passes[i] = &pass{run: r, s: s, rep: &stage.Report{}}
+		wg.Go(func() { passes[i].apply(ctx) })
+	}
+	wg.Wait()
+	for _, p := range passes {
+		rep.Alerts = append(rep.Alerts, p.rep.Alerts...)
+		for k, n := range p.rep.Counts {
+			rep.Count(k, n)
 		}
-		r.apply(ctx, s)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	rep.Summary = fmt.Sprintf("%d desired collections (%d reconciled), %d films on disk", len(r.want.list), len(r.targets), len(r.disk))
 	return nil

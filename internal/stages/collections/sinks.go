@@ -18,6 +18,7 @@ import (
 	"projectionist/internal/jellyfin"
 	"projectionist/internal/library"
 	"projectionist/internal/plex"
+	"projectionist/internal/stage"
 )
 
 // A sink is an app that shows the collections. Item and collection ids are the app's own.
@@ -38,13 +39,14 @@ type posterSink interface {
 
 // held is a collection as an app holds it.
 type held struct {
-	ID, Sort string
-	Count    int // members, as the app counts them
+	ID, Sort string // Sort: the sort title the app was given (Jellyfin's ForcedSortName), not a form it derives
+	Count    int    // members, as the app counts them
 }
 
 const (
-	addressTTL   = 24 * time.Hour // the item list is re-read once a day...
-	addressRetry = time.Hour      // ...or hourly while a film on disk is missing from it (the app has not scanned it yet)
+	addressTTL   = 24 * time.Hour // the item list is read once a day...
+	addressRetry = time.Hour      // ...and early, at most hourly, while it lacks a wanted film on disk...
+	lookTwice    = 2              // ...until that many reads in a row have lacked it: then it waits for the daily read
 	backoffBase  = 15 * time.Minute
 	backoffMax   = 24 * time.Hour
 	alertAfter   = 24 * time.Hour
@@ -55,14 +57,19 @@ const (
 // took 3-13 s. A var so tests can page through a small library.
 var pageSize = 200
 
+// errBudget ends a sink's pass when its share of the run is spent. What it sent is kept; the next run carries on.
+var errBudget = errors.New("time budget spent")
+
+// sinks builds each app's sink on its own client, bounded by call_timeout: the shared clients keep their short bound
+// for the viewer gate and the other stages, and nothing waits on these calls but this stage's own budget.
 func (r *run) sinks() ([]sink, error) {
 	var out []sink
 	for _, n := range r.opt.Sinks {
 		switch n {
 		case "plex":
-			out = append(out, &plexSink{c: r.env.Plex, section: r.opt.PlexSection})
+			out = append(out, &plexSink{c: r.env.Plex.WithTimeout(r.opt.CallTimeout), section: r.opt.PlexSection})
 		case "jellyfin":
-			out = append(out, &jellyfinSink{c: r.env.Jellyfin})
+			out = append(out, &jellyfinSink{c: r.env.Jellyfin.WithTimeout(r.opt.CallTimeout)})
 		default:
 			return nil, fmt.Errorf("collections: unknown sink %q (plex, jellyfin)", n)
 		}
@@ -77,100 +84,154 @@ type backoff struct {
 	Err        string    `json:"err"`
 }
 
-// apply reconciles one sink. Its failures are logged and backed off, never returned: a sink never fails the run.
-func (r *run) apply(ctx context.Context, s sink) {
-	var b backoff
-	if _, err := r.env.Store.GetJSON(ctx, name, "backoff/"+s.Name(), &b); err != nil {
-		r.env.Log.Error("backoff state unreadable", "event", "store_error", "sink", s.Name(), "err", err)
+// fail records one more failure: the wait doubles from 15 minutes up to a day.
+func (b *backoff) fail(now time.Time, err error) {
+	if b.Failures == 0 {
+		b.Since = now
 	}
-	now := r.env.Now()
-	switch {
-	case now.Before(b.RetryAfter):
-		r.rep.Count(s.Name()+"_waiting", 1)
-		r.env.Log.Info("sink backing off", "event", "sink_waiting", "sink", s.Name(), "retry_after", b.RetryAfter.UTC().Format(time.RFC3339))
-	default:
-		r.skipped, r.firstSkip = 0, ""
-		err := r.reconcile(ctx, s)
-		if r.skipped > 0 {
-			r.rep.Alert("%s: %d collection change(s) refused or not possible, retried next run; first: %s", s.Name(), r.skipped, r.firstSkip)
+	b.Failures++
+	wait := backoffBase
+	for i := 1; i < b.Failures && wait < backoffMax; i++ {
+		wait *= 2
+	}
+	b.RetryAfter, b.Err = now.Add(min(wait, backoffMax)), err.Error()
+}
+
+// pass is one sink's reconcile in one run. The passes run concurrently, so a pass changes only its own fields and its
+// own report (merged into the run's afterwards); the run's desired state is read-only by then.
+type pass struct {
+	*run
+	s        sink
+	rep      *stage.Report // this pass's counts and alerts; shadows run.rep
+	deadline time.Time     // no app call starts after it
+	parked   map[string]backoff
+	dirty    bool // parked changed
+
+	skipped   int    // collection changes refused or not possible this pass
+	firstSkip string // the first of them, for the alert
+}
+
+// apply reconciles one sink. Its failures are logged and backed off, never returned: a sink never fails the run.
+func (p *pass) apply(ctx context.Context) {
+	sn := p.s.Name()
+	var b backoff
+	if _, err := p.env.Store.GetJSON(ctx, name, "backoff/"+sn, &b); err != nil {
+		p.env.Log.Error("backoff state unreadable", "event", "store_error", "sink", sn, "err", err)
+	}
+	now := p.env.Now()
+	if now.Before(b.RetryAfter) {
+		p.rep.Count(sn+"_waiting", 1)
+		p.env.Log.Info("sink backing off", "event", "sink_waiting", "sink", sn, "retry_after", b.RetryAfter.UTC().Format(time.RFC3339))
+	} else {
+		p.deadline = now.Add(p.opt.SinkBudget)
+		err := p.reconcile(ctx)
+		if p.skipped > 0 {
+			p.rep.Alert("%s: %d collection change(s) refused or not possible, retried next run; first: %s", sn, p.skipped, p.firstSkip)
 		}
 		switch {
 		case err == nil:
 			b = backoff{}
 		case ctx.Err() != nil:
 			return // shutting down; not the sink's fault
+		case errors.Is(err, errBudget):
+			// A slow app, not a broken one: no backoff, and the next run starts as soon as this one ends.
+			p.rep.Count(sn+"_unfinished", 1)
+			p.env.Log.Warn("sink pass out of time; the next run carries on", "event", "sink_unfinished", "sink", sn,
+				"budget", p.opt.SinkBudget.String())
+			p.env.Trigger(name)
 		default:
-			if b.Failures == 0 {
-				b.Since = now
-			}
-			b.Failures++
-			wait := backoffBase
-			for i := 1; i < b.Failures && wait < backoffMax; i++ {
-				wait *= 2
-			}
-			b.RetryAfter, b.Err = now.Add(min(wait, backoffMax)), err.Error()
-			r.rep.Count(s.Name()+"_failed", 1)
-			r.env.Log.Warn("sink failed; retrying later", "event", "sink_failed", "sink", s.Name(), "attempt", b.Failures,
+			b.fail(now, err)
+			p.rep.Count(sn+"_failed", 1)
+			p.env.Log.Warn("sink failed; retrying later", "event", "sink_failed", "sink", sn, "attempt", b.Failures,
 				"retry_after", b.RetryAfter.UTC().Format(time.RFC3339), "err", err)
 		}
-		if err := r.env.Store.PutJSON(ctx, name, "backoff/"+s.Name(), b); err != nil {
-			r.env.Log.Error("backoff state not saved", "event", "store_error", "sink", s.Name(), "err", err)
+		if err := p.env.Store.PutJSON(ctx, name, "backoff/"+sn, b); err != nil {
+			p.env.Log.Error("backoff state not saved", "event", "store_error", "sink", sn, "err", err)
 		}
 	}
 	if b.Failures > 0 && now.Sub(b.Since) >= alertAfter {
-		r.rep.Alert("%s has failed collection updates since %s: %s", s.Name(), b.Since.UTC().Format(time.RFC3339), b.Err)
+		p.rep.Alert("%s has failed collection updates since %s: %s", sn, b.Since.UTC().Format(time.RFC3339), b.Err)
 	}
+}
+
+// call starts one app request unless the pass's budget is spent; each request is bounded by call_timeout.
+func (p *pass) call(send func() error) error {
+	if !p.env.Now().Before(p.deadline) {
+		return errBudget
+	}
+	return send()
 }
 
 type addressCache struct {
-	At    time.Time      `json:"at"`
-	Items map[int]string `json:"items"`
+	At     time.Time      `json:"at"`
+	Items  map[int]string `json:"items"`
+	Misses map[int]int    `json:"misses"` // wanted films on disk the list lacked, and in how many reads in a row
 }
 
-// address maps TMDB ids to the sink's item ids: one list call a day, cached, plus an hourly re-read while a wanted
-// film on disk is missing from it.
-func (r *run) address(ctx context.Context, s sink) (map[int]string, error) {
+// address maps TMDB ids to the sink's item ids from the app's item list, read once a day. A wanted film on disk that
+// the list lacks (the app had not scanned it yet) earns an early re-read, at most hourly, until lookTwice reads in a
+// row have lacked it; then it waits for the daily read like everything else.
+func (p *pass) address(ctx context.Context) (map[int]string, error) {
 	var cache addressCache
-	found, err := r.env.Store.GetJSON(ctx, name, "address/"+s.Name(), &cache)
+	found, err := p.env.Store.GetJSON(ctx, name, "address/"+p.s.Name(), &cache)
 	if err != nil {
 		return nil, err
 	}
-	age := r.env.Now().Sub(cache.At)
-	if found && age < addressTTL && (age < addressRetry || !r.missing(cache.Items)) {
+	age := p.env.Now().Sub(cache.At)
+	early := slices.ContainsFunc(p.lacking(cache.Items), func(id int) bool { return cache.Misses[id] < lookTwice })
+	if found && age < addressTTL && (age < addressRetry || !early) {
 		return cache.Items, nil
 	}
-	items, err := s.Address(ctx)
-	if err != nil {
+	var items map[int]string
+	if err := p.call(func() (err error) { items, err = p.s.Address(ctx); return err }); err != nil {
 		return nil, err
 	}
-	if err := r.env.Store.PutJSON(ctx, name, "address/"+s.Name(), addressCache{At: r.env.Now(), Items: items}); err != nil {
+	fresh := addressCache{At: p.env.Now(), Items: items, Misses: map[int]int{}}
+	for _, id := range p.lacking(items) {
+		fresh.Misses[id] = cache.Misses[id] + 1
+	}
+	if err := p.env.Store.PutJSON(ctx, name, "address/"+p.s.Name(), fresh); err != nil {
 		return nil, err
 	}
 	return items, nil
 }
 
-func (r *run) missing(items map[int]string) bool {
-	for _, c := range r.targets {
+// lacking lists the wanted films on disk that items does not address.
+func (p *pass) lacking(items map[int]string) []int {
+	var out []int
+	for _, c := range p.targets {
 		for _, id := range c.Members {
-			if r.disk[id] && items[id] == "" {
-				return true
+			if p.disk[id] && items[id] == "" {
+				out = append(out, id)
 			}
 		}
 	}
-	return false
+	return out
 }
 
-// reconcile sends a sink the missing creates, member adds, sort titles and posters. A change the app refuses is
-// skipped for that collection only; any other error stops the sink for this run.
-func (r *run) reconcile(ctx context.Context, s sink) error {
-	items, err := r.address(ctx, s)
+func (p *pass) collections(ctx context.Context) (have map[string]held, err error) {
+	err = p.call(func() error { have, err = p.s.Collections(ctx); return err })
+	return have, err
+}
+
+// reconcile sends a sink the missing creates, member adds, sort titles and posters, one collection at a time; see
+// settled for what a failed change does.
+func (p *pass) reconcile(ctx context.Context) error {
+	items, err := p.address(ctx)
 	if err != nil {
 		return err
 	}
-	have, err := s.Collections(ctx)
+	have, err := p.collections(ctx)
 	if err != nil {
 		return err
 	}
+	if _, err := p.env.Store.GetJSON(ctx, name, "parked/"+p.s.Name(), &p.parked); err != nil {
+		return err
+	}
+	if p.parked == nil {
+		p.parked = map[string]backoff{}
+	}
+	defer p.unpark(ctx)
 	addressed := func(c *collection) []string {
 		var ids []string
 		seen := map[string]bool{}
@@ -182,52 +243,112 @@ func (r *run) reconcile(ctx context.Context, s sink) error {
 		}
 		return ids
 	}
-	created := 0
-	for _, c := range r.targets {
+	created := map[string][]string{} // the members each collection made this pass was made with
+	for _, c := range p.targets {
 		ids := addressed(c)
-		if _, ok := have[key(c.Name)]; ok || len(ids) == 0 {
+		if _, ok := have[key(c.Name)]; ok || len(ids) == 0 || p.waiting(c) {
 			continue
 		}
-		ok, err := r.write(s, "create", c, len(ids), func() error { return s.Create(ctx, c.Name, ids) })
-		if err != nil {
-			return err
+		err := p.write(c, "create", len(ids), func() error { return p.s.Create(ctx, c.Name, ids) })
+		if err == nil {
+			created[key(c.Name)] = ids
 		}
-		if !ok {
-			continue
-		}
-		created++
-		if r.opt.DryRun { // what the real run does next to the collection it just made
+		if err == nil && p.opt.DryRun { // what the real run does next to the collection it just made
 			if c.Sort != "" {
-				r.write(s, "sort", c, 0, nil) // a dry run never calls send, so it cannot fail
+				p.write(c, "sort", 0, nil) // a dry run never calls send, so it cannot fail
 			}
-			if err := r.poster(ctx, s, c, ""); err != nil {
-				return err
-			}
+			err = p.poster(ctx, c, "")
 		}
-	}
-	if created > 0 && !r.opt.DryRun {
-		if have, err = s.Collections(ctx); err != nil {
+		if err := p.settled(c, err); err != nil {
 			return err
 		}
 	}
-	for _, c := range r.targets {
+	if len(created) > 0 && !p.opt.DryRun {
+		if have, err = p.collections(ctx); err != nil {
+			return err
+		}
+	}
+	for _, c := range p.targets {
 		h, ok := have[key(c.Name)]
-		if !ok {
+		if !ok || p.waiting(c) {
 			continue
 		}
-		if err := r.members(ctx, s, c, h, addressed(c)); err != nil {
-			return err
-		}
-		if c.Sort != "" && !strings.EqualFold(h.Sort, c.Sort) {
-			if _, err := r.write(s, "sort", c, 0, func() error { return s.SetSort(ctx, h.ID, c.Sort) }); err != nil {
-				return err
-			}
-		}
-		if err := r.poster(ctx, s, c, h.ID); err != nil {
+		if err := p.settled(c, p.settle(ctx, c, h, addressed(c), created[key(c.Name)])); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// settle gives one app collection what it lacks: members, the sort title and the owner's poster.
+func (p *pass) settle(ctx context.Context, c *collection, h held, want, created []string) error {
+	if err := p.members(ctx, c, h, want, created); err != nil {
+		return err
+	}
+	if c.Sort != "" && !strings.EqualFold(h.Sort, c.Sort) {
+		if err := p.write(c, "sort", 0, func() error { return p.s.SetSort(ctx, h.ID, c.Sort) }); err != nil {
+			return err
+		}
+	}
+	return p.poster(ctx, c, h.ID)
+}
+
+// settled files the outcome of one collection's changes. Done clears its parking. A refusal (4xx) says that request
+// is wrong, so it is skipped and alerted and asked again next run. A 5xx while the app answers its lists parks just
+// this collection on its own backoff (alerted after a day), so one poison write cannot hold up the others. Anything
+// else (no answer, a spent budget, the store) is returned and ends the pass.
+func (p *pass) settled(c *collection, err error) error {
+	k := key(c.Name)
+	switch code := status(err); {
+	case err == nil:
+		if _, ok := p.parked[k]; ok {
+			delete(p.parked, k)
+			p.dirty = true
+		}
+		return nil
+	case code/100 == 4:
+		p.skip(c, err)
+		return nil
+	case code/100 == 5:
+		b := p.parked[k]
+		b.fail(p.env.Now(), err)
+		p.parked[k], p.dirty = b, true
+		p.rep.Count(p.s.Name()+"_collection_failed", 1)
+		p.env.Log.Warn("collection change failed; it waits on its own backoff", "event", "collection_failed", "sink", p.s.Name(),
+			"collection", c.Name, "attempt", b.Failures, "retry_after", b.RetryAfter.UTC().Format(time.RFC3339), "err", err)
+		return nil
+	default:
+		return err
+	}
+}
+
+// waiting reports whether a parked collection's backoff still runs.
+func (p *pass) waiting(c *collection) bool {
+	b, ok := p.parked[key(c.Name)]
+	if ok && p.env.Now().Before(b.RetryAfter) {
+		p.rep.Count(p.s.Name()+"_collection_waiting", 1)
+		return true
+	}
+	return false
+}
+
+// unpark stores the parked collections when they changed, and alerts those failing for over a day.
+func (p *pass) unpark(ctx context.Context) {
+	if p.dirty && !p.opt.DryRun {
+		if err := p.env.Store.PutJSON(ctx, name, "parked/"+p.s.Name(), p.parked); err != nil {
+			p.env.Log.Error("parked collections not saved", "event", "store_error", "sink", p.s.Name(), "err", err)
+		}
+	}
+	var stuck []string
+	for k, b := range p.parked {
+		if p.env.Now().Sub(b.Since) >= alertAfter {
+			stuck = append(stuck, k)
+		}
+	}
+	if len(stuck) > 0 {
+		slices.Sort(stuck)
+		p.rep.Alert("%s: %d collection(s) failing for over a day, retried with backoff; first: %s", p.s.Name(), len(stuck), p.parked[stuck[0]].Err)
+	}
 }
 
 // seenMembers is what this stage last saw (and added) in one app collection.
@@ -237,19 +358,24 @@ type seenMembers struct {
 }
 
 // members adds what an app collection lacks. Its member list is read only when the app's count moved since the last
-// run or a wanted item is new, so a quiet run asks each app for one collection list, not one call per collection.
-func (r *run) members(ctx context.Context, s sink, c *collection, h held, want []string) error {
+// run or a wanted item is new, so a quiet run asks each app for one collection list, not one call per collection; a
+// collection this pass made is not read at all, since it was given exactly created.
+func (p *pass) members(ctx context.Context, c *collection, h held, want, created []string) error {
+	seenKey := "members/" + p.s.Name() + "/" + h.ID
+	if created != nil {
+		return p.env.Store.PutJSON(ctx, name, seenKey, seenMembers{Count: len(created), Items: created})
+	}
 	var seen seenMembers
-	found, err := r.env.Store.GetJSON(ctx, name, "members/"+s.Name()+"/"+h.ID, &seen)
+	found, err := p.env.Store.GetJSON(ctx, name, seenKey, &seen)
 	if err != nil {
 		return err
 	}
 	if found && seen.Count == h.Count && !slices.ContainsFunc(want, func(id string) bool { return !slices.Contains(seen.Items, id) }) {
 		return nil
 	}
-	cur, err := s.Members(ctx, h.ID)
-	if err != nil {
-		return err
+	var cur map[string]bool
+	if err := p.call(func() (err error) { cur, err = p.s.Members(ctx, h.ID); return err }); err != nil {
+		return fmt.Errorf("members %q: %w", c.Name, err)
 	}
 	var add []string
 	for _, id := range want {
@@ -258,96 +384,87 @@ func (r *run) members(ctx context.Context, s sink, c *collection, h held, want [
 		}
 	}
 	if len(add) > 0 {
-		if ok, err := r.write(s, "add", c, len(add), func() error { return s.Add(ctx, h.ID, add) }); err != nil || !ok {
-			return err // refused: nothing recorded, so the next run asks again
+		if err := p.write(c, "add", len(add), func() error { return p.s.Add(ctx, h.ID, add) }); err != nil {
+			return err // nothing recorded, so the next run asks again
 		}
 	}
-	if r.opt.DryRun {
+	if p.opt.DryRun {
 		return nil
 	}
 	seen = seenMembers{Count: len(cur) + len(add), Items: add}
 	for id := range cur {
 		seen.Items = append(seen.Items, id)
 	}
-	return r.env.Store.PutJSON(ctx, name, "members/"+s.Name()+"/"+h.ID, seen)
+	return p.env.Store.PutJSON(ctx, name, seenKey, seen)
 }
 
-// write sends one change, or only logs it in a dry run. n is the number of members it carries. ok is false when the
-// app refused the change (recorded by isolate); err is any other failure.
-func (r *run) write(s sink, op string, c *collection, n int, send func() error) (ok bool, err error) {
+// write sends one change, or only logs it in a dry run; n is the number of members it carries. An error names the
+// change and the collection.
+func (p *pass) write(c *collection, op string, n int, send func() error) error {
 	event := op
-	if r.opt.DryRun {
+	if p.opt.DryRun {
 		event = "would_" + op
-	} else if err := send(); err != nil {
-		return false, r.isolate(s, op, c, err)
+	} else if err := p.call(send); err != nil {
+		return fmt.Errorf("%s %q: %w", op, c.Name, err)
 	}
-	r.rep.Count(s.Name()+"_"+op, 1)
+	p.rep.Count(p.s.Name()+"_"+op, 1)
 	if n > 0 {
-		r.rep.Count(s.Name()+"_"+op+"_members", n)
+		p.rep.Count(p.s.Name()+"_"+op+"_members", n)
 	}
-	r.env.Log.Info("collection "+event, "event", event, "sink", s.Name(), "collection", c.Name, "members", n, "sort", c.Sort)
-	return true, nil
-}
-
-// isolate turns the app's refusal of one collection's request into a skip, so the run goes on to the next
-// collection; any other error is returned and backs the whole sink off.
-func (r *run) isolate(s sink, op string, c *collection, err error) error {
-	if !refusal(err) {
-		return err
-	}
-	r.skip(s, op, c, err)
+	p.env.Log.Info("collection "+event, "event", event, "sink", p.s.Name(), "collection", c.Name, "members", n, "sort", c.Sort)
 	return nil
 }
 
-func (r *run) skip(s sink, op string, c *collection, err error) {
-	r.skipped++
-	if r.firstSkip == "" {
-		r.firstSkip = fmt.Sprintf("%s %q: %v", op, c.Name, err)
+func (p *pass) skip(c *collection, err error) {
+	p.skipped++
+	if p.firstSkip == "" {
+		p.firstSkip = err.Error()
 	}
-	r.rep.Count(s.Name()+"_"+op+"_skipped", 1)
-	r.env.Log.Warn("collection change skipped", "event", op+"_skipped", "sink", s.Name(), "collection", c.Name, "err", err)
+	p.rep.Count(p.s.Name()+"_skipped", 1)
+	p.env.Log.Warn("collection change skipped", "event", "change_skipped", "sink", p.s.Name(), "collection", c.Name, "err", err)
 }
 
-// refusal reports whether the app answered with a 4xx: it rejected that one request, which retrying cannot fix and
-// which says nothing about the next collection. Transport errors, timeouts and 5xx mean the app is unwell. Both
-// clients end a non-2xx error with "HTTP <code>".
-func refusal(err error) bool {
+// status is the HTTP status an app answered with, or 0 when it did not answer (transport error, timeout) or the error
+// is not the app's. Both clients end a non-2xx error with "HTTP <code>".
+func status(err error) int {
+	if err == nil {
+		return 0
+	}
 	msg := err.Error()
 	i := strings.LastIndex(msg, "HTTP ")
 	if i < 0 {
-		return false
+		return 0
 	}
-	code, convErr := strconv.Atoi(msg[i+len("HTTP "):])
-	return convErr == nil && code/100 == 4
+	code, _ := strconv.Atoi(msg[i+len("HTTP "):])
+	return code
 }
 
 // poster uploads an owner collection's poster once per app collection: recorded, because an app may draw its own
 // poster for a collection, so the app's image list cannot tell whether ours went up. id "" is a dry run's planned
 // collection. A poster file missing from poster_dir (the deploy copy skipped) is skipped and alerted.
-func (r *run) poster(ctx context.Context, s sink, c *collection, id string) error {
-	ps, ok := s.(posterSink)
+func (p *pass) poster(ctx context.Context, c *collection, id string) error {
+	ps, ok := p.s.(posterSink)
 	if !ok || c.Poster == "" {
 		return nil
 	}
 	if id != "" {
 		var done string
-		if found, err := r.env.Store.GetJSON(ctx, name, "poster/"+s.Name()+"/"+id, &done); err != nil || found {
+		if found, err := p.env.Store.GetJSON(ctx, name, "poster/"+p.s.Name()+"/"+id, &done); err != nil || found {
 			return err
 		}
 	}
 	jpeg, err := os.ReadFile(c.Poster)
 	if errors.Is(err, fs.ErrNotExist) {
-		r.skip(s, "poster", c, err)
+		p.skip(c, fmt.Errorf("poster %q: %w", c.Name, err))
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	sent, err := r.write(s, "poster", c, 0, func() error { return ps.Poster(ctx, id, jpeg) })
-	if err != nil || !sent || r.opt.DryRun {
+	if err := p.write(c, "poster", 0, func() error { return ps.Poster(ctx, id, jpeg) }); err != nil || p.opt.DryRun {
 		return err
 	}
-	return r.env.Store.PutJSON(ctx, name, "poster/"+s.Name()+"/"+id, c.Poster)
+	return p.env.Store.PutJSON(ctx, name, "poster/"+p.s.Name()+"/"+id, c.Poster)
 }
 
 // ---- Plex ----
@@ -483,11 +600,11 @@ func (*jellyfinSink) Name() string { return "jellyfin" }
 
 type jfItems struct {
 	Items []struct {
-		ID         string `json:"Id"`
-		Name       string `json:"Name"`
-		Path       string `json:"Path"`
-		SortName   string `json:"SortName"`
-		ChildCount int    `json:"ChildCount"`
+		ID             string `json:"Id"`
+		Name           string `json:"Name"`
+		Path           string `json:"Path"`
+		ForcedSortName string `json:"ForcedSortName"`
+		ChildCount     int    `json:"ChildCount"`
 	} `json:"Items"`
 }
 
@@ -508,19 +625,20 @@ func (j *jellyfinSink) Address(ctx context.Context) (map[int]string, error) {
 }
 
 // Collections and Members ask as an administrator: Jellyfin 12.1 leaves ChildCount out of a BoxSet, and lists none
-// of its children, when no userId is given.
+// of its children, when no userId is given. The sort title is ForcedSortName (Fields=Settings), as it was set:
+// SortName is Jellyfin's derived form ("zzBong Joon-ho" shows as "zzbong joonho", digit runs padded to ten).
 func (j *jellyfinSink) Collections(ctx context.Context) (map[string]held, error) {
 	user, err := j.admin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var res jfItems
-	if err := j.c.GetJSON(ctx, "/Items?IncludeItemTypes=BoxSet&Recursive=true&Fields=SortName,ChildCount&userId="+url.QueryEscape(user), &res); err != nil {
+	if err := j.c.GetJSON(ctx, "/Items?IncludeItemTypes=BoxSet&Recursive=true&Fields=Settings,ChildCount&userId="+url.QueryEscape(user), &res); err != nil {
 		return nil, err
 	}
 	out := map[string]held{}
 	for _, it := range res.Items {
-		out[key(it.Name)] = held{ID: it.ID, Sort: it.SortName, Count: it.ChildCount}
+		out[key(it.Name)] = held{ID: it.ID, Sort: it.ForcedSortName, Count: it.ChildCount}
 	}
 	return out, nil
 }
