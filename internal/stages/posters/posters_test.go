@@ -223,6 +223,8 @@ fanart_api = %q
 
 func reply(rw http.ResponseWriter, body string) { rw.Write([]byte(body)) }
 
+const guest = `<MediaContainer size="1"><Video type="movie" title="X"><User title="roger"/></Video></MediaContainer>`
+
 func plexDB(t *testing.T, path, insert string) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -264,7 +266,7 @@ func (w *world) verdict(t *testing.T, key string) Verdict {
 // and a rerun that pays or uploads again.
 func TestRunEndToEnd(t *testing.T) {
 	w := newWorld(t, "")
-	w.h.Plex.Handle("GET", "/status/sessions", 200, `<MediaContainer size="1"><Video type="movie" title="X"><User title="roger"/></Video></MediaContainer>`)
+	w.h.Plex.Handle("GET", "/status/sessions", 200, guest)
 	rep := w.run(t)
 	if w.messages != 0 || rep.Counts["gather_deferred"] != 4 || rep.Counts["gathered"] != 0 {
 		t.Fatalf("run 1: %d judge calls, counts %v; while a guest watches nothing is downloaded or judged", w.messages, rep.Counts)
@@ -320,6 +322,11 @@ func TestRunEndToEnd(t *testing.T) {
 		t.Fatalf("Gamma retried before its backoff: %d calls", n)
 	}
 	w.h.Now = w.h.Now.Add(2 * time.Minute)
+	w.h.Plex.Handle("GET", "/status/sessions", 200, guest)
+	if rep := w.run(t); rep.Counts["apply_deferred"] != 1 {
+		t.Fatalf("Gamma's retry while a guest watches: counts %v; the upload must wait", rep.Counts)
+	}
+	w.h.Plex.Handle("GET", "/status/sessions", 200, `<MediaContainer size="0"></MediaContainer>`)
 	w.run(t)
 	w.run(t)
 	if n := len(w.h.Jellyfin.Calls("POST", "/Items/j3/Images/Primary")); n != 2 || w.messages != 2 ||
@@ -424,7 +431,7 @@ func TestGuestDefersJudging(t *testing.T) {
 	w.set(func() { w.overloaded = true })
 	w.run(t) // gathers the pools; no judge call is answered
 	w.set(func() { w.overloaded = false })
-	w.h.Plex.Handle("GET", "/status/sessions", 200, `<MediaContainer size="1"><Video type="movie" title="X"><User title="roger"/></Video></MediaContainer>`)
+	w.h.Plex.Handle("GET", "/status/sessions", 200, guest)
 	if rep := w.run(t); w.messages != 0 || rep.Counts["judge_deferred"] != 2 {
 		t.Fatalf("%d judge calls answered, counts %v; want none while a guest watches", w.messages, rep.Counts)
 	}
