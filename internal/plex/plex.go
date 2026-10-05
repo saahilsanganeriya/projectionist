@@ -173,7 +173,12 @@ func (c *Client) Account(ctx context.Context, method, rawURL string, form url.Va
 
 // GetJSON decodes the response's MediaContainer object into v; an empty body leaves v untouched.
 func (c *Client) GetJSON(ctx context.Context, path string, v any) error {
-	body, err := c.do(ctx, http.MethodGet, path, "application/json")
+	return c.DoJSON(ctx, http.MethodGet, path, v)
+}
+
+// DoJSON is GetJSON for any method, e.g. POST /library/collections, whose answer names the collection it made.
+func (c *Client) DoJSON(ctx context.Context, method, path string, v any) error {
+	body, err := c.do(ctx, method, path, "application/json")
 	if err != nil || len(body) == 0 {
 		return err
 	}
@@ -181,7 +186,7 @@ func (c *Client) GetJSON(ctx context.Context, path string, v any) error {
 		MediaContainer json.RawMessage `json:"MediaContainer"`
 	}
 	if err := json.Unmarshal(body, &wrap); err != nil {
-		return fmt.Errorf("plex GET %s: %w", path, err)
+		return fmt.Errorf("plex %s %s: %w", method, path, err)
 	}
 	return json.Unmarshal(wrap.MediaContainer, v)
 }

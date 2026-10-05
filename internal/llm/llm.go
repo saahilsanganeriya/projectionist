@@ -22,6 +22,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -266,7 +267,8 @@ type Price struct {
 	Assumed       bool
 }
 
-// prices is the first-party list price; longest prefix first, so "claude-sonnet-5-5" wins over "claude-sonnet-5".
+// prices is the first-party list price per model; an id matches its model or a dated snapshot of it
+// ("claude-haiku-4-5-20251001"), never a later model that shares the prefix ("claude-sonnet-5-6" is not Sonnet 5).
 var prices = []struct {
 	prefix string
 	Price
@@ -282,7 +284,7 @@ var prices = []struct {
 func PriceOf(model string) Price {
 	id := strings.ReplaceAll(strings.TrimPrefix(model, "anthropic/"), ".", "-")
 	for _, p := range prices {
-		if strings.HasPrefix(id, p.prefix) {
+		if rest, ok := strings.CutPrefix(id, p.prefix); ok && (rest == "" || snapshot.MatchString(rest)) {
 			return p.Price
 		}
 	}
@@ -294,6 +296,8 @@ func PriceOf(model string) Price {
 	}
 	return Price{Input: 2 * base.Input, Output: 2 * base.Output, Assumed: true}
 }
+
+var snapshot = regexp.MustCompile(`^-\d{8}$`)
 
 func family(id string) string {
 	for _, f := range []string{"haiku", "sonnet", "opus"} {

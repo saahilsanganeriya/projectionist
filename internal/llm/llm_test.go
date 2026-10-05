@@ -67,7 +67,7 @@ func TestPolicy(t *testing.T) {
 }
 
 // Catches: a model priced under its list price (a budget that stops late), the batch discount missed, or an
-// unknown model budgeted at less than its family's dearest price.
+// unknown model budgeted at less than its family's dearest price, including one whose id extends a known one.
 func TestPriceOf(t *testing.T) {
 	u := Usage{InputTokens: 1_000_000, OutputTokens: 100_000}
 	cases := []struct {
@@ -79,7 +79,8 @@ func TestPriceOf(t *testing.T) {
 		{"claude-haiku-4-5-20251001", false, 1.5, false},
 		{"anthropic/claude-haiku-4.5", true, 0.75, false},
 		{"claude-sonnet-5-5", false, 3, false},
-		{"claude-haiku-5", false, 3, true}, // twice Haiku 4.5's price until the table knows it
+		{"claude-haiku-5", false, 3, true},    // twice Haiku 4.5's price until the table knows it
+		{"claude-sonnet-5-6", false, 6, true}, // a later Sonnet is not priced as Sonnet 5 by its shared prefix
 	}
 	for _, c := range cases {
 		p := PriceOf(c.model)
