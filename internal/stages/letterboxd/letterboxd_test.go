@@ -464,18 +464,22 @@ func TestLostScrobbleAnswerNeverRepeats(t *testing.T) {
 	}
 }
 
-// Catches, against a fake plex.tv on the fake Plex: the mirror adding a film that is already there or a watched
-// one, removing anything the owner put on his watchlist himself (a show here), a lookup repeated for a film
-// already matched, and a second run writing again.
+// Catches, against a fake plex.tv on the fake Plex: the owner's show (TMDB TV id 565) taken for the film The
+// Ring (TMDB movie id 565) so the film is never added, removing anything he put there himself, a lookup
+// repeated for a film already matched, and a second run writing again.
 func TestPlexWatchlistMirror(t *testing.T) {
 	w := newWorld(t)
-	var list []string // plex.tv metadata ids on the watchlist
-	list = append(list, "show1")
+	// plex.tv metadata ids on the watchlist; the owner's show carries TMDB TV id 565, the same number as a film
+	list := []string{"show565"}
 	px := w.h.Plex
 	px.HandleFunc("GET", "/library/sections/watchlist/all", func(rw http.ResponseWriter, r *http.Request) {
 		md := []map[string]any{}
 		for _, k := range list {
-			md = append(md, map[string]any{"ratingKey": k, "type": "show", "Guid": []map[string]string{{"id": "tmdb://" + strings.TrimPrefix(k, "m")}}})
+			kind, id := "movie", strings.TrimPrefix(k, "m")
+			if strings.HasPrefix(k, "show") {
+				kind, id = "show", strings.TrimPrefix(k, "show")
+			}
+			md = append(md, map[string]any{"ratingKey": k, "type": kind, "Guid": []map[string]string{{"id": "tmdb://" + id}}})
 		}
 		json.NewEncoder(rw).Encode(map[string]any{"MediaContainer": map[string]any{"totalSize": len(md), "Metadata": md}})
 	})
@@ -489,7 +493,7 @@ func TestPlexWatchlistMirror(t *testing.T) {
 	opts := fmt.Sprintf("plex_watchlist = true\ndiscover_url = %q\n", px.URL)
 	rep := w.run(t, opts)
 	sort.Strings(list)
-	if want := []string{"m18", "m565", "show1"}; strings.Join(list, ",") != strings.Join(want, ",") || rep.Counts["plextv.watchlist_added"] != 2 {
+	if want := []string{"m18", "m565", "show565"}; strings.Join(list, ",") != strings.Join(want, ",") || rep.Counts["plextv.watchlist_added"] != 2 {
 		t.Fatalf("plex.tv watchlist = %v (counts %v)", list, rep.Counts)
 	}
 	w.h.Now = w.h.Now.Add(25 * time.Hour) // re-read: the two adds are now listed members, the show still the owner's

@@ -195,6 +195,7 @@ type plexListing struct {
 	TotalSize int `json:"totalSize"`
 	Metadata  []struct {
 		RatingKey  string  `json:"ratingKey"`
+		Type       string  `json:"type"`
 		Title      string  `json:"title"`
 		ViewCount  int     `json:"viewCount"`
 		UserRating float64 `json:"userRating"`
@@ -789,7 +790,8 @@ func (r *run) plexTVSnapshot(ctx context.Context) (map[int]have, error) {
 			return nil, err
 		}
 		for _, it := range l.Metadata {
-			if id := tmdbFromGuids(it.Guid); id > 0 {
+			// Shows on his watchlist are his own; their TMDB ids live in another number space than films'.
+			if id := tmdbFromGuids(it.Guid); id > 0 && it.Type == "movie" {
 				fresh[id] = have{Item: it.RatingKey, Member: true}
 			}
 		}
