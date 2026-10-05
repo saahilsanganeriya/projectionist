@@ -117,34 +117,39 @@ func ep(season, episode int, title string) Episode { return Episode{season, epis
 
 // Catches the TV rules: Seinfeld's 9xx numbers, a file's own range winning when it contains the listed number (and
 // not otherwise), the file's own title kept when TMDB's disagrees, a file naming another show isolated instead of
-// renamed into this one, identical copies of an episode deleted while different copies get labels, and a season pack
-// whose folder merely mentions extras ("+ Extras") filed as extras.
+// renamed into this one, identical copies of an episode deleted while different copies get labels (and keep them on
+// a re-run, when the release group is no longer in the name), and a season pack whose folder merely mentions extras
+// ("+ Extras") filed as extras.
 func TestPlanEpisodes(t *testing.T) {
 	in := newInput(map[string]int64{
-		tv + "Seinfeld/Season 9/901 - The Butter Shave.mkv":                  1,
-		tv + "Seinfeld/Season 3/317 & 318 - The Boyfriend.mkv":               2,
-		tv + "Seinfeld/S04/Seinfeld.S04E03.The.Pitch.mkv":                    3,
-		tv + "Seinfeld/S04/Seinfeld.S04E05-E06.mkv":                          4,
-		tv + "Seinfeld/S05/Seinfeld.S05E01.The.Mango.mkv":                    5,
-		tv + "Seinfeld/Misc/Curb.Your.Enthusiasm.S01E01.mkv":                 6,
-		tv + "Seinfeld/S06/Seinfeld.S06E01.mkv":                              7,
-		tv + "Seinfeld/S06/copy/Seinfeld.S06E01.mkv":                         7,
-		tv + "Seinfeld/S06/Seinfeld.S06E02.1080p.WEB-AAA.mkv":                8,
-		tv + "Seinfeld/S06/Seinfeld.S06E02.720p.HDTV-BBB.mkv":                9,
-		tv + "Seinfeld/Seinfeld Complete + Extras/Seinfeld.S07E01.1080p.mkv": 10,
+		tv + "Seinfeld/Season 9/901 - The Butter Shave.mkv":                                                     1,
+		tv + "Seinfeld/Season 3/317 & 318 - The Boyfriend.mkv":                                                  2,
+		tv + "Seinfeld/S04/Seinfeld.S04E03.The.Pitch.mkv":                                                       3,
+		tv + "Seinfeld/S04/Seinfeld.S04E05-E06.mkv":                                                             4,
+		tv + "Seinfeld/S05/Seinfeld.S05E01.The.Mango.mkv":                                                       5,
+		tv + "Seinfeld/Misc/Curb.Your.Enthusiasm.S01E01.mkv":                                                    6,
+		tv + "Seinfeld/S06/Seinfeld.S06E01.mkv":                                                                 7,
+		tv + "Seinfeld/S06/copy/Seinfeld.S06E01.mkv":                                                            7,
+		tv + "Seinfeld/S06/Seinfeld.S06E02.1080p.WEB-AAA.mkv":                                                   8,
+		tv + "Seinfeld/S06/Seinfeld.S06E02.720p.HDTV-BBB.mkv":                                                   9,
+		tv + "Seinfeld/Seinfeld Complete + Extras/Seinfeld.S07E01.1080p.mkv":                                    10,
+		tv + "Seinfeld (1989) {tmdb-1400}/Season 08/Seinfeld (1989) - S08E01 - The Foundation [1080p FLUX].mkv": 11,
+		tv + "Seinfeld (1989) {tmdb-1400}/Season 08/Seinfeld (1989) - S08E01 - The Foundation [2160p FLUX].mkv": 12,
 	})
 	rows := map[string][]Episode{
-		tv + "Seinfeld/Season 9/901 - The Butter Shave.mkv":                  {ep(9, 901, "The Butter Shave")},
-		tv + "Seinfeld/Season 3/317 & 318 - The Boyfriend.mkv":               {ep(3, 17, "The Boyfriend (1)")},
-		tv + "Seinfeld/S04/Seinfeld.S04E03.The.Pitch.mkv":                    {ep(4, 3, "The Ticket")},
-		tv + "Seinfeld/S04/Seinfeld.S04E05-E06.mkv":                          {ep(4, 7, "The Bubble Boy")},
-		tv + "Seinfeld/S05/Seinfeld.S05E01.The.Mango.mkv":                    {ep(5, 1, "The Mango")},
-		tv + "Seinfeld/Misc/Curb.Your.Enthusiasm.S01E01.mkv":                 {ep(1, 1, "The Seinfeld Chronicles")},
-		tv + "Seinfeld/S06/Seinfeld.S06E01.mkv":                              {ep(6, 1, "The Chaperone")},
-		tv + "Seinfeld/S06/copy/Seinfeld.S06E01.mkv":                         {ep(6, 1, "The Chaperone")},
-		tv + "Seinfeld/S06/Seinfeld.S06E02.1080p.WEB-AAA.mkv":                {ep(6, 2, "The Big Salad")},
-		tv + "Seinfeld/S06/Seinfeld.S06E02.720p.HDTV-BBB.mkv":                {ep(6, 2, "The Big Salad")},
-		tv + "Seinfeld/Seinfeld Complete + Extras/Seinfeld.S07E01.1080p.mkv": {ep(7, 1, "The Engagement")},
+		tv + "Seinfeld/Season 9/901 - The Butter Shave.mkv":                                                     {ep(9, 901, "The Butter Shave")},
+		tv + "Seinfeld/Season 3/317 & 318 - The Boyfriend.mkv":                                                  {ep(3, 17, "The Boyfriend (1)")},
+		tv + "Seinfeld/S04/Seinfeld.S04E03.The.Pitch.mkv":                                                       {ep(4, 3, "The Ticket")},
+		tv + "Seinfeld/S04/Seinfeld.S04E05-E06.mkv":                                                             {ep(4, 7, "The Bubble Boy")},
+		tv + "Seinfeld/S05/Seinfeld.S05E01.The.Mango.mkv":                                                       {ep(5, 1, "The Mango")},
+		tv + "Seinfeld/Misc/Curb.Your.Enthusiasm.S01E01.mkv":                                                    {ep(1, 1, "The Seinfeld Chronicles")},
+		tv + "Seinfeld/S06/Seinfeld.S06E01.mkv":                                                                 {ep(6, 1, "The Chaperone")},
+		tv + "Seinfeld/S06/copy/Seinfeld.S06E01.mkv":                                                            {ep(6, 1, "The Chaperone")},
+		tv + "Seinfeld/S06/Seinfeld.S06E02.1080p.WEB-AAA.mkv":                                                   {ep(6, 2, "The Big Salad")},
+		tv + "Seinfeld/S06/Seinfeld.S06E02.720p.HDTV-BBB.mkv":                                                   {ep(6, 2, "The Big Salad")},
+		tv + "Seinfeld/Seinfeld Complete + Extras/Seinfeld.S07E01.1080p.mkv":                                    {ep(7, 1, "The Engagement")},
+		tv + "Seinfeld (1989) {tmdb-1400}/Season 08/Seinfeld (1989) - S08E01 - The Foundation [1080p FLUX].mkv": {ep(8, 1, "The Foundation")},
+		tv + "Seinfeld (1989) {tmdb-1400}/Season 08/Seinfeld (1989) - S08E01 - The Foundation [2160p FLUX].mkv": {ep(8, 1, "The Foundation")},
 	}
 	for f, r := range rows {
 		in.Shows[f], in.Episodes[f] = show, r
@@ -153,17 +158,18 @@ func TestPlanEpisodes(t *testing.T) {
 	in.Video[tv+"Seinfeld/S06/Seinfeld.S06E02.720p.HDTV-BBB.mkv"] = VideoFacts{1280, 720, "h264"}
 	s := "TV/Seinfeld (1989) {tmdb-1400}/Season "
 	expect(t, Build(in), map[string]string{
-		tv + "Seinfeld/Season 9/901 - The Butter Shave.mkv":                  "move " + s + "09/Seinfeld (1989) - S09E01 - The Butter Shave.mkv",
-		tv + "Seinfeld/Season 3/317 & 318 - The Boyfriend.mkv":               "move " + s + "03/Seinfeld (1989) - S03E17-E18 - The Boyfriend.mkv",
-		tv + "Seinfeld/S04/Seinfeld.S04E03.The.Pitch.mkv":                    "move " + s + "04/Seinfeld (1989) - S04E03 - The Pitch.mkv",
-		tv + "Seinfeld/S04/Seinfeld.S04E05-E06.mkv":                          "move " + s + "04/Seinfeld (1989) - S04E07 - The Bubble Boy.mkv",
-		tv + "Seinfeld/S05/Seinfeld.S05E01.The.Mango.mkv":                    "move " + s + "05/Seinfeld (1989) - S05E01 - The Mango.mkv",
-		tv + "Seinfeld/Misc/Curb.Your.Enthusiasm.S01E01.mkv":                 "move TV/Curb Your Enthusiasm/Season 01/Curb.Your.Enthusiasm.S01E01.mkv",
-		tv + "Seinfeld/S06/Seinfeld.S06E01.mkv":                              "move " + s + "06/Seinfeld (1989) - S06E01 - The Chaperone.mkv",
-		tv + "Seinfeld/S06/copy/Seinfeld.S06E01.mkv":                         "delete TV/Seinfeld/S06/Seinfeld.S06E01.mkv",
-		tv + "Seinfeld/S06/Seinfeld.S06E02.1080p.WEB-AAA.mkv":                "move " + s + "06/Seinfeld (1989) - S06E02 - The Big Salad [1080p AAA].mkv",
-		tv + "Seinfeld/S06/Seinfeld.S06E02.720p.HDTV-BBB.mkv":                "move " + s + "06/Seinfeld (1989) - S06E02 - The Big Salad [720p BBB].mkv",
-		tv + "Seinfeld/Seinfeld Complete + Extras/Seinfeld.S07E01.1080p.mkv": "move " + s + "07/Seinfeld (1989) - S07E01 - The Engagement.mkv",
+		tv + "Seinfeld/Season 9/901 - The Butter Shave.mkv":                                                     "move " + s + "09/Seinfeld (1989) - S09E01 - The Butter Shave.mkv",
+		tv + "Seinfeld/Season 3/317 & 318 - The Boyfriend.mkv":                                                  "move " + s + "03/Seinfeld (1989) - S03E17-E18 - The Boyfriend.mkv",
+		tv + "Seinfeld/S04/Seinfeld.S04E03.The.Pitch.mkv":                                                       "move " + s + "04/Seinfeld (1989) - S04E03 - The Pitch.mkv",
+		tv + "Seinfeld/S04/Seinfeld.S04E05-E06.mkv":                                                             "move " + s + "04/Seinfeld (1989) - S04E07 - The Bubble Boy.mkv",
+		tv + "Seinfeld/S05/Seinfeld.S05E01.The.Mango.mkv":                                                       "move " + s + "05/Seinfeld (1989) - S05E01 - The Mango.mkv",
+		tv + "Seinfeld/Misc/Curb.Your.Enthusiasm.S01E01.mkv":                                                    "move TV/Curb Your Enthusiasm/Season 01/Curb.Your.Enthusiasm.S01E01.mkv",
+		tv + "Seinfeld/S06/Seinfeld.S06E01.mkv":                                                                 "move " + s + "06/Seinfeld (1989) - S06E01 - The Chaperone.mkv",
+		tv + "Seinfeld/S06/copy/Seinfeld.S06E01.mkv":                                                            "delete TV/Seinfeld/S06/Seinfeld.S06E01.mkv",
+		tv + "Seinfeld/S06/Seinfeld.S06E02.1080p.WEB-AAA.mkv":                                                   "move " + s + "06/Seinfeld (1989) - S06E02 - The Big Salad [1080p AAA].mkv",
+		tv + "Seinfeld/S06/Seinfeld.S06E02.720p.HDTV-BBB.mkv":                                                   "move " + s + "06/Seinfeld (1989) - S06E02 - The Big Salad [720p BBB].mkv",
+		tv + "Seinfeld/Seinfeld Complete + Extras/Seinfeld.S07E01.1080p.mkv":                                    "move " + s + "07/Seinfeld (1989) - S07E01 - The Engagement.mkv",
+		tv + "Seinfeld (1989) {tmdb-1400}/Season 08/Seinfeld (1989) - S08E01 - The Foundation [1080p FLUX].mkv": "keep " + s + "08/Seinfeld (1989) - S08E01 - The Foundation [1080p FLUX].mkv",
 	})
 }
 

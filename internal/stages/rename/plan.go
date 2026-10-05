@@ -613,7 +613,11 @@ func (p *planner) planTV() (*videoPlan, []Op, []Review) {
 		if c.title != "" {
 			s += " - " + c.title
 		}
-		if perEp[epKey{c.unit, c.season, c.ep}] > 1 {
+		folder := fmt.Sprintf("%s/Season %02d", c.showDir, c.season)
+		if cur := stem(path.Base(f)); perEp[epKey{c.unit, c.season, c.ep}] > 1 && path.Dir(f) == folder &&
+			strings.HasPrefix(cur, component(s)+" [") && strings.HasSuffix(cur, "]") {
+			s = cur // already labelled by this scheme: re-runs keep the label (its release group is no longer in the name)
+		} else if perEp[epKey{c.unit, c.season, c.ep}] > 1 {
 			if _, known := in.Video[f]; !known {
 				ops = append(ops, Op{c.unit, "leave", f, "", needsFacts})
 				continue
@@ -624,7 +628,7 @@ func (p *planner) planTV() (*videoPlan, []Op, []Review) {
 			}
 			s += fmt.Sprintf(" [%s %s]", resolution(in.Video[f].Width, in.Video[f].Height), label)
 		}
-		videos.set(f, planned{c.unit, fmt.Sprintf("%s/Season %02d", c.showDir, c.season), component(s), lowerExt(f), c.reason})
+		videos.set(f, planned{c.unit, folder, component(s), lowerExt(f), c.reason})
 	}
 	seasons := make([]showSeason, 0, len(dvdSeasons))
 	for k := range dvdSeasons {
