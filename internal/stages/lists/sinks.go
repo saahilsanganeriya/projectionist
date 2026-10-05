@@ -56,6 +56,47 @@ func getRow(ctx context.Context, db *sql.DB, app, key string) (sinkRow, error) {
 	return r, err
 }
 
+// shelvedKeys returns the keys of every list the stage has a record of in either app.
+func shelvedKeys(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT DISTINCT list FROM lists_sinks ORDER BY list`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		keys = append(keys, k)
+	}
+	return keys, rows.Err()
+}
+
+// madeIDs returns the ids of the collections the stage made in app.
+func madeIDs(ctx context.Context, db *sql.DB, app string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id FROM lists_sinks WHERE app=? AND id != ''`, app)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids[id] = true
+	}
+	return ids, rows.Err()
+}
+
+func deleteRow(ctx context.Context, db *sql.DB, app, key string) error {
+	_, err := db.ExecContext(ctx, `DELETE FROM lists_sinks WHERE app=? AND list=?`, app, key)
+	return err
+}
+
 func putRow(ctx context.Context, db *sql.DB, app, key string, r sinkRow) error {
 	intent := ""
 	if !r.IntentAt.IsZero() {
@@ -249,7 +290,6 @@ func batches(xs []string, n int) [][]string {
 	return out
 }
 
-// sameTitle compares collection titles, ignoring the invisible U+200E two hand-made Plex collections carry.
-func sameTitle(a, b string) bool {
-	return strings.Trim(a, "\u200e ") == strings.Trim(b, "\u200e ")
-}
+// sameTitle compares collection titles as Plex matches collection tags: ignoring case, and ignoring the invisible
+// U+200E two hand-made Plex collections carry.
+func sameTitle(a, b string) bool { return fold(a) == fold(b) }

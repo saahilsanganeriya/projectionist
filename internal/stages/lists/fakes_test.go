@@ -55,8 +55,10 @@ type fakePlex struct {
 	calls   []string // "METHOD path?query" of every request
 	next    int
 	now     func() int64
-	fail    bool // answer 500 to everything
-	failAt  int  // answer 500 to section listings starting here (0 = never)
+	fail    bool          // answer 500 to everything
+	failAt  int           // answer 500 to section listings starting here (0 = never)
+	hold    chan struct{} // when set, every request waits until it is closed: a Plex too busy to answer
+	failOn  string        // answer 500 to requests starting with this "METHOD /path"
 }
 
 func (p *fakePlex) coll(key string) *plexColl0 {
@@ -150,8 +152,31 @@ func newFakePlex(t *testing.T, movies map[string]int, now func() int64) *fakePle
 		q := r.URL.Query()
 		p.next++
 		c := &plexColl0{key: fmt.Sprint(p.next), title: q.Get("title"), added: p.now(), items: keysOf(q.Get("uri"))}
+		for _, old := range p.colls { // measured on 1.43: a title that differs only in case joins the existing tag
+			if strings.EqualFold(old.title, c.title) {
+				old.items = append(old.items, c.items...)
+				c.title, c.items = old.title, append([]string(nil), old.items...)
+			}
+		}
 		p.colls = append(p.colls, c)
 		mc(w, map[string]any{"Metadata": []any{collJSON(c)}})
+	})
+	mux.HandleFunc("DELETE /library/collections/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		var rest []*plexColl0
+		for _, c := range p.colls {
+			if c.key != id {
+				rest = append(rest, c)
+			}
+		}
+		p.colls = rest
+		var hubs []map[string]any
+		for _, h := range p.hubs { // measured: deleting a collection drops its Home row
+			if h["identifier"] != "custom.collection.4."+id {
+				hubs = append(hubs, h)
+			}
+		}
+		p.hubs = hubs
 	})
 	mux.HandleFunc("GET /library/collections/{id}/children", func(w http.ResponseWriter, r *http.Request) {
 		c := p.coll(r.PathValue("id"))
@@ -238,13 +263,19 @@ func newFakePlex(t *testing.T, movies map[string]int, now func() int64) *fakePle
 	})
 	p.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
+		hold := p.hold
+		p.mu.Unlock()
+		if hold != nil {
+			<-hold
+		}
+		p.mu.Lock()
 		defer p.mu.Unlock()
 		p.calls = append(p.calls, r.Method+" "+r.URL.Path+"?"+r.URL.RawQuery)
 		if r.Header.Get("X-Plex-Token") != fake.PlexToken {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if p.fail {
+		if p.fail || (p.failOn != "" && strings.HasPrefix(r.Method+" "+r.URL.Path, p.failOn)) {
 			http.Error(w, "busy", http.StatusInternalServerError)
 			return
 		}
@@ -278,7 +309,9 @@ type fakeJellyfin struct {
 	sets     []*boxSet0
 	calls    []string
 	next     int
-	scanning bool // the Movies library reports RefreshStatus "Active", and half the movies are missing
+	scanning string            // "library": Movies is Active; "task": only the scan task runs. Half the movies drop out
+	onWrite  func(call string) // called with each write, after it is applied
+	failOn   string            // answer 500 to requests starting with this "METHOD /path"
 }
 
 func (j *fakeJellyfin) set(id string) *boxSet0 {
@@ -311,9 +344,13 @@ func newFakeJellyfin(t *testing.T, movies map[string]int) *fakeJellyfin {
 		js(w, []map[string]string{{"Id": "u-roger", "Name": "roger"}, {"Id": "u-saahil", "Name": "saahil"}})
 	})
 	mux.HandleFunc("GET /Library/VirtualFolders", func(w http.ResponseWriter, r *http.Request) {
-		status := map[bool]string{true: "Active", false: "Idle"}[j.scanning]
+		status := map[bool]string{true: "Active", false: "Idle"}[j.scanning == "library"]
 		js(w, []map[string]any{{"Name": "Movies", "CollectionType": "movies", "RefreshStatus": status},
 			{"Name": "Collections", "CollectionType": "boxsets", "RefreshStatus": "Idle"}})
+	})
+	mux.HandleFunc("GET /ScheduledTasks", func(w http.ResponseWriter, r *http.Request) {
+		state := map[bool]string{true: "Running", false: "Idle"}[j.scanning != ""]
+		js(w, []map[string]any{{"Key": "RefreshLibrary", "Name": "Scan Media Library", "State": state}, {"Key": "CleanCache", "State": "Idle"}})
 	})
 	mux.HandleFunc("GET /Items", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -325,7 +362,7 @@ func newFakeJellyfin(t *testing.T, movies map[string]int) *fakeJellyfin {
 				if q.Get("userId") != "" && (q.Get("IsPlayed") == "true") != j.played[id] {
 					continue
 				}
-				if j.scanning && tmdb%2 == 1 {
+				if j.scanning != "" && tmdb%2 == 1 {
 					continue
 				}
 				items = append(items, map[string]any{"Id": id, "ProviderIds": map[string]string{"Tmdb": fmt.Sprint(tmdb)}})
@@ -341,6 +378,9 @@ func newFakeJellyfin(t *testing.T, movies map[string]int) *fakeJellyfin {
 				sort.Strings(kids)
 			}
 			for _, id := range kids {
+				if j.scanning != "" && j.movies[id]%2 == 1 { // measured mid-scan: members drop out of a BoxSet's listing too
+					continue
+				}
 				items = append(items, map[string]any{"Id": id})
 			}
 		}
@@ -375,6 +415,16 @@ func newFakeJellyfin(t *testing.T, movies map[string]int) *fakeJellyfin {
 		s := j.set(r.PathValue("id"))
 		s.items = append(s.items, ids(r)...)
 	})
+	mux.HandleFunc("DELETE /Items/{id}", func(w http.ResponseWriter, r *http.Request) {
+		var rest []*boxSet0
+		for _, s := range j.sets {
+			if s.id != r.PathValue("id") {
+				rest = append(rest, s)
+			}
+		}
+		j.sets = rest
+		w.WriteHeader(http.StatusNoContent)
+	})
 	mux.HandleFunc("DELETE /Collections/{id}/Items", func(w http.ResponseWriter, r *http.Request) {
 		s := j.set(r.PathValue("id"))
 		for _, id := range ids(r) {
@@ -389,7 +439,14 @@ func newFakeJellyfin(t *testing.T, movies map[string]int) *fakeJellyfin {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		if j.failOn != "" && strings.HasPrefix(r.Method+" "+r.URL.Path, j.failOn) {
+			http.Error(w, "busy", http.StatusInternalServerError)
+			return
+		}
 		mux.ServeHTTP(w, r)
+		if r.Method != http.MethodGet && j.onWrite != nil {
+			j.onWrite(j.calls[len(j.calls)-1])
+		}
 	}))
 	t.Cleanup(j.srv.Close)
 	return j
@@ -409,17 +466,22 @@ type fakeLetterboxd struct {
 	pages    map[string][]byte
 	redirect map[string]string // boxd.it code → path
 	films    map[string]string // slug → "movie/949" or "tv/87108"
+	status   map[string]int    // path → an error status to answer with (403: a refusal)
 	requests []string
 }
 
 func newFakeLetterboxd(t *testing.T) *fakeLetterboxd {
-	lb := &fakeLetterboxd{pages: map[string][]byte{}, redirect: map[string]string{}, films: map[string]string{}}
+	lb := &fakeLetterboxd{pages: map[string][]byte{}, redirect: map[string]string{}, films: map[string]string{}, status: map[string]int{}}
 	lb.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lb.mu.Lock()
 		defer lb.mu.Unlock()
 		lb.requests = append(lb.requests, r.URL.Path)
 		if r.Header.Get("User-Agent") == "" {
 			http.Error(w, "no agent", http.StatusForbidden)
+			return
+		}
+		if code, ok := lb.status[r.URL.Path]; ok {
+			http.Error(w, "refused", code)
 			return
 		}
 		if p, ok := lb.redirect[strings.TrimPrefix(r.URL.Path, "/")]; ok {

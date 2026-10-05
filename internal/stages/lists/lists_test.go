@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"projectionist/internal/fake"
 	"projectionist/internal/jellyfin"
+	"projectionist/internal/lbpace"
 	"projectionist/internal/plex"
 	"projectionist/internal/stage"
 )
@@ -30,14 +32,14 @@ type world struct {
 }
 
 // newWorld: one canon list (7 films over two pages) and one own list ("nolan", found through the export's code),
-// seven of the films on the NAS, a hand-made Plex collection that shares the own list's title.
+// seven of the films on the NAS, a hand-made Plex collection whose title differs from the own list's only in case.
 func newWorld(t *testing.T) *world {
 	h := fake.NewEnv(t, nil)
 	w := &world{h: h, clock: &fakeClock{now: time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)}}
 	h.Env.Now = w.clock.Now
-	oldSleep, oldPage := sleep, plexPage
-	sleep, plexPage = w.clock.Sleep, 3 // three listing pages for seven movies
-	t.Cleanup(func() { sleep, plexPage = oldSleep, oldPage })
+	oldSleep, oldPage, oldLimiter := sleep, plexPage, limiter
+	sleep, plexPage, limiter = w.clock.Sleep, 3, lbpace.New(w.clock.Now, w.clock.Sleep) // three listing pages for seven movies
+	t.Cleanup(func() { sleep, plexPage, limiter = oldSleep, oldPage, oldLimiter })
 
 	w.lb = newFakeLetterboxd(t)
 	w.top = w.lb.srv.URL + "/official/list/letterboxds-top-500-films/"
@@ -73,7 +75,7 @@ func newWorld(t *testing.T) *world {
 	w.px = newFakePlex(t, map[string]int{"k14537": 14537, "k389": 389, "k670": 670, "k25237": 25237, "k157336": 157336,
 		"k77": 77, "k11": 11}, func() int64 { return w.clock.Now().Unix() }) // Inception (27205) not scanned by Plex yet
 	w.px.watched["k25237"] = true
-	w.px.colls = []*plexColl0{{key: "500", title: "nolan", summary: "my favourite Nolans", items: []string{"k77"}}}
+	w.px.colls = []*plexColl0{{key: "500", title: "Nolan", summary: "my favourite Nolans", items: []string{"k77"}}}
 	h.Env.Plex = plex.New(w.px.srv.URL, h.PrefsPath, 5*time.Second)
 
 	w.jf = newFakeJellyfin(t, map[string]int{"j14537": 14537, "j389": 389, "j670": 670, "j25237": 25237, "j157336": 157336,
@@ -135,8 +137,10 @@ func jfOrder(s *boxSet0) []string {
 
 // Catches, end to end: owned films shelved out of list order (Plex reorders a new custom collection; Jellyfin
 // sorts by premiere date unless told otherwise), a summary or sort title off the owner's format, a missing poster
-// or Home row, a private list shelved, a hand-made collection with the same title touched, and — on the second run
-// — any write at all or any Letterboxd request inside the refresh windows (the reconciler's "nothing to do").
+// or Home row, a Home row on Recommended or friends' Homes, a private list shelved, a hand-made collection whose
+// title differs only in case touched (Plex files a new collection with that title into it) or the two apps naming
+// the shelf differently, and — on the second run — any write at all or any Letterboxd request inside the refresh
+// windows (the reconciler's "nothing to do").
 func TestShelvesAndRerunChangesNothing(t *testing.T) {
 	w := newWorld(t)
 	rep := w.run(t)
@@ -162,11 +166,14 @@ func TestShelvesAndRerunChangesNothing(t *testing.T) {
 	if want := []string{"movie.recentlyreleased", "movie.recentlyadded", "custom.collection.4." + top.key, "movie.curated"}; !reflect.DeepEqual(hubs, want) {
 		t.Errorf("home rows = %v", hubs)
 	}
-	if h := w.px.hubs[2]; h["promotedToOwnHome"] != true || h["promotedToSharedHome"] != false {
+	if h := w.px.hubs[2]; h["promotedToOwnHome"] != true || h["promotedToRecommended"] != false || h["promotedToSharedHome"] != false {
 		t.Errorf("home row flags = %v", h)
 	}
-	if hand := w.px.coll("500"); hand.title != "nolan" || hand.summary != "my favourite Nolans" || !reflect.DeepEqual(hand.items, []string{"k77"}) {
+	if hand := w.px.coll("500"); hand.title != "Nolan" || hand.summary != "my favourite Nolans" || !reflect.DeepEqual(hand.items, []string{"k77"}) {
 		t.Errorf("hand-made collection changed: %+v", hand)
+	}
+	if want := []string{"k157336", "k77"}; !reflect.DeepEqual(w.plexColl(t, "nolan · Letterboxd").items, want) {
+		t.Errorf("plex nolan = %v, want %v", w.plexColl(t, "nolan · Letterboxd").items, want)
 	}
 	for _, c := range w.px.writes() {
 		if strings.Contains(c, "/500/") || strings.Contains(c, "/500?") || strings.Contains(c, "id=500") || strings.Contains(c, "Item=500") {
@@ -174,7 +181,7 @@ func TestShelvesAndRerunChangesNothing(t *testing.T) {
 		}
 	}
 
-	bsTop, bsNolan := w.boxSet(t, "Top"), w.boxSet(t, "nolan")
+	bsTop, bsNolan := w.boxSet(t, "Top"), w.boxSet(t, "nolan · Letterboxd")
 	if want := []string{"j14537", "j389", "j25237", "j670"}; !reflect.DeepEqual(jfOrder(bsTop), want) {
 		t.Errorf("jellyfin Top = %v (order %s), want %v", bsTop.items, bsTop.order, want)
 	}
@@ -218,6 +225,39 @@ func TestShelvesAndRerunChangesNothing(t *testing.T) {
 	}
 	if rep.Counts["plex_writes"] != 0 || rep.Counts["jellyfin_writes"] != 0 {
 		t.Errorf("counts = %v", rep.Counts)
+	}
+
+	w.px.hubs[2]["promotedToRecommended"] = true // as an earlier build left the gate's rows
+	w.run(t)
+	if h := w.px.hubs[2]; h["promotedToOwnHome"] != true || h["promotedToRecommended"] != false {
+		t.Errorf("home row left on Recommended: %v", h)
+	}
+}
+
+// Catches: a collection the owner makes after the stage's last look at an app, with a title equal to a new shelf's
+// but for case — adopted as the shelf's, or created over (Plex files the shelf's films into it) instead of the
+// shelf waiting a run — and, once each app has reported it, the shelf not renamed in both apps (each app's owner
+// titles count for both, so the collections stage, which matches titles ignoring case, never writes into a shelf).
+func TestOwnerCollectionsKeepTheirTitles(t *testing.T) {
+	w := newWorld(t)
+	w.run(t)
+	w.h.SetOptions(w.opts + fmt.Sprintf("home = []\n[[canon]]\nname = \"Top\"\nurl = %q\n"+
+		"[[canon]]\nname = \"Top 3\"\nurl = %q\nlimit = 3\n[[canon]]\nname = \"Top 4\"\nurl = %q\nlimit = 4\n", w.top, w.top, w.top))
+	w.px.colls = append(w.px.colls, &plexColl0{key: "600", title: "top 3", summary: "mine", items: []string{"k11"}})
+	w.jf.sets = append(w.jf.sets, &boxSet0{id: "mine4", name: "TOP 4", overview: "mine", items: []string{"j77"}})
+	for run := 2; run <= 3; run++ {
+		w.clock.Sleep(context.Background(), time.Hour)
+		w.run(t)
+	}
+	for _, title := range []string{"Top 3 · Letterboxd", "Top 4 · Letterboxd"} {
+		w.plexColl(t, title)
+		w.boxSet(t, title)
+	}
+	if c := w.px.coll("600"); c.title != "top 3" || c.summary != "mine" || !reflect.DeepEqual(c.items, []string{"k11"}) {
+		t.Errorf("the owner's Plex collection changed: %+v", c)
+	}
+	if b := w.jf.set("mine4"); b.name != "TOP 4" || b.overview != "mine" || !reflect.DeepEqual(b.items, []string{"j77"}) {
+		t.Errorf("the owner's BoxSet changed: %+v", b)
 	}
 }
 
@@ -265,7 +305,7 @@ func posterLI(page, slug string) string {
 	return page[start:end]
 }
 
-// Catches: a failing Plex failing the run or holding up Jellyfin, and — once Plex is back, with the state of the
+// Catches: a failing Plex failing the run or stopping Jellyfin, and — once Plex is back, with the state of the
 // collections lost — a duplicate collection instead of adopting the one made earlier (its summary marks it ours).
 func TestPlexDownNeverFailsAndStateLossAdopts(t *testing.T) {
 	w := newWorld(t)
@@ -348,27 +388,189 @@ func TestPartialPlexListingNeverDrops(t *testing.T) {
 	}
 }
 
-// Catches: BoxSets rebuilt from a listing Jellyfin gives while it scans its movie library (movies drop out and come
-// back): members dropped and re-added, out of order, until the scan ends; and that partial listing replacing the
-// last good map, which is what the next run falls back on if Jellyfin does not answer.
+// Catches: BoxSets rebuilt from listings Jellyfin gives while it scans (movies drop out of the library and of each
+// BoxSet, and come back): members dropped and re-added, out of order, every run until the scan ends — whether the
+// Movies library reports the scan, or only the scan task does (measured: the task runs on after the library says
+// Idle), or Jellyfin does not say; that partial listing replacing the last good map, which the next run falls back
+// on; and a scan that never ends stopping BoxSet upkeep without telling the owner.
 func TestJellyfinScanDefersBoxSets(t *testing.T) {
+	for _, c := range []struct{ name, scan, failOn string }{
+		{"library scanning", "library", ""},
+		{"only the scan task running", "task", ""},
+		{"scan state not answered", "task", "GET /ScheduledTasks"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWorld(t)
+			w.run(t)
+			w.jf.scanning, w.jf.failOn = c.scan, c.failOn
+			before := len(w.jf.writes())
+			for run := 1; run <= 3; run++ {
+				rep := w.run(t)
+				if !strings.Contains(rep.Summary, "jellyfin 0 writes (rest deferred: Jellyfin is scanning") {
+					t.Errorf("run %d: summary = %q", run, rep.Summary)
+				}
+				if alerted := len(rep.Alerts) > 0; alerted != (run == 3) {
+					t.Errorf("run %d of the scan: alerts %v, want one only from the third", run, rep.Alerts)
+				}
+			}
+			if got := w.jf.writes()[before:]; len(got) > 0 {
+				t.Errorf("writes while Jellyfin scans: %v", got)
+			}
+			if want := []string{"j14537", "j389", "j25237", "j670"}; !reflect.DeepEqual(w.boxSet(t, "Top").items, want) {
+				t.Errorf("jellyfin Top = %v, want %v", w.boxSet(t, "Top").items, want)
+			}
+			var kept jellyfinMap
+			w.h.Env.Store.GetJSON(context.Background(), name, "jellyfin_map", &kept)
+			if len(kept.Items) != len(w.jf.movies) {
+				t.Errorf("map kept through the scan has %d movies, want %d", len(kept.Items), len(w.jf.movies))
+			}
+		})
+	}
+}
+
+// Catches: one of the stage's own collections counted as an owner's title because a failed write left it without
+// the stage's summary — the shelf would be renamed "… · Letterboxd" on a later run, and back once the summary is in.
+func TestOwnShelfNeverTakesItsOwnTitle(t *testing.T) {
+	w := newWorld(t)
+	w.px.failOn = "PUT /library/sections/4/all" // Top is made in both apps, but its summary write fails
+	w.jf.failOn = "POST /Items/"
+	w.run(t)
+	w.px.failOn, w.jf.failOn = "", ""
+	for run := 2; run <= 3; run++ {
+		w.clock.Sleep(context.Background(), time.Hour)
+		w.run(t)
+	}
+	if top := w.plexColl(t, "Top"); !strings.HasPrefix(top.summary, summaryMarker) {
+		t.Errorf("plex Top summary = %q", top.summary)
+	}
+	if top := w.boxSet(t, "Top"); !strings.HasPrefix(top.overview, summaryMarker) {
+		t.Errorf("jellyfin Top overview = %q", top.overview)
+	}
+}
+
+// Catches: a shelf left in both apps (and on Home) after its list is gone — made private on Letterboxd (also one
+// found only on his lists page, which drops it), left out by skip_own, dropped from the canon config — so a private
+// list stays visible to every account sharing the library; a shelf deleted because its list was merely unreadable
+// this run (a refusal); and a shelf deleted after the owner made it his (rewrote its summary).
+func TestRetiresShelvesOfGoneLists(t *testing.T) {
+	nolan := "/saahilsan/list/nolan/"
+	canonTop := func(w *world, extra string) {
+		w.h.SetOptions(w.opts + extra + fmt.Sprintf("home = [\"Top\"]\n[[canon]]\nname = \"Top\"\nurl = %q\n", w.top))
+	}
+	for _, c := range []struct {
+		name         string
+		before       func(w *world) // before the first run
+		change       func(w *world)
+		goneInPlex   string // the shelf that must be gone; "" = none
+		goneInJF     string
+		retiredCount int
+	}{
+		{"made private", nil, func(w *world) { delete(w.lb.pages, nolan) }, "nolan · Letterboxd", "nolan · Letterboxd", 2},
+		{"made private, found only on his lists page", func(w *world) {
+			os.RemoveAll(filepath.Join(filepath.Dir(w.missing), "export"))
+			w.lb.pages["/saahilsan/lists/"] = []byte(strings.Replace(string(w.lb.pages["/saahilsan/lists/"]), `<div class="list-summary-list">`,
+				`<div class="list-summary-list"><h2 class="name prettify"><a href="/saahilsan/list/nolan/">nolan</a></h2>`, 1))
+		}, func(w *world) {
+			delete(w.lb.pages, nolan)
+			w.lb.pages["/saahilsan/lists/"] = fixture(t, "lists_index.html")
+		}, "nolan · Letterboxd", "nolan · Letterboxd", 2},
+		{"left out by skip_own", nil, func(w *world) { canonTop(w, "skip_own = [\"nolan\"]\n") }, "nolan · Letterboxd", "nolan · Letterboxd", 2},
+		{"dropped from the canon", nil, func(w *world) { w.h.SetOptions(w.opts + "canon = []\n") }, "Top", "Top", 2},
+		{"refused this run", nil, func(w *world) { w.lb.status[nolan] = 403 }, "", "", 0},
+		{"made his own, then dropped", nil, func(w *world) {
+			w.plexColl(t, "Top").summary = "my favourites from the Top 500"
+			w.h.SetOptions(w.opts + "canon = []\n")
+		}, "", "Top", 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWorld(t)
+			if c.before != nil {
+				c.before(w)
+			}
+			w.run(t)
+			c.change(w)
+			w.clock.Sleep(context.Background(), 21*time.Hour) // past own_refresh
+			rep := w.run(t)
+			for _, title := range []string{"Top", "nolan · Letterboxd"} {
+				inPlex, inJellyfin := false, false
+				for _, x := range w.px.colls {
+					inPlex = inPlex || x.title == title
+				}
+				for _, x := range w.jf.sets {
+					inJellyfin = inJellyfin || x.name == title
+				}
+				if inPlex == (title == c.goneInPlex) || inJellyfin == (title == c.goneInJF) {
+					t.Errorf("%q: in Plex %v (gone: %q), in Jellyfin %v (gone: %q)", title, inPlex, c.goneInPlex, inJellyfin, c.goneInJF)
+				}
+			}
+			for _, h := range w.px.hubs {
+				if id := h["identifier"].(string); strings.HasPrefix(id, "custom.collection.") && c.goneInPlex == "Top" {
+					t.Errorf("home row of a retired shelf left: %s", id)
+				}
+			}
+			if hand := w.px.coll("500"); hand == nil || hand.title != "Nolan" {
+				t.Errorf("hand-made collection touched: %+v", hand)
+			}
+			if rep.Counts["shelves_retired"] != c.retiredCount {
+				t.Errorf("shelves_retired = %d, want %d", rep.Counts["shelves_retired"], c.retiredCount)
+			}
+		})
+	}
+}
+
+// Catches: a slow Plex holding up Jellyfin. Every Plex call here waits until Jellyfin has written the list change,
+// so a run whose Jellyfin lane waits for Plex never gets there and the test hangs instead of passing.
+func TestSlowPlexNeverHoldsUpJellyfin(t *testing.T) {
 	w := newWorld(t)
 	w.run(t)
-	w.jf.scanning = true
-	before := len(w.jf.writes())
-	rep := w.run(t)
-	if got := w.jf.writes()[before:]; len(got) > 0 {
-		t.Errorf("writes while Jellyfin scans: %v", got)
+	p2 := "/official/list/letterboxds-top-500-films/page/2/"
+	w.lb.pages[p2] = []byte(strings.Replace(string(w.lb.pages[p2]), posterLI(string(w.lb.pages[p2]), "oldboy"), "", 1))
+	w.clock.Sleep(context.Background(), 8*24*time.Hour) // past canon_refresh and plex_refresh
+
+	w.px.hold = make(chan struct{})
+	w.h.Env.Plex = plex.New(w.px.srv.URL, w.h.PrefsPath, time.Hour) // a held call never times out into a pass
+	var once sync.Once
+	w.jf.onWrite = func(call string) {
+		if strings.HasPrefix(call, "DELETE /Collections/") { // Oldboy leaves the Top BoxSet
+			once.Do(func() { close(w.px.hold) })
+		}
 	}
-	if !strings.Contains(rep.Summary, "jellyfin 0 writes (rest deferred: Jellyfin is scanning") {
-		t.Errorf("summary = %q", rep.Summary)
-	}
-	if want := []string{"j14537", "j389", "j25237", "j670"}; !reflect.DeepEqual(jfOrder(w.boxSet(t, "Top")), want) {
+	t.Cleanup(func() { once.Do(func() { close(w.px.hold) }) })
+	w.run(t)
+	if want := []string{"j14537", "j389", "j25237"}; !reflect.DeepEqual(jfOrder(w.boxSet(t, "Top")), want) {
 		t.Errorf("jellyfin Top = %v, want %v", w.boxSet(t, "Top").items, want)
 	}
-	var kept jellyfinMap
-	w.h.Env.Store.GetJSON(context.Background(), name, "jellyfin_map", &kept)
-	if len(kept.Items) != len(w.jf.movies) {
-		t.Errorf("map kept through the scan has %d movies, want %d", len(kept.Items), len(w.jf.movies))
+	if want := []string{"k14537", "k389", "k25237"}; !reflect.DeepEqual(w.plexColl(t, "Top").items, want) {
+		t.Errorf("plex Top = %v, want %v (Plex catches up once it answers)", w.plexColl(t, "Top").items, want)
+	}
+}
+
+// Catches: a page that is not what it should be taken at face value — a film page that is a challenge answered with
+// HTTP 200 cached as "no TMDB link" for 30 days (the film missing from every shelf), and a list page that parses
+// to no films (a challenge or a new layout) taken as an empty list, which would empty the shelf in both apps.
+func TestUnreadablePagesChangeNothing(t *testing.T) {
+	w := newWorld(t)
+	delete(w.lb.films, "oldboy")
+	w.lb.pages["/film/oldboy/"] = fixture(t, "challenge.html")
+	w.run(t)
+	w.lb.films["oldboy"] = "movie/670"
+	w.clock.Sleep(context.Background(), time.Hour)
+	w.run(t)
+	want := []string{"k14537", "k389", "k25237", "k670"}
+	if got := w.plexColl(t, "Top").items; !reflect.DeepEqual(got, want) {
+		t.Fatalf("plex Top = %v, want %v (Oldboy's film page read again once it answers)", got, want)
+	}
+
+	w.lb.pages["/official/list/letterboxds-top-500-films/"] = fixture(t, "challenge.html")
+	w.clock.Sleep(context.Background(), 8*24*time.Hour) // past canon_refresh
+	pxBefore, jfBefore := len(w.px.writes()), len(w.jf.writes())
+	w.run(t)
+	for _, c := range append(w.px.writes()[pxBefore:], w.jf.writes()[jfBefore:]...) {
+		if strings.HasPrefix(c, "DELETE ") {
+			t.Errorf("an unreadable list page dropped a member: %s", c)
+		}
+	}
+	if got := w.plexColl(t, "Top").items; !reflect.DeepEqual(got, want) {
+		t.Errorf("plex Top = %v, want %v", got, want)
 	}
 }

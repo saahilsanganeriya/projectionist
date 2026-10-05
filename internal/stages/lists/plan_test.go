@@ -109,21 +109,15 @@ func TestPlanMoves(t *testing.T) {
 	}
 }
 
-// Catches: an alert on a single refusal (Cloudflare hiccups heal by themselves and /health would page the owner),
-// no alert when refusals last, and a streak that survives a clean run.
-func TestBlockedRunsAlertOnlyWhenLasting(t *testing.T) {
+// Catches: an alert on a single bad run (a Cloudflare hiccup or a busy app heals by itself, and /health would page
+// the owner), no alert when the trouble lasts, and a streak that survives a good run.
+func TestLastingAlertsFromTheThirdRun(t *testing.T) {
 	h := fake.NewEnv(t, nil)
-	ctx := context.Background()
-	steps := []struct {
-		blocked    bool
-		unresolved int
-		alert      bool
-	}{{true, 5, false}, {true, 5, false}, {true, 5, true}, {true, 0, false}, {false, 5, false}, {true, 5, false}}
-	for i, s := range steps {
+	for i, s := range []struct{ bad, alert bool }{{true, false}, {true, false}, {true, true}, {true, true}, {false, false}, {true, false}} {
 		rep := &stage.Report{}
-		blockedRuns(ctx, h.Env, rep, s.blocked, s.unresolved)
+		lasting(context.Background(), h.Env, rep, "test_runs", s.bad, "trouble")
 		if (len(rep.Alerts) > 0) != s.alert {
-			t.Errorf("step %d (blocked=%v unresolved=%d): alerts %v, want alert=%v", i, s.blocked, s.unresolved, rep.Alerts, s.alert)
+			t.Errorf("step %d (bad=%v): alerts %v, want alert=%v", i, s.bad, rep.Alerts, s.alert)
 		}
 	}
 }

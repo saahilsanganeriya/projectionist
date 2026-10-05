@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"projectionist/internal/lbpace"
 )
 
 func fixture(t *testing.T, name string) []byte {
@@ -63,13 +65,13 @@ func TestParsePage(t *testing.T) {
 // movie, whose id would then match an unrelated film on the NAS.
 func TestParseFilm(t *testing.T) {
 	for file, want := range map[string]film{
-		"film_interstellar.html": {Kind: "movie", TMDB: 157336},
-		"film_chernobyl.html":    {Kind: "tv", TMDB: 87108},
-		"challenge.html":         {},
+		"film_interstellar.html": {Kind: "movie", TMDB: 157336, Checked: true},
+		"film_chernobyl.html":    {Kind: "tv", TMDB: 87108, Checked: true},
+		"challenge.html":         {}, // not a film page: no answer at all
 	} {
-		kind, tmdb := parseFilm(fixture(t, file))
-		if kind != want.Kind || tmdb != want.TMDB {
-			t.Errorf("%s: kind=%q tmdb=%d, want %+v", file, kind, tmdb, want)
+		kind, tmdb, ok := parseFilm(fixture(t, file))
+		if kind != want.Kind || tmdb != want.TMDB || ok != want.Checked {
+			t.Errorf("%s: kind=%q tmdb=%d ok=%v, want %+v", file, kind, tmdb, ok, want)
 		}
 	}
 }
@@ -101,8 +103,8 @@ func (c *fakeClock) Sleep(ctx context.Context, d time.Duration) error {
 	return ctx.Err()
 }
 
-// Catches: requests closer than the interval (the politeness promise to Letterboxd), retries that skip the pacer,
-// and requests sent after Letterboxd refused one (a challenge must end the run's fetching, not be hammered).
+// Catches: a request (a retry included) that skips the shared limiter, and requests sent after Letterboxd refused one
+// (a challenge must end the run's fetching, not be hammered).
 func TestFetcherPacingAndRefusal(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 10, 5, 7, 0, 0, 0, time.UTC)}
 	var mu sync.Mutex
@@ -115,7 +117,10 @@ func TestFetcherPacingAndRefusal(t *testing.T) {
 		w.WriteHeader(status[r.URL.Path])
 	}))
 	defer srv.Close()
-	f := newFetcher("test-agent", &pacer{interval: 2 * time.Second, now: clock.Now, sleep: clock.Sleep}, discard())
+	oldSleep := sleep
+	sleep = clock.Sleep
+	defer func() { sleep = oldSleep }()
+	f := newFetcher("test-agent", lbpace.New(clock.Now, clock.Sleep), discard())
 	ctx := context.Background()
 	for _, p := range []string{"/ok", "/ok"} {
 		if _, _, err := f.get(ctx, srv.URL+p); err != nil {

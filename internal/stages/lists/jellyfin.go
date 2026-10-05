@@ -22,8 +22,9 @@ type jellyfinSink struct {
 	w        *writer
 	user     string         // the owner's user id
 	byTMDB   map[int]string // item id
-	watched  map[int]bool
+	sets     []boxSet       // the BoxSets, as load read them
 	taken    int
+	retired  int
 	scanning bool // the movie library is being scanned: its listings come and go, so BoxSets wait
 }
 
@@ -33,10 +34,12 @@ type jellyfinMap struct {
 }
 
 // load reads the owner's user id, the TMDB id → item id map and his played films every run, falling back to the
-// last copy when Jellyfin does not answer or is scanning the movie library. During a scan movies drop out of the
+// last copy when Jellyfin does not answer or is scanning; then the BoxSets. During a scan movies drop out of the
 // listings and come back (2026-10-05: 144 of 2,236 folders missing, a different 144 a few minutes later; a
-// user-scoped listing showed 189 of 2,220), so a map read then would make the BoxSets shrink and regrow.
-func (j *jellyfinSink) load(ctx context.Context) {
+// user-scoped listing showed 189 of 2,220), so a map read then would make the BoxSets shrink and regrow. The scan
+// task runs on after the Movies library reports Idle (same day, 11:17-11:30Z: Movies Idle, "Scan Media Library" at
+// 66%, the movie listing 2,099 then 2,037, a BoxSet's members 123 then 14), so both signals count.
+func (j *jellyfinSink) load(ctx context.Context) appReport {
 	j.w = &writer{app: "jellyfin", log: j.log}
 	ctx, cancel := context.WithTimeout(ctx, j.opt.JellyfinBudget)
 	defer cancel()
@@ -62,12 +65,21 @@ func (j *jellyfinSink) load(ctx context.Context) {
 		CollectionType string `json:"CollectionType"`
 		RefreshStatus  string `json:"RefreshStatus"`
 	}
-	if ok = ok && j.w.read(ctx, "libraries", func(ctx context.Context) error {
+	var tasks []struct {
+		Key   string `json:"Key"`
+		State string `json:"State"`
+	}
+	ok = ok && j.w.read(ctx, "libraries", func(ctx context.Context) error {
 		return j.env.Jellyfin.GetJSON(ctx, "/Library/VirtualFolders", &libraries)
-	}); ok {
-		for _, l := range libraries {
-			j.scanning = j.scanning || (l.CollectionType == "movies" && l.RefreshStatus == "Active")
-		}
+	}) && j.w.read(ctx, "tasks", func(ctx context.Context) error {
+		return j.env.Jellyfin.GetJSON(ctx, "/ScheduledTasks?isHidden=false", &tasks)
+	})
+	j.scanning = !ok // a Jellyfin that does not say whether it is scanning is taken to be scanning
+	for _, l := range libraries {
+		j.scanning = j.scanning || (l.CollectionType == "movies" && l.RefreshStatus == "Active")
+	}
+	for _, t := range tasks {
+		j.scanning = j.scanning || (t.Key == "RefreshLibrary" && t.State == "Running")
 	}
 	const list = "/Items?Recursive=true&IncludeItemTypes=Movie&Fields=ProviderIds&EnableImages=false"
 	if ok && m.User != "" && !j.scanning &&
@@ -101,13 +113,37 @@ func (j *jellyfinSink) load(ctx context.Context) {
 	}
 	j.w.stopped = ""
 	j.user = m.User
-	j.byTMDB, j.watched = map[int]string{}, map[int]bool{}
+	var r appReport
+	j.byTMDB = map[int]string{}
 	for t, it := range m.Items {
 		j.byTMDB[t] = it.Key
 		if it.Watched {
-			j.watched[t] = true
+			r.Watched = append(r.Watched, t)
 		}
 	}
+	if j.user == "" {
+		j.w.stopped = "no Jellyfin user " + j.opt.JellyfinUser + " yet"
+		return r
+	}
+	sets, ok := j.boxSets(ctx)
+	if !ok {
+		return r
+	}
+	mine, err := madeIDs(ctx, j.env.Store.DB(), "jellyfin")
+	if err != nil {
+		j.w.stopped = "state: " + err.Error()
+		return r
+	}
+	j.sets = sets
+	for _, b := range sets {
+		if !mine[b.ID] && !strings.HasPrefix(b.Overview, summaryMarker) {
+			r.Taken = append(r.Taken, fold(b.Name))
+		}
+	}
+	if err := j.env.Store.PutJSON(ctx, name, "jellyfin_report", r); err != nil {
+		j.log.Warn("jellyfin report not kept", "event", "store_error", "err", err)
+	}
+	return r
 }
 
 type boxSet struct {
@@ -127,25 +163,50 @@ func (j *jellyfinSink) boxSets(ctx context.Context) ([]boxSet, bool) {
 	return out.Items, ok
 }
 
-func (j *jellyfinSink) reconcile(ctx context.Context, shelves []shelf) {
-	if j.scanning {
-		j.w.stopped = "Jellyfin is scanning its movie library"
-		return
-	}
-	if j.user == "" || len(j.byTMDB) == 0 {
-		j.w.stopped = "no user or TMDB id → item map yet"
+func (j *jellyfinSink) reconcile(ctx context.Context, shelves []shelf, retire []string) {
+	if j.w.stopped != "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, j.opt.JellyfinBudget)
 	defer cancel()
-	sets, ok := j.boxSets(ctx)
-	if !ok {
+	j.retire(ctx, retire) // deleting a BoxSet does not depend on the movie listings, so it goes ahead during a scan
+	if j.scanning {
+		j.w.stopped = "Jellyfin is scanning its movie library"
+		return
+	}
+	if len(j.byTMDB) == 0 {
+		j.w.stopped = "no TMDB id → item map yet"
 		return
 	}
 	for _, s := range shelves {
-		j.shelf(ctx, s, sets)
+		j.shelf(ctx, s, j.sets)
 		if j.w.stopped != "" {
 			return
+		}
+	}
+}
+
+// retire deletes the BoxSets of retired lists; only one that still carries the stage's overview is deleted.
+func (j *jellyfinSink) retire(ctx context.Context, keys []string) {
+	db := j.env.Store.DB()
+	for _, key := range keys {
+		row, err := getRow(ctx, db, "jellyfin", key)
+		if err != nil {
+			j.w.stopped = "state: " + err.Error()
+			return
+		}
+		for _, b := range j.sets {
+			if row.ID == "" || b.ID != row.ID || !strings.HasPrefix(b.Overview, summaryMarker) {
+				continue
+			}
+			if !j.w.write(ctx, "retire "+b.Name, func(ctx context.Context) error { return j.env.Jellyfin.Delete(ctx, "/Items/"+b.ID) }) {
+				return
+			}
+			j.retired++
+			j.log.Info("shelf retired", "event", "collection_retired", "app", "jellyfin", "list", key, "title", b.Name, "id", b.ID)
+		}
+		if err := deleteRow(ctx, db, "jellyfin", key); err != nil {
+			j.log.Warn("state write failed", "event", "store_error", "err", err)
 		}
 	}
 }
@@ -184,7 +245,7 @@ func (j *jellyfinSink) shelf(ctx context.Context, s shelf, sets []boxSet) {
 		return
 	}
 	dirty := false
-	for k, v := range map[string]string{"Name": s.List.Name, "ForcedSortName": s.SortTitle, "Overview": s.Summary, "DisplayOrder": "Default"} {
+	for k, v := range map[string]string{"Name": s.Title, "ForcedSortName": s.SortTitle, "Overview": s.Summary, "DisplayOrder": "Default"} {
 		if have, _ := meta[k].(string); have != v {
 			meta[k] = v
 			dirty = true
@@ -249,7 +310,7 @@ func (j *jellyfinSink) adoptOrCreate(ctx context.Context, s shelf, row *sinkRow,
 	db := j.env.Store.DB()
 	adoptable := func(sets []boxSet) *boxSet {
 		for i, b := range sets {
-			if sameTitle(b.Name, s.List.Name) && (strings.HasPrefix(b.Overview, summaryMarker) ||
+			if sameTitle(b.Name, s.Title) && (strings.HasPrefix(b.Overview, summaryMarker) ||
 				(!row.IntentAt.IsZero() && !b.DateCreated.Before(row.IntentAt.Add(-time.Minute)))) {
 				return &sets[i]
 			}
@@ -268,10 +329,10 @@ func (j *jellyfinSink) adoptOrCreate(ctx context.Context, s shelf, row *sinkRow,
 		return keep(b)
 	}
 	for _, b := range sets {
-		if sameTitle(b.Name, s.List.Name) {
+		if sameTitle(b.Name, s.Title) {
 			j.taken++
 			j.log.Warn("a BoxSet of the owner's has this title; list not shelved", "event", "name_taken", "app", "jellyfin",
-				"list", s.List.Name, "boxset", b.ID)
+				"list", s.List.Name, "title", s.Title, "boxset", b.ID)
 			return nil
 		}
 	}
@@ -290,7 +351,7 @@ func (j *jellyfinSink) adoptOrCreate(ctx context.Context, s shelf, row *sinkRow,
 	var made struct {
 		ID string `json:"Id"`
 	}
-	path := "/Collections?" + url.Values{"name": {s.List.Name}, "ids": {strings.Join(first, ",")}, "isLocked": {"true"}}.Encode()
+	path := "/Collections?" + url.Values{"name": {s.Title}, "ids": {strings.Join(first, ",")}, "isLocked": {"true"}}.Encode()
 	if !j.w.writeOnce(ctx, "create "+s.List.Name, func(ctx context.Context) error {
 		if err := j.env.Jellyfin.PostJSON(ctx, path, nil, &made); err != nil || made.ID != "" {
 			return err
@@ -300,5 +361,5 @@ func (j *jellyfinSink) adoptOrCreate(ctx context.Context, s shelf, row *sinkRow,
 		return nil
 	}
 	j.log.Info("boxset made", "event", "collection_created", "app", "jellyfin", "list", s.List.Name, "id", made.ID)
-	return keep(&boxSet{ID: made.ID, Name: s.List.Name})
+	return keep(&boxSet{ID: made.ID, Name: s.Title})
 }

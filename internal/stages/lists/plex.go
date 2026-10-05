@@ -21,9 +21,10 @@ type plexSink struct {
 	log     *slog.Logger
 	w       *writer
 	byTMDB  map[int]string // ratingKey
-	watched map[int]bool   // the owner's Plex watched flags, from the same answer
+	colls   []plexColl     // the section's collections, as load read them
 	machine string
 	taken   int
+	retired int
 }
 
 // plexPage is how many movies one listing call asks for: on the busy NAS (2026-10-05) the whole section in one answer
@@ -41,8 +42,8 @@ type plexItem struct {
 }
 
 // load reads the TMDB id → ratingKey map, from Plex at most once per plex_refresh (one paged listing of the
-// section), else from the copy kept in the store.
-func (p *plexSink) load(ctx context.Context) {
+// section), else from the copy kept in the store; then the section's collections.
+func (p *plexSink) load(ctx context.Context) appReport {
 	p.w = &writer{app: "plex", log: p.log}
 	var m plexMap
 	found, err := p.env.Store.GetJSON(ctx, name, "plex_map", &m)
@@ -107,13 +108,33 @@ func (p *plexSink) load(ctx context.Context) {
 		}
 		p.w.stopped = "" // a failed listing only means the old copy (if any) is used
 	}
-	p.byTMDB, p.watched = map[int]string{}, map[int]bool{}
+	var r appReport
+	p.byTMDB = map[int]string{}
 	for t, it := range m.Items {
 		p.byTMDB[t] = it.Key
 		if it.Watched {
-			p.watched[t] = true
+			r.Watched = append(r.Watched, t)
 		}
 	}
+	colls, ok := p.collections(ctx)
+	if !ok {
+		return r // the writer is stopped: reconcile waits for the next run
+	}
+	mine, err := madeIDs(ctx, p.env.Store.DB(), "plex")
+	if err != nil {
+		p.w.stopped = "state: " + err.Error()
+		return r
+	}
+	p.colls = colls
+	for _, c := range colls {
+		if !mine[c.RatingKey] && !strings.HasPrefix(c.Summary, summaryMarker) {
+			r.Taken = append(r.Taken, fold(c.Title))
+		}
+	}
+	if err := p.env.Store.PutJSON(ctx, name, "plex_report", r); err != nil {
+		p.log.Warn("plex report not kept", "event", "store_error", "err", err)
+	}
+	return r
 }
 
 type plexColl struct {
@@ -136,13 +157,17 @@ func (p *plexSink) collections(ctx context.Context) ([]plexColl, bool) {
 	return out.Metadata, ok
 }
 
-func (p *plexSink) reconcile(ctx context.Context, shelves []shelf) {
-	if len(p.byTMDB) == 0 {
-		p.w.stopped = "no TMDB id → ratingKey map yet"
+func (p *plexSink) reconcile(ctx context.Context, shelves []shelf, retire []string) {
+	if p.w.stopped != "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.opt.PlexBudget)
 	defer cancel()
+	p.retire(ctx, retire)
+	if len(p.byTMDB) == 0 {
+		p.w.stopped = "no TMDB id → ratingKey map yet"
+		return
+	}
 	var id struct {
 		MachineIdentifier string `json:"machineIdentifier"`
 	}
@@ -150,13 +175,9 @@ func (p *plexSink) reconcile(ctx context.Context, shelves []shelf) {
 		return
 	}
 	p.machine = id.MachineIdentifier
-	colls, ok := p.collections(ctx)
-	if !ok {
-		return
-	}
 	ids := map[string]string{} // list name → collection ratingKey
 	for _, s := range shelves {
-		if key := p.shelf(ctx, s, colls); key != "" {
+		if key := p.shelf(ctx, s, p.colls); key != "" {
 			ids[s.List.Name] = key
 		}
 		if p.w.stopped != "" {
@@ -164,6 +185,34 @@ func (p *plexSink) reconcile(ctx context.Context, shelves []shelf) {
 		}
 	}
 	p.home(ctx, shelves, ids)
+}
+
+// retire deletes the collections of retired lists. Only a collection that still carries the stage's summary is
+// deleted (that also drops its Home row, measured on 1.43); the record of any other is just forgotten.
+func (p *plexSink) retire(ctx context.Context, keys []string) {
+	db := p.env.Store.DB()
+	for _, key := range keys {
+		row, err := getRow(ctx, db, "plex", key)
+		if err != nil {
+			p.w.stopped = "state: " + err.Error()
+			return
+		}
+		for _, c := range p.colls {
+			if row.ID == "" || c.RatingKey != row.ID || !strings.HasPrefix(c.Summary, summaryMarker) {
+				continue
+			}
+			if !p.w.write(ctx, "retire "+c.Title, func(ctx context.Context) error {
+				return p.env.Plex.Do(ctx, "DELETE", "/library/collections/"+c.RatingKey)
+			}) {
+				return
+			}
+			p.retired++
+			p.log.Info("shelf retired", "event", "collection_retired", "app", "plex", "list", key, "title", c.Title, "id", c.RatingKey)
+		}
+		if err := deleteRow(ctx, db, "plex", key); err != nil {
+			p.log.Warn("state write failed", "event", "store_error", "err", err)
+		}
+	}
 }
 
 func (p *plexSink) uri(keys []string) string {
@@ -237,7 +286,7 @@ func (p *plexSink) shelf(ctx context.Context, s shelf, colls []plexColl) string 
 	}
 	edit := url.Values{}
 	for _, f := range []struct{ field, have, want string }{
-		{"title", coll.Title, s.List.Name}, {"titleSort", coll.TitleSort, s.SortTitle}, {"summary", coll.Summary, s.Summary}} {
+		{"title", coll.Title, s.Title}, {"titleSort", coll.TitleSort, s.SortTitle}, {"summary", coll.Summary, s.Summary}} {
 		if f.have != f.want {
 			edit.Set(f.field+".value", f.want)
 			edit.Set(f.field+".locked", "1")
@@ -293,10 +342,10 @@ func (p *plexSink) adoptOrCreate(ctx context.Context, s shelf, row *sinkRow, col
 		return p.keep(ctx, db, s, row, c)
 	}
 	for _, c := range colls {
-		if sameTitle(c.Title, s.List.Name) {
+		if sameTitle(c.Title, s.Title) {
 			p.taken++
 			p.log.Warn("a collection of the owner's has this title; list not shelved", "event", "name_taken", "app", "plex",
-				"list", s.List.Name, "collection", c.RatingKey)
+				"list", s.List.Name, "title", s.Title, "collection", c.RatingKey)
 			return nil
 		}
 	}
@@ -312,7 +361,7 @@ func (p *plexSink) adoptOrCreate(ctx context.Context, s shelf, row *sinkRow, col
 	if len(first) > 100 {
 		first = first[:100]
 	}
-	path := "/library/collections?" + url.Values{"type": {"1"}, "smart": {"0"}, "title": {s.List.Name},
+	path := "/library/collections?" + url.Values{"type": {"1"}, "smart": {"0"}, "title": {s.Title},
 		"sectionId": {strconv.Itoa(p.opt.PlexSection)}, "uri": {p.uri(first)}}.Encode()
 	if !p.w.writeOnce(ctx, "create "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "POST", path) }) {
 		return nil
@@ -332,7 +381,7 @@ func (p *plexSink) adoptOrCreate(ctx context.Context, s shelf, row *sinkRow, col
 
 func (p *plexSink) adoptable(s shelf, row *sinkRow, colls []plexColl) *plexColl {
 	for i, c := range colls {
-		if !sameTitle(c.Title, s.List.Name) {
+		if !sameTitle(c.Title, s.Title) {
 			continue
 		}
 		if strings.HasPrefix(c.Summary, summaryMarker) || (!row.IntentAt.IsZero() && c.AddedAt >= row.IntentAt.Unix()-60) {
@@ -351,8 +400,9 @@ func (p *plexSink) keep(ctx context.Context, db *sql.DB, s shelf, row *sinkRow, 
 	return c
 }
 
-// home promotes the configured lists to the owner's Home and Recommended (not friends' Homes), in the configured
-// order after opt.HomeAfter, and demotes shelves this stage promoted that are no longer configured.
+// home promotes the configured lists to the owner's own Home only (not Recommended, which every shared user sees, nor
+// friends' Homes), in the configured order after opt.HomeAfter, and demotes shelves this stage promoted that are no
+// longer configured.
 func (p *plexSink) home(ctx context.Context, shelves []shelf, ids map[string]string) {
 	db := p.env.Store.DB()
 	manage := fmt.Sprintf("/hubs/sections/%d/manage", p.opt.PlexSection)
@@ -360,6 +410,7 @@ func (p *plexSink) home(ctx context.Context, shelves []shelf, ids map[string]str
 		Identifier            string `json:"identifier"`
 		PromotedToOwnHome     bool   `json:"promotedToOwnHome"`
 		PromotedToRecommended bool   `json:"promotedToRecommended"`
+		PromotedToSharedHome  bool   `json:"promotedToSharedHome"`
 	}
 	var hubs struct {
 		Hub []hub `json:"Hub"`
@@ -401,13 +452,13 @@ func (p *plexSink) home(ctx context.Context, shelves []shelf, ids map[string]str
 		need := false
 		switch {
 		case on:
-			need = !h.PromotedToOwnHome || !h.PromotedToRecommended
+			need = !h.PromotedToOwnHome || h.PromotedToRecommended || h.PromotedToSharedHome
 		case row.Promoted: // promoted by this stage, no longer configured; a row the owner promoted stays
-			need = h.PromotedToOwnHome || h.PromotedToRecommended
+			need = h.PromotedToOwnHome || h.PromotedToRecommended || h.PromotedToSharedHome
 		}
 		if need {
 			v := map[bool]string{true: "1", false: "0"}[on]
-			path := manage + "?" + url.Values{"metadataItemId": {key}, "promotedToRecommended": {v}, "promotedToOwnHome": {v},
+			path := manage + "?" + url.Values{"metadataItemId": {key}, "promotedToRecommended": {"0"}, "promotedToOwnHome": {v},
 				"promotedToSharedHome": {"0"}}.Encode()
 			if !p.w.write(ctx, "home row "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "POST", path) }) {
 				return

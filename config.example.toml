@@ -56,14 +56,15 @@ default_section = 4
 
 # Letterboxd lists as Plex collections and Jellyfin BoxSets: the canon plus the owner's own public lists, owned films
 # in list order, "On the NAS: N of M · seen S · <url>" summaries, generated posters, Plex Home rows for `home`.
-# Letterboxd is read politely (one request per request_interval, page 1 only of user pages) and cached in SQLite.
+# Letterboxd is read politely (one request per 2 s for the whole process, page 1 only of user pages) and cached in
+# SQLite. A shelf whose title an owner's collection already has (ignoring case) is named "<list> · Letterboxd". A
+# shelf whose list is gone (private or deleted, in skip_own, dropped from the canon) is deleted from both apps.
 [stages.lists]
 every            = "24h"
 window           = "03:00-08:00"
 dry_run          = false      # true: read and count everything, write nothing
 only             = []         # shelve only these lists (names); empty = all
 letterboxd_user  = "saahilsan"
-request_interval = "2s"
 canon_refresh    = "168h"     # canon list pages are re-read weekly
 own_refresh      = "20h"      # the owner's lists, films page and diary feed: daily
 export_dir       = "/volume1/docker/projectionist/data/letterboxd" # the unzipped Letterboxd export (lists/*.csv, watched.csv)
@@ -76,7 +77,7 @@ plex_refresh     = "24h"      # one /library/sections/4/all listing (TMDB id →
 plex_budget      = "30m"      # first build of all shelves: ~2,000 calls; later runs a handful
 jellyfin_user    = "saahil"
 jellyfin_budget  = "15m"
-home             = ["Letterboxd Top 500", "Criterion Collection", "Sight & Sound 2022"] # Plex Home rows, in order
+home             = ["Letterboxd Top 500", "Criterion Collection", "Sight & Sound 2022"] # the owner's own Plex Home rows, in order
 home_after       = "movie.recentlyadded"
 # The canon defaults to the lists below (checked 2026-10-05); a [[stages.lists.canon]] table replaces all of them.
 # [[stages.lists.canon]]

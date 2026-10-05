@@ -1,7 +1,8 @@
 package lists
 
-// Letterboxd side: polite fetching (one request per interval, a real User-Agent, no login), page parsing, and the
-// SQLite cache that makes every answer reusable: film page → TMDB id forever, list pages until they are stale.
+// Letterboxd side: polite fetching (one request per 2 s for the whole process, via lbpace; a real User-Agent; no
+// login), page parsing, and the SQLite cache that makes every answer reusable: film page → TMDB id forever, list
+// pages until they are stale.
 //
 // Cloudflare challenges anonymous requests for paginated *user* pages (/<user>/lists/page/2/, /<user>/films/page/2/,
 // measured 2026-10-05), so only page 1 of those is ever requested; list pages (/<user>/list/<slug>/page/N/) are fine.
@@ -26,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"projectionist/internal/lbpace"
 	"projectionist/internal/store"
 )
 
@@ -33,26 +35,6 @@ var (
 	errBlocked  = errors.New("letterboxd refused the request (challenge or rate limit)")
 	errNotFound = errors.New("not on letterboxd (404)")
 )
-
-// pacer spaces request starts at least interval apart, across every Letterboxd host.
-type pacer struct {
-	interval time.Duration
-	now      func() time.Time
-	sleep    func(context.Context, time.Duration) error
-	last     time.Time
-}
-
-func (p *pacer) wait(ctx context.Context) error {
-	if !p.last.IsZero() {
-		if d := p.interval - p.now().Sub(p.last); d > 0 {
-			if err := p.sleep(ctx, d); err != nil {
-				return err
-			}
-		}
-	}
-	p.last = p.now()
-	return nil
-}
 
 func sleepCtx(ctx context.Context, d time.Duration) error {
 	t := time.NewTimer(d)
@@ -68,13 +50,13 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 type fetcher struct {
 	http     *http.Client
 	ua       string
-	pace     *pacer
+	pace     *lbpace.Limiter
 	log      *slog.Logger
 	requests int
 	blocked  bool // set by the first 403/429; no further request this run
 }
 
-func newFetcher(ua string, pace *pacer, log *slog.Logger) *fetcher {
+func newFetcher(ua string, pace *lbpace.Limiter, log *slog.Logger) *fetcher {
 	return &fetcher{
 		http: &http.Client{Timeout: 30 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
@@ -82,14 +64,15 @@ func newFetcher(ua string, pace *pacer, log *slog.Logger) *fetcher {
 	}
 }
 
-// get fetches one URL when the pacer allows: the body on 200, the Location on a redirect (never followed, so every hop
-// is paced), errNotFound on 404/410, errBlocked on 403/429. Other failures are retried twice, 5 s then 10 s later.
+// get fetches one URL when the shared limiter allows: the body on 200, the Location on a redirect (never followed,
+// so every hop is paced), errNotFound on 404/410, errBlocked on 403/429. Other failures are retried twice, 5 s then
+// 10 s later.
 func (f *fetcher) get(ctx context.Context, rawURL string) (body []byte, location string, err error) {
 	for attempt := 1; ; attempt++ {
 		if f.blocked {
 			return nil, "", errBlocked
 		}
-		if err := f.pace.wait(ctx); err != nil {
+		if err := f.pace.Wait(ctx); err != nil {
 			return nil, "", err
 		}
 		body, location, err = f.once(ctx, rawURL)
@@ -97,7 +80,7 @@ func (f *fetcher) get(ctx context.Context, rawURL string) (body []byte, location
 			return body, location, err
 		}
 		f.log.Warn("letterboxd request failed", "event", "letterboxd_retry", "url", rawURL, "attempt", attempt, "err", err)
-		if err := f.pace.sleep(ctx, time.Duration(attempt)*5*time.Second); err != nil {
+		if err := sleep(ctx, time.Duration(attempt)*5*time.Second); err != nil {
 			return nil, "", err
 		}
 	}
@@ -207,17 +190,22 @@ func parsePage(body []byte) page {
 }
 
 // parseFilm reads a film page's TMDB link. The TMDB button wins over the body attributes: a miniseries page says
-// data-tmdb-type="movie" with an empty id while its button links /tv/<id>.
-func parseFilm(body []byte) (kind string, tmdb int) {
+// data-tmdb-type="movie" with an empty id while its button links /tv/<id>. ok is false for a page that is not a film
+// page at all (a challenge answered with HTTP 200, a changed layout): no answer, rather than "no TMDB link".
+func parseFilm(body []byte) (kind string, tmdb int, ok bool) {
 	if m := tmdbButton.FindSubmatch(body); m != nil {
 		n, _ := strconv.Atoi(string(m[2]))
-		return string(m[1]), n
+		return string(m[1]), n, true
 	}
-	if m := bodyTMDB.FindSubmatch(body); m != nil && len(m[2]) > 0 {
-		n, _ := strconv.Atoi(string(m[2]))
-		return string(m[1]), n
+	m := bodyTMDB.FindSubmatch(body)
+	if m == nil {
+		return "", 0, false
 	}
-	return "", 0
+	if len(m[2]) == 0 {
+		return "", 0, true // a film page without a TMDB link
+	}
+	n, _ := strconv.Atoi(string(m[2]))
+	return string(m[1]), n, true
 }
 
 type rssItem struct {
@@ -339,7 +327,7 @@ type letterboxd struct {
 }
 
 // cachedPage returns the page at path, fetched again only when its copy is older than maxAge. When the fetch fails
-// for any reason but a 404, the stale copy is used; ok is false when there is neither.
+// for any reason but a 404, or the page shows nothing, the stale copy is used; ok is false when there is neither.
 func (lb *letterboxd) cachedPage(ctx context.Context, path string, maxAge time.Duration) (p page, ok bool, err error) {
 	var fetched, raw string
 	err = lb.db.QueryRowContext(ctx, `SELECT fetched_at, page FROM lists_pages WHERE path=?`, path).Scan(&fetched, &raw)
@@ -361,6 +349,11 @@ func (lb *letterboxd) cachedPage(ctx context.Context, path string, maxAge time.D
 		ok = !p.Gone
 	}
 	fresh, err := lb.fetchPage(ctx, path)
+	if err == nil && len(fresh.Entries) == 0 && len(fresh.Lists) == 0 {
+		// every page read here lists films or lists: an empty one is a challenge answered with HTTP 200 or a changed
+		// layout, and taking it would empty the shelves
+		err = errors.New("no films or lists on the page")
+	}
 	switch {
 	case err == nil:
 		return fresh, true, lb.storePage(ctx, path, fresh)
@@ -530,8 +523,14 @@ func (lb *letterboxd) resolve(ctx context.Context, slugs []string, known map[str
 			return resolved, ctx.Err()
 		case errors.Is(err, errBlocked):
 			return resolved, nil
-		case err == nil || errors.Is(err, errNotFound):
-			f.Kind, f.TMDB = parseFilm(body)
+		case errors.Is(err, errNotFound):
+			f.Checked = true
+		case err == nil:
+			var ok bool
+			if f.Kind, f.TMDB, ok = parseFilm(body); !ok {
+				lb.log.Warn("film page unreadable", "event", "film_unavailable", "slug", slug, "bytes", len(body))
+				continue
+			}
 			f.Checked = true
 		default:
 			lb.log.Warn("film page unavailable", "event", "film_unavailable", "slug", slug, "err", err)
