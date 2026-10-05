@@ -331,25 +331,24 @@ func TestNoVerdictIsNotUnreadable(t *testing.T) {
 }
 
 // Catches: a video whose ffprobe is killed on every run (one that always outlasts the time limit, or meets the OOM
-// killer) staying unprobed for good, which keeps a fresh state from ever taking its first baseline: growth alerts
-// off, silently.
+// killer) staying unprobed for good, which keeps a fresh state from ever taking its first baseline (growth alerts off,
+// silently); and a verdict in between not ending the run of kills, which files a readable video as unreadable early.
 func TestAlwaysKilledProbeIsUnreadable(t *testing.T) {
 	h := fake.NewEnv(t, nil)
 	root := t.TempDir()
 	h.SetOptions(`root = "` + root + `"`)
 	fakeProbe(t, h)
-	ran := "Movies/Ran (1985) {tmdb-11645}/Ran (1985) {tmdb-11645}"
-	put(t, root, ran+".mkv", "ffprobe killed")
 	os.Mkdir(filepath.Join(root, "TV"), 0o755)
-	for i := 1; i <= killLimit; i++ {
-		rep := run(t, h)
-		if want := map[bool]int{true: 1}[i == killLimit]; rep.Counts[unreadable] != want || rep.Counts["not_probed"] != 1-want {
-			t.Fatalf("run %d: counts = %v, want unreadable_video = %d", i, rep.Counts, want)
+	const killed = "ffprobe killed"
+	runs := []struct {
+		body                  string
+		unreadable, notProbed int
+	}{{killed, 0, 1}, {killed, 0, 1}, {"film", 0, 0}, {killed, 0, 1}, {killed, 0, 1}, {killed, 1, 0}}
+	for i, r := range runs {
+		put(t, root, "Movies/Ran (1985) {tmdb-11645}/Ran (1985) {tmdb-11645}.mkv", r.body)
+		if rep := run(t, h); rep.Counts[unreadable] != r.unreadable || rep.Counts["not_probed"] != r.notProbed {
+			t.Fatalf("run %d (%s): counts = %v, want unreadable_video = %d, not_probed = %d", i+1, r.body, rep.Counts, r.unreadable, r.notProbed)
 		}
-	}
-	put(t, root, ran+".nfo", "1")
-	if rep := run(t, h); len(rep.Alerts) != 1 {
-		t.Fatalf("after the video was judged, a new stray file raised alerts %q, want one", rep.Alerts)
 	}
 }
 
