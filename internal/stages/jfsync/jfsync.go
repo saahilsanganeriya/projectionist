@@ -68,7 +68,7 @@ type Options struct {
 
 func defaults() Options {
 	return Options{
-		Apply: true, MoviesSection: 4, TVSection: 2, AddressEvery: 24 * time.Hour, ListTimeout: 5 * time.Minute,
+		Apply: true, MoviesSection: 4, TVSection: 2, AddressEvery: 24 * time.Hour, ListTimeout: 10 * time.Minute,
 		PlexBackups: "/volume1/PlexMediaServer/backups", WebhookURL: "http://127.0.0.1:8097/hooks/plex",
 		PlexTV: "https://plex.tv",
 	}
