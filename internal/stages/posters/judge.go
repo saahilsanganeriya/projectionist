@@ -30,8 +30,8 @@ and "premieres" or "now streaming" lines; TV network or streaming-service logos;
 or the title's own; watermarks; blurry, stretched or badly cropped images; art for a different title; and, for a
 season, art for the complete series or another season instead of this one.
 
-Score near-duplicates (the same art cropped, resized or recoloured) the same. Give one short clause on why the
-best candidate wins.`
+Score near-duplicates (the same art cropped, resized or recoloured) the same. The reason is one clause of at most
+15 words on why the best candidate wins.`
 
 // answerSchema is the structured output every judge call must return.
 var answerSchema = json.RawMessage(`{"type":"object","properties":{` +
