@@ -1,5 +1,6 @@
 // Package posters picks the most artistic poster for every movie, show and season and puts it on Jellyfin and Plex
-// (port of posters/posters.py, which ran on the Mac).
+// (port of posters/posters.py, which ran on the Mac), and gives every Movies collection without a poster of the
+// owner's one (collections.go).
 //
 // Each run reconciles the library against the posters_items table, so an early trigger or a crash only resumes:
 //
@@ -43,8 +44,8 @@ const name = "posters"
 type Options struct {
 	MoviesRoot       string        `toml:"movies_root"`
 	TVRoot           string        `toml:"tv_root"`
-	Only             []string      `toml:"only"`    // title keys ("movie:tmdb-422", "season:tmdb-1400:2") to limit a run to
-	DryRun           bool          `toml:"dry_run"` // candidates and judge only: Plex and Jellyfin are not touched
+	Only             []string      `toml:"only"`    // title keys ("movie:tmdb-422", "season:tmdb-1400:2", "collection:scary movie") to limit a run to
+	DryRun           bool          `toml:"dry_run"` // titles: candidates and judge only, no poster uploaded
 	CacheDir         string        `toml:"cache_dir"`
 	SecretsDir       string        `toml:"secrets_dir"`     // anthropic_api_key (TMDB and fanart.tv are the shared clients')
 	OwnerItems       string        `toml:"owner_items"`     // customizations/items.json: ratingKey, guid, external ids per item
@@ -64,6 +65,13 @@ type Options struct {
 	Mark             string        `toml:"mark"`             // EXIF ImageDescription on the images the stage chose
 	AnthropicAPI     string        `toml:"anthropic_api"`
 	TMDBImages       string        `toml:"tmdb_images"`
+	// Collections: both files set (the collections stage's) turn them on.
+	CollectionsOwner    string  `toml:"collections_owner_file"`    // the owner's collections: never given a poster here
+	CollectionsApproved string  `toml:"collections_approved_file"` // with the arrivals the collections stage stored
+	CollectionDryRun    bool    `toml:"collection_dry_run"`        // collections: candidates and judge only (default)
+	CollectionBudgetUSD float64 `toml:"collection_budget_usd"`     // every collection judge call ever, apart from budget_usd
+	CommonsAPI          string  `toml:"commons_api"`
+	CommonsContact      string  `toml:"commons_contact"` // a URL or e-mail for the User-Agent: Wikimedia then allows 20× the rate
 }
 
 func defaults() Options {
@@ -90,6 +98,10 @@ func defaults() Options {
 		Mark:             "poster-curator 2026-10",
 		AnthropicAPI:     "https://api.anthropic.com",
 		TMDBImages:       "https://image.tmdb.org/t/p",
+
+		CollectionDryRun:    true,
+		CollectionBudgetUSD: 5,
+		CommonsAPI:          "https://commons.wikimedia.org/w/api.php",
 	}
 }
 
@@ -168,6 +180,9 @@ type run struct {
 	gateMu   sync.Mutex
 	gateAt   time.Time
 	gateBusy bool
+
+	commonsMu   sync.Mutex // Commons API calls go one at a time, CommonsPace apart
+	commonsLast time.Time
 }
 
 // guestsWatching is the viewer gate, asked at most once a minute; a gate that cannot tell counts as busy.
@@ -249,6 +264,14 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if err != nil {
 		return err
 	}
+	if opt.CollectionsApproved != "" {
+		cs, err := collectionTitles(ctx, db, opt)
+		if err != nil {
+			return err
+		}
+		titles = append(titles, cs...)
+		rep.Count("collections", len(cs))
+	}
 	if len(opt.Only) > 0 {
 		titles = slices.DeleteFunc(titles, func(t Title) bool { return !slices.Contains(opt.Only, t.Key) })
 	}
@@ -293,20 +316,37 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if err := r.judge(ctx, rows); err != nil {
 		return err
 	}
-	if !opt.DryRun {
-		if err := r.enqueue(ctx, rows); err != nil {
+	if live := r.live(); live[false] || live[true] {
+		var send []*row
+		for _, it := range rows {
+			if live[it.Title.Kind.collection()] {
+				send = append(send, it)
+			}
+		}
+		if err := r.enqueue(ctx, send); err != nil {
 			return err
 		}
 		if err := r.apply(ctx); err != nil {
 			return err
 		}
 	}
-	spent, err := spentUSD(ctx, db)
+	spent, err := spentUSD(ctx, db, false)
 	if err != nil {
 		return err
 	}
 	rep.Summary = fmt.Sprintf("%d titles; %d judged this run; $%.4f of $%.2f spent or held", len(rows), rep.Counts["judged"], spent, opt.BudgetUSD)
+	if opt.CollectionsApproved != "" {
+		if spent, err = spentUSD(ctx, db, true); err != nil {
+			return err
+		}
+		rep.Summary += fmt.Sprintf("; collections $%.4f of $%.2f", spent, opt.CollectionBudgetUSD)
+	}
 	return ctx.Err()
+}
+
+// live is, for titles (false) and collections (true), whether their posters are uploaded this run.
+func (r *run) live() map[bool]bool {
+	return map[bool]bool{false: !r.opt.DryRun, true: r.opt.CollectionsApproved != "" && !r.opt.CollectionDryRun}
 }
 
 // ---- store ----
@@ -348,6 +388,12 @@ func loadRows(ctx context.Context, db *sql.DB, titles []Title, now time.Time) ([
 
 // poolSig names what a title's pool is gathered from: a new owner poster (a newer export) gathers it again.
 func (r *run) poolSig(t Title) string {
+	switch t.Kind {
+	case franchise:
+		return "tmdb-collection+fanart+film"
+	case director:
+		return "commons+tmdb-person"
+	}
 	sig := "tmdb+fanart"
 	if p, ok := r.owners[t.Key]; ok {
 		sig += " owner=" + p.State + ":" + p.File

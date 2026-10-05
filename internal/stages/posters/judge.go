@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"math/rand/v2"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -34,15 +35,56 @@ season instead of this one.
 Score near-duplicates (the same art cropped, resized or recoloured) the same. Answer with JSON only, in exactly this
 shape: {"scores": {"A": 7, "B": 4}, "reason": "<at most 15 words on why the best one wins>"}`
 
+// franchisePrompt and directorPrompt judge a collection's pool. The owner's own collection posters set the style: a
+// franchise's carry its title in the series' typography, a director's are textless photos, most of them on set.
+const franchisePrompt = `You are the art director of a cinephile's film library. You will see the candidate posters for one
+franchise collection (the shelf that holds every film of a series), each labelled with a letter and where it comes from.
+Score every candidate from 1 to 10 for how good it would look as the collection's poster.
+
+The library's other franchise posters are clean key art made for the whole series, with the franchise's title (often
+with the word COLLECTION) set in the series' own typography. Reward: art made for the whole collection over one film's
+poster; a strong composition with a clear focal point; typography that belongs to the design; a mood true to the series;
+clean, high-resolution artwork.
+
+Penalise: collages of floating heads; DVD or Blu-ray box layouts; review quotes, award banners and credit blocks; text in
+a language other than English or the series' own; watermarks; low-resolution, stretched or badly cropped images; and art
+for another franchise.
+
+Score near-duplicates the same. Answer with JSON only, in exactly this shape:
+{"scores": {"A": 7, "B": 4}, "reason": "<at most 15 words on why the best one wins>"}`
+
+const directorPrompt = `You are the photo editor of a cinephile's film library. You will see candidate photos for one director
+collection (the shelf of films by one director), each labelled with a letter, the site it comes from, its full size and
+its caption. The chosen photo becomes the collection's poster, cropped to a tall 2:3 frame around the director, with no
+text added.
+
+Who a photo shows: decide from its caption and source only, never from faces. A TMDB profile photo of the director, or a
+photo whose caption names the director as its subject, shows the director. The director's films are listed first: a
+caption that ties a photo to someone else's film, or to another person of the same name, does not show the director.
+Score 1 such a photo, one whose caption names only other people, a group or crowd where the caption does not single the
+director out, and anything that is not a photograph of a person (a poster, a building, a car, a document).
+
+Prefer, in this order: the director at work on a film set (a camera, crew, a monitor, a clapperboard or a megaphone
+around them); then a strong, well-lit portrait. Reward one clear subject, good light, sharp focus and room for a tall
+crop around them. Penalise: red-carpet and press backdrops, press-conference tables and microphones, watermarks and text
+overlays, low resolution (under about 1000 pixels on the long side), heavy blur, and a subject too small to crop to.
+
+Answer with JSON only, in exactly this shape:
+{"scores": {"A": 8, "B": 3}, "on_set": ["A"], "box": {"A": [0.31, 0.08, 0.74, 0.97]}, "reason": "<at most 15 words>"}
+"on_set" lists the photos taken on a film set. "box" gives, for every photo scored above 1, the director's whole visible
+figure, head included, as [left, top, right, bottom] fractions of the image's width and height.`
+
 // Verdict is the decision for one candidate set; a different set (another source, a new poster) is judged again.
 type Verdict struct {
-	Choice string             `json:"choice"` // Candidate.URL
-	Rule   string             `json:"rule"`   // upload | single | judged | kept | unjudged
-	Reason string             `json:"reason,omitempty"`
-	Scores map[string]float64 `json:"scores,omitempty"` // by Candidate.URL
-	Model  string             `json:"model,omitempty"`
-	Of     string             `json:"of"` // setID of what was judged
-	At     time.Time          `json:"at"`
+	Choice string               `json:"choice"` // Candidate.URL
+	Rule   string               `json:"rule"`   // upload | single | judged | kept | unjudged
+	Reason string               `json:"reason,omitempty"`
+	Scores map[string]float64   `json:"scores,omitempty"` // by Candidate.URL
+	Boxes  map[string][]float64 `json:"boxes,omitempty"`  // a director's photos: where the director is, by Candidate.URL
+	OnSet  []string             `json:"on_set,omitempty"` // a director's photos taken on a film set (Candidate.URL)
+	Model  string               `json:"model,omitempty"`
+	Of     string               `json:"of"` // setID of what was judged
+	At     time.Time            `json:"at"`
 }
 
 func setID(cands []Candidate) string {
@@ -177,21 +219,33 @@ func order(key string, n int) []int {
 // at low effort: scoring six thumbnails needs little, and thinking counts towards max_tokens.
 func (r *run) request(ctx context.Context, model llm.Model, it *row) (llm.Request, int, error) {
 	t := it.Title
+	system := systemPrompt
 	what := map[kind]string{movie: "MOVIE", show: "TV SHOW", season: "TV SEASON"}[t.Kind]
 	head := fmt.Sprintf("%s: %s (%d). %d candidate posters follow.", what, t.Name, t.Year, len(it.Cands))
+	switch t.Kind {
+	case franchise:
+		system, head = franchisePrompt, fmt.Sprintf("FRANCHISE COLLECTION: %s. %d candidate posters follow.", t.Name, len(it.Cands))
+	case director:
+		system, head = directorPrompt, fmt.Sprintf("DIRECTOR COLLECTION: %s, director of %s. %d candidate photos follow.",
+			t.Name, r.films(ctx, t), len(it.Cands))
+	}
 	content := []llm.Block{llm.Text(head)}
-	tokens := (len(systemPrompt)+len(head)+40)/3 + 100 // text at ≤3 chars a token, plus the message framing
+	tokens := (len(system)+len(head)+40)/3 + 100 // text at ≤3 chars a token, plus the message framing
 	for li, ci := range order(t.Key, len(it.Cands)) {
 		c := it.Cands[ci]
 		thumb, err := r.thumb(ctx, c)
 		if err != nil {
 			return llm.Request{}, 0, err
 		}
-		content = append(content, llm.Text(letters[li:li+1]+":"), llm.JPEG(thumb))
-		tokens += ((c.W + 27) / 28) * ((c.H + 27) / 28)
+		label := letters[li:li+1] + ":"
+		if c.Caption != "" {
+			label += " " + c.Caption
+		}
+		content = append(content, llm.Text(label), llm.JPEG(thumb))
+		tokens += len(label)/3 + 1 + ((c.W+27)/28)*((c.H+27)/28)
 	}
 	content = append(content, llm.Text("Score every candidate."))
-	req := llm.Request{Model: model.ID, MaxTokens: r.opt.MaxTokens, System: systemPrompt,
+	req := llm.Request{Model: model.ID, MaxTokens: r.opt.MaxTokens, System: system,
 		Messages: []llm.Message{{Role: "user", Content: content}}}
 	if model.LowEffort {
 		req.OutputConfig = &llm.EffortConfig{Effort: "low"}
@@ -233,8 +287,8 @@ func (r *run) judgeNow(ctx context.Context, model llm.Model, it *row) {
 }
 
 // record turns an answer into the title's verdict; an unusable answer marks its (billed) call unusable.
-func (r *run) record(ctx context.Context, it *row, model, answer string, callID int64) {
-	scores, reason, err := parseAnswer(answer)
+func (r *run) record(ctx context.Context, it *row, model, text string, callID int64) {
+	a, err := parseAnswer(text)
 	if err != nil {
 		r.env.Log.Warn("unusable judge answer", "event", "judge_failed", "item", it.Title.Key, "err", err)
 		r.count("judge_failed", 1)
@@ -242,10 +296,20 @@ func (r *run) record(ctx context.Context, it *row, model, answer string, callID 
 		return
 	}
 	byIndex := map[int]float64{}
-	v := Verdict{Reason: reason, Model: model, Of: setID(it.Cands), At: r.env.Now(), Scores: map[string]float64{}}
+	v := Verdict{Reason: a.Reason, Model: model, Of: setID(it.Cands), At: r.env.Now(), Scores: map[string]float64{}}
 	for li, ci := range order(it.Title.Key, len(it.Cands)) {
-		if s, ok := scores[letters[li:li+1]]; ok {
-			byIndex[ci], v.Scores[it.Cands[ci].URL] = s, s
+		l, u := letters[li:li+1], it.Cands[ci].URL
+		if s, ok := a.Scores[l]; ok {
+			byIndex[ci], v.Scores[u] = s, s
+		}
+		if b := a.Box[l]; validBox(b) {
+			if v.Boxes == nil {
+				v.Boxes = map[string][]float64{}
+			}
+			v.Boxes[u] = b
+		}
+		if slices.Contains(a.OnSet, l) {
+			v.OnSet = append(v.OnSet, u)
 		}
 	}
 	choice, rule := decide(it.Cands, byIndex)
@@ -259,29 +323,48 @@ func (r *run) record(ctx context.Context, it *row, model, answer string, callID 
 		"score", byIndex[choice])
 }
 
+// judgeAnswer is what the judge said, by letter; OnSet and Box come with a director's photos only.
+type judgeAnswer struct {
+	Scores map[string]float64   `json:"scores"`
+	Reason string               `json:"reason"`
+	OnSet  []string             `json:"on_set"`
+	Box    map[string][]float64 `json:"box"`
+}
+
 // parseAnswer reads the first JSON object in the answer; a model sometimes adds prose or a second object after it.
-func parseAnswer(text string) (map[string]float64, string, error) {
+func parseAnswer(text string) (judgeAnswer, error) {
 	i := strings.Index(text, "{")
 	if i < 0 {
-		return nil, "", fmt.Errorf("no JSON in %q", clip(text))
+		return judgeAnswer{}, fmt.Errorf("no JSON in %q", clip(text))
 	}
-	var a struct {
-		Scores map[string]float64 `json:"scores"`
-		Reason string             `json:"reason"`
-	}
+	var a judgeAnswer
 	if err := json.NewDecoder(strings.NewReader(text[i:])).Decode(&a); err != nil {
-		return nil, "", fmt.Errorf("%w in %q", err, clip(text))
+		return judgeAnswer{}, fmt.Errorf("%w in %q", err, clip(text))
 	}
-	out := map[string]float64{}
+	letter := func(l string) (string, bool) {
+		l = strings.ToUpper(strings.TrimSpace(l))
+		return l, len(l) == 1 && strings.Contains(letters, l)
+	}
+	out := judgeAnswer{Reason: a.Reason, Scores: map[string]float64{}, Box: map[string][]float64{}}
 	for l, score := range a.Scores {
-		if l = strings.ToUpper(strings.TrimSpace(l)); len(l) == 1 && strings.Contains(letters, l) {
-			out[l] = score
+		if l, ok := letter(l); ok {
+			out.Scores[l] = score
 		}
 	}
-	if len(out) == 0 {
-		return nil, "", fmt.Errorf("no scores in %q", clip(text))
+	for l, b := range a.Box {
+		if l, ok := letter(l); ok {
+			out.Box[l] = b
+		}
 	}
-	return out, a.Reason, nil
+	for _, l := range a.OnSet {
+		if l, ok := letter(l); ok {
+			out.OnSet = append(out.OnSet, l)
+		}
+	}
+	if len(out.Scores) == 0 {
+		return judgeAnswer{}, fmt.Errorf("no scores in %q", clip(text))
+	}
+	return out, nil
 }
 
 func clip(s string) string {
@@ -430,16 +513,20 @@ func (r *run) lookup(ctx context.Context, byKey map[string]*row, key string) (*r
 func (r *run) reserve(ctx context.Context, item, of, model, mode string, usd float64) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	collection, budget, what := strings.HasPrefix(item, collectionPrefix), r.opt.BudgetUSD, "titles"
+	if collection {
+		budget, what = r.opt.CollectionBudgetUSD, "collections"
+	}
 	var settled, held float64
 	if err := r.env.Store.DB().QueryRowContext(ctx, `SELECT coalesce(sum(cost_usd), 0), coalesce(sum(reserved_usd), 0)
-		FROM posters_calls`).Scan(&settled, &held); err != nil {
+		FROM posters_calls WHERE (item LIKE 'collection:%') = ?`, collection).Scan(&settled, &held); err != nil {
 		return 0, err
 	}
 	switch {
-	case settled+usd > r.opt.BudgetUSD:
-		return 0, fmt.Errorf("%w: $%.4f of $%.2f spent", errBudget, settled, r.opt.BudgetUSD)
-	case settled+held+usd > r.opt.BudgetUSD:
-		return 0, fmt.Errorf("%w: $%.4f spent and $%.4f held of $%.2f", errBudgetHeld, settled, held, r.opt.BudgetUSD)
+	case settled+usd > budget:
+		return 0, fmt.Errorf("%w (%s): $%.4f of $%.2f spent", errBudget, what, settled, budget)
+	case settled+held+usd > budget:
+		return 0, fmt.Errorf("%w (%s): $%.4f spent and $%.4f held of $%.2f", errBudgetHeld, what, settled, held, budget)
 	}
 	res, err := r.env.Store.DB().ExecContext(context.WithoutCancel(ctx), `INSERT INTO posters_calls(at, item, of, model, mode,
 		batch_id, state, input_tokens, output_tokens, reserved_usd, cost_usd, llm_ms, error)
@@ -513,9 +600,11 @@ func (r *run) callState(ctx context.Context) (map[string]bool, map[string]int, e
 	return inFlight, unusable, rows.Err()
 }
 
-func spentUSD(ctx context.Context, db *sql.DB) (float64, error) {
+// spentUSD is what the judge calls for titles, or for collections, have cost or still hold.
+func spentUSD(ctx context.Context, db *sql.DB, collections bool) (float64, error) {
 	var spent float64
-	err := db.QueryRowContext(ctx, `SELECT coalesce(sum(cost_usd + reserved_usd), 0) FROM posters_calls`).Scan(&spent)
+	err := db.QueryRowContext(ctx, `SELECT coalesce(sum(cost_usd + reserved_usd), 0) FROM posters_calls
+		WHERE (item LIKE 'collection:%') = ?`, collections).Scan(&spent)
 	return spent, err
 }
 

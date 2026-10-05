@@ -20,19 +20,23 @@ import (
 type kind string
 
 const (
-	movie  kind = "movie"
-	show   kind = "show"
-	season kind = "season"
+	movie     kind = "movie"
+	show      kind = "show"
+	season    kind = "season"
+	franchise kind = "franchise" // a Movies collection of a series' films
+	director  kind = "director"  // a Movies collection of one director's films
 )
 
-// Title is one movie, show or season folder in the naming scheme.
+// Title is one movie, show or season folder in the naming scheme, or a Movies collection.
 type Title struct {
-	Key    string     `json:"key"` // "movie:tmdb-422", "show:tvdb-79169", "season:tmdb-1400:2"
-	Kind   kind       `json:"kind"`
-	Name   string     `json:"name"` // as the judge reads it: "Seinfeld - Season 2"
-	Year   int        `json:"year"`
-	ID     library.ID `json:"id"` // the movie's or the show's
-	Season int        `json:"season,omitempty"`
+	Key     string     `json:"key"` // "movie:tmdb-422", "show:tvdb-79169", "season:tmdb-1400:2", "collection:scary movie"
+	Kind    kind       `json:"kind"`
+	Name    string     `json:"name"` // as the judge reads it: "Seinfeld - Season 2"
+	Year    int        `json:"year"`
+	ID      library.ID `json:"id"` // the movie's or the show's
+	Season  int        `json:"season,omitempty"`
+	Members []int      `json:"members,omitempty"` // a collection's films, as TMDB ids
+	Sets    []string   `json:"sets,omitempty"`    // a franchise's TMDB collections, by name
 }
 
 func key(k kind, id library.ID, seasonNo int) string {

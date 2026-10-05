@@ -22,14 +22,16 @@ import (
 //
 // A row remembers the app item its poster went to, and an app that later lists the title under another item gets
 // the poster again: Jellyfin's item id is a hash of the path, so every folder or file rename re-creates the item,
-// and Plex re-creates items on some moves.
+// and Plex re-creates items on some moves. A collection is addressed by its name; one the collections stage has not
+// made in an app yet waits for that app's next daily listing.
 
 const (
 	sinkPlex     = "plex"
 	sinkJellyfin = "jellyfin"
 )
 
-// enqueue puts every verdict's choice in the outbox; a row already holding that choice is left alone.
+// enqueue puts every verdict's choice in the outbox; a row already holding that choice is left alone. A director
+// collection's row names the photo and where the director is in it (composeURL).
 func (r *run) enqueue(ctx context.Context, rows []*row) error {
 	tx, err := r.env.Store.DB().BeginTx(ctx, nil)
 	if err != nil {
@@ -41,11 +43,15 @@ func (r *run) enqueue(ctx context.Context, rows []*row) error {
 		if it.Verdict == nil {
 			continue
 		}
+		send := it.Verdict.Choice
+		if it.Title.Kind == director {
+			send = composeURL(send, it.Verdict.Boxes[send])
+		}
 		for _, s := range []string{sinkJellyfin, sinkPlex} {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO posters_sinks(item, sink, url, state, target, attempts, next_at, last_error)
 				VALUES (?, ?, ?, 'pending', '', 0, ?, '') ON CONFLICT(item, sink) DO UPDATE SET url=excluded.url, state='pending',
 				target='', attempts=0, next_at=excluded.next_at, last_error='' WHERE posters_sinks.url != excluded.url`,
-				it.Title.Key, s, it.Verdict.Choice, now); err != nil {
+				it.Title.Key, s, send, now); err != nil {
 				return err
 			}
 		}
@@ -59,8 +65,9 @@ type outboxRow struct {
 }
 
 // apply refreshes each app's item index when it is due, with or without uploads waiting, sends back to the outbox
-// every title the app now lists under another item, then drains the due rows. The viewer gate is asked before each
-// title's download and uploads: a guest watching defers that title to a later run.
+// every title the app now lists under another item, then drains the due rows of the kinds that are live (titles,
+// collections). The viewer gate is asked before each title's download and uploads: a guest watching defers that
+// title to a later run.
 func (r *run) apply(ctx context.Context) error {
 	index := map[string]map[string]sinkItem{}
 	for _, s := range []string{sinkPlex, sinkJellyfin} {
@@ -76,8 +83,10 @@ func (r *run) apply(ctx context.Context) error {
 			return err
 		}
 	}
+	live := r.live()
 	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT item, sink, url, state, attempts FROM posters_sinks
-		WHERE state IN ('pending', 'uploaded') AND next_at <= ? ORDER BY item, sink`, stamp(r.env.Now()))
+		WHERE state IN ('pending', 'uploaded') AND next_at <= ? AND (item LIKE 'collection:%') IN (?, ?) ORDER BY item, sink`,
+		stamp(r.env.Now()), !live[false], live[true])
 	if err != nil {
 		return err
 	}
@@ -239,19 +248,27 @@ func (r *run) upload(ctx context.Context, sink string, target sinkItem, img []by
 	return r.env.Plex.Send(ctx, http.MethodPost, "/library/metadata/"+target.ID+"/posters", "image/jpeg", img)
 }
 
-// prepare is the full-size image as a JPEG, carrying the stage's EXIF mark when marked. Plex lists every upload
-// alike, and its export keeps an upload's bytes, so the mark is how a later export tells the stage's uploads from
-// the owner's (importOwners). The owner's own upload therefore goes back unmarked; a kept pick or Plex default is
-// marked, or the next export would read it as his upload.
+// prepare is the full-size image as a JPEG (a director's poster composed from its photo), carrying the stage's EXIF
+// mark when marked. Plex lists every upload alike, and its export keeps an upload's bytes, so the mark is how a later
+// export tells the stage's uploads from the owner's (importOwners). The owner's own upload therefore goes back
+// unmarked; a kept pick or Plex default is marked, or the next export would read it as his upload.
 func (r *run) prepare(ctx context.Context, u string, marked bool) ([]byte, error) {
+	spec, composed := strings.CutPrefix(u, composePrefix)
+	var box string
+	if composed {
+		box, u, _ = strings.Cut(spec, " ")
+	}
 	b, err := r.original(ctx, u)
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.HasPrefix(b, []byte{0xFF, 0xD8}) {
+	if composed || !bytes.HasPrefix(b, []byte{0xFF, 0xD8}) {
 		img, err := decode(b)
 		if err != nil {
 			return nil, err
+		}
+		if composed {
+			img = compose(img, parseBox(box))
 		}
 		var buf bytes.Buffer
 		if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 92}); err != nil {
@@ -312,7 +329,7 @@ func mark(jpg []byte, desc string) ([]byte, error) {
 type sinkItem struct {
 	ID      string `json:"id"`
 	Section int    `json:"section,omitempty"` // Plex only
-	Type    int    `json:"type,omitempty"`    // Plex metadata type: 1 movie, 2 show, 3 season
+	Type    int    `json:"type,omitempty"`    // Plex metadata type: 1 movie, 2 show, 3 season, 18 collection
 }
 
 // sinkIndex maps title keys to the app's items from one listing per app, refreshed every SinkIndexEvery.
@@ -396,6 +413,20 @@ func (r *run) plexIndex(ctx context.Context) (map[string]sinkItem, error) {
 			put(out, key(season, id, m.Index), sinkItem{ID: m.RatingKey, Section: ts, Type: 3})
 		}
 	}
+	if r.opt.CollectionsApproved != "" {
+		var colls struct {
+			Metadata []struct {
+				RatingKey string `json:"ratingKey"`
+				Title     string `json:"title"`
+			} `json:"Metadata"`
+		}
+		if err := r.env.Plex.GetJSON(ctx, fmt.Sprintf("/library/sections/%d/collections", ms), &colls); err != nil {
+			return nil, err
+		}
+		for _, c := range colls.Metadata {
+			put(out, collectionKey(c.Title), sinkItem{ID: c.RatingKey, Section: ms, Type: 18})
+		}
+	}
 	return out, nil
 }
 
@@ -409,13 +440,18 @@ var jellyfinPage = 200
 func (r *run) jellyfinIndex(ctx context.Context) (map[string]sinkItem, error) {
 	type item struct {
 		ID          string            `json:"Id"`
+		Name        string            `json:"Name"`
 		Type        string            `json:"Type"`
 		ProviderIDs map[string]string `json:"ProviderIds"`
 		SeriesID    string            `json:"SeriesId"`
 		IndexNumber *int              `json:"IndexNumber"`
 	}
 	var items []item
-	for _, typ := range []string{"Movie", "Series", "Season"} {
+	types := []string{"Movie", "Series", "Season"}
+	if r.opt.CollectionsApproved != "" {
+		types = append(types, "BoxSet")
+	}
+	for _, typ := range types {
 		for start := 0; ; start += jellyfinPage {
 			var page struct{ Items []item }
 			if err := r.env.Jellyfin.GetJSON(ctx, fmt.Sprintf("/Items?Recursive=true&IncludeItemTypes=%s&Fields=ProviderIds"+
@@ -432,6 +468,9 @@ func (r *run) jellyfinIndex(ctx context.Context) (map[string]sinkItem, error) {
 	out := map[string]sinkItem{}
 	seriesIDs := map[string][]library.ID{}
 	for _, it := range items {
+		if it.Type == "BoxSet" {
+			put(out, collectionKey(it.Name), sinkItem{ID: it.ID})
+		}
 		for src, val := range it.ProviderIDs {
 			id := library.ID{Source: strings.ToLower(src), Value: val}
 			switch it.Type {

@@ -38,18 +38,24 @@ func init() { FetchDelay, llm.RetryDelay, jellyfinPage = zeroDelay, zeroDelay, 1
 func zeroDelay(int) time.Duration { return 0 }
 
 // poster draws a JPEG whose colour the fake judge scores and whose pattern gives each colour its own dHash;
-// "big" draws the same art at twice the size.
+// "big" draws the same art at twice the size, and "wide" a 2:1 photo with the colour in its left quarter only.
 func poster(colour string) []byte {
-	w := 400
+	w, h, wide := 400, 600, false
 	if c, ok := strings.CutSuffix(colour, "big"); ok {
-		colour, w = c, 800
+		colour, w, h = c, 800, 1200
 	}
-	img := image.NewRGBA(image.Rect(0, 0, w, w*3/2))
-	for y := 0; y < w*3/2; y++ {
+	if c, ok := strings.CutSuffix(colour, "wide"); ok {
+		colour, w, h, wide = c, 800, 400, true
+	}
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			v := uint8(128 + x*127/w)
 			c := map[string]color.RGBA{"red": {v, 0, 0, 255}, "blue": {0, 0, 255 - v/2, 255},
 				"green": {0, uint8(96 + 120*(x*9/w%2)), 0, 255}, "yellow": {200, uint8(80 + 120*(x*9/w/2%2)), 0, 255}}[colour]
+			if wide && x >= w/4 {
+				c = color.RGBA{128, 128, 128, 255}
+			}
 			img.Set(x, y, c)
 		}
 	}
@@ -58,22 +64,29 @@ func poster(colour string) []byte {
 	return b.Bytes()
 }
 
-// scoreOf is the fake judge's taste: red 9, green 6, blue 3.
+// scoreOf is the fake judge's taste, by the image's mean colour: red 9, green 6, blue (or grey) 3.
 func scoreOf(jpg []byte) int {
 	img, _ := jpeg.Decode(bytes.NewReader(jpg))
-	r, g, b, _ := img.At(img.Bounds().Dx()/2, img.Bounds().Dy()/2).RGBA()
+	var r, g, b uint64
+	for y := img.Bounds().Min.Y; y < img.Bounds().Max.Y; y += 4 {
+		for x := img.Bounds().Min.X; x < img.Bounds().Max.X; x += 4 {
+			rr, gg, bb, _ := img.At(x, y).RGBA()
+			r, g, b = r+uint64(rr), g+uint64(gg), b+uint64(bb)
+		}
+	}
 	switch {
-	case r > g && r > b:
+	case r > g*11/10 && r > b*11/10:
 		return 9
-	case g > b:
+	case g > b*11/10:
 		return 6
 	}
 	return 3
 }
 
 // answer is the fake judge: it scores each labelled image by its colour, so a letter mixed up with another
-// candidate's image shows up as a wrong choice. Like the real API, Sonnet 5.5 asked without low effort thinks the
-// whole max_tokens away, and Haiku 4.5 refuses an effort (answer returns nil: the server sends a 400).
+// candidate's image shows up as a wrong choice, and puts a director in the left quarter of every photo. Like the real
+// API, Sonnet 5.5 asked without low effort thinks the whole max_tokens away, and Haiku 4.5 refuses an effort (answer
+// returns nil: the server sends a 400).
 func answer(req llm.Request) *llm.Response {
 	switch {
 	case req.Model == "claude-haiku-4-5-20251001" && req.OutputConfig != nil:
@@ -81,19 +94,24 @@ func answer(req llm.Request) *llm.Response {
 	case req.Model == "claude-sonnet-5-5" && (req.OutputConfig == nil || req.OutputConfig.Effort != "low"):
 		return &llm.Response{Model: req.Model, StopReason: "max_tokens", Usage: llm.Usage{InputTokens: 1000, OutputTokens: req.MaxTokens}}
 	}
-	var scores []string
+	var scores, boxes []string
 	label := ""
 	for _, b := range req.Messages[0].Content {
-		if b.Type == "text" && len(b.Text) == 2 {
+		if b.Type == "text" && len(b.Text) >= 2 && b.Text[1] == ':' {
 			label = b.Text[:1]
 		}
 		if b.Type == "image" {
 			raw, _ := base64.StdEncoding.DecodeString(b.Source.Data)
 			scores = append(scores, fmt.Sprintf(`%q: %d`, label, scoreOf(raw)))
+			boxes = append(boxes, fmt.Sprintf(`%q: [0, 0.1, 0.25, 0.9]`, label))
 		}
 	}
-	return &llm.Response{Model: req.Model, Content: []llm.Block{llm.Text(`{"scores": {` + strings.Join(scores, ", ") + `}, "reason": "red wins"} {"extra": 1}`)},
-		Usage: llm.Usage{InputTokens: 1000, OutputTokens: 100}}
+	extra := ""
+	if req.System == directorPrompt {
+		extra = `, "box": {` + strings.Join(boxes, ", ") + `}`
+	}
+	return &llm.Response{Model: req.Model, Content: []llm.Block{llm.Text(`{"scores": {` + strings.Join(scores, ", ") + `}` + extra +
+		`, "reason": "red wins"} {"extra": 1}`)}, Usage: llm.Usage{InputTokens: 1000, OutputTokens: 100}}
 }
 
 type world struct {
@@ -112,6 +130,7 @@ type world struct {
 	messages   int // answered judge calls
 	batches    map[string][]llm.BatchRequest
 	ended      bool
+	commons    http.HandlerFunc // the Wikimedia Commons API, when set
 }
 
 // set changes the fake servers' behaviour between runs.
@@ -169,6 +188,8 @@ func newWorld(t *testing.T, opts string) *world {
 		switch {
 		case strings.HasPrefix(p, "/t/p/"):
 			rw.Write(poster(strings.TrimSuffix(filepath.Base(p), ".jpg")))
+		case p == "/w/api.php" && w.commons != nil:
+			w.commons(rw, r)
 		case p == "/v1/models":
 			w.models++
 			reply(rw, `{"data":[{"id":"claude-sonnet-5-5","created_at":"2026-09-28T00:00:00Z","capabilities":{"effort":{"low":{"supported":true}}}},
@@ -454,7 +475,7 @@ func TestBatchBacklog(t *testing.T) {
 	if w.messages != 0 || len(w.batches["b1"]) != 2 || w.verdict(t, "movie:tmdb-1").Choice != "" {
 		t.Fatalf("run 1: %d messages, batch %d requests; want one batch of 2 and no verdict yet", w.messages, len(w.batches["b1"]))
 	}
-	if held, _ := spentUSD(context.Background(), w.h.Env.Store.DB()); held <= 0 {
+	if held, _ := spentUSD(context.Background(), w.h.Env.Store.DB(), false); held <= 0 {
 		t.Fatal("a submitted batch holds nothing against the budget")
 	}
 	// Alpha's pool changes while the batch runs (TMDB lists a new poster, a day later, and the pool is gathered again).

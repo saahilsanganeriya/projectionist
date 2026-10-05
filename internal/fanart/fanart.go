@@ -69,25 +69,37 @@ type Image struct {
 
 // Movie lists a film's art by TMDB id ("949") or IMDb id ("tt0113277"); none is an empty list.
 func (c *Client) Movie(ctx context.Context, id string) ([]Image, error) {
-	return c.images(ctx, "/movies/"+id)
+	_, imgs, err := c.images(ctx, "/movies/"+id)
+	return imgs, err
 }
 
 // TV lists a show's art by TVDB id; none is an empty list.
 func (c *Client) TV(ctx context.Context, tvdbID int) ([]Image, error) {
-	return c.images(ctx, "/tv/"+strconv.Itoa(tvdbID))
+	_, imgs, err := c.images(ctx, "/tv/"+strconv.Itoa(tvdbID))
+	return imgs, err
 }
 
-// images flattens the answer's per-type arrays; the other keys (name, ids, *_count) are skipped. Within a type,
-// fanart.tv's order (most liked first) is kept, and types come in key order so the result is stable.
-func (c *Client) images(ctx context.Context, path string) ([]Image, error) {
+// Collection lists a TMDB collection's art with the name fanart.tv files it under. fanart.tv keeps collections
+// beside films, under /movies/ by TMDB collection id ("Star Wars Collection" is /movies/10), and a film may share
+// that number, so the caller compares the name with TMDB's.
+func (c *Client) Collection(ctx context.Context, tmdbCollectionID int) (string, []Image, error) {
+	return c.images(ctx, "/movies/"+strconv.Itoa(tmdbCollectionID))
+}
+
+// images flattens the answer's per-type arrays and returns them with its name; the other keys (ids, *_count) are
+// skipped. Within a type, fanart.tv's order (most liked first) is kept, and types come in key order so the result is
+// stable.
+func (c *Client) images(ctx context.Context, path string) (string, []Image, error) {
 	body, err := c.get(ctx, path)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	var byType map[string]json.RawMessage
 	if err := json.Unmarshal(body, &byType); err != nil {
-		return nil, fmt.Errorf("fanart GET %s: %w", path, err)
+		return "", nil, fmt.Errorf("fanart GET %s: %w", path, err)
 	}
+	var name string
+	json.Unmarshal(byType["name"], &name) // absent from an empty answer
 	types := make([]string, 0, len(byType))
 	for t, raw := range byType {
 		if strings.HasPrefix(strings.TrimSpace(string(raw)), "[") {
@@ -99,7 +111,7 @@ func (c *Client) images(ctx context.Context, path string) ([]Image, error) {
 	for _, t := range types {
 		var raw []struct{ ID, URL, Lang, Likes, Season, Width, Height string }
 		if err := json.Unmarshal(byType[t], &raw); err != nil {
-			return nil, fmt.Errorf("fanart GET %s: %s: %w", path, t, err)
+			return "", nil, fmt.Errorf("fanart GET %s: %s: %w", path, t, err)
 		}
 		for _, r := range raw {
 			likes, _ := strconv.Atoi(r.Likes)
@@ -108,7 +120,7 @@ func (c *Client) images(ctx context.Context, path string) ([]Image, error) {
 			out = append(out, Image{Type: t, ID: r.ID, URL: r.URL, Lang: r.Lang, Likes: likes, Season: r.Season, Width: w, Height: h})
 		}
 	}
-	return out, nil
+	return name, out, nil
 }
 
 // get returns the answer's body; a 404 (no art for the title) reads as an empty object, which is also what
