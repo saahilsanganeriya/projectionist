@@ -223,13 +223,16 @@ func (r *run) plexSnapshot(ctx context.Context) (sinkMeta, map[int]have, error) 
 		return m, nil, err
 	}
 	m.Machine = ident.MachineIdentifier
+	// Small lean pages: with the NAS busy, one 500-film page outlasted a 60 s timeout, while 100-film pages took
+	// 4-17 s. A failed page is retried; a listing that still fails is retried whole on the next run.
 	fresh, byKey := map[int]have{}, map[string]int{}
-	const page = 500
+	const page = 100
+	b := &breaker{}
 	for start := 0; ; start += page {
 		var l plexListing
 		path := fmt.Sprintf("/library/sections/%d/all?type=1&includeGuids=1&excludeElements=Media,Genre,Country,Director,Writer,Role,Collection,Label,Field"+
 			"&excludeFields=summary,tagline&X-Plex-Container-Start=%d&X-Plex-Container-Size=%d", r.opt.PlexSection, start, page)
-		if err := r.env.Plex.GetJSON(ctx, path, &l); err != nil {
+		if err := r.call(ctx, b, func() error { return r.env.Plex.GetJSON(ctx, path, &l) }); err != nil {
 			return m, nil, err
 		}
 		for _, it := range l.Metadata {
