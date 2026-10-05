@@ -386,8 +386,9 @@ func (s *syncer) markMigrated(ctx context.Context, app string, u User, from stri
 }
 
 // backfillPlex imports, once per person, the mapped accounts' watch rows from the newest Plex database backup copy
-// (never the live DB). A copy that cannot be read, or that has no account of the configured name, is retried every
-// run; until then that person's Plex writes wait, since they would replay plays Plex already holds.
+// (never the live DB), when nobody but the owner is watching (the read takes minutes). A copy that cannot be read,
+// or that has no account of the configured name, is retried every run; until then that person's Plex writes wait,
+// since they would replay plays Plex already holds.
 func (s *syncer) backfillPlex(ctx context.Context) error {
 	var todo []User
 	var accounts []any
@@ -400,7 +401,7 @@ func (s *syncer) backfillPlex(ctx context.Context) error {
 			todo, accounts = append(todo, u), append(accounts, u.Plex)
 		}
 	}
-	if len(todo) == 0 {
+	if len(todo) == 0 || !s.quiet(ctx) {
 		return nil
 	}
 	file, taken, err := newestBackup(s.opt.PlexBackups)
@@ -586,8 +587,9 @@ type importCursor struct {
 }
 
 // importJellyfin walks the listing's ids in order from where the last run stopped. An item gone since the listing
-// (404) holds nothing to import. Any other failure stops this person's walk until the next run (alerting from the
-// third in a row) and leaves the other people to go on.
+// (404) holds nothing to import. Someone other than the owner starting to watch pauses the walk until a later run;
+// any other failure stops this person's walk until the next run (alerting from the third in a row) and leaves the
+// other people to go on.
 func (s *syncer) importJellyfin(ctx context.Context, u User, userID string, addr *addresses, ids []string) error {
 	key := "import.jellyfin." + u.Name
 	var cur importCursor
@@ -603,6 +605,9 @@ func (s *syncer) importJellyfin(ctx context.Context, u User, userID string, addr
 	}
 	n := 0
 	for _, id := range ids[start:] {
+		if !s.quiet(ctx) {
+			return s.env.Store.PutJSON(ctx, name, key, cur)
+		}
 		var ud struct {
 			Played                bool
 			PlayCount             int

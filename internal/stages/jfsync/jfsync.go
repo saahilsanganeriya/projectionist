@@ -12,8 +12,8 @@
 // to an app each field the record knows and the app is not believed to hold. What an app holds (jfsync_sink) is
 // everything it pushed, was migrated from it, or was given, kept per person and library item, so an item the app
 // re-creates under a new id still holds it. Failed writes are retried on later runs with backoff and never fail the
-// run. A listing is refreshed after the writes, so it never delays them; an item added since it waits for the next
-// one.
+// run. The heavy reads (listings, history imports) wait while anyone but the owner is watching; the writes do not.
+// A listing is refreshed after the writes, so it never delays them; an item added since it waits for the next one.
 package jfsync
 
 import (
@@ -97,13 +97,15 @@ type Stage struct{}
 func (Stage) Name() string { return name }
 
 type syncer struct {
-	env    *stage.Env
-	opt    Options
-	rep    *stage.Report
-	tokens map[string]string // Plex account id → that friend's server token; memory only, never logged
-	plan   []string
-	readAt time.Time       // when this run read the record: a push recorded later is not in its view
-	ready  map[string]bool // "app/person": that person's history in the app is imported, so writes may go
+	env     *stage.Env
+	opt     Options
+	rep     *stage.Report
+	tokens  map[string]string // Plex account id → that friend's server token; memory only, never logged
+	plan    []string
+	readAt  time.Time       // when this run read the record: a push recorded later is not in its view
+	ready   map[string]bool // "app/person": that person's history in the app is imported, so writes may go
+	askedAt time.Time       // the last viewer check, and its answer
+	isQuiet bool
 }
 
 func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
@@ -122,7 +124,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		if err != nil {
 			return err
 		}
-		if a.At.IsZero() && s.due(a) { // never listed: nothing can be addressed until it is
+		if a.At.IsZero() && s.due(a) && s.quiet(ctx) { // never listed: nothing can be addressed until it is
 			a = s.refresh(ctx, app, a)
 		}
 		addrs[app] = a
@@ -149,7 +151,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		}
 	}
 	for _, app := range apps { // after the writes, so a whole-library listing never delays them
-		if s.due(addrs[app]) {
+		if s.due(addrs[app]) && s.quiet(ctx) {
 			s.refresh(ctx, app, addrs[app])
 		}
 	}
@@ -158,6 +160,20 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	}
 	rep.Summary = summary(rep.Counts)
 	return nil
+}
+
+// quiet says whether a heavy read (a listing, a history import) may go now: nobody but an owner is watching, and an
+// unknown answer counts as someone. The servers are asked at most once per Viewers.Poll.
+func (s *syncer) quiet(ctx context.Context) bool {
+	if s.askedAt.IsZero() || s.env.Now().Sub(s.askedAt) >= s.env.Viewers.Poll {
+		n, err := s.env.Viewers.Count(ctx)
+		s.askedAt, s.isQuiet = s.env.Now(), err == nil && n == 0
+		if !s.isQuiet {
+			s.rep.Count("viewer_wait", 1)
+			s.env.Log.Info("heavy reads wait for viewers", "event", "viewer_wait", "others", n, "err", err)
+		}
+	}
+	return s.isQuiet
 }
 
 // resolve maps events that arrived with only an app's id (webhooks) to items, once that id is addressed, and folds

@@ -464,6 +464,52 @@ func TestJellyfinImportResumes(t *testing.T) {
 	}
 }
 
+// Catches: a listing or a history import run while someone other than the owner is watching (on the NAS a
+// whole-library Jellyfin listing took 5m44s and the import about 19 min per person); a guest arriving mid-import
+// not pausing it, or the paused walk restarting from its first item; and the writes held up with the heavy reads.
+func TestHeavyReadsWaitForGuests(t *testing.T) {
+	h, w, _, _ := newHarness(t)
+	guest := func(on bool) {
+		body := `<MediaContainer size="0"></MediaContainer>`
+		if on {
+			body = `<MediaContainer size="1"><Video type="movie" title="Ran"><User title="roger"/></Video></MediaContainer>`
+		}
+		h.Plex.Handle("GET", "/status/sessions", 200, body)
+	}
+	listings := func() int { return len(h.Plex.Calls("GET", "/accounts")) + len(h.Jellyfin.Calls("GET", "/Items")) }
+	asked := func(id string) int { // saahil's history import asking for one item
+		return strings.Count(fmt.Sprint(h.Jellyfin.Calls("GET", "/UserItems/"+id+"/UserData")), "userId=u1")
+	}
+	h.Plex.Handle("GET", "/status/sessions", 500, "") // who is watching is unknown: someone may be
+	if rep := run(t, h); listings() != 0 || len(w.since(0)) != 0 || fmt.Sprint(rep.Counts) != "map[viewer_wait:1]" {
+		t.Fatalf("viewers unknown: %d listing requests, writes %v, counts %v", listings(), w.since(0), rep.Counts)
+	}
+	guest(false)
+	arrives := true
+	h.Jellyfin.HandleFunc("GET", "/UserItems/c1/UserData", func(rw http.ResponseWriter, r *http.Request) {
+		if arrives { // a guest starts watching while saahil's import reads Clerks
+			arrives = false
+			guest(true)
+			h.Now = h.Now.Add(h.Env.Viewers.Poll)
+		}
+		rw.Write([]byte(`{}`))
+	})
+	if run(t, h); listings() != 2 || asked("c1") != 1 || asked("d1") != 0 {
+		t.Fatalf("guest arriving mid-import: %d listing requests, c1 asked %d, d1 asked %d", listings(), asked("c1"), asked("d1"))
+	}
+	guest(false)
+	if run(t, h); asked("a1") != 1 || asked("d1") != 1 {
+		t.Fatalf("after the guest left: a1 asked %d (resumes past it), d1 asked %d", asked("a1"), asked("d1"))
+	}
+	guest(true)
+	h.Now = h.Now.Add(25 * time.Hour) // both listings due
+	done := len(w.since(0))
+	push(h, plexApp, plexPlay("media.stop", "roger", "15", `,"viewOffset":600000,"duration":6000000`))
+	if run(t, h); listings() != 2 || strings.Join(w.since(done), "\n") != `/UserItems/d1/UserData?userId=u2 {"LastPlayedDate":"2026-10-06T07:00:00Z","PlaybackPositionTicks":6000000000}` {
+		t.Fatalf("guest watching, listings due: %d listing requests, writes %v", listings(), w.since(done))
+	}
+}
+
 // Catches: a push resolved into the record but not folded into what its app holds (a crash or a failed write
 // between the two): the next run would write Plex's own scrobble back to Plex, a second view nobody can remove.
 func TestResolveCommitsWithTheSink(t *testing.T) {
