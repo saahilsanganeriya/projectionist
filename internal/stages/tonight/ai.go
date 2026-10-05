@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -111,9 +112,9 @@ Rules:
 - Pick only films from the UNSEEN list in the user message, and give each pick's id exactly as listed.
 - Make the picks differ in mood (for example light, tense, moving, strange, slow) and in length: include a
   short one and a long one when the list has them. Avoid several picks from one genre, decade or country.
-- For each pick, "mood" is its mood in two or three words, and "liked" is the film he rated 4 stars or more, or
-  the director whose films he rated highly, that the pick draws on. Use these two fields for that bookkeeping.
-- "reason" is one finished sentence of at most 160 characters, for him to read: it names the "liked" film or
+- For each pick, "mood" is its mood in two or three words, and "liked" is the title of the film he rated 4 stars
+  or more that the pick draws on, written as in his ratings. Use these two fields for that bookkeeping.
+- "reason" is one finished sentence of at most 160 characters, for him to read: it names the "liked" film or its
   director and says what tonight's film shares with it. No spoilers, no notes, no checks.
 - Answer with JSON only, in the given schema.`
 
@@ -137,9 +138,32 @@ type answer struct {
 // "...package.12"). Two lowercase letters before the stop keep initials ("L.A.", "E.T.") intact.
 var gluedNote = regexp.MustCompile(`(\p{Ll}{2}[.!?])(?:\p{Lu}|\d)`)
 
-// validate keeps the answer's picks that name an unseen film once, and lists every violation for the retry. glued
-// holds the reasons that carried a glued note, as the model wrote them, so the log shows whether the cause is gone.
-func validate(text string, unseen map[int]candidate, want int) (picks []pick, violations, glued []string) {
+// lovedFilms holds the films he rated 4★ or more, keyed by title alone and by title and year (filmKey).
+func lovedFilms(hist []rated) map[string]bool {
+	loved := map[string]bool{}
+	for _, h := range hist {
+		if h.Rating >= 4 {
+			loved[filmKey(h.Name, 0)], loved[filmKey(h.Name, h.Year)] = true, true
+		}
+	}
+	return loved
+}
+
+var titleYear = regexp.MustCompile(`^(.+?) \((\d{4})\)$`)
+
+// lovedKey is a "liked" value's key in lovedFilms: "Rope (1948)" by title and year, "Rope" by title alone.
+func lovedKey(liked string) string {
+	if m := titleYear.FindStringSubmatch(strings.TrimSpace(liked)); m != nil {
+		year, _ := strconv.Atoi(m[2])
+		return filmKey(m[1], year)
+	}
+	return filmKey(liked, 0)
+}
+
+// validate keeps the answer's picks that name an unseen film once and draw on a film he rated 4★ or more, and lists
+// every violation for the retry. glued holds the reasons that carried a glued note, as the model wrote them, so the
+// log shows whether the cause is gone.
+func validate(text string, unseen map[int]candidate, loved map[string]bool, want int) (picks []pick, violations, glued []string) {
 	var ans answer
 	if err := json.Unmarshal([]byte(text), &ans); err != nil {
 		return nil, []string{"the answer is not JSON in the schema: " + err.Error()}, nil
@@ -154,6 +178,8 @@ func validate(text string, unseen map[int]candidate, want int) (picks []pick, vi
 			violations = append(violations, fmt.Sprintf("pick %d: id %d is picked twice", i+1, p.ID))
 		case strings.TrimSpace(p.Reason) == "":
 			violations = append(violations, fmt.Sprintf("pick %d: id %d has no reason", i+1, p.ID))
+		case !loved[lovedKey(p.Liked)]:
+			violations = append(violations, fmt.Sprintf("pick %d: liked %q is not a film he rated 4 stars or more", i+1, p.Liked))
 		default:
 			seen[p.ID] = true
 			reason := p.Reason

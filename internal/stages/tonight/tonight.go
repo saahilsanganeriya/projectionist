@@ -431,7 +431,8 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 	if err != nil {
 		return err
 	}
-	picks, violations, glued := validate(r.Text(), unseen, opt.Picks)
+	loved := lovedFilms(hist)
+	picks, violations, glued := validate(r.Text(), unseen, loved, opt.Picks)
 	if r.StopReason == "max_tokens" {
 		// Thinking shares max_tokens with the answer, so the retry thinks less; a changed effort may miss the cache,
 		// which bound already prices.
@@ -464,7 +465,7 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 				"retry_bound_usd", fmt.Sprintf("%.5f", b), "spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]))
 		} else if r2, err := call(2, b); err != nil {
 			env.Log.Warn("retry failed; keeping the valid picks", "event", "tonight_retry_error", "err", err)
-		} else if picks2, v2, g2 := validate(r2.Text(), unseen, opt.Picks); len(picks2) > len(picks) {
+		} else if picks2, v2, g2 := validate(r2.Text(), unseen, loved, opt.Picks); len(picks2) > len(picks) {
 			picks, glued = picks2, append(glued, g2...)
 			if len(v2) > 0 {
 				env.Log.Warn("dropped invalid picks after the retry", "event", "tonight_picks_dropped", "violations", strings.Join(v2, "; "))

@@ -72,27 +72,33 @@ func TestSeen(t *testing.T) {
 	}
 }
 
-// Catches: a pick outside the unseen set, a duplicate or a reasonless pick reaching Plex, a short answer accepted
+// Catches: a pick outside the unseen set, a duplicate or a reasonless pick reaching Plex, a reason drawing on a film
+// he did not rate 4★ or more (a hallucinated or low-rated "liked", told apart by year), a short answer accepted
 // without a retry, and a note the model glued onto a reason (seen on 2026-10-05) reaching his Home row.
 func TestValidate(t *testing.T) {
 	unseen := map[int]candidate{389: {film: film{TMDB: 389, Title: "12 Angry Men", Year: 1957}},
 		346: {film: film{TMDB: 346, Title: "Seven Samurai", Year: 1954}}}
-	picks, v, _ := validate(`{"picks":[{"id":389,"title":"12 Angry Men","reason":"Like  Rope,\nall in one room."},
-		{"id":389,"title":"12 Angry Men","reason":"again"},{"id":680,"title":"Pulp Fiction","reason":"seen"},
-		{"id":346,"title":"Seven Samurai","reason":" "}]}`, unseen, 2)
+	loved := lovedFilms([]rated{{Name: "Rope", Year: 1948, Rating: 4.5}, {Name: "Dune", Year: 2021, Rating: 5},
+		{Name: "Dune", Year: 1984, Rating: 2}})
+	picks, v, _ := validate(`{"picks":[{"id":389,"title":"12 Angry Men","liked":"Rope","reason":"Like  Rope,\nall in one room."},
+		{"id":389,"title":"12 Angry Men","liked":"Rope","reason":"again"},{"id":680,"title":"Pulp Fiction","liked":"Rope","reason":"seen"},
+		{"id":346,"title":"Seven Samurai","liked":"Rope","reason":" "},
+		{"id":346,"title":"Seven Samurai","liked":"Dune (1984)","reason":"An epic like Dune."}]}`, unseen, loved, 2)
 	if len(picks) != 1 || picks[0].TMDB != 389 || picks[0].Reason != "Like Rope, all in one room." {
 		t.Fatalf("picks = %+v", picks)
 	}
 	want := []string{"pick 2: id 389 is picked twice", `pick 3: id 680 ("Pulp Fiction") is not in the UNSEEN list`,
-		"pick 4: id 346 has no reason", "1 valid picks; 2 are needed"}
+		"pick 4: id 346 has no reason", `pick 5: liked "Dune (1984)" is not a film he rated 4 stars or more`,
+		"1 valid picks; 2 are needed"}
 	if !slices.Equal(v, want) {
 		t.Fatalf("violations = %q", v)
 	}
-	if _, v, _ := validate("Sure! Here are", unseen, 2); len(v) != 1 || !strings.Contains(v[0], "not JSON") {
+	if _, v, _ := validate("Sure! Here are", unseen, loved, 2); len(v) != 1 || !strings.Contains(v[0], "not JSON") {
 		t.Fatalf("non-JSON violations = %q", v)
 	}
-	picks, _, glued := validate(`{"picks":[{"id":389,"title":"x","reason":"Hazy longing in a short package.12"},
-		{"id":346,"title":"y","reason":"An L.A. noir like Heat, beauty-in-sorrow of Moonlight.Quiet and slow.Hmm."}]}`, unseen, 2)
+	picks, _, glued := validate(`{"picks":[{"id":389,"title":"x","liked":"Rope","reason":"Hazy longing in a short package.12"},
+		{"id":346,"title":"y","liked":"Dune (2021)","reason":"An L.A. noir like Heat, beauty-in-sorrow of Moonlight.Quiet and slow.Hmm."}]}`,
+		unseen, loved, 2)
 	if len(picks) != 2 || picks[0].Reason != "Hazy longing in a short package." ||
 		picks[1].Reason != "An L.A. noir like Heat, beauty-in-sorrow of Moonlight." || len(glued) != 2 {
 		t.Fatalf("glued notes kept or unreported: %+v, glued %q", picks, glued)
