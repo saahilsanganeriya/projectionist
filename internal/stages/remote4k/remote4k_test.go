@@ -22,10 +22,10 @@ func uhd(path string, width int, kbps int64, dv int) version {
 	return version{path, probe.Info{BitRate: kbps * 1000, Video: &probe.Video{Width: width, DVProfile: dv}}}
 }
 
-// Catches: encoding a film that already fits the upload (also when only size and duration give its bitrate), a
-// 1080p-only film, the smaller of two 4K sources, a scope (3840x1600) source missed, or a DV5 source encoded.
+// Catches: encoding a film that already fits the upload, a 1080p-only film, the smaller of two 4K sources (also
+// when only size and duration give a bitrate), a scope (3840x1600) source missed, or a DV5 source encoded.
 func TestPick(t *testing.T) {
-	sized := version{"sized", probe.Info{Size: 15e9, Duration: 6000, Video: &probe.Video{Width: 3840}}} // exactly 20000 kbps
+	sized := version{"sized", probe.Info{Size: 45e9, Duration: 6000, Video: &probe.Video{Width: 3840}}} // 60000 kbps
 	cases := []struct {
 		name       string
 		vs         []version
@@ -37,7 +37,7 @@ func TestPick(t *testing.T) {
 		{"highest-bitrate 4K", []version{uhd("hd", 1920, 9000, 0), uhd("a", 3840, 48000, 0), uhd("b", 3840, 61000, 0)}, "b", "", false},
 		{"scope 4K", []version{{"scope", probe.Info{BitRate: 7e7, Video: &probe.Video{Width: 3840, Height: 1600}}}}, "scope", "", false},
 		{"small 4K exists", []version{uhd("big", 3840, 70000, 0), uhd("small", 3840, 18000, 0)}, "", "", true},
-		{"small by size and duration", []version{uhd("big", 3840, 70000, 0), sized}, "", "", true},
+		{"bitrate from size and duration", []version{uhd("a", 3840, 48000, 0), sized}, "sized", "", false},
 		{"Dolby Vision profile 5", []version{uhd("dv5", 3840, 70000, 5)}, "", "Dolby Vision profile 5", false},
 	}
 	for _, c := range cases {
@@ -133,6 +133,11 @@ echo out_time_ms=6612000000 > "$progress"; echo encoded > "$prev"
 	go func() { done <- (Stage{}).Run(context.Background(), h.Env, &rep) }()
 
 	waitFor(t, "encoder started", func() bool {
+		select {
+		case err := <-done:
+			t.Fatalf("run ended before encoding Heat: err=%v counts=%v", err, rep.Counts)
+		default:
+		}
 		pid, _ := os.ReadFile(filepath.Join(ffdir, "pid"))
 		return len(pid) > 0
 	})
