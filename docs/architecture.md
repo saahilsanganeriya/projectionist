@@ -94,6 +94,7 @@ image, enables the stage's `[stages.<name>]` table, and imports any legacy state
 | 9 | ssd-mirror | `ssd-copy/fill.py` | The same A→Z plan for the same free space. Resumes after a kill. Runs at idle I/O priority. |
 | 10 | backups | `backup_plex_db.sh`, `export_customizations.py` | `PRAGMA integrity_check` = ok on the copy. The exported file set equals the Python's. |
 | 11 | posters | `posters/posters.py` (runs on the Mac) | Last. It needs AI gateway keys, which would become a compose secret. Replay of `decisions.json` gives identical choices. |
+| 12 | collections | `jellyfin/jf_mirror.py collections` (never run) and the approved list in `config/collections.approved.json` | Desired = the 111 backed-up collections + the approved 150 + arrivals (TMDB collection, director, canon director at 3 films; facts from folder names and TMDB, never from an app). NAS dry run lists every Plex and Jellyfin create/add/sort/poster; a real run limited to 3 approved franchises in Plex, verified through the API; a second run writes nothing. |
 
 Order: small and independent stages first, so the pattern is proven before the rename stages. The shared
 probe/details work comes before the rename planner, because the planner consumes subtitle facts. The rename

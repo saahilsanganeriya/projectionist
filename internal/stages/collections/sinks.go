@@ -233,15 +233,8 @@ func (r *run) members(ctx context.Context, s sink, c *collection, h held, want [
 	if err != nil {
 		return err
 	}
-	if found && seen.Count == h.Count {
-		known := map[string]bool{}
-		for _, id := range seen.Items {
-			known[id] = true
-		}
-		news := slices.ContainsFunc(want, func(id string) bool { return !known[id] })
-		if !news {
-			return nil
-		}
+	if found && seen.Count == h.Count && !slices.ContainsFunc(want, func(id string) bool { return !slices.Contains(seen.Items, id) }) {
+		return nil
 	}
 	cur, err := s.Members(ctx, h.ID)
 	if err != nil {
