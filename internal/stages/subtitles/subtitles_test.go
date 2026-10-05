@@ -86,7 +86,7 @@ for n in Ran Heat Clerks Show; do case "$*" in *"/$n "*) cat "`+ff+`/$n.json"; e
 	f.h.Script(t, "ffmpeg", `case "$*" in *framecrc*) cat "`+ff+`/ran.framecrc";; *"-f srt"*) cat "`+ff+`/heat.srt";; *) exit 1;; esac
 `)
 	// alass's real CLI: <reference> <incorrect> <output> [--index <audio stream>]; it exits 1 on any other flag.
-	alass := f.h.Script(t, "alass", `if [ "$2" = "_" ]; then [ "$4 $5" = "--index 1" ] || exit 1; echo speech > "$3"; exit 0; fi
+	alass := f.h.Script(t, "alass", `if [ "$2" = "_" ]; then [ "$4 $5" = "--index 1" ] || exit 1; cp "`+ff+`/clerks.aligned.srt" "$3"; exit 0; fi
 cp "`+ff+`/clerks.aligned.srt" "$3"; echo "info: 'reference file FPS/input file FPS' ratio is 1"
 `)
 
@@ -382,14 +382,15 @@ func TestHasEnglishSidecar(t *testing.T) {
 	}
 }
 
-// Catches alass output accepted when its shifts scatter (another cut or episode), or a uniform shift with alass's
-// frame-rate guess misread and the file kept unchanged.
+// Catches alass output accepted when its shifts scatter (another cut or episode) or when it does not line up with
+// the speech alass heard (another film shifted whole: the Aftersun case of the replay), or a uniform shift with
+// alass's frame-rate guess misread and the file kept unchanged.
 func TestAlassFit(t *testing.T) {
 	h := fake.NewEnv(t, nil)
 	dir := t.TempDir()
 	var cand, uniform, scattered strings.Builder
-	for i := range 40 {
-		s := float64(i * 30)
+	for i, s := range captionTimes() {
+		s -= 30
 		fmt.Fprintf(&cand, "%d\n%s --> %s\nline\n\n", i+1, stampOf(s), stampOf(s+2))
 		fmt.Fprintf(&uniform, "%d\n%s --> %s\nline\n\n", i+1, stampOf(s*25/24+1.5), stampOf(s*25/24+3.5))
 		fmt.Fprintf(&scattered, "%d\n%s --> %s\nline\n\n", i+1, stampOf(s+float64(i%3)*4), stampOf(s+float64(i%3)*4+2))
@@ -398,13 +399,17 @@ func TestAlassFit(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "scattered"), []byte(scattered.String()), 0o644)
 	alass := h.Script(t, "alass", `cp "`+dir+`/$(cat "`+dir+`/mode")" "$3"; echo "info: 'reference file FPS/input file FPS' ratio is 25/24"`+"\n")
 	r := &run{env: h.Env, opt: Options{Alass: alass}}
-	ref := reference{label: "alass", dir: dir, speech: filepath.Join(dir, "speech.srt")}
-	for mode, want := range map[string]bool{"uniform": true, "scattered": false} {
-		os.WriteFile(filepath.Join(dir, "mode"), []byte(mode), 0o644)
+	for _, c := range []struct {
+		mode   string
+		speech string
+		want   bool
+	}{{"uniform", uniform.String(), true}, {"scattered", scattered.String(), false}, {"uniform", srt(otherTimes(), 0), false}} {
+		ref := reference{label: "alass", dir: dir, speech: filepath.Join(dir, "speech.srt"), talk: spanBits(cues(c.speech), 1)}
+		os.WriteFile(filepath.Join(dir, "mode"), []byte(c.mode), 0o644)
 		attempt := map[string]any{}
 		out, result, ok := r.fit(context.Background(), ref, cand.String(), attempt)
-		if ok != want || ok && (result != "retimed" || out != uniform.String() || attempt["offset_ms"] != 1500.0) {
-			t.Errorf("%s: ok %v result %q attempt %v", mode, ok, result, attempt)
+		if ok != c.want || ok && (result != "retimed" || out != uniform.String() || attempt["offset_ms"] != 1500.0) {
+			t.Errorf("%s against its speech %v: ok %v result %q attempt %v", c.mode, c.want, ok, result, attempt)
 		}
 	}
 }

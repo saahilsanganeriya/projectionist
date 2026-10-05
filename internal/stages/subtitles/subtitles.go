@@ -593,7 +593,8 @@ type reference struct {
 	bits   bitset
 	starts []float64
 	dir    string // alass work files
-	speech string
+	speech string // alass's speech segments as an SRT
+	talk   bitset // the same segments as bins, for the cross-check
 }
 
 func (ref reference) cleanup() {
@@ -643,7 +644,14 @@ func (r *run) reference(ctx context.Context, t *title) (reference, error) {
 		}
 		ref.label, ref.why = "", "alass could not read the audio: "+err.Error()
 		r.alertOnce("alass-failed", "alass failed (titles without an English image track get no subtitle): %v", err)
+		return ref, nil
 	}
+	raw, err := os.ReadFile(ref.speech)
+	if err != nil {
+		ref.cleanup()
+		return reference{}, err
+	}
+	ref.talk = spanBits(cues(string(raw)), 1)
 	return ref, nil
 }
 
@@ -694,6 +702,17 @@ func (r *run) fit(ctx context.Context, ref reference, txt string, attempt map[st
 	offset, agree, ok := shifts(spans, moved, ratio)
 	attempt["offset_ms"], attempt["ratio"], attempt["agree"] = offset, ratio, math.Round(agree*100)/100
 	if !ok || agree < alassAgree {
+		return "", "", false
+	}
+	// Cross-check with subfetch2.py's own speech test: each cue's first second must line up with the speech alass
+	// heard (a lag that stands out, 6 of 8 chunks on one line). It rejects a wrong subtitle that alass shifted whole.
+	first := make([]span, len(moved))
+	for i, c := range moved {
+		first[i] = span{c.start, math.Min(c.end, c.start+1)}
+	}
+	check, ok := align(first, ref.talk)
+	attempt["z"], attempt["chunks"] = math.Round(check.Z*10)/10, check.Agree
+	if !ok {
 		return "", "", false
 	}
 	if slices.Equal(spans, moved) {
