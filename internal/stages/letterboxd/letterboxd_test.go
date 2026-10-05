@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -625,5 +626,46 @@ func TestRefusesFasterThanPolite(t *testing.T) {
 	w.h.SetOptions(w.opts + "interval = \"1s\"\n")
 	if err := w.st.Run(context.Background(), w.h.Env, &stage.Report{}); !errors.Is(err, errTooFast) || w.lb.total() != 0 {
 		t.Errorf("err = %v after %d Letterboxd requests; want errTooFast before any", err, w.lb.total())
+	}
+}
+
+// Catches: a Plex or Jellyfin listing that stops after its first page, or skips or repeats one (the NAS library
+// holds 2,240 films; a page holds 100, so 250 crosses two page boundaries and ends on a partial page).
+func TestListingsReadEveryPage(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	const n = 250
+	h.Plex.HandleFunc("GET", "/library/sections/4/all", func(w http.ResponseWriter, r *http.Request) {
+		start, _ := strconv.Atoi(r.URL.Query().Get("X-Plex-Container-Start"))
+		size, _ := strconv.Atoi(r.URL.Query().Get("X-Plex-Container-Size"))
+		md := []map[string]any{}
+		for i := start; i < min(start+size, n); i++ {
+			md = append(md, map[string]any{"ratingKey": strconv.Itoa(i)})
+		}
+		json.NewEncoder(w).Encode(map[string]any{"MediaContainer": map[string]any{"totalSize": n, "Metadata": md}})
+	})
+	h.Jellyfin.HandleFunc("GET", "/Items", func(w http.ResponseWriter, r *http.Request) {
+		start, _ := strconv.Atoi(r.URL.Query().Get("StartIndex"))
+		limit, _ := strconv.Atoi(r.URL.Query().Get("Limit"))
+		items := []map[string]any{}
+		for i := start; i < min(start+limit, n); i++ {
+			items = append(items, map[string]any{"Id": strconv.Itoa(i)})
+		}
+		json.NewEncoder(w).Encode(map[string]any{"Items": items, "TotalRecordCount": n})
+	})
+	r := &run{env: h.Env, opt: defaults(), sleep: func(context.Context, time.Duration) error { return nil }}
+	seen := map[string]int{}
+	if err := r.plexPages(context.Background(), &breaker{}, "", func(it plexItem) { seen["plex "+it.RatingKey]++ }); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.jfPages(context.Background(), &breaker{}, "userId=u1", func(it jfItem) { seen["jellyfin "+it.ID]++ }); err != nil {
+		t.Fatal(err)
+	}
+	for k, c := range seen {
+		if c != 1 {
+			t.Errorf("%s listed %d times", k, c)
+		}
+	}
+	if len(seen) != 2*n {
+		t.Errorf("listed %d distinct items, want %d", len(seen), 2*n)
 	}
 }

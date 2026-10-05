@@ -66,7 +66,7 @@ export_dir     = "/volume1/docker/projectionist/data/letterboxd" # unzipped acco
 movies_dir     = "/volume1/media/Movies"
 missing_file   = "/volume1/media/_watchlist-missing.txt" # watchlist films not on the NAS; "" = none
 sink_refresh   = "24h"                    # re-read what Plex (one paged listing) and plex.tv hold this often; Plex also before any write
-jellyfin_refresh = "0s"                   # 0 = re-read Jellyfin every run (its listing takes a second)
+jellyfin_refresh = "0s"                   # 0 = re-read Jellyfin every run, so films it indexes are picked up within one run
 plex_section   = 4
 jellyfin_user  = "saahil"
 collection     = "Watchlist"              # "" = no Watchlist collection

@@ -515,19 +515,41 @@ func (r *run) plexCollection(ctx context.Context, b *breaker, m sinkMeta, haves 
 
 // ---- Jellyfin ----
 
+type jfItem struct {
+	ID          string            `json:"Id"`
+	Name        string            `json:"Name"`
+	Path        string            `json:"Path"`
+	ProviderIDs map[string]string `json:"ProviderIds"`
+	UserData    struct {
+		PlayCount      int      `json:"PlayCount"`
+		Played         bool     `json:"Played"`
+		LastPlayedDate string   `json:"LastPlayedDate"`
+		Rating         *float64 `json:"Rating"`
+	} `json:"UserData"`
+}
+
 type jfItems struct {
-	Items []struct {
-		ID          string            `json:"Id"`
-		Name        string            `json:"Name"`
-		Path        string            `json:"Path"`
-		ProviderIDs map[string]string `json:"ProviderIds"`
-		UserData    struct {
-			PlayCount      int      `json:"PlayCount"`
-			Played         bool     `json:"Played"`
-			LastPlayedDate string   `json:"LastPlayedDate"`
-			Rating         *float64 `json:"Rating"`
-		} `json:"UserData"`
-	} `json:"Items"`
+	Items            []jfItem `json:"Items"`
+	TotalRecordCount int      `json:"TotalRecordCount"`
+}
+
+// jfPages reads a Jellyfin item listing in 100-item pages, each retried: on the busy NAS a cold Jellyfin took 31 s
+// to list 299 movies at once and 8.7 s for a page of 100, and the library holds 2,240.
+func (r *run) jfPages(ctx context.Context, b *breaker, query string, visit func(jfItem)) error {
+	const page = 100
+	for start := 0; ; start += page {
+		var l jfItems
+		path := fmt.Sprintf("/Items?%s&SortBy=SortName,ProductionYear,DateCreated&StartIndex=%d&Limit=%d", query, start, page)
+		if err := r.call(ctx, b, func() error { return r.env.Jellyfin.GetJSON(ctx, path, &l) }); err != nil {
+			return err
+		}
+		for _, it := range l.Items {
+			visit(it)
+		}
+		if len(l.Items) < page || start+page >= l.TotalRecordCount {
+			return nil
+		}
+	}
 }
 
 // jfTMDB prefers the folder's {tmdb-N} (the library's own identity) over Jellyfin's provider id.
@@ -543,17 +565,18 @@ func jfTMDB(path string, providers map[string]string) int {
 	return id
 }
 
-// jellyfinSnapshot is plexSnapshot for Jellyfin: one listing of the user's movies, then the collection's.
+// jellyfinSnapshot is plexSnapshot for Jellyfin: the user's movies, then the collection's.
 func (r *run) jellyfinSnapshot(ctx context.Context, force bool) (sinkMeta, map[int]have, bool, error) {
 	m, haves, due, err := r.storedSnapshot(ctx, "jellyfin", r.opt.JFRefresh, force)
 	if err != nil || !due {
 		return m, haves, false, err
 	}
+	b := &breaker{}
 	var users []struct {
 		ID   string `json:"Id"`
 		Name string `json:"Name"`
 	}
-	if err := r.env.Jellyfin.GetJSON(ctx, "/Users", &users); err != nil {
+	if err := r.call(ctx, b, func() error { return r.env.Jellyfin.GetJSON(ctx, "/Users", &users) }); err != nil {
 		return m, nil, false, err
 	}
 	m.UserID = ""
@@ -565,15 +588,11 @@ func (r *run) jellyfinSnapshot(ctx context.Context, force bool) (sinkMeta, map[i
 	if m.UserID == "" {
 		return m, nil, false, fmt.Errorf("jellyfin: no user %q", r.opt.JellyfinUser)
 	}
-	var items jfItems
-	if err := r.env.Jellyfin.GetJSON(ctx, "/Items?userId="+m.UserID+"&IncludeItemTypes=Movie&Recursive=true&Fields=Path,ProviderIds&EnableImages=false&EnableUserData=true", &items); err != nil {
-		return m, nil, false, err
-	}
 	fresh := map[int]have{}
-	for _, it := range items.Items {
+	if err := r.jfPages(ctx, b, "userId="+m.UserID+"&IncludeItemTypes=Movie&Recursive=true&Fields=Path,ProviderIds&EnableImages=false&EnableUserData=true", func(it jfItem) {
 		id := jfTMDB(it.Path, it.ProviderIDs)
 		if id == 0 {
-			continue
+			return
 		}
 		h := have{Item: it.ID, Plays: it.UserData.PlayCount}
 		if it.UserData.Played {
@@ -586,23 +605,23 @@ func (r *run) jellyfinSnapshot(ctx context.Context, force bool) (sinkMeta, map[i
 			h.Last = t.In(r.env.Loc).Format(time.DateOnly)
 		}
 		fresh[id] = h
+	}); err != nil {
+		return m, nil, false, err
 	}
 	m.Collection = ""
 	if r.opt.Collection != "" {
-		if m.Collection, err = r.jfCollectionID(ctx, m.UserID); err != nil {
+		if err := r.call(ctx, b, func() (err error) { m.Collection, err = r.jfCollectionID(ctx, m.UserID); return err }); err != nil {
 			return m, nil, false, err
 		}
 		if m.Collection != "" {
-			var kids jfItems
-			if err := r.env.Jellyfin.GetJSON(ctx, "/Items?userId="+m.UserID+"&ParentId="+m.Collection+"&Fields=Path,ProviderIds&EnableImages=false", &kids); err != nil {
-				return m, nil, false, err
-			}
-			for _, k := range kids.Items {
+			if err := r.jfPages(ctx, b, "userId="+m.UserID+"&ParentId="+m.Collection+"&Fields=Path,ProviderIds&EnableImages=false", func(k jfItem) {
 				if id := jfTMDB(k.Path, k.ProviderIDs); id > 0 {
 					h := fresh[id]
 					h.Member = true
 					fresh[id] = h
 				}
+			}); err != nil {
+				return m, nil, false, err
 			}
 		}
 	}

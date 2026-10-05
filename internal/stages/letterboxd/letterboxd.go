@@ -5,8 +5,8 @@
 // 2 s, every answer that can be cached is): the RSS feed (every run), the watchlist and watched-films grid pages
 // (daily), the film pages (TMDB id, cached forever), and the account export unzipped on the NAS (the backfill).
 // Films join the library on the TMDB id in the folder names. Per app the stage keeps a snapshot of what the app
-// holds (Plex: one paged listing, re-read daily and before any run that writes to it; Jellyfin: every run, it is
-// cheap) and updates it after each write, so a rerun writes nothing.
+// holds (Plex: one paged listing, re-read daily and before any run that writes to it; Jellyfin: every run, while
+// it is still indexing) and updates it after each write, so a rerun writes nothing.
 //
 // Never: unwatch, lower a play count, clear a rating, or remove anything this stage did not add. Plex takes no
 // last-played date (a scrobble stamps "now"). Reviews are not synced: a Plex review is shown to everyone his
@@ -44,7 +44,7 @@ type Options struct {
 	MoviesDir     string        `toml:"movies_dir"`
 	MissingFile   string        `toml:"missing_file"`     // watchlist films not on the NAS; "" = none
 	SinkRefresh   time.Duration `toml:"sink_refresh"`     // re-read what Plex and plex.tv hold this often (Plex also before writing)
-	JFRefresh     time.Duration `toml:"jellyfin_refresh"` // 0 = every run: Jellyfin's listing is cheap and it is still indexing
+	JFRefresh     time.Duration `toml:"jellyfin_refresh"` // 0 = every run, so films Jellyfin indexes are picked up within one run
 
 	PlexSection   int    `toml:"plex_section"`
 	JellyfinUser  string `toml:"jellyfin_user"`
