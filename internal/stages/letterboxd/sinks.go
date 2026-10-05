@@ -33,8 +33,15 @@ var errBreakerOpen = errors.New("too many failed calls this run")
 
 type breaker struct{ fails int }
 
-// call runs one app request with retries; a call that still fails counts toward the breaker.
+// call runs one idempotent app request with retries; a call that still fails counts toward the breaker.
 func (r *run) call(ctx context.Context, b *breaker, f func() error) error {
+	return r.callOnce(ctx, b, true, f)
+}
+
+// callOnce is call for a request that must not be repeated blindly (a scrobble adds a view): when the request
+// may have reached the app but its answer was lost (any transport error, timeouts included), it returns at once
+// with errUnconfirmed instead of retrying.
+func (r *run) callOnce(ctx context.Context, b *breaker, idempotent bool, f func() error) error {
 	if b.fails >= 3 {
 		return errBreakerOpen
 	}
@@ -52,10 +59,17 @@ func (r *run) call(ctx context.Context, b *breaker, f func() error) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		var transport *url.Error
+		if !idempotent && errors.As(err, &transport) {
+			b.fails++
+			return fmt.Errorf("%w: %w", errUnconfirmed, err)
+		}
 	}
 	b.fails++
 	return err
 }
+
+var errUnconfirmed = errors.New("sent, outcome unknown")
 
 func (r *run) loadHaves(ctx context.Context, app string) (map[int]have, error) {
 	out := map[int]have{}
@@ -314,16 +328,25 @@ func (r *run) syncPlex(ctx context.Context, wants []want, scope map[int]bool) er
 	for _, u := range ups {
 		h := haves[u.TMDB]
 		// Plex has no "set play count": each scrobble adds one view (and stamps lastViewedAt = now; Plex takes no
-		// date). The row is bumped before the call, so a crash mid-call under-counts (healed by the next
-		// snapshot) rather than over-counts (which could never be undone without unwatching).
+		// date). The row is bumped before the call and kept unless Plex answered with an error, so a crash or a
+		// lost answer under-counts (healed by the next snapshot) and never over-counts (which could not be undone
+		// without unwatching).
 		for h.Plays < u.Plays {
 			h.Plays++
 			if err := r.saveHave(ctx, app, u.TMDB, h); err != nil {
 				return err
 			}
-			if err := r.call(ctx, b, func() error {
-				return r.env.Plex.Do(ctx, http.MethodGet, "/:/scrobble?key="+url.QueryEscape(u.Item)+"&"+plexLib)
-			}); err != nil {
+			err := r.callOnce(ctx, b, false, func() error {
+				// PUT, not the usual GET: Go's transport silently resends a GET whose connection dropped before
+				// the answer, which here would add a second view. Plex accepts either method.
+				return r.env.Plex.Do(ctx, http.MethodPut, "/:/scrobble?key="+url.QueryEscape(u.Item)+"&"+plexLib)
+			})
+			if errors.Is(err, errUnconfirmed) {
+				r.count(app+".scrobble_unconfirmed", 1)
+				r.env.Log.Warn("scrobble outcome unknown; counted as done until the next re-read", "event", "scrobble_unconfirmed", "tmdb", u.TMDB, "err", err)
+				break
+			}
+			if err != nil {
 				h.Plays--
 				if serr := r.saveHave(ctx, app, u.TMDB, h); serr != nil {
 					return serr

@@ -93,6 +93,7 @@ type apps struct {
 	collection   []string
 	promoted     bool
 	failScrobble bool
+	dropScrobble bool               // count the view, then drop the connection: the answer is lost
 	jf           map[string]*jfFilm // item id →
 	jfSet        []string
 	jfBodies     []string
@@ -161,7 +162,7 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 		q := r.URL.Query()
 		a.promoted = q.Get("metadataItemId") == "900" && q.Get("promotedToOwnHome") == "1" && q.Get("promotedToRecommended") == "1"
 	})
-	px.HandleFunc("GET", "/:/scrobble", func(w http.ResponseWriter, r *http.Request) {
+	px.HandleFunc("PUT", "/:/scrobble", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		if a.failScrobble {
@@ -169,6 +170,10 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 			return
 		}
 		a.plex[r.URL.Query().Get("key")].views++
+		if a.dropScrobble {
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			conn.Close()
+		}
 	})
 	px.HandleFunc("PUT", "/:/rate", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
@@ -296,7 +301,7 @@ func (w *world) run(t *testing.T, extra string) stage.Report {
 
 func writes(h *fake.Harness) int {
 	n := 0
-	for _, c := range [][]fake.Call{h.Plex.Calls("GET", "/:/scrobble"), h.Plex.Calls("PUT", "/:/rate"), h.Plex.Calls("POST", "/library/collections"),
+	for _, c := range [][]fake.Call{h.Plex.Calls("PUT", "/:/scrobble"), h.Plex.Calls("PUT", "/:/rate"), h.Plex.Calls("POST", "/library/collections"),
 		h.Plex.Calls("POST", "/hubs/sections/4/manage"), h.Jellyfin.Calls("POST", "/Collections")} {
 		n += len(c)
 	}
@@ -425,5 +430,21 @@ func TestRunSurvivesBlocksAndFailures(t *testing.T) {
 	}
 	if w.apps.plex["10"].views != 3 || w.apps.plex["20"].views != 2 {
 		t.Errorf("failed scrobbles not retried: %d, %d", w.apps.plex["10"].views, w.apps.plex["20"].views)
+	}
+}
+
+// Catches: a scrobble whose answer was lost (Plex counted the view; the reply never came) retried or recounted,
+// which would push the play count past the diary for good, since nothing may ever lower it.
+func TestLostScrobbleAnswerNeverRepeats(t *testing.T) {
+	w := newWorld(t)
+	w.apps.dropScrobble = true
+	rep := w.run(t, "")
+	if rep.Counts["plex.scrobble_unconfirmed"] != 2 || w.apps.plex["10"].views != 2 || w.apps.plex["20"].views != 1 {
+		t.Fatalf("views %d, %d; counts %v", w.apps.plex["10"].views, w.apps.plex["20"].views, rep.Counts)
+	}
+	w.apps.dropScrobble = false
+	w.run(t, "")
+	if w.apps.plex["10"].views != 3 || w.apps.plex["20"].views != 2 {
+		t.Errorf("views after the next run = %d, %d; want exactly 3 and 2", w.apps.plex["10"].views, w.apps.plex["20"].views)
 	}
 }
