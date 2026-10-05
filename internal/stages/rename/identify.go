@@ -215,7 +215,7 @@ func abs(n int) int {
 var (
 	titleYearParens = regexp.MustCompile(`^(.+?)` + pyS + `*\((\d{4})\)`)
 	releaseCut      = regexp.MustCompile(`(?i)(?:^|[ \[(])(?:S\d{1,2}(?:E\d+)?|season|series|complete|\d{3,4}p|web[ -]?(?:dl|rip)?|blu[ -]?ray|bdrip|brrip|hdtv|dvdrip|x26[45]|h[ .]?26[45]|hevc|remux|uhd|imax|extended|unrated|proper|repack)(?:$|[ \])\-])`)
-	yearToken       = regexp.MustCompile(`(?:^|[ \[(])((?:19|20)\d\d)(?:$|[ \])])`)
+	yearToken       = regexp.MustCompile(`\b((?:19|20)\d\d)\b`)
 	bracketOpen     = regexp.MustCompile(`[\[(]`)
 )
 
