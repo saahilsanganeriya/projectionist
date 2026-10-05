@@ -99,6 +99,24 @@ mbps            = 50                                           # cap on bulk rea
 io_class        = "idle"                                       # copies yield all disk time; "best-effort" = fill.py's nice 19
 status_file     = "/volume1/PlexMediaServer/ssd-copy/PROGRESS.txt"
 
+# An English text subtitle beside every movie and episode; replaces scripts/sub_stats.py and scripts/subfetch2.py.
+# Providers are called directly, never through Plex: OpenSubtitles' legacy REST API, Gestdown (Addic7ed, episodes) and
+# SITEC Subtitles (films) need no key; OpenSubtitles.com and Subdl join only when <secrets_dir>/<name>_api_key exists
+# (opensubtitles_api_key, subdl_api_key). IMDb and TheTVDB ids come from TMDB. A title waits until every listed
+# provider has answered, so drop a provider that cannot be reached from this network (Subdl, 2026-10-05) from the list.
+[stages.subtitles]
+every       = "6h"
+roots       = ["/volume1/media/Movies", "/volume1/media/TV"]
+stats_file  = "/state/sub_stats.tsv" # sub_stats.py's TSV over the whole library, refreshed each run
+retry_after = "168h"                 # a title that got no subtitle is searched again after this, then 2, 4, 8x it
+workers     = 3
+max_titles  = 0                      # per run; 0 = every due title
+secrets_dir = "/run/secrets"
+alass       = "/usr/local/bin/alass" # aligns to the audio when there is no English image track, and rescues misfits
+providers   = ["opensubtitles", "opensubtitles-com", "subdl", "gestdown", "sitec"]
+legacy_quota = "/volume1/PlexMediaServer/subtitle-downloads" # subfetch2.py's quota files, read once while the store has none
+# output_dir = "/volume1/PlexMediaServer/projectionist-test/subtitles/out" # test runs: write sidecars here instead
+
 # Real-time trigger: inotify on the library and finished downloads. A top-level folder (a movie, a show, a download)
 # that changed and then stayed quiet for `quiet` triggers each stage in `trigger`; each is a reconciler that finds its
 # own work. One run = one `sweep` period (walk every root, then follow events), so `every` must be <= `sweep`: the next
