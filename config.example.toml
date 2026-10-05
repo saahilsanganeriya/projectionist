@@ -207,22 +207,56 @@ io_class        = "idle"                                       # copies yield al
 status_file     = "/volume1/PlexMediaServer/ssd-copy/PROGRESS.txt"
 
 # An English text subtitle beside every movie and episode; replaces scripts/sub_stats.py and scripts/subfetch2.py.
-# Providers are called directly, never through Plex: OpenSubtitles' legacy REST API, Gestdown (Addic7ed, episodes) and
-# SITEC Subtitles (films) need no key; OpenSubtitles.com and Subdl join only when <secrets_dir>/<name>_api_key exists
-# (opensubtitles_api_key, subdl_api_key). IMDb and TheTVDB ids come from TMDB. A title waits until every listed
-# provider has answered, so drop a provider that cannot be reached from this network (Subdl, 2026-10-05) from the list.
+# A video carrying an embedded English text track already has English subtitles (the players show it, and the audit
+# counts it): it is skipped, never opened. Cheap first: a subtitle made for the file's own release (its original
+# name's group, from the .details note or the rename logs; or an OpenSubtitles file-hash match) is written without
+# reading the video once its last cue fits the note's duration and frame rate. Anything else waits in the alignment
+# queue, worked while nobody but the owner watches, at most align_per_day titles in any 24 h. Providers are called
+# directly, never through Plex: Gestdown (Addic7ed, episodes) and SITEC Subtitles (films) need no key; OpenSubtitles'
+# legacy REST API comes last whatever this list's order (180 downloads a day), and is used for a hash match, or when
+# no other provider has a candidate; OpenSubtitles.com and Subdl join only when <secrets_dir>/<name>_api_key exists
+# (opensubtitles_api_key, subdl_api_key). IMDb and TheTVDB ids come from TMDB. A title waits until every listed free
+# provider has answered (OpenSubtitles only when it is the title's one source), so drop a provider that cannot be
+# reached from this network (Subdl, 2026-10-05) from the list.
 [stages.subtitles]
-every       = "6h"
-roots       = ["/volume1/media/Movies", "/volume1/media/TV"]
-stats_file  = "/state/sub_stats.tsv" # sub_stats.py's TSV over the whole library, refreshed each run
-retry_after = "168h"                 # a title that got no subtitle is searched again after this, then 2, 4, 8x it
-workers     = 3
-max_titles  = 0                      # per run; 0 = every due title
-secrets_dir = "/run/secrets"
-alass       = "/usr/local/bin/alass" # aligns to the audio when there is no English image track, and rescues misfits
-providers   = ["opensubtitles", "opensubtitles-com", "subdl", "gestdown", "sitec"]
-legacy_quota = "/volume1/PlexMediaServer/subtitle-downloads" # subfetch2.py's quota files, read once while the store has none
+every         = "6h"
+roots         = ["/volume1/media/Movies", "/volume1/media/TV"]
+stats_file    = "/state/sub_stats.tsv" # sub_stats.py's TSV over the whole library, refreshed each run
+retry_after   = "168h"                 # a title that got no subtitle is searched again after this, then 2, 4, 8x it
+workers       = 3                      # titles searched at once; the queue aligns one at a time
+max_titles    = 0                      # per run; 0 = every due title
+secrets_dir   = "/run/secrets"
+alass         = "/usr/local/bin/alass" # the queue: aligns to the audio when there is no English image track, and rescues misfits
+providers     = ["gestdown", "sitec", "subdl", "opensubtitles", "opensubtitles-com"]
+align_per_day = 20                     # queued titles aligned in any 24 h, counted as each starts reading its video; 0 = none
+legacy_quota  = "/volume1/PlexMediaServer/subtitle-downloads" # subfetch2.py's quota files, read once while the store has none
+# undo_logs = [...]                    # rename logs for original names a note lacks; default: the details stage's list
 # output_dir = "/volume1/PlexMediaServer/projectionist-test/subtitles/out" # test runs: write sidecars here instead
+
+# Five unseen films for tonight, picked once a day by one Claude call over his Letterboxd ratings and reviews; a
+# Plex Movies collection "Tonight" promoted to his own Home as the first Movies row (below Continue Watching, On Deck
+# and the rows of libraries ordered before Movies), and the same BoxSet in Jellyfin.
+# Reconciles every 30 min: a pick he has since watched leaves the row at once.
+# daily_cap_usd is a hard cap: the call and its one retry are sized together before the first is sent, each at its
+# worst (the cached prompt prefix billed as a cache write, as a retry that misses the 5-minute cache pays it again;
+# 2% slack on token counts; all of max_tokens as output), and the candidate list is cut until the pair fits.
+[stages.tonight]
+every           = "30m"                          # the model is [[llm.policy]]'s
+effort          = "medium"                       # sent only to a model that takes it (Haiku 4.5 does not)
+max_tokens      = 1000                           # thinking + the JSON; a cut-off answer is retried at effort "low"
+daily_cap_usd   = 0.15                           # hard: see the comment above the table
+pick_after      = "05:00"                        # in timezone: a new day's picks after this
+picks           = 5
+max_candidates  = 400                            # unseen films shown, best-ranked first; fewer when the cap needs it
+api_key_file    = "/run/secrets/anthropic_api_key"
+letterboxd_dir  = "/volume1/docker/projectionist/data/letterboxd" # the export CSVs, or the newest export folder in it
+letterboxd_rss  = "https://letterboxd.com/saahilsan/rss/"
+movies_dir      = "/volume1/media/Movies"
+section         = 4
+collection      = "Tonight"
+jellyfin_user   = "saahil"
+sink_timeout    = "3m"                           # per sink per run; a failed write is retried with backoff
+plex_map_timeout = "10m"                         # the daily TMDB id → ratingKey listing; a page took 112 s in a scan
 
 # Real-time trigger: inotify on the library and finished downloads. A top-level folder (a movie, a show, a download)
 # that changed and then stayed quiet for `quiet` triggers each stage in `trigger`; each is a reconciler that finds its

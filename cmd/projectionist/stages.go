@@ -15,6 +15,7 @@ import (
 	"projectionist/internal/stages/rename"
 	"projectionist/internal/stages/ssdmirror"
 	"projectionist/internal/stages/subtitles"
+	"projectionist/internal/stages/tonight"
 	"projectionist/internal/stages/watcher"
 )
 
@@ -35,6 +36,7 @@ func stages() []stage.Stage {
 		rename.Stage{},
 		ssdmirror.Stage{},
 		subtitles.Stage{},
+		tonight.Stage{},
 		watcher.Stage{},
 	}
 }

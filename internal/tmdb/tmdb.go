@@ -141,6 +141,13 @@ type Details struct {
 	Collection    *Collection `json:"belongs_to_collection"` // films only; nil when the film is in none
 	ExternalIDs   ExternalIDs `json:"external_ids"`
 	Seasons       []Season    `json:"seasons"` // shows only; season 0 holds the specials
+	Countries     []Country   `json:"production_countries"`
+	VoteAverage   float64     `json:"vote_average"`
+	VoteCount     int         `json:"vote_count"`
+}
+
+type Country struct {
+	ISO string `json:"iso_3166_1"` // "US"
 }
 
 type Genre struct {
