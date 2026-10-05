@@ -23,8 +23,9 @@ func newExecutor(root string, log undoFile) *executor {
 }
 
 // Catches the executor's refusals: overwriting a file already at a video's target (the unit must stop with
-// ErrUnitStopped and move nothing, its subtitles included), deleting a "twin" whose bytes differ, and writing the
-// undo log with more than one fsync per unit (the old executor's 18 ops/s came from one per op).
+// ErrUnitStopped and move nothing, its subtitles included), moving the sidecars of a planned video that has vanished
+// since the walk (a stale listing: the unit stops and its subtitle stays), deleting a "twin" whose bytes differ, and
+// writing the undo log with more than one fsync per unit (the old executor's 18 ops/s came from one per op).
 func TestRunUnitRefusals(t *testing.T) {
 	root := t.TempDir()
 	m := filepath.Join(root, "Movies")
@@ -35,6 +36,7 @@ func TestRunUnitRefusals(t *testing.T) {
 	write(t, filepath.Join(m, "b/copy/B.mkv"), "b2")
 	write(t, filepath.Join(m, "c/C.mkv"), "c")
 	write(t, filepath.Join(m, "c/C.srt"), "s")
+	write(t, filepath.Join(m, "e/E.srt"), "s") // E.mkv was there when the plan was made
 	log := &countingLog{}
 	x := newExecutor(root, log)
 
@@ -47,6 +49,15 @@ func TestRunUnitRefusals(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(filepath.Join(m, "A (2000) {tmdb-1}/A (2000) {tmdb-1}.mkv")); string(got) != "someone else" || !lexists(filepath.Join(m, "a/A.srt")) {
 		t.Fatal("a refused unit moved or overwrote something")
+	}
+
+	_, err = x.runUnit(context.Background(), "movie:tmdb-5", []Op{
+		{"movie:tmdb-5", "move", filepath.Join(m, "e/E.srt"), filepath.Join(m, "E (2004) {tmdb-5}/E (2004) {tmdb-5}.en.srt"), ""},
+		{"movie:tmdb-5", "move", filepath.Join(m, "e/E.mkv"), filepath.Join(m, "E (2004) {tmdb-5}/E (2004) {tmdb-5}.mkv"), ""},
+	})
+	if !errors.Is(err, ErrUnitStopped) || !strings.Contains(err.Error(), "planned video missing") || !lexists(filepath.Join(m, "e/E.srt")) {
+		t.Fatalf("stale listing: err = %v, subtitle left = %v; want ErrUnitStopped naming the missing video, subtitle left",
+			err, lexists(filepath.Join(m, "e/E.srt")))
 	}
 
 	if _, err := x.runUnit(context.Background(), "movie:tmdb-2", []Op{

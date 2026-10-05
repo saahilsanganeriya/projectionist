@@ -174,9 +174,12 @@ func TestPlanEpisodes(t *testing.T) {
 }
 
 // Catches: an SxxE00 special not numbered by its title in TMDB's list (Season 00), not filed as an extra when the
-// list has no such title, or renamed blindly when no list was fetched.
+// list has no such title, or renamed blindly when no list was fetched; and the subtitle of a special left where it
+// is renamed onto the one episode planned beside it (it must wait with its video).
 func TestPlanSpecials(t *testing.T) {
 	f := tv + "Euphoria/Specials/euphoria.us.s01e00.trouble.dont.last.always.1080p.mkv"
+	sub := tv + "Euphoria/Specials/euphoria.us.s01e00.trouble.dont.last.always.1080p.en.srt"
+	pilot := tv + "Euphoria/Specials/euphoria.us.s01e01.1080p.mkv"
 	euphoria := Title{ID: "tmdb-85552", Name: "Euphoria (US)", Year: 2019}
 	for _, c := range []struct {
 		name  string
@@ -190,12 +193,16 @@ func TestPlanSpecials(t *testing.T) {
 		{"no list", nil, "leave"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			in := newInput(map[string]int64{f: 1})
+			in := newInput(map[string]int64{f: 1, sub: 1, pilot: 1})
 			in.Shows[f], in.Episodes[f] = euphoria, []Episode{ep(1, 0, "")}
+			in.Shows[pilot], in.Episodes[pilot] = euphoria, []Episode{ep(1, 1, "Pilot")}
+			want := map[string]string{f: c.want}
 			if c.hints != nil {
 				in.Hints[euphoria.ID] = c.hints
+			} else {
+				want[sub] = "leave"
 			}
-			expect(t, Build(in), map[string]string{f: c.want})
+			expect(t, Build(in), want)
 		})
 	}
 }
@@ -261,17 +268,23 @@ func TestPlanSubtitles(t *testing.T) {
 }
 
 // Catches the safety checks that block a unit: two files onto one name (case-insensitively, as SMB sees them), a
-// target that already exists, and one video stem prefixing another in a folder.
+// target that already exists, one video stem prefixing another in a folder, and a name component the share cannot
+// hold (over 255 bytes, or ending in a dot or a space, which SMB clients cannot open).
 func TestCheckProblems(t *testing.T) {
+	long := strings.Repeat("é", 128) // 256 bytes, 128 characters
 	ops := []Op{
 		{"movie:a", "move", "/x/1.mkv", "/lib/Movies/A/A.mkv", ""},
 		{"movie:b", "move", "/x/2.mkv", "/lib/Movies/A/a.mkv", ""},
 		{"movie:c", "move", "/x/3.mkv", "/lib/Movies/C/C.mkv", ""},
 		{"movie:d", "keep", "/lib/Movies/D/D.mkv", "/lib/Movies/D/D.mkv", ""},
 		{"movie:d", "move", "/x/4.mkv", "/lib/Movies/D/D - 4K.mkv", ""},
+		{"movie:e", "move", "/x/5.mkv", "/lib/Movies/E/" + long + ".mkv", ""},
+		{"movie:f", "move", "/x/6.mkv", "/lib/Movies/F Jr./F.mkv", ""},
+		{"movie:g", "archive", "/x/7.nfo", "/lib/_archive/junk/G /7.nfo", ""},
 	}
 	problems := check(ops, map[string]int64{"/lib/Movies/C/C.mkv": 1})
-	want := map[string]string{"movie:a": "collision", "movie:b": "collision", "movie:c": "target exists", "movie:d": "stem prefix clash"}
+	want := map[string]string{"movie:a": "collision", "movie:b": "collision", "movie:c": "target exists", "movie:d": "stem prefix clash",
+		"movie:e": "bad component", "movie:f": "bad component", "movie:g": "bad component"}
 	for unit, w := range want {
 		if p := strings.Join(problems[unit], "; "); !strings.Contains(p, w) {
 			t.Errorf("%s: problems %q, want %q", unit, p, w)
