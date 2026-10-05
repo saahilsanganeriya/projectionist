@@ -100,9 +100,9 @@ func TestValidate(t *testing.T) {
 }
 
 // Catches a taste block that grows with his diary until the sizing finds no room for even 4 x picks candidates and
-// the day gets no call (round-3 review), and a bound that sheds what the reasons rely on: his 4★+ films go last, his
-// oldest review first. 250 bytes holds the headings (146 counted), both 4★+ ratings (22 each) and the newest review
-// (46), but not the old review (43) as well.
+// the day gets no call, and a bound that sheds what the reasons rely on: his 4★+ films go last, his oldest review
+// first. 250 bytes holds the headings (146 counted), both 4★+ ratings (22 each) and the newest review (46), but not
+// the old review (43) as well.
 func TestTasteTextKeepsTheBestWithinItsBudget(t *testing.T) {
 	films := []rated{
 		{Name: "Old Favourite", Year: 1990, Rating: 5, Last: "2022-01-01"},
@@ -456,13 +456,26 @@ type plexFake struct {
 	home    []string // the members his Home row lists: Plex's cached hub, refreshed only by a manage call on it
 	posters [][]byte
 
-	dropCreate   bool   // POST /library/collections makes the collection, then hangs up: its answer is lost
-	failReadBack int    // GET /library/metadata/900 answers 503 this many times first
-	onCreate     func() // runs inside the create, e.g. to stop the run there
+	dropCreate   bool           // POST /library/collections makes the collection, then hangs up: its answer is lost
+	failReadBack int            // GET /library/metadata/900 answers 503 this many times first
+	onCreate     func()         // runs inside the create, e.g. to stop the run there
+	fail         map[string]int // "poster" | "hub" (the hub's manage PUT): answers 503 this many times first
+	stopInRemove func()         // a member DELETE takes the film out, runs this (e.g. to stop the run), then hangs up
+}
+
+// failing reports whether the write named key fails this time; the caller holds p.mu.
+func (p *plexFake) failing(rw http.ResponseWriter, key string) bool {
+	if p.fail[key] == 0 {
+		return false
+	}
+	p.fail[key]--
+	http.Error(rw, "busy", http.StatusServiceUnavailable)
+	return true
 }
 
 func newPlexFake(srv *fake.Server) *plexFake {
-	p := &plexFake{srv: srv, viewed: map[string]bool{}, hubs: []plexHub{{Identifier: "movie.recentlyadded", PromotedToOwnHome: true}}}
+	p := &plexFake{srv: srv, viewed: map[string]bool{}, fail: map[string]int{},
+		hubs: []plexHub{{Identifier: "movie.recentlyadded", PromotedToOwnHome: true}}}
 	mc := func(rw http.ResponseWriter, v any) {
 		json.NewEncoder(rw).Encode(map[string]any{"MediaContainer": v})
 	}
@@ -557,6 +570,11 @@ func newPlexFake(srv *fake.Server) *plexFake {
 			p.mu.Lock()
 			defer p.mu.Unlock()
 			p.coll = slices.DeleteFunc(p.coll, func(k string) bool { return k == key })
+			if p.stopInRemove != nil {
+				p.stopInRemove()
+				conn, _, _ := rw.(http.Hijacker).Hijack()
+				conn.Close()
+			}
 		})
 	}
 	srv.HandleFunc("PUT", "/library/sections/4/all", func(rw http.ResponseWriter, r *http.Request) {
@@ -574,6 +592,9 @@ func newPlexFake(srv *fake.Server) *plexFake {
 	srv.HandleFunc("POST", "/library/metadata/900/posters", func(rw http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
+		if p.failing(rw, "poster") {
+			return
+		}
 		body, _ := io.ReadAll(r.Body)
 		p.posters = append(p.posters, body)
 	})
@@ -593,6 +614,9 @@ func newPlexFake(srv *fake.Server) *plexFake {
 	srv.HandleFunc("PUT", "/hubs/sections/4/manage/custom.collection.4.900", func(rw http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
+		if p.failing(rw, "hub") {
+			return
+		}
 		if i := slices.IndexFunc(p.hubs, func(h plexHub) bool { return h.Identifier == "custom.collection.4.900" }); i >= 0 {
 			p.hubs[i] = hubFlags(p.hubs[i].Identifier, r.URL.Query())
 			p.home = slices.Clone(p.coll)
@@ -880,9 +904,9 @@ func TestRunAcrossDays(t *testing.T) {
 	}
 }
 
-// Catches the daily cap being soft. Row 1 is the round-2 review's $0.16958 case: sizing that prices the retry's
-// prefix at the cache-read rate sends all ~190 candidates, and a retry that misses the cache then bills a second
-// write, taking the pair past $0.15. Row 2: a call sent although even an empty list's pair would not fit.
+// Catches the daily cap being soft. Row 1 is a $0.16958 day: sizing that prices the retry's prefix at the cache-read
+// rate sends all ~190 candidates, and a retry that misses the cache then bills a second write, taking the pair past
+// $0.15. Row 2: a call sent although even an empty list's pair would not fit.
 func TestDailyCapIsHard(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -937,10 +961,10 @@ func TestLostAnswerStaysCounted(t *testing.T) {
 }
 
 // Catches a second "Tonight" collection after a failed call around the create, which nothing would ever clean up
-// (round-2 review: run 2 made a second POST /library/collections). Rows: both creates' answers are lost after the
-// apps made the collections; Plex answers the create, then fails the read-back, so the create's answer alone must
-// name the collection; the service stops (SIGTERM) inside either create, where the run's closing save fails with
-// the cancelled context and only the record saved before the create survives.
+// (run 2 made a second POST /library/collections). Rows: both creates' answers are lost after the apps made the
+// collections; Plex answers the create, then fails the read-back, so the create's answer alone must name the
+// collection; the service stops (SIGTERM) inside either create, where the run's closing save fails with the
+// cancelled context and only the record saved before the create survives.
 func TestCreateNeverDuplicates(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -1012,9 +1036,9 @@ func TestModelFollowsDatedPolicy(t *testing.T) {
 }
 
 // Catches an answer cut off at max_tokens (thinking shares them with the JSON) costing the day its picks: the retry
-// must say why and think less, or it is cut off the same way. Row 2 is the round-3 review's: thinking took every
-// token, so there is no text to send back, and a retry carrying an empty text block is refused (by count_tokens first),
-// leaving the day with no picks.
+// must say why and think less, or it is cut off the same way. In row 2 thinking took every token, so there is no
+// text to send back, and a retry carrying an empty text block is refused (by count_tokens first), leaving the day
+// with no picks.
 func TestCutOffAnswerRetriesAtLowEffort(t *testing.T) {
 	for _, c := range []struct{ name, cut string }{
 		{"cut inside the JSON", `{"picks":[{"id":389,"title":"12 Angry Men","mood":"tense","liked":"Rope","reason":"Like Rope, it`},
@@ -1041,7 +1065,7 @@ func TestCutOffAnswerRetriesAtLowEffort(t *testing.T) {
 // Catches the retry being sent although, counted, it no longer fits what is left of the day. Sizing allows the retry
 // the answer (max_tokens) plus retryExtra tokens of violations; an answer that billed all of max_tokens and named 60
 // films outside the list, each with a long title, runs far past that, and only the check before the retry holds the
-// cap (round-3 review: with the fake billing 422 output tokens the check was never reached).
+// cap (with the fake billing 422 output tokens the check was never reached).
 func TestRetryThatNoLongerFitsIsNotSent(t *testing.T) {
 	w := newWorld(t, "", 190)
 	w.ai.missRetry = true
@@ -1057,6 +1081,52 @@ func TestRetryThatNoLongerFitsIsNotSent(t *testing.T) {
 	}
 	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "no valid picks") {
 		t.Fatalf("alerts %q", rep.Alerts)
+	}
+}
+
+// Catches his Home row listing films the collection no longer holds after a Plex write following a member edit
+// fails: the next run finds the members right, so only a saved mark refreshes the hub Plex caches. Row 1 is the
+// reviewer's repro (day 2's poster answers 503; 16 min later his Home still listed day 1's picks); in row 2 the
+// refresh itself fails, so the mark must outlive it; row 3 stops the service inside a watched pick's removal after
+// Plex made it, where the run's closing save fails and only a mark saved before the edit survives.
+func TestHomeRowRefreshedAfterAFailedWrite(t *testing.T) {
+	nextDay := func(w *world) { w.h.Now = time.Date(2026, 10, 6, 13, 0, 0, 0, time.UTC) }
+	watchedOne := func(w *world) { w.plex.viewed[rk(346)], w.h.Now = true, w.h.Now.Add(30*time.Minute) }
+	for _, c := range []struct {
+		name   string
+		change func(*world)
+		fault  func(*plexFake, context.CancelFunc)
+	}{
+		{"the poster fails after a new day's members", nextDay, func(p *plexFake, _ context.CancelFunc) { p.fail["poster"] = 1 }},
+		{"the hub refresh fails after a new day's members", nextDay, func(p *plexFake, _ context.CancelFunc) { p.fail["hub"] = 1 }},
+		{"stopped inside a watched pick's removal", watchedOne, func(p *plexFake, stop context.CancelFunc) { p.stopInRemove = stop }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWorld(t, "", 0)
+			w.ai.script(answer3(389, 346, 655), answer3(1398, 949, 18148))
+			w.run(t)
+			ctx, stop := context.WithCancel(context.Background())
+			defer stop()
+			w.plex.mu.Lock()
+			c.change(w)
+			c.fault(w.plex, stop)
+			w.plex.mu.Unlock()
+			rep := &stage.Report{}
+			err := (Stage{}).Run(ctx, w.h.Env, rep)
+			if stopped := ctx.Err() != nil; stopped != (err != nil) || (!stopped && rep.Counts["plex_retry"] != 1) {
+				t.Fatalf("run A: err %v, counts %v\n%s", err, rep.Counts, w.logs)
+			}
+			w.plex.mu.Lock()
+			w.plex.stopInRemove = nil
+			w.plex.mu.Unlock()
+			w.h.Now = w.h.Now.Add(16 * time.Minute) // past the first 15 min backoff
+			if rep := w.run(t); rep.Counts["plex_synced"] != 1 {
+				t.Fatalf("run B: counts %v\n%s", rep.Counts, w.logs)
+			}
+			if home, members := w.plex.homeRow(), w.plex.members(); !slices.Equal(home, members) || len(members) == 0 {
+				t.Fatalf("STALE: his Home row lists %v while the collection holds %v", home, members)
+			}
+		})
 	}
 }
 
