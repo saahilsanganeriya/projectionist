@@ -22,7 +22,7 @@ import (
 )
 
 // version is stored in every cached Info; rows from an older build lack later fields and are probed again.
-const version = 2
+const version = 3
 
 type Info struct {
 	Version   int        `json:"v"`
@@ -51,14 +51,17 @@ const (
 )
 
 type Video struct {
-	Index          int     `json:"index"`
-	Codec          string  `json:"codec"` // hevc, h264, av1, ...
-	Profile        string  `json:"profile"`
-	PixFmt         string  `json:"pix_fmt"`
-	BitDepth       int     `json:"bit_depth"`
-	Width          int     `json:"width"`
-	Height         int     `json:"height"`
-	FPS            float64 `json:"fps"`
+	Index    int     `json:"index"`
+	Codec    string  `json:"codec"` // hevc, h264, av1, ...
+	Profile  string  `json:"profile"`
+	PixFmt   string  `json:"pix_fmt"`
+	BitDepth int     `json:"bit_depth"`
+	Width    int     `json:"width"`
+	Height   int     `json:"height"`
+	FPS      float64 `json:"fps"`
+	// Duration is the video stream's own length in seconds (0 = unknown). It can end seconds before the
+	// container, whose duration is the longest stream (an audio tail).
+	Duration       float64 `json:"duration_s"`
 	BitRate        int64   `json:"bit_rate"` // 0 when the container does not say
 	HDR            string  `json:"hdr"`
 	DVProfile      int     `json:"dv_profile"` // 0 when not Dolby Vision
@@ -116,6 +119,7 @@ type ffStream struct {
 	Width         int               `json:"width"`
 	Height        int               `json:"height"`
 	AvgFrameRate  string            `json:"avg_frame_rate"`
+	Duration      string            `json:"duration"`
 	RFrameRate    string            `json:"r_frame_rate"`
 	BitRate       string            `json:"bit_rate"`
 	Channels      int               `json:"channels"`
@@ -195,6 +199,10 @@ func parseVideo(s ffStream) *Video {
 		Index: s.Index, Codec: s.CodecName, Profile: s.Profile, PixFmt: s.PixFmt, Width: s.Width, Height: s.Height,
 		FPS: rate(s.AvgFrameRate), BitRate: streamBitRate(s), HDR: SDR,
 		ColorPrimaries: s.ColorPrim, ColorTransfer: s.ColorTransfer, ColorSpace: s.ColorSpace, Encoder: tag(s.Tags, "encoder"),
+		Duration: atof(s.Duration),
+	}
+	if v.Duration == 0 {
+		v.Duration = clockSeconds(tag(s.Tags, "duration")) // MKV: mkvmerge's statistics tag, "00:22:35.396000000"
 	}
 	if v.FPS == 0 {
 		v.FPS = rate(s.RFrameRate)
@@ -305,6 +313,16 @@ func tag(tags map[string]string, key string) string {
 		return v
 	}
 	return tags[strings.ToUpper(key)]
+}
+
+// clockSeconds reads "HH:MM:SS.fraction"; 0 when it is not one.
+func clockSeconds(s string) float64 {
+	h, rest, ok1 := strings.Cut(s, ":")
+	m, sec, ok2 := strings.Cut(rest, ":")
+	if !ok1 || !ok2 {
+		return 0
+	}
+	return atof(h)*3600 + atof(m)*60 + atof(sec)
 }
 
 func atoi(s string) int64   { n, _ := strconv.ParseInt(s, 10, 64); return n }

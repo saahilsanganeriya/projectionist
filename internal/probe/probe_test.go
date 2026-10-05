@@ -45,7 +45,8 @@ func TestParse(t *testing.T) {
 }
 
 // Catches, on a real capture (a Dolby Vision 8.6 + HDR10+ WEBRip): DV level and base-layer compatibility misread,
-// HDR10+ missed (it is only in the frames' SEI), the luminance rationals misparsed, the release tag dropped.
+// HDR10+ missed (it is only in the frames' SEI), the luminance rationals misparsed, the release tag dropped, and
+// the video's own length (MKV keeps it in a DURATION tag) lost.
 func TestParseDolbyVisionHDR10Plus(t *testing.T) {
 	raw, _ := os.ReadFile("testdata/dv8_hdr10plus.json")
 	info, err := Parse(raw)
@@ -58,7 +59,7 @@ func TestParseDolbyVisionHDR10Plus(t *testing.T) {
 	}
 	v := info.Video
 	if v.HDR != DolbyVision || v.DVProfile != 8 || v.DVLevel != 6 || v.DVBLCompat != 1 || v.DVEL || !v.HDR10Plus ||
-		v.MaxCLL != 820 || v.MaxFALL != 330 || v.MasteringMin != 0.005 || v.MasteringMax != 1000 {
+		v.MaxCLL != 820 || v.MaxFALL != 330 || v.MasteringMin != 0.005 || v.MasteringMax != 1000 || math.Abs(v.Duration-8048.457) > 1e-6 {
 		t.Fatalf("video = %+v", v)
 	}
 	if !strings.HasPrefix(info.Title, "SiteI.com | Dungeons.and.Dragons") || info.Subtitles[1].Title != "SDH" {

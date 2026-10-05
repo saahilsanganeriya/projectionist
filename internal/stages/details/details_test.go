@@ -419,7 +419,8 @@ func media(t *testing.T, size int, zeros ...[2]int) string {
 // Catches: a GPU hiccup reported as a broken file (it must be retried on the CPU), a truncated end sample
 // passing (too few frames), a 2 s extra failing for lacking 5 s of frames, the error budget off (two errors after
 // a seek pass, three fail), a missing piece between the samples passing (Amélie's "Home Movie" had 8 MiB of zeros
-// at 8 %), and header or tail padding taken for a hole.
+// at 8 %), header or tail padding taken for a hole, and the end sample timed by the container when the video ends
+// sooner (a Clone Wars episode: video 1355.4 s, audio 1359.4 s, 48 of 59 frames).
 func TestDecodeCheck(t *testing.T) {
 	cases := []struct{ script, wantDetail string }{
 		{`case "$*" in *-hwaccel*) echo "hwaccel init failed" >&2; exit 1;; esac; echo frame=120`, ""},
@@ -447,6 +448,11 @@ func TestDecodeCheck(t *testing.T) {
 	if clean, detail, _ := decodeCheck(context.Background(), h.Env.FFmpeg, hole, &probe.Video{Codec: "hevc", FPS: 24}, 6000); clean || !strings.HasPrefix(detail, "4 KiB of zeros at 5") {
 		t.Errorf("hole in the middle: clean=%v detail=%q", clean, detail)
 	}
+	h.Script(t, "ffmpeg", `case "$*" in *"-ss 1353.367 "*) echo frame=48;; *) echo frame=120;; esac`+"\n")
+	if clean, detail, _ := decodeCheck(context.Background(), h.Env.FFmpeg, noise, &probe.Video{Codec: "av1", FPS: 23.976, Duration: 1355.396}, 1359.367); !clean {
+		t.Errorf("video shorter than its container: clean=false detail=%q", detail)
+	}
+	h.Script(t, "ffmpeg", "echo frame=120\n")
 	padded := media(t, mib, [2]int{0, 20 << 10}, [2]int{mib - 20<<10, mib})
 	if clean, detail, _ := decodeCheck(context.Background(), h.Env.FFmpeg, padded, &probe.Video{Codec: "hevc", FPS: 24}, 6000); !clean {
 		t.Errorf("zero padding in the first and last 2 %%: clean=false detail=%q", detail)
