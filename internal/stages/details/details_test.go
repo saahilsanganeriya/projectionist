@@ -543,11 +543,13 @@ func TestVideoMovedMidRun(t *testing.T) {
 	for _, c := range []struct {
 		name, probe, peak, decode string // shell run inside that step; $HEAT is Heat's folder, $RAN Ran's
 		renamedInFolder           bool
+		options                   string
 	}{
 		{name: "gone before its turn", probe: `[ -d "$RAN" ] && mv "$RAN" "$RAN-moved"`},
 		{name: "during its probe, which fails", probe: `mv "$HEAT" "$HEAT-moved"; exit 1`},
 		{name: "renamed in its folder during its probe", probe: `mv "$HEAT/Heat (1995) {tmdb-949}.mkv" "$HEAT/Heat (1995) {tmdb-949} - 1080p.mkv"`, renamedInFolder: true},
-		{name: "during its peak scan", peak: `mv "$HEAT" "$HEAT-moved"`},
+		{name: "during its peak scan", peak: `mv "$HEAT" "$HEAT-moved"`, options: "max_decode_checks = 0"},
+		{name: "between its peak scan and its decode check", peak: `mv "$HEAT" "$HEAT-moved"`},
 		{name: "during its decode check", decode: `mv "$HEAT" "$HEAT-moved"; echo "No such file or directory" >&2; exit 1`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -562,7 +564,7 @@ func TestVideoMovedMidRun(t *testing.T) {
 			h.Script(t, "ffprobe", vars+`case "$*" in *packet=*) `+or(c.peak)+`; echo "pts_time=N/A|dts_time=0.000|size=1000";;
 *Heat*) `+or(c.probe)+`; cat "`+fixture+`";; *) cat "`+fixture+`";; esac`+"\n")
 			h.Script(t, "ffmpeg", vars+or(c.decode)+"; echo frame=120\n")
-			h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []\npeak_above_kbps = 10000", l.root))
+			h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []\npeak_above_kbps = 10000\n%s", l.root, c.options))
 			rep := runOnce(t, h.Env)
 			var bad int
 			h.Env.Store.DB().QueryRow(`SELECT count(*) FROM details_files WHERE status = 'unreadable' OR clean = 0`).Scan(&bad)
