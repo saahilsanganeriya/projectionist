@@ -138,6 +138,17 @@ type answer struct {
 // "...package.12"). Two lowercase letters before the stop keep initials ("L.A.", "E.T.") intact.
 var gluedNote = regexp.MustCompile(`(\p{Ll}{2}[.!?])(?:\p{Lu}|\d)`)
 
+// cleanReason cuts what the model glued onto a reason's last sentence: a note, or a stray JSON bracket (every reason
+// of one Sonnet 5.5 answer on 2026-10-05 ended ".}"). cut reports whether anything was cut.
+func cleanReason(s string) (reason string, cut bool) {
+	reason = strings.TrimSpace(s)
+	if m := gluedNote.FindStringSubmatchIndex(reason); m != nil {
+		reason = reason[:m[3]]
+	}
+	reason = strings.TrimRight(reason, "}] ")
+	return reason, reason != strings.TrimSpace(s)
+}
+
 // lovedFilms holds the films he rated 4★ or more, keyed by title alone and by title and year (filmKey).
 func lovedFilms(hist []rated) map[string]bool {
 	loved := map[string]bool{}
@@ -161,8 +172,8 @@ func lovedKey(liked string) string {
 }
 
 // validate keeps the answer's picks that name an unseen film once and draw on a film he rated 4★ or more, and lists
-// every violation for the retry. glued holds the reasons that carried a glued note, as the model wrote them, so the
-// log shows whether the cause is gone.
+// every violation for the retry. glued holds the reasons something was cut from (cleanReason), as the model wrote
+// them, so the log shows whether the cause is gone.
 func validate(text string, unseen map[int]candidate, loved map[string]bool, want int) (picks []pick, violations, glued []string) {
 	var ans answer
 	if err := json.Unmarshal([]byte(text), &ans); err != nil {
@@ -171,21 +182,20 @@ func validate(text string, unseen map[int]candidate, loved map[string]bool, want
 	seen := map[int]bool{}
 	for i, p := range ans.Picks {
 		c, ok := unseen[p.ID]
+		reason, cut := cleanReason(p.Reason)
 		switch {
 		case !ok:
 			violations = append(violations, fmt.Sprintf("pick %d: id %d (%q) is not in the UNSEEN list", i+1, p.ID, p.Title))
 		case seen[p.ID]:
 			violations = append(violations, fmt.Sprintf("pick %d: id %d is picked twice", i+1, p.ID))
-		case strings.TrimSpace(p.Reason) == "":
+		case reason == "":
 			violations = append(violations, fmt.Sprintf("pick %d: id %d has no reason", i+1, p.ID))
 		case !loved[lovedKey(p.Liked)]:
 			violations = append(violations, fmt.Sprintf("pick %d: liked %q is not a film he rated 4 stars or more", i+1, p.Liked))
 		default:
 			seen[p.ID] = true
-			reason := p.Reason
-			if m := gluedNote.FindStringSubmatchIndex(reason); m != nil {
-				glued = append(glued, reason)
-				reason = reason[:m[3]]
+			if cut {
+				glued = append(glued, p.Reason)
 			}
 			picks = append(picks, pick{TMDB: p.ID, Title: c.Title, Year: c.Year, Reason: oneLine(reason, 200),
 				Mood: p.Mood, Liked: p.Liked, PosterPath: c.PosterPath})

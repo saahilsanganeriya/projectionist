@@ -75,12 +75,13 @@ func TestSeen(t *testing.T) {
 
 // Catches: a pick outside the unseen set, a duplicate or a reasonless pick reaching Plex, a reason drawing on a film
 // he did not rate 4★ or more (a hallucinated or low-rated "liked", told apart by year), a short answer accepted
-// without a retry, and a note the model glued onto a reason (seen on 2026-10-05) reaching his Home row.
+// without a retry, and a note or a stray JSON bracket the model glued onto a reason (both seen on 2026-10-05; the
+// third glued reason is a real answer's, verbatim) reaching his Home row.
 func TestValidate(t *testing.T) {
 	unseen := map[int]candidate{389: {film: film{TMDB: 389, Title: "12 Angry Men", Year: 1957}},
-		346: {film: film{TMDB: 346, Title: "Seven Samurai", Year: 1954}}}
+		346: {film: film{TMDB: 346, Title: "Seven Samurai", Year: 1954}}, 12548: {film: film{TMDB: 12548, Title: "I Vitelloni", Year: 1953}}}
 	loved := lovedFilms([]rated{{Name: "Rope", Year: 1948, Rating: 4.5}, {Name: "Dune", Year: 2021, Rating: 5},
-		{Name: "Dune", Year: 1984, Rating: 2}})
+		{Name: "Dune", Year: 1984, Rating: 2}, {Name: "La Dolce Vita", Year: 1960, Rating: 5}})
 	picks, v, _ := validate(`{"picks":[{"id":389,"title":"12 Angry Men","liked":"Rope","reason":"Like  Rope,\nall in one room."},
 		{"id":389,"title":"12 Angry Men","liked":"Rope","reason":"again"},{"id":680,"title":"Pulp Fiction","liked":"Rope","reason":"seen"},
 		{"id":346,"title":"Seven Samurai","liked":"Rope","reason":" "},
@@ -98,10 +99,12 @@ func TestValidate(t *testing.T) {
 		t.Fatalf("non-JSON violations = %q", v)
 	}
 	picks, _, glued := validate(`{"picks":[{"id":389,"title":"x","liked":"Rope","reason":"Hazy longing in a short package.12"},
-		{"id":346,"title":"y","liked":"Dune (2021)","reason":"An L.A. noir like Heat, beauty-in-sorrow of Moonlight.Quiet and slow.Hmm."}]}`,
-		unseen, loved, 2)
-	if len(picks) != 2 || picks[0].Reason != "Hazy longing in a short package." ||
-		picks[1].Reason != "An L.A. noir like Heat, beauty-in-sorrow of Moonlight." || len(glued) != 2 {
+		{"id":346,"title":"y","liked":"Dune (2021)","reason":"An L.A. noir like Heat, beauty-in-sorrow of Moonlight.Quiet and slow.Hmm."},
+		{"id":12548,"title":"I Vitelloni","mood":"wistful, drifting","liked":"La Dolce Vita","reason":"Fellini's earlier look at aimless men in a small town shares the restless yearning and bittersweet drift of La Dolce Vita.}"}]}`,
+		unseen, loved, 3)
+	if len(picks) != 3 || picks[0].Reason != "Hazy longing in a short package." ||
+		picks[1].Reason != "An L.A. noir like Heat, beauty-in-sorrow of Moonlight." ||
+		!strings.HasSuffix(picks[2].Reason, "drift of La Dolce Vita.") || len(glued) != 3 {
 		t.Fatalf("glued notes kept or unreported: %+v, glued %q", picks, glued)
 	}
 }

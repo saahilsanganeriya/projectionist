@@ -473,7 +473,7 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 		}
 	}
 	for _, g := range glued {
-		env.Log.Warn("a reason carried a glued note; cut", "event", "tonight_reason_glued", "reason", g)
+		env.Log.Warn("a reason carried a glued note or a stray bracket; cut", "event", "tonight_reason_glued", "reason", g)
 	}
 	rep.Count("reasons_glued", len(glued))
 	st.Day, st.Picks = day, picks
