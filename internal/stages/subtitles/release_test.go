@@ -172,3 +172,32 @@ Audio 1:         eng · AAC · 5.1
 		t.Errorf("note read as %+v (image track %v, text track %v)", n, image, text)
 	}
 }
+
+// Catches quick mode writing, unaligned, a subtitle that says it is for something else: labelled with another title,
+// naming another episode, or naming another edition than the file's (none where the file names one, or one where the
+// file names none). A subtitle for this episode that names no release at all is plausible.
+func TestPlausible(t *testing.T) {
+	for _, c := range []struct {
+		why, original string
+		movie, other  bool
+		cand          Candidate
+		want          bool
+	}{
+		{"names nothing", "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", false, false, Candidate{Release: "CtrlHD"}, true},
+		{"this episode", "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", false, false, Candidate{FileName: "Show.S01E01.WEB.srt"}, true},
+		{"another episode", "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", false, false, Candidate{FileName: "Show.S01E02.WEB.srt"}, false},
+		{"another title", "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", false, true, Candidate{Release: "CtrlHD"}, false},
+		{"the film's edition", "Aliens.1986.Special.Edition.1080p.BluRay-GRP.mkv", true, false, Candidate{Release: "Aliens.1986.Special.Edition.BluRay"}, true},
+		{"no edition for the film's", "Aliens.1986.Special.Edition.1080p.BluRay-GRP.mkv", true, false, Candidate{Release: "Aliens.1986.BluRay"}, false},
+		{"an edition the film lacks", "Aliens.1986.1080p.BluRay-GRP.mkv", true, false, Candidate{Release: "Aliens.1986.Special.Edition.BluRay"}, false},
+	} {
+		ti := &title{origin: originOf([]string{c.original}), show: "Show", season: 1, episode: 1}
+		if c.movie {
+			ti.show = ""
+		}
+		c.cand.ours = !c.other
+		if got := ti.plausible(c.cand); got != c.want {
+			t.Errorf("%s: %+v against %q: %v, want %v", c.why, c.cand, c.original, got, c.want)
+		}
+	}
+}

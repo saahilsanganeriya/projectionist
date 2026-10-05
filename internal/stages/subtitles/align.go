@@ -260,6 +260,12 @@ func pgsReference(framecrc string, duration float64) (starts []float64, ref bits
 			}
 		}
 	}
+	return captionReference(ev, duration)
+}
+
+// captionReference is caption start times as a reference: sorted, and the bins within 0.2 s of each; ok=false when
+// there are fewer than 40 or they cover less than half of the video.
+func captionReference(ev []float64, duration float64) (starts []float64, ref bitset, ok bool) {
 	sort.Float64s(ev)
 	if len(ev) < minCues || ev[len(ev)-1]-ev[0] < float64(0.5*duration) {
 		return nil, nil, false

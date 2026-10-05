@@ -214,6 +214,56 @@ func (t *title) releaseMatched(c Candidate) bool {
 	return false
 }
 
+// plausible tells whether quick mode may write c unaligned although it was not made for this release: labelled with
+// this title (this film, this episode), naming the file's edition and no other, and, for an episode, neither c's names
+// nor the file's original name naming another episode.
+func (t *title) plausible(c Candidate) bool {
+	r, ep := parseRelease(c.Release+" "+c.FileName), sxe(t.season, t.episode)
+	return c.ours && r.editions == t.origin.rel.editions &&
+		(t.show == "" || (r.sxe == "" || r.sxe == ep) && (t.origin.rel.sxe == "" || t.origin.rel.sxe == ep))
+}
+
+// specialSure: TMDB and the subtitle sites number a show's specials (season 0) each their own way, so quick mode
+// writes a special's subtitle unaligned only when the file's original name carries the same SxxEyy.
+func (t *title) specialSure() bool {
+	return t.show == "" || t.season != 0 || t.origin.rel.sxe == sxe(0, t.episode)
+}
+
+var idxStampRe = regexp.MustCompile(`^timestamp:\s*(\d+):(\d\d):(\d\d):(\d{3})`)
+
+// vobsubReference is the caption starts of the video's English VobSub sidecar, <stem>.en.idx, read from that text
+// alone (the .sub images are never opened): its first English stream with at least minCues captions over half the
+// video. Nil when there is none. Every .idx in the library (50 on 2026-10-05) has "time offset: 0" and no "delay:"
+// lines, so the timestamps are taken as they are.
+func vobsubReference(video string, duration float64) *reference {
+	raw, err := os.ReadFile(strings.TrimSuffix(video, filepath.Ext(video)) + ".en.idx")
+	if err != nil {
+		return nil
+	}
+	var streams [][]float64
+	english := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if id, ok := strings.CutPrefix(line, "id:"); ok { // "id: en, index: 0" opens a stream
+			if english = strings.HasPrefix(strings.TrimSpace(id), "en,"); english {
+				streams = append(streams, nil)
+			}
+		} else if m := idxStampRe.FindStringSubmatch(line); m != nil && english {
+			h, _ := strconv.Atoi(m[1])
+			mins, _ := strconv.Atoi(m[2])
+			sec, _ := strconv.Atoi(m[3])
+			ms, _ := strconv.Atoi(m[4])
+			streams[len(streams)-1] = append(streams[len(streams)-1], float64(h*3600+mins*60+sec)+float64(ms)/1000)
+		}
+	}
+	for _, ev := range streams {
+		if starts, bits, ok := captionReference(ev, duration); ok {
+			return &reference{label: "idx", starts: starts, bits: bits}
+		}
+	}
+	return nil
+}
+
 var fpsRe = regexp.MustCompile(`\b(23\.976|23\.98|24|25|29\.97|30|50|59\.94|60) ?fps\b|\b(23\.976|23\.98|29\.97)\b`)
 
 // subFPS is the frame rate a candidate says it was timed for, 0 when it does not say.

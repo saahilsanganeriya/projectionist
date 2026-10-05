@@ -13,8 +13,9 @@ package subtitles
 // decoded text and of that text with the ad blocks stripped; GATE_ALASS (id, video, framecrc, duration, candidate
 // files...) with GATE_ALASS_BIN and GATE_FFMPEG_DIR -> alass.tsv: per candidate, the stage's alass route scored
 // against the PGS captions it never saw, and its caption route with the alass rescue; GATE_SPOT (id, video, sidecar,
-// framecrc file or "-", duration) with the same two -> spot.tsv: a written sidecar's median distance to the video's
-// English captions where a framecrc is given, and the shift alass's alignment to the speech would give it.
+// framecrc file, "idx" or "-", duration) with the same two -> spot.tsv: a written sidecar's median distance to the
+// video's English captions where a framecrc is given (or to its <video>.en.idx captions for "idx"), and the shift
+// alass's alignment to the speech would give it.
 
 import (
 	"context"
@@ -210,9 +211,11 @@ func TestGateSpot(t *testing.T) {
 		f := strings.Split(line, "\t")
 		sub, _ := os.ReadFile(f[2])
 		caption := ""
-		if f[3] != "-" {
+		duration, _ := strconv.ParseFloat(f[4], 64)
+		if ref := vobsubReference(f[1], duration); f[3] == "idx" && ref != nil {
+			caption = strconv.FormatFloat(medianOffsetMS(cues(string(sub)), ref.starts), 'f', 0, 64)
+		} else if f[3] != "-" {
 			framecrc, _ := os.ReadFile(f[3])
-			duration, _ := strconv.ParseFloat(f[4], 64)
 			if starts, _, ok := pgsReference(string(framecrc), duration); ok {
 				caption = strconv.FormatFloat(medianOffsetMS(cues(string(sub)), starts), 'f', 0, 64)
 			}

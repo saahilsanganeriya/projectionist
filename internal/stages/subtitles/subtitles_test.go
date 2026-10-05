@@ -50,6 +50,7 @@ type fixture struct {
 	hashIMDb string // when set, Ran's file hash finds a subtitle labelled with this IMDb id
 	hashText string // that subtitle (default: another film's timing)
 	ranHash  string
+	mode     string // the stage's mode; the tests written before quick mode existed run careful mode
 }
 
 func (f *fixture) path(rel string) string { return filepath.Join(f.lib, rel) }
@@ -75,7 +76,7 @@ func gz(s string) []byte {
 }
 
 func newFixture(t *testing.T) *fixture {
-	f := &fixture{h: fake.NewEnv(t, nil), lib: t.TempDir(), dir: t.TempDir(), ts: captionTimes()}
+	f := &fixture{h: fake.NewEnv(t, nil), lib: t.TempDir(), dir: t.TempDir(), ts: captionTimes(), mode: "careful"}
 	for i, rel := range []string{ran, heat, clerks, dune, show} {
 		os.MkdirAll(filepath.Dir(f.path(rel)), 0o755)
 		os.WriteFile(f.path(rel), bytes.Repeat([]byte{byte(i + 1)}, 4096), 0o644)
@@ -159,6 +160,7 @@ secrets_dir = "` + f.dir + `"
 legacy_quota = "` + f.dir + `"
 alass = "` + filepath.Join(f.h.Env.FFmpeg.Dir, "alass") + `"
 workers = 1
+mode = "` + f.mode + `"
 ` + extra)
 }
 
@@ -675,20 +677,22 @@ func (f *fixture) note(rel, original, subs, duration string) {
 		"Container:       matroska · 1.00 GB · "+duration+" · 0 chapters\n"), 0o644)
 }
 
-// gestdownNTb has Gestdown serve Show's episode two subtitles: CtrlHD's, popular and 3 s late, and NTb's, on time; TMDB
-// gives the show its TheTVDB and IMDb ids. It returns the requests per path.
+// gestdownNTb has Gestdown serve each of Show's episodes two subtitles: CtrlHD's, popular and 3 s late, and NTb's, on
+// time; TMDB gives the show its TheTVDB and IMDb ids. It returns the requests per path.
 func (f *fixture) gestdownNTb(t *testing.T) func(string) int {
 	f.h.TMDB.Handle("GET", "/tv/1", 200, `{"id":1,"external_ids":{"tvdb_id":81189,"imdb_id":"tt0000001"}}`)
 	gd, calls := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
-		switch r.URL.Path {
-		case "/shows/external/tvdb/81189":
-			w.Write([]byte(`{"shows":[{"id":"s"}]}`))
-		case "/subtitles/get/s/1/1/English":
+		var season, episode int
+		switch _, err := fmt.Sscanf(r.URL.Path, "/subtitles/get/s/%d/%d/English", &season, &episode); {
+		case err == nil:
 			w.Write([]byte(`{"matchingSubtitles":[{"subtitleId":"c","version":"CtrlHD","completed":true,"downloadUri":"/dl/c","language":"English","downloadCount":999},` +
-				`{"subtitleId":"n","version":"WEB-DL-NTb","completed":true,"downloadUri":"/dl/n","language":"English"}],"episode":{"season":1,"number":1}}`))
-		case "/dl/c":
+				`{"subtitleId":"n","version":"WEB-DL-NTb","completed":true,"downloadUri":"/dl/n","language":"English"}],` +
+				fmt.Sprintf(`"episode":{"season":%d,"number":%d}}`, season, episode)))
+		case r.URL.Path == "/shows/external/tvdb/81189":
+			w.Write([]byte(`{"shows":[{"id":"s"}]}`))
+		case r.URL.Path == "/dl/c":
 			w.Write([]byte(srt(f.ts, 3)))
-		case "/dl/n":
+		case r.URL.Path == "/dl/n":
 			w.Write([]byte(srt(f.ts, 0)))
 		}
 	})
@@ -840,5 +844,148 @@ func TestRunOriginalNameFromRenameLog(t *testing.T) {
 	f.run(t)
 	if o := f.outcomes()[f.path(show)]; o != "release_matched" || f.sidecar(t, show) != stripAds(srt(f.ts, 0)) {
 		t.Errorf("Show %q; want NTb's subtitle written unaligned", o)
+	}
+}
+
+// idxStream is one stream of a VobSub .idx: its id line and a timestamp line per caption start.
+func idxStream(lang string, ts []float64) string {
+	b := "\n# " + lang + "\nid: " + lang + ", index: 0\n"
+	for _, t := range ts {
+		ms := int64(math.Round(t * 1000))
+		b += fmt.Sprintf("timestamp: %02d:%02d:%02d:%03d, filepos: 000000000\n", ms/3600000, ms/60000%60, ms/1000%60, ms%1000)
+	}
+	return b
+}
+
+// Catches quick mode reading or aligning the video for a subtitle the cheap check passed, or writing one it should not.
+// Gestdown serves CtrlHD's subtitle (popular, 3 s late) and NTb's; neither is made for a KILLERS release, so the more
+// popular one is written once the cheap check passes, with no byte of the video read and nothing run on it; a subtitle
+// made for the file's release goes first though another is more popular (here rank sees "hd" as the group, which CtrlHD
+// carries); one that fails the cheap check queues the title. A VobSub sidecar's English stream (after a Spanish one
+// and a forced English one) is the timing: CtrlHD's is retimed onto it although the cheap check would fail it, and
+// nothing that misses another cut's captions is written though it passes the cheap check. Nothing is written for an
+// episode whose original name names another one, nor for a special whose original name lacks its S00Exx.
+func TestRunQuickWritesWithoutReadingTheVideo(t *testing.T) {
+	special := "TV/Show (2008) {tmdb-1}/Season 00/Show (2008) - S00E01 - Special.mkv"
+	vobsub := "# VobSub index file, v7 (do not modify this line!)\ntime offset: 0\n"
+	for _, c := range []struct {
+		why, rel, original, length, idx string
+		want, id                        string
+	}{
+		{"the popular one", show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", "0h 45m", "", "best_match", "gestdown:c"},
+		{"the release's own first", show, "Show.S01E01.x264-HD (WEB NTb).mkv", "0h 45m", "", "release_matched", "gestdown:n"},
+		{"cheap check fails", show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", "0h 50m", "", "queued", ""},
+		{"fitted to the .idx", show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", "0h 50m",
+			idxStream("es", otherTimes()) + idxStream("en", captionTimes()[:10]) + idxStream("en", captionTimes()), "idx_retimed", "gestdown:c"},
+		{"the .idx of another cut", show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", "0h 45m", idxStream("en", otherTimes()), "queued", ""},
+		{"named another episode", show, "Show.S01E02.720p.HDTV.x264-KILLERS.mkv", "0h 45m", "", "queued", ""},
+		{"a special named so", special, "Show.S00E01.720p.HDTV.x264-KILLERS.mkv", "0h 45m", "", "best_match", "gestdown:c"},
+		{"a special not named so", special, "Show.Christmas.Special.720p.HDTV.x264-KILLERS.mkv", "0h 45m", "", "queued", ""},
+	} {
+		f := newFixture(t)
+		f.mode = "quick"
+		f.gestdownNTb(t)
+		f.options(`providers = ["gestdown"]` + "\nalign_per_day = 0")
+		if c.rel == special {
+			os.MkdirAll(filepath.Dir(f.path(special)), 0o755)
+			os.WriteFile(f.path(special), []byte("special"), 0o644)
+		}
+		f.note(c.rel, c.original, "none", c.length)
+		if c.idx != "" {
+			os.WriteFile(strings.TrimSuffix(f.path(c.rel), ".mkv")+".en.idx", []byte(vobsub+c.idx), 0o644)
+		}
+		rep := f.run(t)
+		fields := f.verdict(c.rel, c.want)
+		_, err := os.Stat(strings.TrimSuffix(f.path(c.rel), ".mkv") + ".en.srt")
+		probed, _ := os.ReadFile(filepath.Join(f.h.Env.FFmpeg.Dir, "ffprobe.calls"))
+		helpers, _ := os.ReadFile(filepath.Join(f.h.Env.FFmpeg.Dir, "helper.calls"))
+		touched := strings.Contains(string(probed)+string(helpers), filepath.Base(c.rel))
+		if got := f.outcomes()[f.path(c.rel)]; got != c.want || touched || fields["video_bytes"] != 0.0 || (err == nil) != (c.id != "") ||
+			c.id != "" && fields["id"] != c.id || c.want == "best_match" && rep.Counts["written_best_match"] != 1 {
+			t.Errorf("%s: %q (want %q), fields %v (want id %q, 0 bytes), sidecar %v, ffprobe/helpers ran on it %v, counts %v",
+				c.why, got, c.want, fields, c.id, err == nil, touched, rep.Counts)
+		}
+		if ms, _ := fields["ref_median_ms"].(float64); c.want == "idx_retimed" && math.Abs(ms) > 210 { // the fit's 0.1 s bins
+			t.Errorf("%s: written %v ms from the .idx captions; want within 210", c.why, fields["ref_median_ms"])
+		}
+	}
+}
+
+// Catches quick mode's queue aligning outside its night window, the window read in UTC rather than the config
+// timezone, or an alignment starting after the window closed while a guest kept it waiting; and the window
+// applied to careful mode, which aligns at any hour.
+func TestRunQuickQueueOnlyAtNight(t *testing.T) {
+	for _, mode := range []string{"quick", "careful"} {
+		f := newFixture(t)
+		f.mode = mode
+		f.gestdownNTb(t)
+		f.options(`providers = ["gestdown"]`)
+		f.note(show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", "none", "0h 50m") // the cheap check fails: queued
+		f.h.Env.Loc, _ = time.LoadLocation("America/Los_Angeles")
+		var mu sync.Mutex
+		now, guestUntil := time.Date(2026, 10, 5, 6, 0, 0, 0, time.UTC), time.Time{} // 23:00 the night before, Pacific
+		f.h.Env.Now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+		f.h.Plex.HandleFunc("GET", "/status/sessions", func(w http.ResponseWriter, _ *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+			if now.Before(guestUntil) { // a guest watches; ten minutes pass between polls
+				now = now.Add(10 * time.Minute)
+				w.Write([]byte(guest))
+				return
+			}
+			w.Write([]byte(nobody))
+		})
+		aligned := func(at, until time.Time) bool {
+			mu.Lock()
+			now, guestUntil = at, until
+			mu.Unlock()
+			f.run(t)
+			return f.outcomes()[f.path(show)] == "retimed"
+		}
+		evening := aligned(now, time.Time{})
+		if mode == "careful" {
+			if !evening {
+				t.Errorf("careful mode: Show %q at 23:00; want aligned at any hour", f.outcomes()[f.path(show)])
+			}
+			continue
+		}
+		late := aligned(time.Date(2026, 10, 5, 13, 50, 0, 0, time.UTC), time.Date(2026, 10, 5, 14, 5, 0, 0, time.UTC)) // 06:50, a guest until 07:10
+		night := aligned(time.Date(2026, 10, 6, 9, 30, 0, 0, time.UTC), time.Time{})                                   // 02:30
+		if evening || late || !night {
+			t.Errorf("quick mode aligned Show at 23:00 %v, after a guest kept it past 07:00 %v, at 02:30 %v; want only at 02:30", evening, late, night)
+		}
+	}
+}
+
+// Catches a mode or window other than the stage knows run as some default instead of refused, and a table with no
+// mode running careful mode instead of quick (the owner's default).
+func TestRunModeOptions(t *testing.T) {
+	for _, c := range []struct{ options, wantErr, wantSummary string }{
+		{"", "", "quick mode:"},
+		{`mode = "fast"`, `mode "fast"`, ""},
+		{`align_window = "1am-7am"`, "align_window", ""},
+	} {
+		f := newFixture(t)
+		f.h.SetOptions(`roots = ["` + f.path("Movies") + `"]` + "\nstats_file = \"" + filepath.Join(f.dir, "s.tsv") + "\"\nproviders = []\n" + c.options)
+		var rep stage.Report
+		err := f.st.Run(context.Background(), f.h.Env, &rep)
+		if fmt.Sprint(err) == "<nil>" != (c.wantErr == "") || err != nil && !strings.Contains(err.Error(), c.wantErr) ||
+			!strings.HasPrefix(rep.Summary, c.wantSummary) {
+			t.Errorf("%q: err %v, summary %q; want an error naming %q, summary starting %q", c.options, err, rep.Summary, c.wantErr, c.wantSummary)
+		}
+	}
+}
+
+// Catches quick mode spending OpenSubtitles' downloads (180 a day, 8 minutes apart) on a title a cheaper provider has
+// candidates for: OpenSubtitles' own episode match, not a hash match, is neither tried nor queued beside Gestdown's.
+func TestRunQuickSparesOpenSubtitles(t *testing.T) {
+	f := newFixture(t)
+	f.mode = "quick"
+	f.gestdownNTb(t)
+	f.options(`providers = ["opensubtitles", "gestdown"]` + "\nalign_per_day = 0")
+	f.note(show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", "none", "0h 50m") // Gestdown's two fail the cheap check
+	f.run(t)
+	if got := f.verdict(show, "queued")["detail"]; got != "2 candidate(s)" || strings.Contains(strings.Join(f.requests, " "), "/dl/showos") {
+		t.Errorf("Show queued with %v, OpenSubtitles requests %v; want Gestdown's 2 and no OpenSubtitles download", got, f.requests)
 	}
 }

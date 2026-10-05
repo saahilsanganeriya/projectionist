@@ -207,6 +207,11 @@ secrets_dir   = "/run/secrets"
 alass         = "/usr/local/bin/alass" # the queue: aligns to the audio when there is no English image track, and rescues misfits
 providers     = ["gestdown", "sitec", "subdl", "opensubtitles", "opensubtitles-com"]
 align_per_day = 20                     # queued titles aligned in any 24 h, counted as each starts reading its video; 0 = none
+mode          = "quick"                # quick: write any plausible subtitle that passes the cheap check (no video read),
+                                       # fit to an English .en.idx where there is one, queue only the rest, align only
+                                       # inside align_window. careful: write unaligned only a release match, align any hour
+align_window  = "01:00-07:00"          # quick mode: the queue starts alignments only inside this window (config timezone),
+                                       # so only a run that reaches the queue inside it aligns anything
 legacy_quota  = "/volume1/PlexMediaServer/subtitle-downloads" # subfetch2.py's quota files, read once while the store has none
 # undo_logs = [...]                    # rename logs for original names a note lacks; default: the details stage's list
 # output_dir = "/volume1/PlexMediaServer/projectionist-test/subtitles/out" # test runs: write sidecars here instead
