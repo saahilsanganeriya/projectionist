@@ -314,7 +314,9 @@ func TestDecodeDownload(t *testing.T) {
 		{"no BOM: little-endian", string(le), "UTF-16", text},
 		{"big-endian", string(be), "utf-16be", text},
 		{"odd length", "\xff\xfe1\x00x", "UTF-16", "\u00ff\u00fe1\x00x"},
-		{"lone surrogate", "\xff\xfe1\x00\x00\xd8\n\x00", "UTF-16", "\u00ff\u00fe1\x00\x00\u00d8\n\x00"},
+		{"lone high surrogate", "\xff\xfe1\x00\x00\xd8\n\x00", "UTF-16", "\u00ff\u00fe1\x00\x00\u00d8\n\x00"},
+		{"high surrogate at the end", "\xff\xfe1\x00\x00\xd8", "UTF-16", "\u00ff\u00fe1\x00\x00\u00d8"},
+		{"lone low surrogate", "\xff\xfe1\x00\x00\xdc", "UTF-16", "\u00ff\u00fe1\x00\x00\u00dc"},
 	} {
 		if got := decodeDownload([]byte(c.raw), c.enc); got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)
