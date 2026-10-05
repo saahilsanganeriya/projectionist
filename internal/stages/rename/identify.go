@@ -47,8 +47,9 @@ type identifier struct {
 	cache   kvCache
 	now     time.Time
 	retry   time.Duration
-	library map[string][]Title // kind + normalized name → titles present as scheme folders
-	byID    map[string]Title   // scheme folder title per id: the name everything else adopts
+	library map[string][]Title // kind:normalized name → titles present as scheme folders
+	byID    map[string]Title   // kind:id → the scheme folder's title, the name everything else adopts. Keyed by kind:
+	// TMDB's film and TV ids overlap (film 1398 is "Stalker", show 1398 "The Sopranos").
 }
 
 // kvCache is the slice of the store the identifier needs (get/put JSON under a key).
@@ -73,16 +74,16 @@ func (id *identifier) learn(kind string, tops []string) {
 			continue
 		}
 		t := Title{ID: m[3] + "-" + m[4], Name: m[1], Year: atoi(m[2])}
-		if _, seen := id.byID[t.ID]; !seen {
-			id.byID[t.ID] = t
+		if _, seen := id.byID[kind+":"+t.ID]; !seen {
+			id.byID[kind+":"+t.ID] = t
 			id.library[kind+":"+normTitle(t.Name)] = append(id.library[kind+":"+normTitle(t.Name)], t)
 		}
 	}
 }
 
 // canonical gives a title the name of its scheme folder when the library has one.
-func (id *identifier) canonical(t Title) Title {
-	if s, ok := id.byID[t.ID]; ok {
+func (id *identifier) canonical(kind string, t Title) Title {
+	if s, ok := id.byID[kind+":"+t.ID]; ok {
 		s.Original = t.Original
 		return s
 	}
@@ -101,7 +102,7 @@ func (id *identifier) resolve(ctx context.Context, kind, top string, videos []st
 		re = schemeShowDir
 	}
 	if m := re.FindStringSubmatch(name); m != nil && (m[3] == "tmdb" || (kind == "show" && m[3] == "tvdb")) {
-		return cachedIdentity{Title: id.canonical(Title{ID: m[3] + "-" + m[4], Name: m[1], Year: atoi(m[2])})}, nil
+		return cachedIdentity{Title: id.canonical(kind, Title{ID: m[3] + "-" + m[4], Name: m[1], Year: atoi(m[2])})}, nil
 	}
 	var c cachedIdentity
 	key := "identity:" + kind + ":" + top
@@ -113,7 +114,7 @@ func (id *identifier) resolve(ctx context.Context, kind, top string, videos []st
 		c.At = id.now
 		id.cache.put(ctx, key, c)
 	}
-	c.Title = id.canonical(c.Title)
+	c.Title = id.canonical(kind, c.Title)
 	return c, nil
 }
 
@@ -172,7 +173,7 @@ func (id *identifier) byTag(ctx context.Context, kind, source, value, title stri
 	case source == "tmdb":
 		return cachedIdentity{Title: Title{ID: "tmdb-" + value, Name: title, Year: year}}, nil
 	case source == "tvdb" && kind == "show":
-		if t, ok := id.byID["tvdb-"+value]; ok {
+		if t, ok := id.byID["show:tvdb-"+value]; ok {
 			return cachedIdentity{Title: t}, nil
 		}
 	}

@@ -64,7 +64,8 @@ type mapCache map[string]any
 func (m mapCache) get(_ context.Context, key string, v any) bool { return false }
 func (m mapCache) put(_ context.Context, key string, v any)      { m[key] = v }
 
-// Catches identity sources out of order: a season pack of a show already in the library must take that show's folder
+// Catches a show taking the name of a film with the same TMDB id (the two id spaces overlap), and identity sources
+// out of order: a season pack of a show already in the library must take that show's folder
 // without asking TMDB (which would also list "Breaking Bad: Original Minisodes"), an {imdb-tt} tag must become the
 // TMDB id TMDB maps it to under the folder's own spelling, and a folder without a year takes it from its episodes
 // (two "Shōgun" on TMDB: only the year tells them apart).
@@ -77,7 +78,11 @@ func TestResolveOrder(t *testing.T) {
 	key := filepath.Join(t.TempDir(), "key")
 	write(t, key, "test-tmdb-key")
 	id := newIdentifier(&tmdb.Client{KeyFile: key, API: srv.URL}, mapCache{}, time.Unix(0, 0), time.Hour)
-	id.learn("show", []string{"/lib/TV/Breaking Bad (2008) {tmdb-1396}"})
+	id.learn("movie", []string{"/lib/Movies/Stalker (1979) {tmdb-1398}"}) // TMDB film 1398 is not TMDB show 1398
+	id.learn("show", []string{"/lib/TV/Breaking Bad (2008) {tmdb-1396}", "/lib/TV/The Sopranos (1999) {tmdb-1398}"})
+	if c, err := id.resolve(context.Background(), "show", "/lib/TV/The Sopranos (1999) {tmdb-1398}", nil); err != nil || c.Title.Name != "The Sopranos" {
+		t.Fatalf("show named after a film with the same id: %+v, %v", c, err)
+	}
 	c, err := id.resolve(context.Background(), "show", "/lib/TV/Breaking.Bad.S05.1080p.BluRay.x264-ROVERS", nil)
 	if err != nil || c.Title != (Title{ID: "tmdb-1396", Name: "Breaking Bad", Year: 2008}) {
 		t.Fatalf("season pack: %+v, %v", c, err)
