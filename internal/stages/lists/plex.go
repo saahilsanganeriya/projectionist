@@ -299,7 +299,7 @@ func (p *plexSink) shelf(ctx context.Context, s shelf, colls []plexColl) string 
 	}
 	drop, add := diffSets(have, want)
 	for _, k := range drop {
-		if !p.w.item(ctx, "drop from "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "DELETE", base+"/items/"+k) }) && p.w.stopped != "" {
+		if !p.w.write(ctx, "drop from "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "DELETE", base+"/items/"+k) }) {
 			return ""
 		}
 	}
@@ -342,7 +342,7 @@ func (p *plexSink) shelf(ctx context.Context, s shelf, colls []plexColl) string 
 		if m.After != "" {
 			path += "?after=" + m.After
 		}
-		if !p.w.item(ctx, "order "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "PUT", path) }) && p.w.stopped != "" {
+		if !p.w.write(ctx, "order "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "PUT", path) }) {
 			return ""
 		}
 	}
@@ -590,8 +590,8 @@ func indexOf(xs []string, x string) int {
 	return -1
 }
 
-// refusedItem tells a member call Plex refuses from a sick Plex: 1.43 answers 400 to an add or a move naming a key it
-// does not hold, or a move of a non-member (measured 2026-10-05), and 404 once the collection is gone.
+// refusedItem tells an add Plex refuses from a sick Plex: 1.43 answers 400 to a batch of only keys it does not hold
+// (measured 2026-10-05), and 404 once the collection is gone.
 func refusedItem(err error) bool {
 	var se *plex.StatusError
 	return errors.As(err, &se) && (se.Code == http.StatusBadRequest || se.Code == http.StatusNotFound)

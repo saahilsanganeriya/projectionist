@@ -13,7 +13,9 @@ import (
 
 // Catches: a package that talks to Letterboxd (a string naming letterboxd.com or boxd.it) with its own pacing instead
 // of waiting on Shared — two such stages in one process would together send faster than one request per 2 s. It
-// reads every non-test Go file of the module, so a stage merged without the shared limiter fails here.
+// reads every non-test Go file of the module, so a stage merged without the shared limiter fails here. It proves the
+// package names Shared, not that every request path waits on it: each stage's fetcher test owns that (lists:
+// TestFetcherPacingAndRefusal).
 func TestEveryLetterboxdClientWaitsOnShared(t *testing.T) {
 	host := regexp.MustCompile(`letterboxd\.com|boxd\.it`)
 	names, waits := map[string]bool{}, map[string]bool{} // package dir → names a host, uses lbpace.Shared

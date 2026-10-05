@@ -130,12 +130,12 @@ func putRow(ctx context.Context, db *sql.DB, app, key string, r sinkRow) error {
 }
 
 // writer runs one app's calls: idempotent ones up to three times (2 s, then 4 s apart); the first call that still
-// fails, or the end of the budget, stops the app for this run. A member call Plex refuses (item) is skipped instead.
+// fails, or the end of the budget, stops the app for this run. An add Plex refuses (item) is skipped instead.
 type writer struct {
 	app     string
 	log     *slog.Logger
 	writes  int
-	refused int    // member calls the app refused, skipped
+	refused int    // adds the app refused, skipped
 	stopped string // why the rest was deferred; "" while healthy
 }
 
@@ -151,8 +151,8 @@ func (w *writer) write(ctx context.Context, what string, fn func(context.Context
 	return ok
 }
 
-// item is write for a call naming one collection member (an add, a drop, a move). One Plex refuses (refusedItem) is
-// skipped and counted, so a key the map got wrong costs that call, not the app's other shelves and Home rows.
+// item is write for an add of collection members. One Plex refuses (refusedItem) is skipped and counted, so a key the
+// map got wrong costs that call, not the app's other shelves and Home rows.
 func (w *writer) item(ctx context.Context, what string, fn func(context.Context) error) bool {
 	ok := w.try(ctx, what, 3, true, fn)
 	if ok {
