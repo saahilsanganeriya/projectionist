@@ -23,6 +23,7 @@ import (
 
 	"golang.org/x/text/unicode/norm"
 
+	"projectionist/internal/lbpace"
 	"projectionist/internal/library"
 	"projectionist/internal/stage"
 	"projectionist/internal/store"
@@ -145,6 +146,10 @@ type rssCache struct {
 	Entries      map[string]entry `json:"entries"`
 }
 
+// limiter paces the RSS read together with every other stage's Letterboxd requests; tests replace it with one on a
+// fake clock.
+var limiter = lbpace.Shared
+
 func refreshRSS(ctx context.Context, env *stage.Env, url string) (rssCache, error) {
 	var c rssCache
 	if _, err := env.Store.GetJSON(ctx, name, "rss", &c); err != nil {
@@ -163,6 +168,9 @@ func refreshRSS(ctx context.Context, env *stage.Env, url string) (rssCache, erro
 	}
 	if c.LastModified != "" {
 		req.Header.Set("If-Modified-Since", c.LastModified)
+	}
+	if err := limiter.Wait(ctx); err != nil {
+		return c, err
 	}
 	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
 	if err != nil {

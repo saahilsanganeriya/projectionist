@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"projectionist/internal/fake"
+	"projectionist/internal/lbpace"
 	"projectionist/internal/stage"
 )
 
@@ -164,13 +165,14 @@ func rk(id int) string   { return strconv.Itoa(100000 + id) }
 func jfID(id int) string { return fmt.Sprintf("jf%d", id) }
 
 type world struct {
-	h      *fake.Harness
-	logs   *bytes.Buffer
-	ai     *aiFake
-	plex   *plexFake
-	jf     *jfFake
-	lbHits int
-	mu     sync.Mutex
+	h       *fake.Harness
+	logs    *bytes.Buffer
+	ai      *aiFake
+	plex    *plexFake
+	jf      *jfFake
+	lbHits  int
+	lbWaits []time.Duration // what each Letterboxd request waited on the limiter, which runs on a frozen clock
+	mu      sync.Mutex
 }
 
 // newWorld adds fillers unseen films to the library (TMDB knows them; Plex and Jellyfin do not), for tests that
@@ -182,6 +184,12 @@ func newWorld(t *testing.T, options string, fillers int) *world {
 	la, _ := time.LoadLocation("America/Los_Angeles")
 	w.h.Env.Loc = la
 	w.h.Now = time.Date(2026, 10, 5, 15, 0, 0, 0, time.UTC) // 08:00 PDT
+	shared, frozen := limiter, w.h.Now
+	limiter = lbpace.New(func() time.Time { return frozen }, func(_ context.Context, d time.Duration) error {
+		w.lbWaits = append(w.lbWaits, d)
+		return nil
+	})
+	t.Cleanup(func() { limiter = shared })
 
 	movies := t.TempDir()
 	lib := slices.Clone(films)
@@ -765,7 +773,8 @@ func (j *jfFake) members() []string {
 // a pick outside the unseen set kept instead of retried; the taste block sent uncached or to an unresolved alias; a
 // second AI call on the same day; a watched pick left in the
 // row (in Plex's cached Home hub too), or a poster uploaded for its removal; yesterday's picks repeated or kept; the row shown on a friend's Home or the Recommended tab, or left
-// there by an earlier build; his own "Tonight" collection or BoxSet adopted and edited; the key reaching a log.
+// there by an earlier build; his own "Tonight" collection or BoxSet adopted and edited; the key reaching a log; an RSS
+// read that skips the process-wide Letterboxd limiter (lbpace.Shared, at most one request per 2 s across stages).
 func TestRunAcrossDays(t *testing.T) {
 	w := newWorld(t, "", 0)
 	w.ai.script(answer3(559907, 389, 346), answer3(389, 346, 655)) // the first answer offers a film he has seen
@@ -905,8 +914,8 @@ func TestRunAcrossDays(t *testing.T) {
 	if strings.Contains(w.logs.String(), "SECRET") {
 		t.Fatal("the API key reached the log")
 	}
-	if w.lbHits != 4 {
-		t.Fatalf("letterboxd requests = %d, want one per run", w.lbHits)
+	if w.lbHits != 4 || !slices.Equal(w.lbWaits, []time.Duration{2 * time.Second, 4 * time.Second, 6 * time.Second}) {
+		t.Fatalf("letterboxd requests = %d (want one per run), limiter waits %v (want each queued behind the last)", w.lbHits, w.lbWaits)
 	}
 }
 
