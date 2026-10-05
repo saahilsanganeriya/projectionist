@@ -5,9 +5,12 @@
 // 2 s, every answer that can be cached is): the RSS feed (every run), the watchlist and watched-films grid pages
 // (daily), the film pages (TMDB id, cached forever), and the account export unzipped on the NAS (the backfill).
 // Films join the library on the TMDB id in the folder names. Per app the stage keeps a snapshot of what the app
-// holds (refreshed at most daily, one listing call) and updates it after each write, so a rerun writes nothing.
+// holds (Plex: one paged listing at most daily; Jellyfin: every run, it is cheap) and updates it after each
+// write, so a rerun writes nothing.
 //
-// Never: unwatch, lower a play count, clear a rating, or remove anything this stage did not add.
+// Never: unwatch, lower a play count, clear a rating, or remove anything this stage did not add. Plex takes no
+// last-played date (a scrobble stamps "now"). Reviews are not synced: a Plex review is shown to everyone his
+// account-wide ratings privacy allows (his Plex friends), and Jellyfin has no per-user text field.
 package letterboxd
 
 import (
