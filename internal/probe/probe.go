@@ -238,7 +238,7 @@ func NewProber(ffprobe string, db *sql.DB) (*Prober, error) {
 
 // Probe returns the file's Info, from the cache when size and mtime are unchanged.
 func (p *Prober) Probe(ctx context.Context, path string) (Info, error) {
-	info, ok, err := p.Cached(ctx, path)
+	info, ok, err := p.Lookup(ctx, path)
 	if ok || err != nil {
 		return info, err
 	}
@@ -262,9 +262,8 @@ func (p *Prober) Probe(ctx context.Context, path string) (Info, error) {
 	return info, err
 }
 
-// Cached returns the stored Info when the file is unchanged since it was probed, without running ffprobe; ok is
-// false when it must be probed (again).
-func (p *Prober) Cached(ctx context.Context, path string) (info Info, ok bool, err error) {
+// Lookup returns the cached Info; ok is false when the file changed (size or mtime) or was never probed.
+func (p *Prober) Lookup(ctx context.Context, path string) (info Info, ok bool, err error) {
 	st, err := os.Stat(path)
 	if err != nil {
 		return Info{}, false, err

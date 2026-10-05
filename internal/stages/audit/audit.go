@@ -404,7 +404,7 @@ func probeAll(ctx context.Context, env *stage.Env, workers int, videos []*video)
 		case v.size == 0:
 			v.probed, v.problem = true, "empty file"
 		default:
-			info, ok, err := env.Probe.Cached(ctx, v.path)
+			info, ok, err := env.Probe.Lookup(ctx, v.path)
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
