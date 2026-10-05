@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -103,10 +104,14 @@ func TestRunHealsJellyfin(t *testing.T) {
 	dockerMux.HandleFunc("GET /containers/{name}/json", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"State":{"Status":"running"}}`))
 	})
-	dockerMux.HandleFunc("POST /containers/jellyfin/restart", func(w http.ResponseWriter, r *http.Request) {
+	dockerMux.HandleFunc("POST /containers/jellyfin/stop", func(w http.ResponseWriter, r *http.Request) {
 		var st State
 		h.Env.Store.GetJSON(r.Context(), name, "state", &st)
 		restarts = append(restarts, st.LastRestart["jellyfin"])
+		w.WriteHeader(http.StatusNoContent)
+	})
+	dockerMux.HandleFunc("POST /containers/jellyfin/start", func(w http.ResponseWriter, _ *http.Request) {
+		jellyfinAnswers(200, 200) // the restart cured it
 		w.WriteHeader(http.StatusNoContent)
 	})
 	opts := "fail_threshold = 2\ndocker_socket = \"" + serveUnix(t, dockerMux) + "\"\nqbittorrent_url = \"" + qbit.URL + "\"\n"
@@ -135,6 +140,7 @@ func TestRunHealsJellyfin(t *testing.T) {
 	if !restarts[0].Equal(h.Now) || !strings.Contains(rep.Summary, "jellyfin-items FAIL (jellyfin GET /Items?Limit=1: HTTP 503)") {
 		t.Fatalf("restart recorded at %v before acting (want %v); summary %q", restarts[0], h.Now, rep.Summary)
 	}
+	jellyfinAnswers(503, 503)
 	expect("streak restarts after the restart", run(), 1, "")
 	h.Now = h.Now.Add(30 * time.Minute)
 	expect("inside the cooldown", run(), 1, "cooldown 1h0m0s")
@@ -170,7 +176,8 @@ func TestRunHealsJellyfin(t *testing.T) {
 
 // Catches: a restart cut off between Docker's stop and its start (projectionist killed mid-restart) leaving
 // Jellyfin stopped for good, and the opposite: starting a container the owner stopped (also after a restart of ours
-// that never took effect), one Docker's restart policy is already bringing back, or one outside restartable.
+// that never took effect), one Docker's restart policy is already bringing back, or one outside restartable. And a
+// dockerd that accepts the connection and never answers hanging the run, and with it every later run.
 func TestResumesACutOffRestart(t *testing.T) {
 	asked := time.Date(2026, 10, 5, 5, 0, 0, 0, time.UTC) // this stage's recorded restart of jellyfin
 	cases := []struct {
@@ -178,20 +185,27 @@ func TestResumesACutOffRestart(t *testing.T) {
 		started, finished time.Duration // the container's StartedAt and FinishedAt, relative to asked
 		restartable       string
 		starts            int
+		hang              bool // inspect never answers
 	}{
-		{"stopped by our restart, never started again", "exited", -time.Hour, time.Minute, `["jellyfin"]`, 1},
-		{"stopped by the owner minutes after our restart", "exited", time.Minute, 5 * time.Minute, `["jellyfin"]`, 0},
-		{"stopped before we asked", "exited", -time.Hour, -time.Minute, `["jellyfin"]`, 0},
-		{"stopped by the owner, our restart having done nothing", "exited", -time.Hour, time.Hour, `["jellyfin"]`, 0},
-		{"Docker's restart policy has it", "restarting", -time.Hour, time.Minute, `["jellyfin"]`, 0},
-		{"not in restartable", "exited", -time.Hour, time.Minute, `[]`, 0},
+		{"stopped by our restart, never started again", "exited", -time.Hour, time.Minute, `["jellyfin"]`, 1, false},
+		{"stopped by the owner minutes after our restart", "exited", time.Minute, 5 * time.Minute, `["jellyfin"]`, 0, false},
+		{"stopped before we asked", "exited", -time.Hour, -time.Minute, `["jellyfin"]`, 0, false},
+		{"stopped by the owner, our restart having done nothing", "exited", -time.Hour, time.Hour, `["jellyfin"]`, 0, false},
+		{"Docker's restart policy has it", "restarting", -time.Hour, time.Minute, `["jellyfin"]`, 0, false},
+		{"not in restartable", "exited", -time.Hour, time.Minute, `[]`, 0, false},
+		{"dockerd never answers", "exited", -time.Hour, time.Minute, `["jellyfin"]`, 0, true},
 	}
 	for _, tc := range cases {
 		h := fake.NewEnv(t, nil)
+		h.Jellyfin.Handle("GET", "/System/Info/Public", 200, "")
 		h.Env.Store.PutJSON(context.Background(), name, "state", State{Streak: map[string]int{}, LastRestart: map[string]time.Time{"jellyfin": asked}})
 		starts := 0
 		mux := http.NewServeMux()
-		mux.HandleFunc("GET /containers/{name}/json", func(w http.ResponseWriter, _ *http.Request) {
+		mux.HandleFunc("GET /containers/{name}/json", func(w http.ResponseWriter, r *http.Request) {
+			if tc.hang {
+				<-r.Context().Done()
+				return
+			}
 			fmt.Fprintf(w, `{"State":{"Status":%q,"StartedAt":%q,"FinishedAt":%q}}`,
 				tc.status, asked.Add(tc.started).Format(time.RFC3339Nano), asked.Add(tc.finished).Format(time.RFC3339Nano))
 		})
@@ -199,10 +213,21 @@ func TestResumesACutOffRestart(t *testing.T) {
 			starts++
 			w.WriteHeader(http.StatusNoContent)
 		})
-		h.SetOptions(fmt.Sprintf("docker_socket = %q\nrestartable = %s\nqbittorrent_url = \"http://127.0.0.1:1\"", serveUnix(t, mux), tc.restartable))
+		opts := fmt.Sprintf("docker_socket = %q\nrestartable = %s\nqbittorrent_url = \"http://127.0.0.1:1\"\n", serveUnix(t, mux), tc.restartable)
+		if tc.hang {
+			opts += `timeout = "200ms"`
+		}
+		h.SetOptions(opts)
 		var rep stage.Report
-		if err := (Stage{}).Run(context.Background(), h.Env, &rep); err != nil {
-			t.Fatal(err)
+		done := make(chan error, 1)
+		go func() { done <- (Stage{}).Run(context.Background(), h.Env, &rep) }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(10 * time.Second): // a watchdog, reached only when the bound is missing
+			t.Fatalf("%s: Run still blocked 10 s after start with a 200ms timeout", tc.name)
 		}
 		alerted := strings.Contains(strings.Join(rep.Alerts, " | "), "never started again; starting it")
 		if starts != tc.starts || alerted != (tc.starts > 0) {
@@ -258,18 +283,127 @@ func TestShutdownDuringViewerCheckHoldsTheRestart(t *testing.T) {
 	}
 }
 
-// Catches: a shutdown abandoning a restart request; Docker 24 stops and starts on the request's context, so an
-// abandoned restart can leave Jellyfin stopped, which this stage then never restarts.
-func TestRestartOutlivesShutdown(t *testing.T) {
-	h := fake.NewEnv(t, nil)
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /containers/jellyfin/restart", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	st, rep := State{Streak: map[string]int{}, LastRestart: map[string]time.Time{}}, stage.Report{}
-	if err := restart(ctx, h.Env, newDocker(serveUnix(t, mux)), &st, "jellyfin", "jellyfin", h.Now, "test", &rep); err != nil || len(rep.Alerts) > 0 {
-		t.Fatalf("err = %v, alerts %q; want the restart sent despite the shutdown", err, rep.Alerts)
+// Catches the 2026-10-05 outage and its kin: a stop grace under 120 s (`docker restart`'s 10 s SIGKILLed a Jellyfin
+// cancelling a scan), no start sent right after the stop, a start Docker acknowledged but never ran left alone, a
+// restart given up at its first failed poll or waiting past 5 min, a service that never comes back not alerted, a
+// running container started again, a start after a refused stop, and a shutdown abandoning the stop or the start.
+func TestRestartSequence(t *testing.T) {
+	notBack := "restart of container jellyfin FAILED: jellyfin did not answer within 5m0s of the start (jellyfin GET /System/Info/Public: HTTP 503); container "
+	polls := int(readyTimeout / readyPoll)
+	cases := []struct {
+		name          string
+		stopCode      int  // the stop's answer
+		ignoredStarts int  // starts Docker answers 204 and never runs; -1: all of them
+		failedPolls   int  // polls Jellyfin fails once running; -1: all of them
+		shutdown      bool // SIGTERM landed before the restart
+		calls, alert  string
+	}{
+		{"answers on the fourth poll", 204, 0, 3, false, "stop t=120 start poll" + strings.Repeat(" inspect poll", 3), ""},
+		{"stop returned but the start never ran", 204, 1, 0, false, "stop t=120 start poll inspect start poll", ""},
+		{"no start ever runs", 204, -1, 0, false, "stop t=120 start poll" + strings.Repeat(" inspect start poll", polls), notBack + "exited, no healthcheck"},
+		{"running, never answers", 204, 0, -1, false, "stop t=120 start poll" + strings.Repeat(" inspect poll", polls), notBack + "running, no healthcheck"},
+		{"stop refused", 500, 0, 0, false, "stop t=120", "FAILED: stop: docker POST /containers/jellyfin/stop?t=120: HTTP 500"},
+		{"shutdown before the restart", 204, 0, 0, true, "stop t=120 start poll", ""},
 	}
+	for _, tc := range cases {
+		h := fake.NewEnv(t, nil)
+		asked := h.Now
+		var mu sync.Mutex
+		var calls []string
+		running, startedAt, ignored, failed := true, asked.Add(-time.Hour), 0, 0
+		// record logs a call and holds the lock until the handler returns: `defer record("x")()`.
+		record := func(call string) func() { mu.Lock(); calls = append(calls, call); return mu.Unlock }
+		h.Jellyfin.HandleFunc("GET", "/System/Info/Public", func(w http.ResponseWriter, _ *http.Request) {
+			defer record("poll")()
+			fresh := running && !startedAt.Before(asked) // hung before the restart, starting up after it
+			if !fresh || tc.failedPolls < 0 || failed < tc.failedPolls {
+				failed += btoi(fresh)
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}
+		})
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /containers/jellyfin/json", func(w http.ResponseWriter, _ *http.Request) {
+			defer record("inspect")()
+			status := "exited"
+			if running {
+				status = "running"
+			}
+			fmt.Fprintf(w, `{"State":{"Status":%q,"StartedAt":%q}}`, status, startedAt.Format(time.RFC3339Nano))
+		})
+		mux.HandleFunc("POST /containers/jellyfin/stop", func(w http.ResponseWriter, r *http.Request) {
+			defer record("stop t=" + r.URL.Query().Get("t"))()
+			running = running && tc.stopCode != http.StatusNoContent
+			w.WriteHeader(tc.stopCode)
+		})
+		mux.HandleFunc("POST /containers/jellyfin/start", func(w http.ResponseWriter, _ *http.Request) {
+			defer record("start")()
+			if tc.ignoredStarts >= 0 && ignored >= tc.ignoredStarts {
+				running, startedAt = true, asked.Add(time.Hour)
+			} else {
+				ignored++
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})
+		dk := newDocker(serveUnix(t, mux))
+		ctx, cancel := context.WithCancel(context.Background())
+		if tc.shutdown {
+			cancel()
+		}
+		advance := func(ctx context.Context, d time.Duration) error { h.Now = h.Now.Add(d); return ctx.Err() }
+		st, rep := State{Streak: map[string]int{}, LastRestart: map[string]time.Time{}}, stage.Report{}
+		err := (Stage{Sleep: advance}).restart(ctx, h.Env, dk, &st, "jellyfin", "jellyfin",
+			named(probes(h.Env, defaults(), dk), "jellyfin"), time.Minute, "test", &rep)
+		cancel()
+		got := strings.Join(rep.Alerts, " | ")
+		if err != nil || strings.Join(calls, " ") != tc.calls || (tc.alert == "") != (got == "") || !strings.Contains(got, tc.alert) {
+			t.Errorf("%s: err %v, calls %q, alerts %q; want calls %q, alert ~%q", tc.name, err, strings.Join(calls, " "), got, tc.calls, tc.alert)
+		}
+	}
+}
+
+// Catches: a second restart in one run recorded at the run's start instead of at its own request. The restart
+// before it can take minutes, so resume's window, which opens at the recorded time, could miss the stop it caused.
+func TestSecondRestartRecordsItsOwnTime(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	t0 := h.Now
+	h.Plex.Handle("GET", "/identity", 200, "")
+	h.Jellyfin.HandleFunc("GET", "/Items", reply(503))
+	var mu sync.Mutex
+	calls := map[string]int{}
+	answer := func(name string, failures int) http.HandlerFunc { // fails its first `failures` calls, then answers 200
+		return func(w http.ResponseWriter, _ *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+			if calls[name]++; calls[name] <= failures {
+				w.WriteHeader(http.StatusBadGateway)
+			}
+		}
+	}
+	h.Jellyfin.HandleFunc("GET", "/System/Info/Public", answer("jellyfin", 2)) // the probe, then the first poll after the start
+	qbit := httptest.NewServer(answer("qbittorrent", 1))
+	t.Cleanup(qbit.Close)
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /containers/{name}/json", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"State":{"Status":"running"}}`))
+	})
+	mux.HandleFunc("POST /containers/{name}/{action}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	h.SetOptions(fmt.Sprintf("fail_threshold = 1\nrestartable = [\"jellyfin\", \"qbittorrent\"]\ndocker_socket = %q\nqbittorrent_url = %q", serveUnix(t, mux), qbit.URL))
+	advance := func(ctx context.Context, d time.Duration) error { h.Now = h.Now.Add(d); return ctx.Err() }
+	if err := (Stage{Sleep: advance}).Run(context.Background(), h.Env, &stage.Report{}); err != nil {
+		t.Fatal(err)
+	}
+	var st State
+	h.Env.Store.GetJSON(context.Background(), name, "state", &st)
+	if want := t0.Add(readyPoll); !st.LastRestart["jellyfin"].Equal(t0) || !st.LastRestart["qbittorrent"].Equal(want) {
+		t.Fatalf("restarts recorded at %v; want jellyfin at %v, qbittorrent at %v (after Jellyfin's wait)", st.LastRestart, t0, want)
+	}
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // reply answers with code, or hangs up without answering when code is 0.

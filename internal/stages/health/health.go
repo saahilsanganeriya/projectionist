@@ -12,8 +12,9 @@
 //     Jellyfin answered none of this run's requests (a server that answers nothing streams to no one);
 //   - this stage has not restarted it within `restart_cooldown` (at least 1 h).
 //
-// A restart is recorded before it is sent, so it is resumable: when projectionist dies between Docker's stop and its
-// start, the next run starts the container it stopped.
+// A restart is a stop with a 120 s grace, a start, then a wait of up to 5 min until the service answers again; a
+// service that does not is alerted as a failed restart. It is recorded before it is sent, so it is resumable: when
+// projectionist dies between the stop and the start, the next run starts the container it stopped.
 //
 // Plex is a DSM package and the hostnames belong to Cloudflare: their failures only alert. Plex and Jellyfin are
 // sinks: these probes read no data from them, they only prove the apps answer, and /Sessions is the viewer check.
@@ -39,8 +40,13 @@ import (
 )
 
 const (
-	name           = "health"
-	restartTimeout = 10 * time.Minute // a busybox restart took 111 s on the loaded NAS (30 s of it the stop grace)
+	name = "health"
+	// Docker's wait between SIGTERM and SIGKILL. `docker restart`'s 10 s SIGKILLed a Jellyfin still cancelling a scan
+	// (2026-10-05), and its start half never ran.
+	stopGrace    = 120 * time.Second
+	callTimeout  = 5 * time.Minute // one Docker stop past its grace, or one start: a busybox restart took 111 s on the loaded NAS
+	readyTimeout = 5 * time.Minute // from the start until the service answers again
+	readyPoll    = 5 * time.Second
 )
 
 type Options struct {
@@ -114,11 +120,13 @@ type State struct {
 	LastRestart map[string]time.Time `json:"last_restart"` // container → when this stage last restarted it
 }
 
-type Stage struct{}
+type Stage struct {
+	Sleep func(ctx context.Context, d time.Duration) error // nil: real time; tests move the harness clock instead
+}
 
 func (Stage) Name() string { return name }
 
-func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
+func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	opt := defaults()
 	if err := env.Options(&opt); err != nil {
 		return err
@@ -132,10 +140,16 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		return err
 	}
 	dk := newDocker(opt.DockerSocket)
-	if err := resume(ctx, env, dk, st, opt.Restartable, rep); err != nil {
-		return err
+	ps := probes(env, opt, dk)
+	containers := map[string]string{"jellyfin": opt.JellyfinContainer, "qbittorrent": opt.QBittorrentContainer}
+	for _, svc := range slices.Sorted(maps.Keys(containers)) {
+		if c := containers[svc]; slices.Contains(opt.Restartable, c) {
+			if err := s.resume(ctx, env, dk, st, c, named(ps, svc), opt.Timeout, rep); err != nil {
+				return err
+			}
+		}
 	}
-	results := runProbes(ctx, opt.Timeout, probes(env, opt, dk))
+	results := runProbes(ctx, opt.Timeout, ps)
 	if err := ctx.Err(); err != nil {
 		return err // probes cut short by shutdown are not failures
 	}
@@ -157,8 +171,6 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		env.Metrics.Set("projectionist_health_latency_seconds", r.latency.Seconds(), "probe", r.probe)
 	}
 
-	now := env.Now()
-	containers := map[string]string{"jellyfin": opt.JellyfinContainer, "qbittorrent": opt.QBittorrentContainer}
 	for _, svc := range services {
 		if len(failed[svc]) == 0 {
 			st.Streak[svc] = 0
@@ -180,7 +192,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		v := decide(restartCase{
 			streak: st.Streak[svc], threshold: opt.FailThreshold, faults: faults,
 			container: c, allowed: slices.Contains(opt.Restartable, c),
-			sinceRestart: now.Sub(st.LastRestart[c]), cooldown: opt.RestartCooldown, playing: playing, silent: !answered,
+			sinceRestart: env.Now().Sub(st.LastRestart[c]), cooldown: opt.RestartCooldown, playing: playing, silent: !answered,
 		})
 		env.Metrics.Set("projectionist_health_failed_checks", float64(st.Streak[svc]), "service", svc)
 		if !v.alert {
@@ -195,7 +207,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 			rep.Alert("%s", msg)
 		default:
 			rep.Alert("%s; restarting container %s", msg, c)
-			if err := restart(ctx, env, dk, &st, svc, c, now, describe(failed[svc]), rep); err != nil {
+			if err := s.restart(ctx, env, dk, &st, svc, c, named(ps, svc), opt.Timeout, describe(failed[svc]), rep); err != nil {
 				return err
 			}
 		}
@@ -205,56 +217,119 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	return env.Store.PutJSON(context.WithoutCancel(ctx), name, "state", st)
 }
 
-func restart(ctx context.Context, env *stage.Env, dk *docker, st *State, svc, c string, now time.Time, why string, rep *stage.Report) error {
+// restart records the restart, stops c with a long grace, then brings it back. A shutdown never cuts it between the
+// stop and the start.
+func (s Stage) restart(ctx context.Context, env *stage.Env, dk *docker, st *State, svc, c string, ready probe,
+	timeout time.Duration, why string, rep *stage.Report) error {
+	asked := env.Now() // this restart's own time: one before it in the same run can take minutes
 	st.Streak[svc] = 0 // the next restart needs a fresh run of failures
-	st.LastRestart[c] = now
+	st.LastRestart[c] = asked
 	// Recorded before acting: a crash in between can only skip a restart, never repeat one inside the cooldown, and
-	// one cut off after Docker's stop is finished by resume.
+	// one cut off after the stop is finished by resume.
 	if err := env.Store.PutJSON(context.WithoutCancel(ctx), name, "state", st); err != nil {
 		return err
 	}
-	return act(ctx, env, rep, "restart", c, why, dk.restart)
+	return act(ctx, env, rep, "restart", c, why, func() error {
+		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopGrace+callTimeout)
+		defer cancel()
+		if err := dk.stop(stopCtx, c); err != nil {
+			return fmt.Errorf("stop: %w", err) // nothing started: a container this did stop is resumed by the next run
+		}
+		return s.bringBack(ctx, env, dk, c, asked, ready, timeout)
+	})
 }
 
 // resume starts a container that a restart of ours stopped and nothing started again (projectionist died between
-// Docker's stop and its start): it last started before we asked, and its stop ended inside the request's own bound.
+// the stop and the start): it last started before we asked, and its stop ended inside the stop request's bound.
 // A container the owner stops later is left stopped: it started after our restart, or stopped after that bound.
-func resume(ctx context.Context, env *stage.Env, dk *docker, st State, restartable []string, rep *stage.Report) error {
-	for _, c := range restartable {
-		asked, ok := st.LastRestart[c]
-		if !ok {
-			continue
-		}
-		s, err := dk.inspect(ctx, c)
-		ours := !s.FinishedAt.Before(asked) && s.FinishedAt.Before(asked.Add(restartTimeout))
-		if err != nil || s.Status != "exited" || !s.StartedAt.Before(asked) || !ours {
-			continue // an inspect error is the probe's to report
-		}
-		rep.Alert("container %s stopped during this stage's restart at %s and never started again; starting it",
-			c, asked.Format(time.RFC3339))
-		if err := act(ctx, env, rep, "resume", c, "restart cut off after the stop", dk.start); err != nil {
-			return err
-		}
+func (s Stage) resume(ctx context.Context, env *stage.Env, dk *docker, st State, c string, ready probe,
+	timeout time.Duration, rep *stage.Report) error {
+	asked, ok := st.LastRestart[c]
+	if !ok {
+		return nil
 	}
-	return nil
+	inspectCtx, cancel := context.WithTimeout(ctx, timeout) // a wedged dockerd must not hang this and every later run
+	cs, err := dk.inspect(inspectCtx, c)
+	cancel()
+	ours := !cs.FinishedAt.Before(asked) && cs.FinishedAt.Before(asked.Add(stopGrace+callTimeout))
+	if err != nil || cs.Status != "exited" || !cs.StartedAt.Before(asked) || !ours {
+		return nil // an inspect error is the probe's to report
+	}
+	rep.Alert("container %s stopped during this stage's restart at %s and never started again; starting it",
+		c, asked.Format(time.RFC3339))
+	return act(ctx, env, rep, "resume", c, "restart cut off after the stop", func() error {
+		return s.bringBack(ctx, env, dk, c, asked, ready, timeout)
+	})
 }
 
-// act runs one Docker action on container c to its end, then alerts a failure, logs, counts and records it. Docker 24
-// runs a restart's stop and start on the request's context, so an abandoned request can leave the container
-// stopped: a shutdown never cancels the action, and the bound is far above a slow restart.
-func act(ctx context.Context, env *stage.Env, rep *stage.Report, action, c, why string,
-	call func(context.Context, string) error) error {
-	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restartTimeout)
-	start := time.Now()
-	err := call(actx, c)
-	cancel()
-	outcome := "ok"
-	if err != nil {
-		outcome = "failed"
-		rep.Alert("%s of container %s failed: %v", action, c, err)
+// bringBack starts c and waits up to readyTimeout for ready to pass. No answer from Docker is proof: while ready
+// fails, a container still exited and not started since `since` is started again. A shutdown cuts only the wait.
+func (s Stage) bringBack(ctx context.Context, env *stage.Env, dk *docker, c string, since time.Time, ready probe,
+	timeout time.Duration) error {
+	bounded := func(d time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithTimeout(context.WithoutCancel(ctx), d)
 	}
-	env.Log.Warn("container "+action, "event", "container_action", "action", action, "container", c, "outcome", outcome,
-		"duration_ms", time.Since(start).Milliseconds(), "err", err)
+	start := func() error {
+		startCtx, cancel := bounded(callTimeout)
+		defer cancel()
+		return dk.start(startCtx, c)
+	}
+	startErr, state := start(), "not inspected"
+	deadline := env.Now().Add(readyTimeout)
+	for {
+		readyCtx, cancel := bounded(timeout)
+		detail, f := ready.check(readyCtx)
+		cancel()
+		switch {
+		case f == passed:
+			return nil
+		case !env.Now().Before(deadline):
+			return fmt.Errorf("%s did not answer within %s of the start (%s); container %s; last start: %v",
+				ready.name, readyTimeout, detail, state, startErr)
+		}
+		if err := s.sleep(ctx, readyPoll); err != nil {
+			return fmt.Errorf("shut down before %s answered again: %w", ready.name, err)
+		}
+		inspectCtx, cancel := bounded(timeout)
+		cs, err := dk.inspect(inspectCtx, c)
+		cancel()
+		if err != nil {
+			state = err.Error()
+			continue
+		}
+		state, _ = cs.judge()
+		if cs.Status == "exited" && cs.StartedAt.Before(since) {
+			env.Log.Warn("start again", "event", "container_start_retry", "container", c, "last_start_err", startErr)
+			startErr = start()
+		}
+	}
+}
+
+func (s Stage) sleep(ctx context.Context, d time.Duration) error {
+	if s.Sleep != nil {
+		return s.Sleep(ctx, d)
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// act runs one container action to its end, then alerts a failure, logs, counts and records it.
+func act(ctx context.Context, env *stage.Env, rep *stage.Report, action, c, why string, call func() error) error {
+	start := time.Now()
+	err := call()
+	outcome, level := "ok", slog.LevelWarn
+	if err != nil {
+		outcome, level = "failed", slog.LevelError
+		rep.Alert("%s of container %s FAILED: %v", action, c, err)
+	}
+	env.Log.Log(ctx, level, "container "+action, "event", "container_action", "action", action, "container", c,
+		"outcome", outcome, "duration_ms", time.Since(start).Milliseconds(), "err", err)
 	env.Metrics.Add("projectionist_health_container_actions_total", 1, "container", c, "action", action, "outcome", outcome)
 	return env.Store.AddEvent(context.WithoutCancel(ctx), env.Now(), name, c, action+"_"+outcome, map[string]any{"why": why})
 }
@@ -368,6 +443,11 @@ func probes(env *stage.Env, opt Options, dk *docker) []probe {
 		ps = append(ps, get(u, "cloudflare", u, opt.Public[u]))
 	}
 	return ps
+}
+
+// named is the probe called n: each service's own HTTP probe is the one a restart waits on.
+func named(ps []probe, n string) probe {
+	return ps[slices.IndexFunc(ps, func(p probe) bool { return p.name == n })]
 }
 
 func httpCheck(ctx context.Context, c *http.Client, url string, want []int) (string, fault) {

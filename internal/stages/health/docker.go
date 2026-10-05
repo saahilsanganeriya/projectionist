@@ -8,11 +8,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// docker is the two Docker Engine API calls this stage needs, over the unix socket: inspect and restart.
+// docker is the Docker Engine API calls this stage needs, over the unix socket. The client has no timeout of its
+// own: every caller bounds its call with a context deadline.
 type docker struct{ http *http.Client }
 
 func newDocker(socket string) *docker {
@@ -61,9 +63,10 @@ func (d *docker) inspect(ctx context.Context, name string) (containerState, erro
 	return out.State, err
 }
 
-// restart stops the container (SIGKILL after 30 s) and starts it again; Docker answers once it has started.
-func (d *docker) restart(ctx context.Context, name string) error {
-	return d.call(ctx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/restart?t=30", nil)
+// stop sends SIGTERM, then SIGKILL after stopGrace; Docker answers once the container has exited.
+func (d *docker) stop(ctx context.Context, name string) error {
+	t := strconv.Itoa(int(stopGrace.Seconds()))
+	return d.call(ctx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/stop?t="+t, nil)
 }
 
 func (d *docker) start(ctx context.Context, name string) error {
