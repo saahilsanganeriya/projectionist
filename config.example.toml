@@ -68,5 +68,6 @@ review_file   = "/volume1/media/_needs-review.txt"
 tmdb_key_file = "/run/secrets/tmdb_api_key"
 aligned_log   = "/volume1/PlexMediaServer/subtitle-downloads/log2.csv" # the aligner's copy wins the primary subtitle name
 sublang_file  = "" # optional JSON {path: {lang, sdh}} for subtitles whose language neither name nor text gives
+notify        = true  # tell Jellyfin which folders changed (one /Library/Media/Updated push per run; Plex watches the disk)
 quiet         = "10m" # a folder written to more recently is still arriving
 retry         = "6h"  # a title TMDB could not match is asked again after this

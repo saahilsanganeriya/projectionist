@@ -44,6 +44,7 @@ type Options struct {
 	TMDBAPI     string        `toml:"tmdb_api"`      // "" = https://api.themoviedb.org/3 (tests point it elsewhere)
 	AlignedLog  string        `toml:"aligned_log"`   // the subtitle aligner's CSV log ("retimed ... -> X.srt")
 	SubLangFile string        `toml:"sublang_file"`  // optional JSON {path: {lang, sdh}} from a text classifier
+	Notify      bool          `toml:"notify"`        // tell Jellyfin which folders changed (off for a sandbox run)
 	Quiet       time.Duration `toml:"quiet"`         // a folder written to more recently is still arriving
 	Retry       time.Duration `toml:"retry"`         // how long a failed identity lookup is remembered
 }
@@ -57,6 +58,7 @@ func defaults() Options {
 		ReviewFile:  "/volume1/media/_needs-review.txt",
 		TMDBKeyFile: "/run/secrets/tmdb_api_key",
 		AlignedLog:  "/volume1/PlexMediaServer/subtitle-downloads/log2.csv",
+		Notify:      true,
 		Quiet:       10 * time.Minute,
 		Retry:       6 * time.Hour,
 	}
@@ -108,7 +110,9 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if err == nil {
 		sweep(env, rep, opt, lib)
 	}
-	pushJellyfin(ctx, env, opt, touched)
+	if opt.Notify {
+		pushJellyfin(ctx, env, opt, touched)
+	}
 	rep.Summary = fmt.Sprintf("%d unit(s) applied, %d left for review", rep.Counts["units_done"], len(review))
 	return err
 }

@@ -412,3 +412,29 @@ func (dir tmdbCache) episodes(show Title) []Episode {
 	}
 	return out
 }
+
+// TestReplaySubFacts: Go's subtitle facts equal sub_stats.py's on real files (RENAME_REPLAY_SUBSTATS = its TSV).
+func TestReplaySubFacts(t *testing.T) {
+	var diffs []string
+	n := 0
+	for _, r := range readTSV(t, env(t, "RENAME_REPLAY_SUBSTATS"), 10)[1:] {
+		raw, err := os.ReadFile(r[0])
+		if err != nil {
+			continue // renamed or gone since the Python pass
+		}
+		n++
+		f := readSubFacts(raw, lowerExt(r[0]))
+		got := []string{r[0], strconv.Itoa(len(raw)), f.SHA1, strconv.Itoa(f.Cues), fmt.Sprintf("%.3f", f.SDH), map[bool]string{true: "1", false: "0"}[f.Ad], f.Script, f.Idx, r[8], f.Guess}
+		if r[6] == "" { // sub_stats leaves script empty for files it does not read as text (.idx, binary .sub)
+			got[6] = ""
+		}
+		if strings.Join(got, "\t") != strings.Join(r, "\t") {
+			diffs = append(diffs, "PY\t"+strings.Join(append(r[:8:8], r[9]), "\t"), "GO\t"+strings.Join(append(got[:8:8], got[9]), "\t"))
+		}
+	}
+	writeLines(t, "subfacts-diffs.tsv", diffs)
+	t.Logf("subtitle facts: %d/%d files identical", n-len(diffs)/2, n)
+	if len(diffs) > 0 {
+		t.Fail()
+	}
+}
