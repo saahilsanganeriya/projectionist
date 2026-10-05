@@ -356,12 +356,13 @@ func TestDryAndOnlyRunsKeepNoState(t *testing.T) {
 	}
 }
 
-// Catches: a down Plex failing the run or holding up Jellyfin, a Plex that is asked again on every run instead of
-// backing off, and a Plex that stays broken without the owner hearing of it.
+// Catches: a Plex that answers 5xx holding up Jellyfin, a 5xx taken for a refusal (the next collection tried at once,
+// with no backoff), a Plex that is asked again on every run instead of backing off, and a Plex that stays broken
+// without the owner hearing of it.
 func TestPlexOutageBacksOffAndNeverFailsTheRun(t *testing.T) {
 	h := fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "mid"})
 	servePlex(h, &app{}, 1, 2, 3, 4)
-	h.Plex.Handle("GET", "/library/sections/4/collections", http.StatusServiceUnavailable, "busy scanning")
+	h.Plex.Handle("POST", "/library/collections", http.StatusServiceUnavailable, "busy scanning")
 	jf := &app{}
 	serveJellyfin(h, jf, map[string]string{}, 1, 2, 3, 4)
 	setup(t, h, "", 1, 2, 3, 4)
@@ -371,8 +372,8 @@ func TestPlexOutageBacksOffAndNeverFailsTheRun(t *testing.T) {
 		t.Fatalf("jellyfin %d collections, alerts %v, counts %v", len(jf.colls), rep.Alerts, rep.Counts)
 	}
 	runOnce(t, h)
-	if n := len(h.Plex.Calls("GET", "/library/sections/4/collections")); n != 1 {
-		t.Fatalf("plex asked %d times within its backoff; want 1", n)
+	if n := len(h.Plex.Calls("POST", "/library/collections")); n != 1 {
+		t.Fatalf("plex create tried %d times over two runs; want 1, then a backoff", n)
 	}
 	h.Now = h.Now.Add(25 * time.Hour)
 	rep = runOnce(t, h)
@@ -411,7 +412,10 @@ func TestArrivalsJoinFromTMDB(t *testing.T) {
 	h.TMDB.Handle("GET", "/movie/5", 200, `{"id":5,"title":"Scary Movie 3","belongs_to_collection":{"id":4246,"name":"Scary Movie Collection"}}`)
 	h.TMDB.Handle("GET", "/movie/5/credits", 200, `{"crew":[{"id":50,"name":"David Zucker","job":"Director"},
 		{"id":52,"name":"Gone From TMDB","job":"Director"},{"id":51,"name":"A Writer","job":"Writer"}]}`)
-	h.TMDB.Handle("GET", "/person/50/movie_credits", 200, `{"crew":[{"id":5,"job":"Director"},{"id":3,"job":"Producer"}]}`)
+	// Only Director credits count: as producer (50) or as a director the film does not credit as such (51), these
+	// two would own the Christopher Nolan collection.
+	h.TMDB.Handle("GET", "/person/50/movie_credits", 200, `{"crew":[{"id":5,"job":"Director"},{"id":1,"job":"Producer"},{"id":2,"job":"Producer"}]}`)
+	h.TMDB.Handle("GET", "/person/51/movie_credits", 200, `{"crew":[{"id":1,"job":"Director"},{"id":2,"job":"Director"}]}`)
 	h.TMDB.Handle("GET", "/movie/6", 200, `TMDB is having a bad day`) // 7 and person 52: 404
 	px := &app{}
 	servePlex(h, px, 1, 2, 3, 4)
@@ -419,14 +423,18 @@ func TestArrivalsJoinFromTMDB(t *testing.T) {
 	asked := func(path string) int { return len(h.TMDB.Calls("GET", path)) }
 
 	runOnce(t, h)
+	if n := len(h.TMDB.Calls("GET", "/movie/1")); n != 0 {
+		t.Fatalf("the baseline run asked TMDB about a film already on disk %d times", n)
+	}
 	for _, id := range []int{5, 6, 7} {
 		os.MkdirAll(filepath.Join(movies, fmt.Sprintf("Film %d (2000) {tmdb-%d}", id, id)), 0o755)
 	}
 	servePlex(h, px, 1, 2, 3, 4, 5) // Plex has scanned 5: its cached item list (2 h old) must be re-read
 	h.Now = h.Now.Add(2 * time.Hour)
 	runOnce(t, h)
-	if got := px.colls[1].Members; !reflect.DeepEqual(got, []string{"103", "104", "105"}) {
-		t.Fatalf("Scary Movie in plex = %v; want the arrival 105 added", got)
+	if nolan, scary := px.colls[0].Members, px.colls[1].Members; !reflect.DeepEqual(scary, []string{"103", "104", "105"}) ||
+		!reflect.DeepEqual(nolan, []string{"101", "102"}) {
+		t.Fatalf("plex Christopher Nolan = %v, Scary Movie = %v; want the arrival 105 in Scary Movie only", nolan, scary)
 	}
 	if asked("/movie/6") != 1 || asked("/movie/7") != 0 || asked("/person/50/movie_credits") != 1 {
 		t.Fatalf("TMDB asked /movie/6 %d, /movie/7 %d, /person/50 %d times; want 1, 0 (left after 6 failed), 1",
