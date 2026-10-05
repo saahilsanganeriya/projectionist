@@ -255,8 +255,10 @@ tmdb_images = %q
 		filepath.Join(backup, "posters"), filepath.Join(backup, "plex.db"), w.api.URL, w.api.URL+"/t/p") + opts
 	w.h.SetOptions(w.opts)
 
+	// Real Plex sends each item's own "guid" (a string) beside includeGuids' "Guid" list.
 	w.h.Plex.HandleFunc("GET", "/library/sections/4/all", func(rw http.ResponseWriter, _ *http.Request) {
-		reply(rw, `{"MediaContainer":{"Metadata":[{"ratingKey":"101","Guid":[{"id":"tmdb://1"}]},{"ratingKey":"102","Guid":[{"id":"tmdb://2"}]}]}}`)
+		reply(rw, `{"MediaContainer":{"Metadata":[{"ratingKey":"101","guid":"plex://movie/a","Guid":[{"id":"tmdb://1"}]},
+ {"ratingKey":"102","guid":"plex://movie/b","Guid":[{"id":"tmdb://2"}]}]}}`)
 	})
 	w.h.Plex.HandleFunc("GET", "/library/sections/2/all", func(rw http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("type") == "3" {
@@ -347,8 +349,8 @@ func (w *world) verdict(t *testing.T, key string) Verdict {
 // Catches, end to end: downloads, judging or uploads while a guest watches; a letter mapped to the wrong candidate
 // (the fake judge scores images by colour); the owner's upload judged or missing from Plex; the owner's pick kept
 // against a candidate 3 points better; Plex given no lock; a failed upload that fails the run or is never retried;
-// a failed Plex lock whose retry uploads the poster again (another copy in Plex's bundle each time); and a rerun that
-// pays or uploads again.
+// a failed Plex lock whose retry uploads the poster again (another copy in Plex's bundle each time); a rerun that
+// pays or uploads again; and a Plex listing that fails to decode on the "guid" string Plex sends beside "Guid".
 func TestRunEndToEnd(t *testing.T) {
 	w := newWorld(t, "")
 	w.h.Plex.Handle("GET", "/status/sessions", 200, guest)

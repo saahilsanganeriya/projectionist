@@ -372,7 +372,10 @@ func (r *run) plexIndex(ctx context.Context) (map[string]sinkItem, error) {
 			RatingKey       string `json:"ratingKey"`
 			ParentRatingKey string `json:"parentRatingKey"`
 			Index           int    `json:"index"`
-			GUID            []struct {
+			// Plex sends the item's own "guid" (a string) beside the "Guid" list. encoding/json matches keys
+			// case-insensitively, so without a field of its own "guid" lands in GUID and the listing fails to decode.
+			PlexGUID string `json:"guid"`
+			GUID     []struct {
 				ID string `json:"id"`
 			} `json:"Guid"`
 		} `json:"Metadata"`
