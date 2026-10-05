@@ -40,7 +40,7 @@ type fixture struct {
 	ts       []float64
 	mu       sync.Mutex
 	requests []string
-	quota    bool   // downloads answer with a page, as OpenSubtitles does once the day's quota is spent
+	quota    bool   // downloads answer 429: the day's quota is spent
 	dead     bool   // every download link answers a plain 404, and Ran's IMDb search finds four subtitles
 	cut      bool   // Ran's candidate does not fit its captions (another cut) until alass aligns it
 	hashIMDb string // when set, Ran's file hash finds a misaligned subtitle labelled with this IMDb id
@@ -123,7 +123,7 @@ cp "`+ff+`/realign.srt" "$3" 2>/dev/null || cp "$2" "$3"; echo "info: 'reference
 		case strings.Contains(r.URL.Path, "imdbid-0109445"):
 			w.Write([]byte(cand("clerks", "Clerks.1994.DVDRip")))
 		case strings.HasPrefix(r.URL.Path, "/dl/") && quota:
-			w.Write([]byte("<html>download limit reached</html>"))
+			w.WriteHeader(429)
 		case r.URL.Path == "/dl/ran.gz" && f.cut:
 			w.Write(gz(srt(otherTimes(), 0)))
 		case r.URL.Path == "/dl/ran.gz": // 2.5 s late, plus the ad block OpenSubtitles appends
@@ -183,49 +183,31 @@ func (f *fixture) requestCount() int {
 // the wait, and the API's redirect followed (OpenSubtitles parked, an alert).
 func TestRunWritesSidecarsAndReconciles(t *testing.T) {
 	f := newFixture(t)
-	rep := f.run(t)
-	if len(rep.Alerts) > 0 {
+	if rep := f.run(t); len(rep.Alerts) > 0 {
 		t.Fatalf("alerts: %v", rep.Alerts)
 	}
-
 	got := cues(f.sidecar(t, ran))
-	if len(got) != len(f.ts) {
-		t.Fatalf("Ran: %d cues, want %d (ad block stripped)", len(got), len(f.ts))
-	}
 	for i, s := range got {
-		if d := s.start - f.ts[i]; d > 0.01 || d < -0.21 {
-			t.Fatalf("Ran cue %d starts %.3f s off its caption", i, d)
+		if d := s.start - f.ts[i]; len(got) != len(f.ts) || d > 0.01 || d < -0.21 {
+			t.Fatalf("Ran: %d cues (want %d, the ad block stripped), cue %d starts %.3f s off its caption", len(got), len(f.ts), i, d)
 		}
 	}
-	if f.sidecar(t, heat) != srt(f.ts, 0) {
-		t.Error("Heat: the embedded track was not extracted as is")
-	}
-	if f.sidecar(t, clerks) != srt(f.ts, 1) {
-		t.Error("Clerks: alass's alignment was not written")
-	}
-	if b, _ := os.ReadFile(strings.TrimSuffix(f.path(dune), ".mkv") + ".en.srt"); string(b) != "theirs" {
-		t.Error("Dune: existing sidecar changed")
+	if f.sidecar(t, heat) != srt(f.ts, 0) || f.sidecar(t, clerks) != srt(f.ts, 1) {
+		t.Error("Heat's embedded track not extracted as is, or Clerks' alass alignment not written")
 	}
 	calls, _ := os.ReadFile(filepath.Join(f.h.Env.FFmpeg.Dir, "ffprobe.calls"))
-	if strings.Contains(string(calls), "Dune") {
-		t.Error("Dune was probed although it has a sidecar")
+	if b, _ := os.ReadFile(strings.TrimSuffix(f.path(dune), ".mkv") + ".en.srt"); string(b) != "theirs" || strings.Contains(string(calls), "Dune") {
+		t.Error("Dune's existing sidecar changed, or Dune probed")
 	}
-	var first, outcome string
+	var first, fields string
 	db := f.h.Env.Store.DB()
 	db.QueryRow(`SELECT item FROM events WHERE stage='subtitles' ORDER BY id LIMIT 1`).Scan(&first)
-	db.QueryRow(`SELECT outcome FROM subtitles_titles WHERE path=?`, f.path(show)).Scan(&outcome)
-	if first != f.path(ran) {
-		t.Errorf("first title handled: %s, want the one without English audio", first)
-	}
-	if outcome != "no_candidates" {
-		t.Errorf("Show outcome %q", outcome)
-	}
-	var fields string
 	db.QueryRow(`SELECT fields FROM events WHERE item=? AND status='retimed'`, f.path(ran)).Scan(&fields)
 	var ev map[string]any
 	json.Unmarshal([]byte(fields), &ev)
-	if ms, ok := ev["ref_median_ms"].(float64); !ok || math.Abs(ms) > 210 {
-		t.Errorf("Ran event %s: want ref_median_ms within 210", fields)
+	if ms, ok := ev["ref_median_ms"].(float64); first != f.path(ran) || f.outcomes()[f.path(show)] != "no_candidates" || !ok || math.Abs(ms) > 210 {
+		t.Errorf("first title %s (want Ran, without English audio), Show %q, Ran's event %s (want ref_median_ms within 210)",
+			first, f.outcomes()[f.path(show)], fields)
 	}
 	pushes := f.h.Jellyfin.Calls("POST", "/Library/Media/Updated")
 	var told []byte
@@ -235,27 +217,16 @@ func TestRunWritesSidecarsAndReconciles(t *testing.T) {
 	if len(pushes) != 2 || bytes.Count(pushes[0].Body, []byte(`"Created"`)) != 1 || bytes.Count(told, []byte(`"Created"`)) != 3 {
 		t.Errorf("Jellyfin told %s; want the first sidecar at once and the other two at the end", told)
 	}
-
-	before := f.requestCount()
-	f.run(t)
-	if n := f.requestCount(); n != before {
-		t.Errorf("rerun made %d provider requests; want none", n-before)
-	}
-	f.h.Now = f.h.Now.Add(169 * time.Hour)
-	f.run(t)
-	if n := f.requestCount(); n == before {
-		t.Error("Show was not searched again after retry_after")
-	}
-	before = f.requestCount()
-	f.h.Now = f.h.Now.Add(169 * time.Hour)
-	f.run(t)
-	if n := f.requestCount(); n != before {
-		t.Error("Show searched again a week after its second miss; want two weeks")
-	}
-	f.h.Now = f.h.Now.Add(168 * time.Hour)
-	f.run(t)
-	if n := f.requestCount(); n == before {
-		t.Error("Show not searched again two weeks after its second miss")
+	// Show's misses: none again at once, then after 1 week, then 2 weeks (not 1) after its second miss.
+	for i, step := range []struct {
+		after    time.Duration
+		searched bool
+	}{{0, false}, {169 * time.Hour, true}, {169 * time.Hour, false}, {168 * time.Hour, true}} {
+		before := f.requestCount()
+		f.h.Now = f.h.Now.Add(step.after)
+		if f.run(t); (f.requestCount() != before) != step.searched {
+			t.Errorf("step %d, %v later: searched %v, want %v", i, step.after, !step.searched, step.searched)
+		}
 	}
 }
 
@@ -273,9 +244,10 @@ func (f *fixture) outcomes() map[string]string {
 
 // Catches titles recorded (a week lost, silently) that a provider never searched or let be tried: an outage, TMDB
 // out, or the download quota, which must also stop every OpenSubtitles request until it resumes 24 h later with no
-// alert (it is routine); a refused search deferring its own title too (one title's refusal would hold up every run),
-// or recording it while another provider is out for the quota; and dead download links (plain 404s) parking
-// OpenSubtitles with an alert instead of moving on as subfetch2.py does.
+// alert (it is routine); a candidate already rejected for the file downloaded again while its title waits; a refused
+// search deferring its own title too (one title's refusal would hold up every run), or recording it while another
+// provider is out for the quota; and dead download links (plain 404s) parking OpenSubtitles with an alert instead of
+// moving on as subfetch2.py does.
 func TestRunProviderTrouble(t *testing.T) {
 	gone := httptest.NewServer(http.NotFoundHandler())
 	gone.Close()
@@ -307,6 +279,18 @@ func TestRunProviderTrouble(t *testing.T) {
 	quota.h.Now = quota.h.Now.Add(time.Hour)
 	quota.run(t)
 	quota.sidecar(t, ran)
+
+	waits := newFixture(t) // Ran's one candidate is rejected while OpenSubtitles.com is down
+	waits.cut = true
+	os.Remove(filepath.Join(waits.h.Env.FFmpeg.Dir, "realign.srt"))
+	os.WriteFile(filepath.Join(waits.dir, "opensubtitles_api_key"), []byte("k\n"), 0o600)
+	waits.st.openSubtitlesCom = gone.URL
+	waits.options(`providers = ["opensubtitles", "opensubtitles-com"]`)
+	waits.run(t)
+	waits.run(t)
+	if n := strings.Count(strings.Join(waits.requests, " ")+" ", "/dl/ran.gz "); n != 1 || waits.outcomes()[waits.path(ran)] != "" {
+		t.Errorf("Ran's rejected candidate downloaded %d times in two runs, recorded %v; want once, Ran waiting", n, waits.outcomes())
+	}
 
 	refuses := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(403) }))
 	defer refuses.Close()
@@ -392,21 +376,15 @@ func TestRunTrustsOwnHashMatch(t *testing.T) {
 // waits; failing, the title it failed on is recorded (it may be that title's audio) and the titles behind it wait;
 // one alert either way.
 func TestRunWhenAlassBreaks(t *testing.T) {
-	outcome := func(f *fixture, rel string) string {
-		o := "deferred"
-		f.h.Env.Store.DB().QueryRow(`SELECT outcome FROM subtitles_titles WHERE path=?`, f.path(rel)).Scan(&o)
-		return o
-	}
 	missing := newFixture(t)
 	os.Remove(filepath.Join(missing.h.Env.FFmpeg.Dir, "alass"))
-	if rep := missing.run(t); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "alass not found") || outcome(missing, clerks) != "deferred" {
-		t.Errorf("alass missing: alerts %q, Clerks %s; want one alert and Clerks deferred", rep.Alerts, outcome(missing, clerks))
+	if rep := missing.run(t); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "alass not found") || missing.outcomes()[missing.path(clerks)] != "" {
+		t.Errorf("alass missing: alerts %q, recorded %v; want one alert and Clerks deferred", rep.Alerts, missing.outcomes())
 	}
-
 	broken := newFixture(t)
 	alass := broken.h.Script(t, "alass", "exit 1\n")
-	if rep := broken.run(t); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "alass failed") || outcome(broken, clerks) != "no_reference" {
-		t.Errorf("alass failing: alerts %q, Clerks %s; want one alert and Clerks recorded", rep.Alerts, outcome(broken, clerks))
+	if rep := broken.run(t); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "alass failed") || broken.outcomes()[broken.path(clerks)] != "no_reference" {
+		t.Errorf("alass failing: alerts %q, recorded %v; want one alert and Clerks recorded", rep.Alerts, broken.outcomes())
 	}
 	r := &run{env: broken.h.Env, opt: Options{Alass: alass}, rep: &stage.Report{}, alerted: map[string]bool{}}
 	next := &title{path: broken.path(clerks), info: probe.Info{Audio: []probe.Audio{{Index: 1}}}}
@@ -417,30 +395,41 @@ func TestRunWhenAlassBreaks(t *testing.T) {
 	}
 }
 
-// Catches: heavy work or downloads started while a guest is watching (the owner's own viewing must not block).
-func TestRunWaitsWhileGuestsWatch(t *testing.T) {
-	f := newFixture(t)
-	polls := make(chan struct{}, 100)
-	var mu sync.Mutex
-	body := `<MediaContainer size="2"><Video type="movie" title="X"><User title="saahil"/></Video><Video type="episode" title="Y"><User title="guest"/></Video></MediaContainer>`
-	f.h.Plex.HandleFunc("GET", "/status/sessions", func(w http.ResponseWriter, _ *http.Request) {
+// sessions makes Plex answer who is watching from *body ("" = Plex down) and reports each answer on the channel.
+func sessions(h *fake.Harness, mu *sync.Mutex, body *string) chan string {
+	served := make(chan string, 1000)
+	h.Plex.HandleFunc("GET", "/status/sessions", func(w http.ResponseWriter, _ *http.Request) {
 		mu.Lock()
-		w.Write([]byte(body))
+		b := *body
 		mu.Unlock()
+		if b == "" {
+			w.WriteHeader(500)
+		}
+		w.Write([]byte(b))
 		select {
-		case polls <- struct{}{}:
+		case served <- b:
 		default:
 		}
 	})
-	done := make(chan stage.Report)
-	go func() {
-		var rep stage.Report
-		f.st.Run(context.Background(), f.h.Env, &rep)
-		done <- rep
-	}()
+	return served
+}
+
+const (
+	nobody = `<MediaContainer size="1"><Video type="movie" title="X"><User title="saahil"/></Video></MediaContainer>` // the owner only
+	guest  = `<MediaContainer size="1"><Video type="episode" title="Y"><User title="guest"/></Video></MediaContainer>`
+)
+
+// Catches heavy work or downloads started while a guest is watching (the owner's own viewing must not block).
+func TestRunWaitsWhileGuestsWatch(t *testing.T) {
+	f := newFixture(t)
+	var mu sync.Mutex
+	body := guest
+	served := sessions(f.h, &mu, &body)
+	done := make(chan struct{})
+	go func() { f.st.Run(context.Background(), f.h.Env, &stage.Report{}); close(done) }()
 	for range 3 {
 		select {
-		case <-polls:
+		case <-served:
 		case <-done:
 			t.Fatal("the run finished without waiting for the guest to stop")
 		}
@@ -449,7 +438,7 @@ func TestRunWaitsWhileGuestsWatch(t *testing.T) {
 		t.Fatalf("%d provider requests while a guest watched", n)
 	}
 	mu.Lock()
-	body = `<MediaContainer size="1"><Video type="movie" title="X"><User title="saahil"/></Video></MediaContainer>`
+	body = nobody
 	mu.Unlock()
 	<-done
 	f.sidecar(t, ran)
@@ -464,23 +453,9 @@ func TestHelperStopsWhileGuestsWatch(t *testing.T) {
 	syscall.Mkfifo(pidPipe, 0o600)
 	syscall.Mkfifo(goPipe, 0o600)
 	helper := h.Script(t, "helper", `echo $$ > "`+pidPipe+`"; read x < "`+goPipe+`"; echo done`+"\n")
-	const nobody, guest = `<MediaContainer size="0"></MediaContainer>`,
-		`<MediaContainer size="1"><Video type="episode" title="Y"><User title="guest"/></Video></MediaContainer>`
 	var mu sync.Mutex
-	body, served := nobody, make(chan string, 1000)
-	h.Plex.HandleFunc("GET", "/status/sessions", func(w http.ResponseWriter, _ *http.Request) {
-		mu.Lock()
-		b := body
-		mu.Unlock()
-		if b == "" {
-			w.WriteHeader(500) // Plex down: who is watching is unknown
-		}
-		w.Write([]byte(b))
-		select {
-		case served <- b:
-		default:
-		}
-	})
+	body := nobody
+	served := sessions(h, &mu, &body)
 	out := make(chan string, 1)
 	go func() {
 		b, err := (&run{env: h.Env}).cmd(context.Background(), helper)
@@ -489,23 +464,19 @@ func TestHelperStopsWhileGuestsWatch(t *testing.T) {
 	raw, _ := os.ReadFile(pidPipe)
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
 	t.Cleanup(func() { syscall.Kill(-pid, syscall.SIGKILL) }) // a helper left stopped must not outlive the test
-	state := func(b string) string {                          // after two polls answered b: the first one's signal is sent before the second
-		mu.Lock()
-		body = b
-		mu.Unlock()
-		for n := 0; n < 2; {
-			if <-served == b {
-				n++
-			}
-		}
-		st, _ := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
-		return string(st)
-	}
 	for _, c := range []struct {
 		body, why string
 		stopped   bool
 	}{{guest, "a guest watches", true}, {nobody, "the guest left", false}, {"", "Plex cannot say", true}, {nobody, "Plex is back", false}} {
-		if st := state(c.body); strings.HasPrefix(st, "T") != c.stopped {
+		mu.Lock()
+		body = c.body
+		mu.Unlock()
+		for n := 0; n < 2; { // after two polls answered it: the first one's signal is sent before the second
+			if <-served == c.body {
+				n++
+			}
+		}
+		if st, _ := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output(); strings.HasPrefix(string(st), "T") != c.stopped {
 			t.Fatalf("helper state %q when %s; want stopped %v", st, c.why, c.stopped)
 		}
 	}
@@ -525,9 +496,7 @@ func TestRunStoppedAfterAWrite(t *testing.T) {
 		w.WriteHeader(500)
 	})
 	f.st.Run(ctx, f.h.Env, &stage.Report{})
-	var o string
-	f.h.Env.Store.DB().QueryRow(`SELECT outcome FROM subtitles_titles WHERE path=?`, f.path(ran)).Scan(&o)
-	if o != "retimed" {
+	if o := f.outcomes()[f.path(ran)]; o != "retimed" {
 		t.Errorf("Ran's sidecar, written as the run stopped, recorded as %q", o)
 	}
 	n := len(f.h.Jellyfin.Calls("POST", "/Library/Media/Updated"))

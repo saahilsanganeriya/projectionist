@@ -62,7 +62,7 @@ type Options struct {
 	MaxTitles  int           `toml:"max_titles"` // per run; 0 = every due title
 	SecretsDir string        `toml:"secrets_dir"`
 	Alass      string        `toml:"alass"`
-	Providers  []string      `toml:"providers"` // a keyed one also needs its key file in secrets_dir
+	Providers  []string      `toml:"providers"` // opensubtitles-com and subdl also need opensubtitles_api_key, subdl_api_key in secrets_dir
 }
 
 func defaults() Options {
@@ -188,8 +188,9 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 		return def
 	}
 	r := &run{env: env, opt: opt, rep: rep, alerted: map[string]bool{}}
+	key := func(name string) string { return filepath.Join(opt.SecretsDir, name) }
 	for _, p := range opt.Providers {
-		switch key := filepath.Join(opt.SecretsDir, strings.ReplaceAll(p, "-", "_")+"_api_key"); p {
+		switch p {
 		case "opensubtitles":
 			l := &legacy{base: or(s.openSubtitles, "https://rest.opensubtitles.org/search/"), userAgent: userAgent, hc: noRedirect,
 				pace: newPacer(time.Second), dl: newPacer(dlGap)}
@@ -206,14 +207,14 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 			}
 			r.providers = append(r.providers, l)
 		case "opensubtitles-com":
-			if fileExists(key) {
-				r.providers = append(r.providers, &dotCom{base: or(s.openSubtitlesCom, "https://api.opensubtitles.com/api/v1"), keyFile: key,
+			if k := key("opensubtitles_api_key"); fileExists(k) {
+				r.providers = append(r.providers, &dotCom{base: or(s.openSubtitlesCom, "https://api.opensubtitles.com/api/v1"), keyFile: k,
 					userAgent: userAgent, hc: hc, pace: newPacer(time.Second)})
 			}
 		case "subdl":
-			if fileExists(key) {
+			if k := key("subdl_api_key"); fileExists(k) {
 				r.providers = append(r.providers, &subdl{api: or(s.subdlAPI, "https://api.subdl.com/api/v1/subtitles"),
-					dl: or(s.subdlDL, "https://dl.subdl.com"), keyFile: key, hc: hc, pace: newPacer(time.Second)})
+					dl: or(s.subdlDL, "https://dl.subdl.com"), keyFile: k, hc: hc, pace: newPacer(time.Second)})
 			}
 		case "gestdown": // free community services: half the rate
 			r.providers = append(r.providers, &gestdown{base: or(s.gestdownAPI, "https://api.gestdown.info"), hc: hc,
