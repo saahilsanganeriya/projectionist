@@ -1,9 +1,15 @@
 package rename
 
 import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+
+	"projectionist/internal/fake"
 )
 
 // Catches subtitle facts that would flip a naming decision: cues miscounted (the "forced" rule), the SDH share not
@@ -51,5 +57,33 @@ func TestReadSubFacts(t *testing.T) {
 		if got != c.want {
 			t.Errorf("%s: %+v, want %+v", c.name, got, c.want)
 		}
+	}
+}
+
+// Catches a container stop being ignored by the first run's long read of every subtitle (it must return at once), and
+// a stopped run losing what it read: the next run must read only the files the stopped one did not reach.
+func TestSubFactsStopKeepsProgress(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	dir := t.TempDir()
+	files := map[string]int64{}
+	for _, n := range []string{"a.srt", "b.srt", "c.srt"} {
+		write(t, filepath.Join(dir, n), englishSRT(3))
+		files[filepath.Join(dir, n)] = 1
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	var read []string
+	readFile = func(p string) ([]byte, error) {
+		if read = append(read, filepath.Base(p)); len(read) == 2 {
+			stop() // the container is told to stop while the second file is read
+		}
+		return os.ReadFile(p)
+	}
+	t.Cleanup(func() { readFile = os.ReadFile })
+	if _, err := subFacts(ctx, h.Env, files); !errors.Is(err, context.Canceled) || len(read) != 2 {
+		t.Fatalf("stopped run: err=%v, read %v; want context.Canceled after a.srt and b.srt", err, read)
+	}
+	read = nil
+	if facts, err := subFacts(context.Background(), h.Env, files); err != nil || len(facts) != 3 || strings.Join(read, ",") != "c.srt" {
+		t.Fatalf("next run: err=%v, %d facts, read %v; want only c.srt read", err, len(facts), read)
 	}
 }

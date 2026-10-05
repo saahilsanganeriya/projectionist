@@ -9,6 +9,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -249,8 +250,14 @@ CREATE TABLE IF NOT EXISTS rename_subfacts_v2 (
   facts    TEXT NOT NULL
 )`
 
+var readFile = os.ReadFile // a test stops a run mid-way through it
+
+// factsBatch is how many freshly read files are committed at once: a stop mid-way (the first run reads every file,
+// ~20 min on a busy NAS) keeps what it read, and one transaction never holds more than this.
+const factsBatch = 500
+
 // subFacts returns the facts of every subtitle in files, reading only those new or changed since the last run (the
-// cache is keyed by path, size and mtime, and forgets files that are gone).
+// cache is keyed by path, size and mtime, and forgets files that are gone). It stops at ctx's end, keeping what it read.
 func subFacts(ctx context.Context, env *stage.Env, files map[string]int64) (map[string]SubFacts, error) {
 	db := env.Store.DB()
 	if _, err := db.ExecContext(ctx, subFactsSchema); err != nil {
@@ -280,11 +287,30 @@ func subFacts(ctx context.Context, env *stage.Env, files map[string]int64) (map[
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	out := map[string]SubFacts{}
 	fresh := map[string]row{}
-	for p := range files {
+	commit := func() error { // a stop must not lose the batch, so it is written without ctx
+		tx, err := db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		for p, r := range fresh {
+			raw, _ := json.Marshal(r.facts)
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO rename_subfacts_v2(path, size, mtime_ns, facts) VALUES (?, ?, ?, ?)`,
+				p, r.size, r.mtime, string(raw)); err != nil {
+				return err
+			}
+		}
+		clear(fresh)
+		return tx.Commit()
+	}
+	out := map[string]SubFacts{}
+	for _, p := range sortedKeys(files) {
 		if !factExt[lowerExt(p)] {
 			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, errors.Join(err, commit())
 		}
 		info, err := os.Lstat(p)
 		if err != nil {
@@ -292,33 +318,28 @@ func subFacts(ctx context.Context, env *stage.Env, files map[string]int64) (map[
 		}
 		r, ok := cached[p]
 		if !ok || r.size != info.Size() || r.mtime != info.ModTime().UnixNano() {
-			raw, err := os.ReadFile(p)
+			raw, err := readFile(p)
 			if err != nil {
 				continue
 			}
 			r = row{info.Size(), info.ModTime().UnixNano(), readSubFacts(raw, lowerExt(p))}
-			fresh[p] = r
+			if fresh[p] = r; len(fresh) >= factsBatch {
+				if err := commit(); err != nil {
+					return nil, err
+				}
+			}
 		}
 		out[p] = r.facts
 	}
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
+	if err := commit(); err != nil {
 		return nil, err
-	}
-	defer tx.Rollback()
-	for p, r := range fresh {
-		raw, _ := json.Marshal(r.facts)
-		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO rename_subfacts_v2(path, size, mtime_ns, facts) VALUES (?, ?, ?, ?)`,
-			p, r.size, r.mtime, string(raw)); err != nil {
-			return nil, err
-		}
 	}
 	for p := range cached {
 		if _, live := out[p]; !live {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM rename_subfacts_v2 WHERE path = ?`, p); err != nil {
+			if _, err := db.ExecContext(ctx, `DELETE FROM rename_subfacts_v2 WHERE path = ?`, p); err != nil {
 				return nil, err
 			}
 		}
 	}
-	return out, tx.Commit()
+	return out, nil
 }
