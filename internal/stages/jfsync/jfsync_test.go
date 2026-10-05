@@ -49,7 +49,7 @@ func writeBackup(t *testing.T, path string, rows [][]any) {
 		CREATE TABLE metadata_item_settings (id INTEGER PRIMARY KEY, account_id INTEGER, guid TEXT, rating REAL, view_offset INTEGER, view_count INTEGER, last_viewed_at INTEGER, updated_at INTEGER);
 		CREATE TABLE media_items (id INTEGER PRIMARY KEY, metadata_item_id INTEGER, deleted_at INTEGER);
 		CREATE TABLE media_parts (id INTEGER PRIMARY KEY, media_item_id INTEGER, file TEXT);
-		INSERT INTO accounts VALUES (1, 'saahilsanganeriya'), (578, 'roger'), (9, 'someone')`)
+		INSERT INTO accounts VALUES (1, 'saahilsanganeriya'), (578, 'roger')`)
 	for _, r := range rows {
 		typ, section := 1, 4
 		if strings.Contains(r[3].(string), "/TV/") {
@@ -90,7 +90,7 @@ func newHarness(t *testing.T, jellyfinStatus int) (h *fake.Harness, w *writes, o
 	writeBackup(t, filepath.Join(dir, "backups", "pre-y.db"), [][]any{
 		{"saahilsanganeriya", 10, 0, heat, 2, 0, T1}, {"saahilsanganeriya", 12, 0, alien, 1, 0, T1},
 		{"saahilsanganeriya", 14, 0, clerks, 1, 0, T1}, {"saahilsanganeriya", 15, 0, dune, 1, 0, T1},
-		{"roger", 21, 2, wire, 1, 0, T2}, {"someone", 11, 0, ran, 3, 0, T2},
+		{"roger", 21, 2, wire, 1, 0, T2},
 	})
 	plan = filepath.Join(dir, "plan.tsv")
 	options = `plex_backups = "` + filepath.Join(dir, "backups") + `"
@@ -179,7 +179,8 @@ func plexHook(t *testing.T, h *fake.Harness, payload string) {
 
 // Catches: a dry run that writes; a state written back to the app it came from (Heat's re-created Plex item would
 // be scrobbled again, adding a play); a friend's write sent with the owner's token; an existing plex.tv webhook
-// dropped when ours is added; a rerun that writes again; and a pushed Plex play not reaching Jellyfin.
+// dropped when ours is added; a rerun that writes again; a pushed play not reaching the other app; and a pushed
+// play not counted as held by the app that pushed it (Plex would be scrobbled again, adding a play).
 func TestRunTwoWay(t *testing.T) {
 	h, w, options, plan := newHarness(t, 200)
 	h.SetOptions(options + "apply = false\n")
@@ -226,6 +227,17 @@ func TestRunTwoWay(t *testing.T) {
 	if got := w.since(done); len(got) != 1 || got[0] != `/UserItems/b1/UserData?userId=u1 {"LastPlayedDate":"2026-10-05T07:00:00Z","PlayCount":1,"PlaybackPositionTicks":0,"Played":true}` {
 		t.Fatalf("after the Plex play: %v", got)
 	}
+
+	// A rewatch stopped 10 min in on Jellyfin: Plex already holds the play (it pushed it), so only the position goes.
+	rec := httptest.NewRecorder()
+	(Stage{}).Hooks(h.Env)["POST /hooks/jellyfin"].ServeHTTP(rec, httptest.NewRequest("POST", "/hooks/jellyfin", strings.NewReader(
+		`{"NotificationType":"UserDataSaved","NotificationUsername":"saahil","ItemId":"b1","ItemType":"Movie","SaveReason":"PlaybackFinished","Played":true,"PlayCount":1,"PlaybackPositionTicks":6000000000}`)))
+	h.Now = h.Now.Add(time.Minute)
+	run(t, h)
+	if got := w.since(done + 1); rec.Code != http.StatusNoContent || len(got) != 1 ||
+		got[0] != "owner /:/progress?identifier=com.plexapp.plugins.library&key=11&time=600000&state=stopped" {
+		t.Fatalf("after the Jellyfin rewatch (hook %d): %v", rec.Code, got)
+	}
 }
 
 // Catches: a failing app failing the run, a failed item retried before its backoff, and a down app being sent its
@@ -254,8 +266,10 @@ func TestWriteFailuresBackOff(t *testing.T) {
 }
 
 // Catches: Plex's stop after a finish overwriting the finish with a resume point near the end; a removed rating
-// (-1) recorded as a rating; plays of unmapped accounts or of the Home Videos section recorded; Jellyfin's
-// every-few-seconds progress saves flooding the record; and a dashed item GUID never matching the API's id.
+// (-1) recorded as a rating; plays of unmapped accounts or of the Home Videos section recorded; a part-way
+// Jellyfin stop recorded as a whole state (its played=false would unmark a play made in Plex) while an explicit
+// "mark unplayed" is lost; Jellyfin's every-few-seconds progress saves flooding the record; and a dashed item GUID
+// never matching the API's id.
 func TestParseHooks(t *testing.T) {
 	opt := defaults()
 	opt.Users = []User{{Name: "saahil", Plex: "saahilsanganeriya", Jellyfin: "saahil"}}
@@ -273,7 +287,9 @@ func TestParseHooks(t *testing.T) {
 		{"unmapped account", "plex", plex("media.scrobble", "someone", "4", ""), ""},
 		{"home videos", "plex", plex("media.scrobble", "saahilsanganeriya", `"5"`, ""), ""},
 		{"user data saved", "jellyfin", `{"NotificationType":"UserDataSaved","NotificationUsername":"saahil","ItemId":"AB-CD","ItemType":"Movie",` +
-			`"SaveReason":"PlaybackFinished","PlaybackPositionTicks":12340000}`, "state 1234 <nil> jellyfin:abcd"},
+			`"SaveReason":"PlaybackFinished","Played":true,"PlaybackPositionTicks":12340000}`, "stopped 1234 <nil> jellyfin:abcd"},
+		{"marked unplayed", "jellyfin", `{"NotificationType":"UserDataSaved","NotificationUsername":"saahil","ItemId":"ab","ItemType":"Movie",` +
+			`"SaveReason":"TogglePlayed","Played":false}`, "state 0 <nil> jellyfin:ab"},
 		{"progress save", "jellyfin", `{"NotificationType":"UserDataSaved","NotificationUsername":"saahil","ItemId":"ab","ItemType":"Movie",` +
 			`"SaveReason":"PlaybackProgress"}`, ""},
 	}

@@ -166,7 +166,7 @@ func hook(env *stage.Env, opt Options, parse parser) http.Handler {
 
 // record keeps an event an app pushed, and folds it into what that app item holds (so it is never sent back).
 func record(ctx context.Context, db *sql.DB, e watch.Event) error {
-	if _, err := watch.Add(ctx, db, e); err != nil {
+	if err := watch.Add(ctx, db, e); err != nil {
 		return err
 	}
 	app, id, _ := strings.Cut(e.Ref, ":")
@@ -251,14 +251,30 @@ func parseJellyfin(r *http.Request, opt Options, now time.Time) (watch.Event, bo
 		return watch.Event{}, false, fmt.Errorf("jellyfin webhook: %w", err)
 	}
 	person, mapped := opt.person(jellyfinApp, p.NotificationUsername)
-	// PlaybackProgress saves arrive every few seconds while playing; the save at the stop carries the final state.
-	if !mapped || p.NotificationType != "UserDataSaved" || p.SaveReason == "PlaybackProgress" || p.ItemID == "" ||
-		(p.ItemType != "Movie" && p.ItemType != "Episode") {
+	if !mapped || p.NotificationType != "UserDataSaved" || p.ItemID == "" || (p.ItemType != "Movie" && p.ItemType != "Episode") {
 		return watch.Event{}, false, nil
 	}
 	id := strings.ToLower(strings.ReplaceAll(p.ItemID, "-", "")) // the plugin may send dashed GUIDs; the API never does
-	return watch.Event{Person: person, Ref: jellyfinApp + ":" + id, Source: "jellyfin-webhook", At: now, Kind: watch.Snapshot,
-		Played: p.Played, Plays: p.PlayCount, PositionMs: p.PlaybackPositionTicks / 10_000, Rating: p.Rating}, true, nil
+	e := watch.Event{Person: person, Ref: jellyfinApp + ":" + id, Source: "jellyfin-webhook", At: now,
+		Played: p.Played, Plays: p.PlayCount, PositionMs: p.PlaybackPositionTicks / 10_000, Rating: p.Rating}
+	switch p.SaveReason {
+	case "PlaybackFinished": // a stop: completed (played, position reset) or part-way (played untouched)
+		switch {
+		case e.PositionMs > 0:
+			e.Kind, e.Played, e.Plays = watch.Stopped, false, 0
+		case e.Played:
+			e.Kind = watch.Snapshot
+		default:
+			return watch.Event{}, false, nil // stopped in the first minutes: Jellyfin keeps nothing
+		}
+	case "TogglePlayed", "UpdateUserData": // mark (un)played, or an API write such as this stage's own
+		e.Kind = watch.Snapshot
+	case "UpdateUserRating":
+		e.Kind = watch.Rated
+	default: // PlaybackStart; PlaybackProgress arrives every few seconds and the stop carries its final state
+		return watch.Event{}, false, nil
+	}
+	return e, true, nil
 }
 
 // ---- one-time migrations of the history that existed only inside an app ----
@@ -292,9 +308,9 @@ func (s *syncer) backfillPlex(ctx context.Context) error {
 	n := 0
 	for _, r := range rows {
 		person, _ := s.opt.person(plexApp, r.account)
-		e := watch.Event{Person: person, Ref: plexApp + ":" + r.ratingKey, Source: "plex-backup", At: r.at, Kind: watch.Snapshot,
-			Played: r.plays > 0, Plays: r.plays, PositionMs: r.positionMs, Rating: r.rating}
-		added, err := s.migrate(ctx, e, watch.ItemsForPath(r.file, r.index), r.guid)
+		e := history(r.plays > 0, r.plays, r.positionMs, r.rating)
+		e.Person, e.Ref, e.Source, e.At = person, plexApp+":"+r.ratingKey, "plex-backup", r.at
+		added, err := s.migrate(ctx, e, watch.ItemsForPath(r.file, r.index))
 		if err != nil {
 			return err
 		}
@@ -304,34 +320,43 @@ func (s *syncer) backfillPlex(ctx context.Context) error {
 	return s.env.Store.PutJSON(ctx, name, "migrated."+plexApp, migrated{From: file, At: s.env.Now(), Events: n})
 }
 
-// migrate records one migrated row per item it holds, and folds it into what the app item holds.
-func (s *syncer) migrate(ctx context.Context, e watch.Event, items []string, rowKey string) (int, error) {
+// history is the event for one migrated row. An item the app never saw finished becomes a stop (or a rating), not a
+// state with played=false: the app's "not played" only means it did not know, so it must not unmark a play
+// recorded elsewhere.
+func history(played bool, plays int, positionMs int64, rating *float64) watch.Event {
+	switch {
+	case played:
+		return watch.Event{Kind: watch.Snapshot, Played: true, Plays: plays, PositionMs: positionMs, Rating: rating}
+	case positionMs > 0:
+		return watch.Event{Kind: watch.Stopped, PositionMs: positionMs, Rating: rating}
+	default:
+		return watch.Event{Kind: watch.Rated, Rating: rating}
+	}
+}
+
+// migrate records a migrated row once per item it holds, and folds it into what the app item holds.
+func (s *syncer) migrate(ctx context.Context, e watch.Event, items []string) (int, error) {
 	app, id, _ := strings.Cut(e.Ref, ":")
 	if len(items) == 0 {
 		s.rep.Count("outside_scheme."+app, 1)
 		return 0, nil
 	}
-	n := 0
 	for _, it := range items {
-		e.Item, e.Dedup = it, e.Source+":"+e.Person+":"+rowKey+":"+it
-		added, err := watch.Add(ctx, s.env.Store.DB(), e)
-		if err != nil {
-			return n, err
-		}
-		if added {
-			n++
+		e.Item = it
+		if err := watch.Add(ctx, s.env.Store.DB(), e); err != nil {
+			return 0, err
 		}
 	}
-	s.rep.Count("imported."+app, n)
-	return n, applySink(ctx, s.env.Store.DB(), app, e.Person, id, e)
+	s.rep.Count("imported."+app, len(items))
+	return len(items), applySink(ctx, s.env.Store.DB(), app, e.Person, id, e)
 }
 
 type backupRow struct {
-	account, ratingKey, guid, file string
-	index, plays                   int
-	positionMs                     int64
-	rating                         *float64
-	at                             time.Time
+	account, ratingKey, file string
+	index, plays             int
+	positionMs               int64
+	rating                   *float64
+	at                       time.Time
 }
 
 // newestBackup is the newest Plex library database copy below dir (not the blobs database).
@@ -360,7 +385,7 @@ func readPlexBackup(ctx context.Context, file string, accounts []any, movies, tv
 		return nil, err
 	}
 	defer db.Close()
-	rows, err := db.QueryContext(ctx, `SELECT a.name, m.id, coalesce(m."index", 0), s.guid, coalesce(s.view_count, 0),
+	rows, err := db.QueryContext(ctx, `SELECT a.name, m.id, coalesce(m."index", 0), coalesce(s.view_count, 0),
 		coalesce(s.view_offset, 0), s.rating, coalesce(nullif(s.last_viewed_at, 0), s.updated_at, 0),
 		coalesce((SELECT p.file FROM media_items mi JOIN media_parts p ON p.media_item_id = mi.id
 		          WHERE mi.metadata_item_id = m.id AND mi.deleted_at IS NULL ORDER BY p.id LIMIT 1), '')
@@ -378,7 +403,7 @@ func readPlexBackup(ctx context.Context, file string, accounts []any, movies, tv
 	for rows.Next() {
 		var r backupRow
 		var at int64
-		if err := rows.Scan(&r.account, &r.ratingKey, &r.index, &r.guid, &r.plays, &r.positionMs, &r.rating, &at, &r.file); err != nil {
+		if err := rows.Scan(&r.account, &r.ratingKey, &r.index, &r.plays, &r.positionMs, &r.rating, &at, &r.file); err != nil {
 			return nil, err
 		}
 		r.at = time.Unix(at, 0).UTC()
@@ -420,9 +445,9 @@ func (s *syncer) backfillJellyfin(ctx context.Context, addr *addresses) error {
 			for _, it := range list.Items {
 				ud := it.UserData
 				at, _ := time.Parse(time.RFC3339Nano, ud.LastPlayedDate) // absent: the zero time, older than any other source
-				e := watch.Event{Person: u.Name, Ref: jellyfinApp + ":" + it.ID, Source: "jellyfin-backfill", At: at,
-					Kind: watch.Snapshot, Played: ud.Played, Plays: ud.PlayCount, PositionMs: ud.PlaybackPositionTicks / 10_000, Rating: ud.Rating}
-				added, err := s.migrate(ctx, e, watch.ItemsForPath(it.Path, 0), it.ID)
+				e := history(ud.Played, ud.PlayCount, ud.PlaybackPositionTicks/10_000, ud.Rating)
+				e.Person, e.Ref, e.Source, e.At = u.Name, jellyfinApp+":"+it.ID, "jellyfin-backfill", at
+				added, err := s.migrate(ctx, e, watch.ItemsForPath(it.Path, 0))
 				if err != nil {
 					return err
 				}

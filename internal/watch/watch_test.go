@@ -66,11 +66,9 @@ func TestStatesLastWriterWins(t *testing.T) {
 	ep := "/tv/The Wire (2002) {tmdb-1438}/Season 01/The Wire (2002) - S01E01-E02 - The Target.mkv"
 	live := Event{Person: "saahil", Ref: "jellyfin:e1", Source: "jellyfin-webhook", At: time.Unix(200, 0), Kind: Finished}
 	old := Event{Person: "saahil", Item: "tv/tmdb-1438/s01e01", Ref: "plex:7", Source: "plex-backup", At: time.Unix(100, 0),
-		Kind: Snapshot, PositionMs: 60000, Dedup: "x"}
+		Kind: Snapshot, PositionMs: 60000}
 	Add(ctx, db, live)
-	for range 2 { // the dedup key makes the second import a no-op
-		Add(ctx, db, old)
-	}
+	Add(ctx, db, old)
 	pending, _ := Unresolved(ctx, db)
 	if err := Resolve(ctx, db, pending[0], ItemsForPath(ep, 0)); err != nil {
 		t.Fatal(err)

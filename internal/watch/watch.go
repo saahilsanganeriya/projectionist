@@ -31,19 +31,20 @@ CREATE TABLE IF NOT EXISTS watch_events (
   played      INTEGER NOT NULL,
   plays       INTEGER NOT NULL,
   position_ms INTEGER NOT NULL,
-  rating      REAL,            -- 0–10; NULL: the event says nothing about the rating (Rated: clears it)
-  dedup       TEXT UNIQUE      -- set by imports, so rerunning one adds nothing
+  rating      REAL             -- 0–10; NULL: the event says nothing about the rating (Rated: clears it)
 );
 CREATE INDEX IF NOT EXISTS watch_events_item ON watch_events(person, item, at);
 `
 
 type Kind string
 
+// Every kind also sets Rating when it is not nil.
 const (
 	Finished Kind = "finished" // a completed viewing: played, one more play, position back to 0
-	Stopped  Kind = "stopped"  // stopped part-way at PositionMs
-	Snapshot Kind = "state"    // a source's whole state: Played, Plays, PositionMs, and Rating when not nil
-	Rated    Kind = "rated"    // Rating set; nil clears it
+	Stopped  Kind = "stopped"  // stopped part-way at PositionMs; says nothing about played
+	Snapshot Kind = "state"    // a source's whole state: Played, Plays, PositionMs. Played=false unmarks a played item,
+	// so only a source that knows (an explicit "mark unplayed") sends one with Played=false.
+	Rated Kind = "rated" // Rating set; nil clears it
 )
 
 type Event struct {
@@ -58,7 +59,6 @@ type Event struct {
 	Plays      int
 	PositionMs int64
 	Rating     *float64
-	Dedup      string
 }
 
 // State is one person's state for one item.
@@ -82,10 +82,8 @@ func (s State) Apply(e Event) State {
 		n.PositionMs = e.PositionMs
 	case Snapshot:
 		n.Played, n.Plays, n.PositionMs = e.Played, e.Plays, e.PositionMs
-		if e.Rating != nil {
-			n.Rating = e.Rating
-		}
-	case Rated:
+	}
+	if e.Rating != nil || e.Kind == Rated {
 		n.Rating = e.Rating
 	}
 	if n.Same(s) {
@@ -134,23 +132,13 @@ func Open(ctx context.Context, db *sql.DB) error {
 	return err
 }
 
-// Add appends e; added is false when an event with the same Dedup key is already recorded.
-func Add(ctx context.Context, db *sql.DB, e Event) (added bool, err error) {
-	var dedup, rating any
-	if e.Dedup != "" {
-		dedup = e.Dedup
-	}
-	if e.Rating != nil {
-		rating = *e.Rating
-	}
-	res, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO watch_events
-		(person, item, ref, source, at, kind, played, plays, position_ms, rating, dedup) VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-		e.Person, e.Item, e.Ref, e.Source, e.At.UTC().Format(store.TimeFormat), e.Kind, e.Played, e.Plays, e.PositionMs, rating, dedup)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
-	return n == 1, err
+// Add appends e. Recording the same snapshot, stop or rating twice changes no state, so an import interrupted
+// part-way may simply run again; a Finished event must be recorded once.
+func Add(ctx context.Context, db *sql.DB, e Event) error {
+	_, err := db.ExecContext(ctx, `INSERT INTO watch_events
+		(person, item, ref, source, at, kind, played, plays, position_ms, rating) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		e.Person, e.Item, e.Ref, e.Source, e.At.UTC().Format(store.TimeFormat), e.Kind, e.Played, e.Plays, e.PositionMs, e.Rating)
+	return err
 }
 
 // Unresolved lists events whose ref has not been mapped to an item yet.
@@ -164,8 +152,8 @@ func Resolve(ctx context.Context, db *sql.DB, e Event, items []string) error {
 		return err
 	}
 	for _, it := range items[1:] {
-		e.Item, e.Dedup = it, ""
-		if _, err := Add(ctx, db, e); err != nil {
+		e.Item = it
+		if err := Add(ctx, db, e); err != nil {
 			return err
 		}
 	}
@@ -187,8 +175,8 @@ func States(ctx context.Context, db *sql.DB) (map[Key]State, error) {
 }
 
 func query(ctx context.Context, db *sql.DB, where string) ([]Event, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, person, item, ref, source, at, kind, played, plays, position_ms, rating,
-		coalesce(dedup, '') FROM watch_events `+where)
+	rows, err := db.QueryContext(ctx, `SELECT id, person, item, ref, source, at, kind, played, plays, position_ms, rating
+		FROM watch_events `+where)
 	if err != nil {
 		return nil, err
 	}
@@ -197,16 +185,12 @@ func query(ctx context.Context, db *sql.DB, where string) ([]Event, error) {
 	for rows.Next() {
 		var e Event
 		var at string
-		var rating sql.NullFloat64
 		if err := rows.Scan(&e.ID, &e.Person, &e.Item, &e.Ref, &e.Source, &at, &e.Kind, &e.Played, &e.Plays, &e.PositionMs,
-			&rating, &e.Dedup); err != nil {
+			&e.Rating); err != nil {
 			return nil, err
 		}
 		if e.At, err = time.Parse(store.TimeFormat, at); err != nil {
 			return nil, err
-		}
-		if rating.Valid {
-			e.Rating = &rating.Float64
 		}
 		out = append(out, e)
 	}
