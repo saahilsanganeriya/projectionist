@@ -36,6 +36,9 @@ services:
       # GPU self-test sample and the old scripts' state files (imported once at cutover): read-only.
       - /volume1/PlexMediaServer/scripts:/volume1/PlexMediaServer/scripts:ro
       - /volume1/PlexMediaServer/remote4k:/volume1/PlexMediaServer/remote4k # STATUS.txt the owner reads
+      # health stage: inspect containers, restart the ones in [stages.health].restartable. The socket is root on the
+      # host and ":ro" would not limit its API; the allow-list in code is the bound.
+      - /var/run/docker.sock:/var/run/docker.sock
     secrets: [jellyfin_key] # /run/secrets/jellyfin_key, read-only
     logging:
       driver: json-file
