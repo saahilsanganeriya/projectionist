@@ -74,8 +74,8 @@ func shelvedKeys(ctx context.Context, db *sql.DB) ([]string, error) {
 	return keys, rows.Err()
 }
 
-// made returns the ids of the collections the stage made in app, and the times of its creates still unconfirmed.
-func made(ctx context.Context, db *sql.DB, app string) (ids map[string]bool, intents []time.Time, err error) {
+// madeIn returns the ids of the collections the stage made in app, and the times of its creates still unconfirmed.
+func madeIn(ctx context.Context, db *sql.DB, app string) (ids map[string]bool, intents []time.Time, err error) {
 	rows, err := db.QueryContext(ctx, `SELECT id, intent_at FROM lists_sinks WHERE app=?`, app)
 	if err != nil {
 		return nil, nil, err

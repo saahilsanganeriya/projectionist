@@ -130,7 +130,7 @@ func (j *jellyfinSink) load(ctx context.Context) appReport {
 	if !ok {
 		return r
 	}
-	mine, intents, err := made(ctx, j.env.Store.DB(), "jellyfin")
+	mine, intents, err := madeIn(ctx, j.env.Store.DB(), "jellyfin")
 	if err != nil {
 		j.w.stopped = "state: " + err.Error()
 		return r

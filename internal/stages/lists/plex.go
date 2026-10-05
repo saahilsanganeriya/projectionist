@@ -122,7 +122,7 @@ func (p *plexSink) load(ctx context.Context) appReport {
 	if !ok {
 		return r // the writer is stopped: reconcile waits for the next run
 	}
-	mine, intents, err := made(ctx, p.env.Store.DB(), "plex")
+	mine, intents, err := madeIn(ctx, p.env.Store.DB(), "plex")
 	if err != nil {
 		p.w.stopped = "state: " + err.Error()
 		return r
