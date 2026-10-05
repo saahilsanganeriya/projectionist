@@ -113,8 +113,8 @@ const (
 )
 
 // fakeProbe answers by file content: "corrupt" fails like ffprobe on a zero-headed file, "embedded" carries an
-// English text track, "forced" only a forced English one, "moved during its probe" and "ffprobe killed" give no
-// verdict, anything else is a plain video. Every call is logged to <ffmpeg dir>/calls.
+// English text track, "forced" only a forced English one, "moved during its probe", "ffprobe killed" and "ffprobe
+// cannot start" give no verdict, anything else is a plain video. Every call is logged to <ffmpeg dir>/calls.
 func fakeProbe(t *testing.T, h *fake.Harness) string {
 	calls := filepath.Join(h.Env.FFmpeg.Dir, "calls")
 	h.Script(t, "ffprobe", `for a; do f=$a; done; echo "$f" >> "`+calls+`"
@@ -124,6 +124,7 @@ embedded) echo '`+withEnglish+`';;
 forced) echo '`+forcedOnly+`';;
 "moved during its probe") rm "$f"; echo "$f: No such file or directory" >&2; exit 1;;
 "ffprobe killed") kill -9 $$;;
+"ffprobe cannot start") exit 127;;
 *) echo '`+videoOnly+`';;
 esac
 `)
@@ -294,9 +295,11 @@ func TestCancelledProbesJudgeNothing(t *testing.T) {
 
 // Catches: a video ffprobe gave no verdict on filed as unreadable, which alerts and e-mails the owner: moved away by
 // the renamer before or during its probe ("No such file or directory"), or ffprobe killed by its time limit under
-// NAS load; and a move before the probe failing the run.
+// NAS load; a move before the probe failing the run; and an ffprobe that cannot start (exit 127, or a missing binary,
+// whose ENOENT reads like a moved file) passing quietly or filing every video unreadable instead of failing the run.
 func TestNoVerdictIsNotUnreadable(t *testing.T) {
-	for _, how := range []string{"moved before its probe", "moved during its probe", "ffprobe killed"} {
+	for how, wantErr := range map[string]string{"moved before its probe": "", "moved during its probe": "", "ffprobe killed": "",
+		"ffprobe cannot start": "exit status 127", "ffprobe missing": "no such file or directory"} {
 		h := fake.NewEnv(t, nil)
 		root := t.TempDir()
 		h.SetOptions(`root = "` + root + `"`)
@@ -306,14 +309,23 @@ func TestNoVerdictIsNotUnreadable(t *testing.T) {
 		run(t, h) // baseline: nothing unreadable
 		ran := "Movies/Ran (1985) {tmdb-11645}/Ran (1985) {tmdb-11645}.mkv"
 		put(t, root, ran, how)
+		if how == "ffprobe missing" {
+			h.Env.Probe.FFprobe = filepath.Join(root, "no-ffprobe")
+		}
 		h.Plex.HandleFunc("GET", "/status/sessions", func(w http.ResponseWriter, r *http.Request) {
 			if how == "moved before its probe" {
 				os.Remove(filepath.Join(root, ran)) // the viewer check runs right before the first probe
 			}
 			w.Write([]byte(`<MediaContainer size="0"></MediaContainer>`))
 		})
-		if rep := run(t, h); rep.Counts[unreadable] != 0 || rep.Counts["not_probed"] != 1 || len(rep.Alerts) != 0 {
-			t.Errorf("%s: counts = %v, alerts = %q", how, rep.Counts, rep.Alerts)
+		var rep stage.Report
+		err := (Stage{}).Run(context.Background(), h.Env, &rep)
+		if wantErr != "" {
+			if err == nil || !strings.Contains(err.Error(), wantErr) {
+				t.Errorf("%s: err = %v, want the run to fail with %q", how, err, wantErr)
+			}
+		} else if err != nil || rep.Counts[unreadable] != 0 || rep.Counts["not_probed"] != 1 || len(rep.Alerts) != 0 {
+			t.Errorf("%s: err = %v, counts = %v, alerts = %q", how, err, rep.Counts, rep.Alerts)
 		}
 	}
 }

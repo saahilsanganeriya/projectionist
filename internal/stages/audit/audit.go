@@ -469,11 +469,10 @@ func probeAll(ctx context.Context, env *stage.Env, workers int, videos []*video)
 	return nil
 }
 
-// read records a probe result. Only ffprobe's own verdict (it failed, or found no video) makes a video unreadable.
+// read records a probe result. Only ffprobe's own verdict (it failed, or found no video) makes a video unreadable;
+// a video gone since the walk, or an ffprobe killed by the probe's time limit (or the OOM killer), stays unprobed.
 func (v *video) read(info probe.Info, err error) {
-	var exitErr *exec.ExitError
-	switch {
-	case err == nil:
+	if err == nil {
 		v.probed = true
 		if info.Video == nil {
 			v.problem = "no video stream"
@@ -481,17 +480,19 @@ func (v *video) read(info probe.Info, err error) {
 		for _, sub := range info.Subtitles {
 			v.embeddedEnglish = v.embeddedEnglish || (sub.Text && !sub.Forced && (sub.Language == "eng" || sub.Language == "en"))
 		}
-	case errors.Is(err, fs.ErrNotExist): // moved away before its probe
-	case errors.As(err, &exitErr):
-		if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() && ws.Signal() == syscall.SIGKILL {
-			return // the probe's time limit (or the OOM killer) stopped ffprobe: no verdict on the file
-		}
-		if _, err := os.Stat(v.path); errors.Is(err, fs.ErrNotExist) {
-			return // moved away while ffprobe read it
-		}
-		v.probed, v.problem = true, ffprobeReason(err, v.path)
+		return
+	}
+	// Ask the file, not the error: a missing ffprobe binary is ENOENT too.
+	if _, err := os.Stat(v.path); errors.Is(err, fs.ErrNotExist) {
+		return // moved away before or while ffprobe read it
+	}
+	var exitErr *exec.ExitError
+	switch {
+	case !errors.As(err, &exitErr) || exitErr.ExitCode() == 126 || exitErr.ExitCode() == 127:
+		v.fatal = err // ffprobe could not start, or the probe cache failed: no file's fault, so fail the run
+	case exitErr.Sys().(syscall.WaitStatus).Signal() == syscall.SIGKILL:
 	default:
-		v.fatal = err
+		v.probed, v.problem = true, ffprobeReason(err, v.path)
 	}
 }
 
