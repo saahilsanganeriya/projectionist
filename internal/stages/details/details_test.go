@@ -3,7 +3,9 @@ package details
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -472,5 +474,22 @@ func TestVanishedVideosAreSkipped(t *testing.T) {
 	h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []", l.root))
 	if rep := runOnce(t, h.Env); rep.Counts["probed"] != 1 || rep.Counts["decode_checked"] != 0 {
 		t.Fatalf("counts %v", rep.Counts)
+	}
+}
+
+// Catches: a missing ffprobe marking every video unreadable, and a missing ffmpeg skipping every decode check
+// in silence (its exec error is an ErrNotExist, like a video moved away).
+func TestMissingToolsFailTheRun(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	l := lib{t, t.TempDir()}
+	l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", 1)
+	h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []", l.root))
+	if err := (Stage{}).Run(context.Background(), h.Env, &stage.Report{}); err == nil || !strings.Contains(err.Error(), "ffprobe") {
+		t.Fatalf("no ffprobe: err = %v (the run must stop before marking videos unreadable)", err)
+	}
+	fixture, _ := filepath.Abs("testdata/cronos_dtshdma.json")
+	h.Script(t, "ffprobe", fmt.Sprintf("cat %q\n", fixture))
+	if err := (Stage{}).Run(context.Background(), h.Env, &stage.Report{}); !errors.Is(err, fs.ErrNotExist) || !strings.Contains(err.Error(), "ffmpeg") {
+		t.Fatalf("no ffmpeg: err = %v", err)
 	}
 }

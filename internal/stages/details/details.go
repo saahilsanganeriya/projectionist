@@ -117,6 +117,10 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if err := env.Options(&opt); err != nil {
 		return err
 	}
+	// A missing ffprobe would otherwise mark every video unreadable.
+	if _, err := os.Stat(env.Probe.FFprobe); err != nil {
+		return fmt.Errorf("ffprobe: %w", err)
+	}
 	db := env.Store.DB()
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return err
@@ -319,8 +323,8 @@ func (r *run) heavyFacts(ctx context.Context, v video, info probe.Info, row *fil
 		case !done && err == nil:
 			r.heavyOK = false
 			r.rep.Count("heavy_deferred", 1)
-		case errors.Is(err, fs.ErrNotExist):
-			return nil // moved away since the walk
+		case err != nil && gone(v.path):
+			return nil // moved away since the walk (a missing ffmpeg is an ErrNotExist too, and must fail)
 		case err != nil:
 			return err // the decoder could not be run at all, or the stage is stopping
 		default:
@@ -369,6 +373,11 @@ func (r *run) heavy(ctx context.Context, fn func(context.Context) error) (done b
 		return false, nil
 	}
 	return true, err
+}
+
+func gone(path string) bool {
+	_, err := os.Stat(path)
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 func (r *run) original(path string) string {
