@@ -107,7 +107,8 @@ func TestJudgeSelfTest(t *testing.T) {
 }
 
 // Catches: settings drift left unrepaired, a repair that drops Jellyfin's other encoding settings, an alert that
-// repeats every 15 min for the same transcode, and a self-test that runs while someone watches or more than daily.
+// repeats every 15 min for the same transcode, a self-test that runs while someone watches or more than daily, and
+// a summary that calls drifted pins intact or a failed self-test passed.
 func TestRunAgainstFakeServers(t *testing.T) {
 	h := fake.NewEnv(t, map[string]string{"HardwareDevicePath": "", "HardwareAcceleratedEncoders": "1"})
 	app := t.TempDir()
@@ -138,8 +139,12 @@ sample = "/samples/gpu_sample.mkv"`)
 	h.Plex.Handle("GET", "/status/sessions", 200, cpuTranscode)
 
 	var ran []*exec.Cmd
+	gpuBroken := false
 	s := Stage{Exec: func(_ context.Context, cmd *exec.Cmd) (int, string, error) {
 		ran = append(ran, cmd)
+		if gpuBroken {
+			return 1, "Failed to initialise VAAPI connection", nil
+		}
 		return 0, "frame=  121 fps=70", nil
 	}}
 	run := func() stage.Report {
@@ -151,8 +156,8 @@ sample = "/samples/gpu_sample.mkv"`)
 	}
 
 	rep := run()
-	if len(rep.Alerts) != 5 { // 2 Plex prefs, Jellyfin drift, CPU transcode, log line
-		t.Fatalf("first run alerts = %d: %q", len(rep.Alerts), rep.Alerts)
+	if len(rep.Alerts) != 5 || rep.Summary != "4 GPU pin(s) had drifted; 1 playing; self-test not due" { // 2 Plex prefs, Jellyfin drift, CPU transcode, log line
+		t.Fatalf("first run alerts = %d: %q; summary %q", len(rep.Alerts), rep.Alerts, rep.Summary)
 	}
 	puts := h.Plex.Calls("PUT", "/:/prefs")
 	if len(puts) != 2 || puts[0].RawQuery != "HardwareDevicePath=8086%3A3185%400000%3A00%3A02.0" || puts[1].RawQuery != "HardwareAcceleratedCodecs=1" {
@@ -172,8 +177,8 @@ sample = "/samples/gpu_sample.mkv"`)
 	}
 
 	h.Plex.Handle("GET", "/status/sessions", 200, `<MediaContainer size="0"></MediaContainer>`)
-	if rep := run(); len(rep.Alerts) != 0 || len(ran) != 2 {
-		t.Fatalf("idle run: alerts=%q self-test commands=%d", rep.Alerts, len(ran))
+	if rep := run(); len(rep.Alerts) != 0 || len(ran) != 2 || rep.Summary != "GPU pins intact; 0 playing; self-test passed" {
+		t.Fatalf("idle run: alerts=%q self-test commands=%d summary=%q", rep.Alerts, len(ran), rep.Summary)
 	}
 	plexCmd, jfCmd := ran[0], ran[1]
 	if plexCmd.Path != "/opt/plex/Plex Transcoder" || plexCmd.SysProcAttr.Credential.Uid != 297536 ||
@@ -188,6 +193,11 @@ sample = "/samples/gpu_sample.mkv"`)
 	run()
 	if len(ran) != 2 {
 		t.Fatal("self-test ran again within 24 h")
+	}
+
+	h.Now, gpuBroken = h.Now.Add(2*time.Hour), true
+	if rep := run(); len(rep.Alerts) != 2 || rep.Summary != "GPU pins intact; 0 playing; self-test failed" {
+		t.Fatalf("broken GPU: alerts=%q summary=%q; want both self-tests alerted and summarised as failed", rep.Alerts, rep.Summary)
 	}
 }
 
@@ -206,6 +216,46 @@ legacy_state = "` + legacy + `"`)
 	var rep stage.Report
 	if err := (Stage{}).Run(context.Background(), h.Env, &rep); err != nil || len(rep.Alerts) != 0 {
 		t.Fatalf("alerts=%q err=%v", rep.Alerts, err)
+	}
+}
+
+// Catches: a slow Plex failing or hanging the run, a pin that could not be written back going unreported (the one
+// Plex failure that must alert), and the daily self-test skipped because Plex could not say who is watching.
+func TestSlowPlexIsNotFatal(t *testing.T) {
+	h := fake.NewEnv(t, map[string]string{"HardwareDevicePath": "", "HardwareAcceleratedCodecs": "1", "HardwareAcceleratedEncoders": "1"})
+	release := make(chan struct{})
+	hang := func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}
+	h.Plex.HandleFunc("PUT", "/:/prefs", hang)
+	h.Plex.HandleFunc("GET", "/status/sessions", hang)
+	t.Cleanup(func() { close(release) }) // runs before the server's own cleanup, so Close does not wait on hang
+	h.Env.Plex = plex.New(h.Plex.URL, h.PrefsPath, time.Hour)
+	app := t.TempDir()
+	os.MkdirAll(filepath.Join(app, "Codecs", "1a2b-linux-x86_64"), 0o755)
+	os.WriteFile(filepath.Join(app, "pms.log"), nil, 0o644)
+	h.SetOptions(`plex_timeout = "20ms"
+plex_app_data = "` + app + `"
+plex_log = "` + filepath.Join(app, "pms.log") + `"`)
+	h.Jellyfin.Handle("GET", "/System/Configuration/encoding", 200, `{"HardwareAccelerationType":"qsv","EnableHardwareEncoding":true,"VaapiDevice":"/dev/dri/renderD128"}`)
+	selfTests := 0
+	s := Stage{Exec: func(context.Context, *exec.Cmd) (int, string, error) {
+		selfTests++
+		return 0, "frame=  121 fps=70", nil
+	}}
+	var rep stage.Report
+	done := make(chan error, 1)
+	go func() { done <- s.Run(context.Background(), h.Env, &rep) }()
+	select {
+	case err := <-done:
+		if err != nil || len(rep.Alerts) != 1 || !strings.HasPrefix(rep.Alerts[0], "GPU pin lost: Plex HardwareDevicePath") || selfTests != 2 {
+			t.Fatalf("err=%v alerts=%q self-tests=%d; want only the pin-lost alert and both self-tests", err, rep.Alerts, selfTests)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run hung on a slow Plex: the plex_timeout bound is missing")
 	}
 }
 
