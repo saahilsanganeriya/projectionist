@@ -178,7 +178,8 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		q := r.URL.Query()
-		a.promoted = q.Get("metadataItemId") == "900" && q.Get("promotedToOwnHome") == "1" && q.Get("promotedToRecommended") == "1"
+		a.promoted = q.Get("metadataItemId") == "900" && q.Get("promotedToOwnHome") == "1" && q.Get("promotedToRecommended") == "1" &&
+			q.Get("promotedToSharedHome") == "0" // his watchlist is not for the Home of everyone he shares with
 	})
 	scrobble := func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()

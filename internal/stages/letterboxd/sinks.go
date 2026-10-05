@@ -481,8 +481,9 @@ func (r *run) plexCollection(ctx context.Context, b *breaker, m sinkMeta, haves 
 		r.count(app+".collection_removed", 1)
 	}
 	if promote && m.Collection != "" {
+		// Shared home off explicitly: left out, Plex 1.43 promotes the hub to every shared user's Home too.
 		if err := r.call(ctx, b, func() error {
-			return r.env.Plex.Do(ctx, http.MethodPost, fmt.Sprintf("/hubs/sections/%d/manage?metadataItemId=%s&promotedToOwnHome=1&promotedToRecommended=1",
+			return r.env.Plex.Do(ctx, http.MethodPost, fmt.Sprintf("/hubs/sections/%d/manage?metadataItemId=%s&promotedToOwnHome=1&promotedToRecommended=1&promotedToSharedHome=0",
 				r.opt.PlexSection, m.Collection))
 		}); err != nil {
 			r.failed(app, "home_promote", 0, err)
