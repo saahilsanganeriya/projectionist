@@ -1,0 +1,10 @@
+Title:           Cronos (1993) {tmdb-11655}
+Original name:   rep-cronos.1992.remastered.1080p.bluray.x264.mkv
+Original folder: Cronos.1992.REMASTERED.1080p.BluRay.x264-Replica
+Resolution:      1920x1080 (1080p)
+Video:           x264 (AVC) · 8-bit · SDR · 23.976 fps · 15.7 Mb/s
+Audio:           spa DTS-HD MA 5.1(side)
+Subtitles:       eng subrip forced; eng hdmv_pgs_subtitle
+Container:       matroska · 11.64 GB · 1h 38m · 15 chapters
+Source · group:  BluRay · unknown
+Identity:        tmdb-11655

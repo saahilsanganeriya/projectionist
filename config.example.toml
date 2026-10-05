@@ -53,3 +53,18 @@ small_kbps      = 20000
 work_dir        = "/volume1/media/.projectionist/remote4k" # same share as the library: publish = one rename
 status_file     = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
 default_section = 4
+
+# Keeps "<dir>/.details/<video>.txt" true for every video in the scheme, from ffprobe and the rename logs;
+# replaces rename/write_details_files.py. Bounds are per run; probed and scanned files are cached.
+[stages.details]
+every             = "15m"
+library           = "/volume1/media"
+sections          = ["Movies", "TV"]
+undo_logs         = ["/volume1/PlexMediaServer/rename/undo.tsv", "/volume1/PlexMediaServer/rename/undo_auto.tsv"]
+max_probes        = 400  # new ffprobe runs per run
+max_peak_scans    = 2    # whole-file packet scans per run (files above peak_above_kbps only; ~20 min per 50 GB)
+max_decode_checks = 60   # 3 x 5 s decode samples per file
+peak_above_kbps   = 20000
+retry_unreadable  = "24h"
+# notes_root      = "/volume1/PlexMediaServer/projectionist-test/details/notes" # dry run: notes into a mirror tree
+# paths_file      = "/path/to/list.txt"                                          # only these videos
