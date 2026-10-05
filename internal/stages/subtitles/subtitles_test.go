@@ -266,3 +266,39 @@ func TestWriteSidecarNeverOverwrites(t *testing.T) {
 		}
 	}
 }
+
+// Catches: a forced-only track counted as English subtitles, an SDH or .eng sidecar missed, or the 4K copy's sidecar
+// ("<stem> - 2160p.en.srt") taken for the main file's.
+func TestHasEnglishSidecar(t *testing.T) {
+	stem := "Heat (1995) {tmdb-949}"
+	for names, want := range map[string]bool{
+		stem + ".en.sdh.srt":                  true,
+		stem + ".ENG.srt":                     true,
+		stem + ".english.forced.ass":          false,
+		stem + ".en.forced.srt":               false,
+		stem + ".fr.srt":                      false,
+		stem + " - 2160p 14Mbps.en.srt":       false,
+		stem + ".en.srt.bak|" + stem + ".mkv": false,
+	} {
+		if got := hasEnglishSidecar(stem, strings.Split(names, "|")); got != want {
+			t.Errorf("%q: %v, want %v", names, got, want)
+		}
+	}
+}
+
+// Catches alass output accepted when its shifts scatter (another cut or episode), or a uniform shift misread.
+func TestShifts(t *testing.T) {
+	var before, uniform, scattered []span
+	for i := range 40 {
+		s := float64(i * 30)
+		before = append(before, span{s, s + 2})
+		uniform = append(uniform, span{s*25/24 + 1.5, 0})
+		scattered = append(scattered, span{s + float64(i%3)*4, 0})
+	}
+	if med, agree, ok := shifts(before, uniform, 25.0/24); !ok || med != 1500 || agree != 1 {
+		t.Errorf("uniform: %v %v %v", med, agree, ok)
+	}
+	if _, agree, _ := shifts(before, scattered, 1); agree >= alassAgree {
+		t.Errorf("scattered shifts agree %.2f", agree)
+	}
+}
