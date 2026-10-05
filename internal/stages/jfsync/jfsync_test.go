@@ -71,18 +71,18 @@ func writeBackup(t *testing.T, path string, rows [][]any) {
 // writes records the apps' write calls (and anything a test adds) in one order across both apps.
 type writes struct {
 	sync.Mutex
-	calls  []string          // "<owner|friend> <path?query>" for Plex, "<path?query> <json>" for Jellyfin
-	status map[string]int    // path → the status a write to it answers (default 200)
-	during map[string]func() // path → called while a write to it is being answered
+	calls  []string                       // "<owner|friend> <path?query>" for Plex, "<path?query> <json>" for Jellyfin
+	status map[string]int                 // path → the status a write to it answers (default 200)
+	during map[string]func(*http.Request) // path → called while a write to it is being answered
 }
 
-func (w *writes) add(rw http.ResponseWriter, path, call string) {
+func (w *writes) add(rw http.ResponseWriter, r *http.Request, call string) {
 	w.Lock()
 	w.calls = append(w.calls, call)
-	status, during := w.status[path], w.during[path]
+	status, during := w.status[r.URL.Path], w.during[r.URL.Path]
 	w.Unlock()
 	if during != nil {
-		during()
+		during(r)
 	}
 	if status != 0 {
 		rw.WriteHeader(status)
@@ -143,7 +143,7 @@ users = [{ name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" }, {
 	h.Plex.Handle("POST", "/api/v2/user/webhooks", 201, ``)
 	h.Plex.Handle("GET", "/api/servers/mid/shared_servers", 200,
 		`<MediaContainer><SharedServer userID="578" accessToken="`+fake.PlexFriendToken+`"/><SharedServer userID="9" accessToken="other"/></MediaContainer>`)
-	w = &writes{status: map[string]int{}, during: map[string]func(){}}
+	w = &writes{status: map[string]int{}, during: map[string]func(*http.Request){}}
 	for _, p := range []string{"GET /:/scrobble", "GET /:/unscrobble", "GET /:/progress", "PUT /:/rate"} {
 		method, path, _ := strings.Cut(p, " ")
 		h.Plex.HandleFunc(method, path, func(rw http.ResponseWriter, r *http.Request) {
@@ -151,7 +151,7 @@ users = [{ name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" }, {
 			if r.Header.Get("X-Plex-Token") == fake.PlexFriendToken {
 				who = "friend"
 			}
-			w.add(rw, r.URL.Path, who+" "+r.URL.Path+"?"+r.URL.RawQuery)
+			w.add(rw, r, who+" "+r.URL.Path+"?"+r.URL.RawQuery)
 		})
 	}
 
@@ -177,7 +177,7 @@ users = [{ name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" }, {
 		})
 		h.Jellyfin.HandleFunc("POST", "/UserItems/"+id+"/UserData", func(rw http.ResponseWriter, r *http.Request) {
 			body, _ := io.ReadAll(r.Body)
-			w.add(rw, r.URL.Path, r.URL.Path+"?"+r.URL.RawQuery+" "+string(body))
+			w.add(rw, r, r.URL.Path+"?"+r.URL.RawQuery+" "+string(body))
 		})
 	}
 	return h, w, options, backups
@@ -304,14 +304,14 @@ func TestRunTwoWay(t *testing.T) {
 	}
 }
 
-// Catches: a push that crosses this stage's write to the same item lost for good. Saahil marks Heat unplayed in
+// Catches: a push that crosses this stage's write to the same field lost for good. Saahil marks Heat unplayed in
 // Jellyfin while the run writes Heat's Plex play there; the next run would skip the item (its newest state came
 // from Jellyfin) and both apps would keep the play. Also: Heat's re-created Plex item, which nothing is known to
 // hold, not unscrobbled.
 func TestPushCrossingAWrite(t *testing.T) {
 	h, w, _, _ := newHarness(t)
 	code := 0
-	w.during["/UserItems/a1/UserData"] = func() {
+	w.during["/UserItems/a1/UserData"] = func(*http.Request) {
 		code = push(h, jellyfinApp, `{"NotificationType":"UserDataSaved","NotificationUsername":"saahil","ItemId":"a1","ItemType":"Movie","SaveReason":"TogglePlayed","Played":false}`)
 	}
 	run(t, h)
@@ -320,13 +320,47 @@ func TestPushCrossingAWrite(t *testing.T) {
 	h.Now = h.Now.Add(5 * time.Minute)
 	run(t, h)
 	got := strings.Join(w.since(done), "\n")
-	if code != http.StatusNoContent || !strings.Contains(got, `/UserItems/a1/UserData?userId=u1 {"PlayCount":0,"PlaybackPositionTicks":0,"Played":false}`) ||
+	if code != http.StatusNoContent || !strings.Contains(got, `/UserItems/a1/UserData?userId=u1 {"PlayCount":0,"Played":false}`) ||
 		!strings.Contains(got, "owner /:/unscrobble?identifier=com.plexapp.plugins.library&key=13") {
 		t.Fatalf("after the crossing push (hook %d):\n%s", code, got)
 	}
 	done = len(w.since(0))
 	if run(t, h); len(w.since(done)) != 0 {
 		t.Fatalf("third run wrote %v", w.since(done))
+	}
+}
+
+// Catches: Plex's echo of this stage's own write read as a push that crossed it. PUT /:/rate comes back as media.rate
+// (as any client's rating does); the sink then forgot what Plex holds, and every later run scrobbled Ran again for
+// roger (a view nobody can remove) and rated it again, which echoed again. Also: a real Plex scrobble crossing the
+// stage's progress write to the same film making it forget the play Plex then holds, so the next run scrobbles it
+// again; only the resume point is in doubt.
+func TestPlexEchoesNeverRescrobble(t *testing.T) {
+	h, w, _, _ := newHarness(t)
+	w.during["/:/rate"] = func(r *http.Request) {
+		account := "saahilsanganeriya"
+		if r.Header.Get("X-Plex-Token") == fake.PlexFriendToken {
+			account = "roger"
+		}
+		push(h, plexApp, plexPlay("media.rate", account, r.URL.Query().Get("key"), `,"userRating":`+r.URL.Query().Get("rating")))
+	}
+	finishes := true
+	w.during["/:/progress"] = func(r *http.Request) {
+		if finishes && r.URL.Query().Get("key") == "11" { // saahil finishes Ran in Plex as his Jellyfin resume point lands
+			finishes = false
+			push(h, plexApp, plexPlay("media.scrobble", "saahilsanganeriya", "11", ""))
+		}
+	}
+	for range 4 {
+		run(t, h)
+		h.Now = h.Now.Add(5 * time.Minute)
+	}
+	got := strings.Join(w.since(0), "\n")
+	for call, want := range map[string]int{"friend /:/scrobble?identifier=com.plexapp.plugins.library&key=11": 1,
+		"friend /:/rate": 1, "owner /:/scrobble": 0, "owner /:/progress?identifier=com.plexapp.plugins.library&key=11&time=0&": 1} {
+		if n := strings.Count(got, call); n != want {
+			t.Errorf("%q sent %d times in 4 runs, want %d", call, n, want)
+		}
 	}
 }
 
@@ -410,7 +444,7 @@ func TestListingsFollowTheWrites(t *testing.T) {
 	h, w, _, _ := newHarness(t)
 	run(t, h)
 	h.Plex.HandleFunc("GET", "/library/sections/4/all", func(rw http.ResponseWriter, r *http.Request) {
-		w.add(rw, "list", "list plex")
+		w.add(rw, r, "list plex")
 		rw.WriteHeader(500)
 	})
 	for i, step := range []struct {

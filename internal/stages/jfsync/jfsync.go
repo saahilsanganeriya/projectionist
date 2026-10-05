@@ -299,9 +299,9 @@ func (s *syncer) reconcile(ctx context.Context, app string, addr *addresses, sta
 			if !s.opt.Apply {
 				continue
 			}
-			held, err := s.write(ctx, app, userID, id, w, row.State, want.PlayedAt)
-			if !held.Same(row.State) {
-				if err := wroteSink(ctx, db, app, u.Name, items, held, s.readAt, s.env.Now()); err != nil {
+			held, wrote, err := s.write(ctx, app, userID, id, w, row.State, want.PlayedAt)
+			if wrote != 0 {
+				if err := wroteSink(ctx, db, app, u.Name, items, held, wrote, s.readAt, s.env.Now()); err != nil {
 					return err
 				}
 			}
@@ -332,30 +332,31 @@ func (s *syncer) reconcile(ctx context.Context, app string, addr *addresses, sta
 }
 
 // write puts into one app item, believed to hold have, the fields of w it does not hold, and returns what the item
-// then holds. playedAt (the last play or stop, never a rating) is Jellyfin's LastPlayedDate. A Plex write is up to
-// three calls; the ones that went through count even when a later one fails, so a scrobble is never repeated.
-func (s *syncer) write(ctx context.Context, app, userID, id string, w, have watch.State, playedAt time.Time) (watch.State, error) {
-	held := have
+// then holds and which fields the calls that went through set. playedAt (the last play or stop, never a rating) is
+// Jellyfin's LastPlayedDate. A Plex write is up to three calls; the ones that went through count even when a later
+// one fails, so a scrobble is never repeated.
+func (s *syncer) write(ctx context.Context, app, userID, id string, w, have watch.State, playedAt time.Time) (watch.State, fields, error) {
+	held, wrote := have, fields(0)
 	if app == jellyfinApp { // Jellyfin sets only the fields the body carries
 		body := map[string]any{}
 		if w.KnowsPlay && (!have.KnowsPlay || w.Played != have.Played || w.Plays != have.Plays) {
 			body["Played"], body["PlayCount"] = w.Played, w.Plays
-			held.Played, held.Plays, held.KnowsPlay = w.Played, w.Plays, true
+			held.Played, held.Plays, held.KnowsPlay, wrote = w.Played, w.Plays, true, wrote|playField
 		}
 		if w.KnowsPosition && (!have.KnowsPosition || w.PositionMs != have.PositionMs) {
 			body["PlaybackPositionTicks"] = w.PositionMs * 10_000
-			held.PositionMs, held.KnowsPosition = w.PositionMs, true
+			held.PositionMs, held.KnowsPosition, wrote = w.PositionMs, true, wrote|positionField
 		}
 		if len(body) > 0 && !playedAt.IsZero() && (w.Played || w.PositionMs > 0) { // a play or a stop goes
 			body["LastPlayedDate"] = playedAt.UTC().Format(time.RFC3339)
 		}
 		if w.Rating != nil && (have.Rating == nil || *have.Rating != *w.Rating) {
-			body["Rating"], held.Rating = *w.Rating, w.Rating
+			body["Rating"], held.Rating, wrote = *w.Rating, w.Rating, wrote|ratingField
 		}
 		if err := s.env.Jellyfin.PostJSON(ctx, "/UserItems/"+id+"/UserData?userId="+userID, body, nil); err != nil {
-			return have, err
+			return have, 0, err
 		}
-		return held, nil
+		return held, wrote, nil
 	}
 	key := "identifier=com.plexapp.plugins.library&key=" + url.QueryEscape(id)
 	if w.KnowsPlay && (!have.KnowsPlay || w.Played != have.Played) {
@@ -364,26 +365,26 @@ func (s *syncer) write(ctx context.Context, app, userID, id string, w, have watc
 			path = "/:/scrobble?"
 		}
 		if err := s.plexAs(ctx, userID, http.MethodGet, path+key); err != nil {
-			return held, err
+			return held, wrote, err
 		}
-		held.Played, held.KnowsPlay = w.Played, true
+		held.Played, held.KnowsPlay, wrote = w.Played, true, wrote|playField
 		if w.Played { // a scrobble also clears the resume point
-			held.PositionMs, held.KnowsPosition = 0, true
+			held.PositionMs, held.KnowsPosition, wrote = 0, true, wrote|positionField
 		}
 	}
 	if w.KnowsPosition && (!held.KnowsPosition || w.PositionMs != held.PositionMs) {
 		if err := s.plexAs(ctx, userID, http.MethodGet, fmt.Sprintf("/:/progress?%s&time=%d&state=stopped", key, w.PositionMs)); err != nil {
-			return held, err
+			return held, wrote, err
 		}
-		held.PositionMs, held.KnowsPosition = w.PositionMs, true
+		held.PositionMs, held.KnowsPosition, wrote = w.PositionMs, true, wrote|positionField
 	}
 	if w.Rating != nil && (have.Rating == nil || *have.Rating != *w.Rating) {
 		if err := s.plexAs(ctx, userID, http.MethodPut, fmt.Sprintf("/:/rate?%s&rating=%g", key, *w.Rating)); err != nil {
-			return held, err
+			return held, wrote, err
 		}
-		held.Rating = w.Rating
+		held.Rating, wrote = w.Rating, wrote|ratingField
 	}
-	return held, nil
+	return held, wrote, nil
 }
 
 // plexAs sends a Plex write as the account it is for: the owner's token for the owner (account 1), else the friend's.
@@ -443,11 +444,21 @@ func summary(counts map[string]int) string {
 
 // ---- jfsync_sink: what each app is believed to hold, per person and library item ----
 
+// fields are the parts of a watch state one app call sets.
+type fields uint8
+
+const (
+	playField fields = 1 << iota // Played and Plays
+	positionField
+	ratingField
+)
+
 type sinkRow struct {
 	watch.State
 	Failures          int
 	RetryAt           time.Time
 	ReadAt, WrittenAt time.Time // this stage's last write to the item, and when the run behind it read the record
+	Wrote             fields    // what that write set
 }
 
 // raced says whether a state the app pushed may have crossed this stage's write to the same item: it arrived after
@@ -465,14 +476,14 @@ func openTables(ctx context.Context, env *stage.Env) error {
 		played INTEGER NOT NULL DEFAULT 0, plays INTEGER NOT NULL DEFAULT 0, position_ms INTEGER NOT NULL DEFAULT 0,
 		rating REAL, knows_play INTEGER NOT NULL DEFAULT 0, knows_position INTEGER NOT NULL DEFAULT 0,
 		failures INTEGER NOT NULL DEFAULT 0, retry_at TEXT NOT NULL DEFAULT '',
-		read_at TEXT NOT NULL DEFAULT '', written_at TEXT NOT NULL DEFAULT '',
+		read_at TEXT NOT NULL DEFAULT '', written_at TEXT NOT NULL DEFAULT '', wrote INTEGER NOT NULL DEFAULT 0,
 		PRIMARY KEY (app, person, item))`)
 	return err
 }
 
 const (
 	stateColumns = `played, plays, position_ms, rating, knows_play, knows_position`
-	sinkColumns  = stateColumns + `, failures, retry_at, read_at, written_at`
+	sinkColumns  = stateColumns + `, failures, retry_at, read_at, written_at, wrote`
 )
 
 // scanSink scans dest, then sinkColumns.
@@ -480,7 +491,7 @@ func scanSink(scan func(...any) error, dest ...any) (sinkRow, error) {
 	var r sinkRow
 	var times [3]string
 	if err := scan(append(dest, &r.Played, &r.Plays, &r.PositionMs, &r.Rating, &r.KnowsPlay, &r.KnowsPosition,
-		&r.Failures, &times[0], &times[1], &times[2])...); err != nil {
+		&r.Failures, &times[0], &times[1], &times[2], &r.Wrote)...); err != nil {
 		return r, err
 	}
 	for i, t := range []*time.Time{&r.RetryAt, &r.ReadAt, &r.WrittenAt} {
@@ -523,14 +534,14 @@ func holdSink(ctx context.Context, db watch.Execer, app, person, item string, st
 }
 
 // wroteSink records what this stage's write to an app item put into each item it holds; it clears their backoff.
-func wroteSink(ctx context.Context, db *sql.DB, app, person string, items []string, st watch.State, readAt, writtenAt time.Time) error {
+func wroteSink(ctx context.Context, db *sql.DB, app, person string, items []string, st watch.State, wrote fields, readAt, writtenAt time.Time) error {
 	for _, it := range items {
 		if err := holdSink(ctx, db, app, person, it, st); err != nil {
 			return err
 		}
-		if _, err := db.ExecContext(ctx, `UPDATE jfsync_sink SET failures=0, retry_at='', read_at=?, written_at=?
+		if _, err := db.ExecContext(ctx, `UPDATE jfsync_sink SET failures=0, retry_at='', read_at=?, written_at=?, wrote=?
 			WHERE app=? AND person=? AND item=?`, readAt.UTC().Format(store.TimeFormat),
-			writtenAt.UTC().Format(store.TimeFormat), app, person, it); err != nil {
+			writtenAt.UTC().Format(store.TimeFormat), wrote, app, person, it); err != nil {
 			return err
 		}
 	}
@@ -565,7 +576,6 @@ type querier interface {
 }
 
 // applySink folds an event an app pushed (or a migrated row of its history) into what that app holds for each item.
-// A push that may have crossed this stage's write leaves the item unknown, so the next run writes it in full.
 func applySink(ctx context.Context, q querier, app, person string, items []string, e watch.Event) error {
 	for _, it := range items {
 		r, err := scanSink(q.QueryRowContext(ctx, `SELECT `+sinkColumns+` FROM jfsync_sink
@@ -575,11 +585,31 @@ func applySink(ctx context.Context, q querier, app, person string, items []strin
 		}
 		st := r.State.Apply(e)
 		if r.raced(e.At) {
-			st = watch.State{}
+			st = forget(app, st, r.State, r.Wrote)
 		}
 		if err := holdSink(ctx, q, app, person, it, st); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// forget leaves unknown, so the next run writes the record's value, each field that this stage's write set and a
+// push crossing it then changed: the app holds whichever of the two it applied last. A field the push left as the
+// write set it (an echo: Plex sends PUT /:/rate back as media.rate) or the write did not set is certain and kept,
+// since a Plex scrobble repeated on a guess adds a view nobody can remove. Plex keeps no play count anyone may set.
+func forget(app string, pushed, written watch.State, wrote fields) watch.State {
+	st := pushed
+	if wrote&playField != 0 && (pushed.KnowsPlay != written.KnowsPlay || pushed.Played != written.Played ||
+		(app == jellyfinApp && pushed.Plays != written.Plays)) {
+		st.Played, st.Plays, st.KnowsPlay = false, 0, false
+	}
+	if wrote&positionField != 0 && (pushed.KnowsPosition != written.KnowsPosition || pushed.PositionMs != written.PositionMs) {
+		st.PositionMs, st.KnowsPosition = 0, false
+	}
+	if wrote&ratingField != 0 && ((pushed.Rating == nil) != (written.Rating == nil) ||
+		(pushed.Rating != nil && *pushed.Rating != *written.Rating)) {
+		st.Rating = nil
+	}
+	return st
 }
