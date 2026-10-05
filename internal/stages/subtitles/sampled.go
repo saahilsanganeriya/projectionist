@@ -57,14 +57,13 @@ const (
 	// matches in every window at one shared offset do not happen to another film's subtitle.
 	minLines   = 6
 	quietLines = 8
-	// Speech evidence: a window must hold minSpeechCues cues at the joint offset, and its onset score there must
-	// stand minZ deviations above its scores over all 24,000 offsets searched. On the calibration windows (11 titles
+	// Speech evidence: a window's onset score at the joint offset must stand minZ deviations above its scores over all
+	// 24,000 offsets searched. On the calibration windows (11 titles
 	// with known timing, 5 variants each, and 154 wrong subtitles: other films and other cuts) no wrong subtitle passed
 	// at any threshold from 2.0 up, since its windows peak at different offsets; a correct one's windows with dialogue
 	// scored 3.0-8.5, and those without, under 3.
-	minSpeechCues = 8
-	minZ          = 3.0
-	quietSpeech   = 0.2
+	minZ        = 3.0
+	quietSpeech = 0.2
 	// The onset score compares the voice band's level in the edgeSpan after a cue's start with the edgeSpan before it
 	// (clipped at edgeClip dB): high where cues begin as someone starts talking. It finds the offset; the overlap of
 	// cues with voiced frames within refineSpan of it then sets it, since cues lead speech by a variable few frames.
@@ -175,11 +174,7 @@ func fitSamples(spans []span, samples []sample) sampledFit {
 			continue
 		}
 		fit.Offsets = append(fit.Offsets, binOffset(own))
-		z := peakZ(f, at)
-		if cuesIn(spans, s.win, fit.Ratio, fit.Offset) < minSpeechCues {
-			z = 0
-		}
-		fit.Evidence = append(fit.Evidence, z)
+		fit.Evidence = append(fit.Evidence, peakZ(f, at))
 	}
 	if !byCaptions {
 		fit.Offset = refine(spans, samples, fit.Ratio, fit.Offset)
@@ -324,17 +319,6 @@ func peakZ(f []float64, bin int) float64 {
 		return (f[bin] - mean) / sd
 	}
 	return 0
-}
-
-// cuesIn counts the cues that start inside the window once mapped.
-func cuesIn(spans []span, win sampleWindow, ratio, o float64) int {
-	n := 0
-	for _, s := range spans {
-		if t := ratio*s.start + o; t >= win.start && t < win.start+win.dur {
-			n++
-		}
-	}
-	return n
 }
 
 // ---- reading the windows ----

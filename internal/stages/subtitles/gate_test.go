@@ -17,7 +17,9 @@ package subtitles
 // video's English captions where a framecrc is given (or to its <video>.en.idx captions for "idx"), and the shift
 // alass's alignment to the speech would give it; GATE_SYNC (id, video, sidecar, duration, "captions <stream>" or
 // "alass <audio stream>") with the same two -> sync.tsv: a written sidecar's offset from an independent whole-file
-// reference (the complete caption track, or alass's whole-file alignment to the audio) at the start, middle and end.
+// reference (the complete caption track, or alass's whole-file alignment to the audio) at the start, middle and end;
+// GATE_FIT (id, video, candidate file) with GATE_FFMPEG_DIR -> fit.tsv and fit/<id>.srt: the sampled fit of that very
+// candidate (the stage's own reads of the windows), and the retimed text when the fit holds.
 
 import (
 	"context"
@@ -346,4 +348,45 @@ func TestGateSync(t *testing.T) {
 			strconv.FormatFloat(math.Round(worst), 'f', 0, 64), ti.disk, time.Since(began).Seconds())
 		gateWrite(t, "sync.tsv", b.String())
 	}
+}
+
+// TestGateFit runs the sampled fit on a given candidate: the reads and the fit exactly as the stage's route c does them.
+func TestGateFit(t *testing.T) {
+	lines := gateLines(t, "GATE_FIT")
+	h := fake.NewEnv(t, nil)
+	h.Env.FFmpeg = config.FFmpeg{Dir: os.Getenv("GATE_FFMPEG_DIR")}
+	prober, err := probe.NewProber(h.Env.FFmpeg.FFprobePath(), h.Env.Store.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &run{env: h.Env, opt: Options{SampleWindows: 4, SampleLength: 90 * time.Second}, rep: &stage.Report{}, alerted: map[string]bool{}}
+	os.MkdirAll(filepath.Join(os.Getenv("GATE_OUT"), "fit"), 0o755)
+	var b strings.Builder
+	b.WriteString("id\treference\tratio\toffset_ms\twindow_offsets_ms\tevidence\trefused\tread_bytes\n")
+	for _, line := range lines {
+		f := strings.Split(line, "\t")
+		info, err := prober.Probe(context.Background(), f[1])
+		if err != nil {
+			t.Errorf("%s: %v", f[0], err)
+			continue
+		}
+		ti := &title{path: f[1], info: info}
+		smp, why := r.newSampler(ti)
+		if smp == nil {
+			fmt.Fprintf(&b, "%s\t\t\t\t\t\t%s\t0\n", f[0], why)
+			continue
+		}
+		if why, err = smp.readAll(context.Background()); err != nil || why != "" {
+			fmt.Fprintf(&b, "%s\t%s\t\t\t\t\t%s %v\t%d\n", f[0], smp.label(), why, err, ti.disk)
+			continue
+		}
+		raw, _ := os.ReadFile(f[2])
+		fit := fitSamples(cues(string(raw)), smp.samples)
+		fmt.Fprintf(&b, "%s\t%s\t%.6f\t%.0f\t%v\t%v\t%s\t%d\n", f[0], smp.label(), fit.Ratio, fit.Offset*1000, rounded(fit.Offsets, 1000, 1),
+			rounded(fit.Evidence, 10, 0.1), fit.Refused, ti.disk)
+		if fit.Refused == "" {
+			gateWrite(t, filepath.Join("fit", f[0]+".srt"), retime(string(raw), fit.Ratio, fit.Offset))
+		}
+	}
+	gateWrite(t, "fit.tsv", b.String())
 }
