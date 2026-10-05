@@ -98,7 +98,7 @@ type desired struct {
 // key compares names as the apps show them: case-insensitive, without the stray U+200E marks some Plex titles carry.
 func key(s string) string { return strings.ToLower(cleanName(s)) }
 
-func cleanName(s string) string { return strings.TrimSpace(strings.ReplaceAll(s, "‎", "")) }
+func cleanName(s string) string { return strings.TrimSpace(strings.ReplaceAll(s, "\u200e", "")) }
 
 // add merges c into a collection of the same name, if there is one.
 func (d *desired) add(c *collection) *collection {

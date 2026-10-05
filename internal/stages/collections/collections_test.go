@@ -239,7 +239,7 @@ func setup(t *testing.T, h *fake.Harness, tmdbURL, extra string, ids ...int) (mo
 	os.MkdirAll(filepath.Join(moviesDir, "Not Renamed Yet"), 0o755)
 	os.MkdirAll(filepath.Join(dir, "posters"), 0o755)
 	os.WriteFile(filepath.Join(dir, "posters", "40699.jpg"), []byte("JPEG"), 0o644)
-	os.WriteFile(filepath.Join(dir, "collections.json"), []byte(`[{"ratingKey":"40699","title":"‎Christopher Nolan",
+	os.WriteFile(filepath.Join(dir, "collections.json"), []byte(`[{"ratingKey":"40699","title":"\u200eChristopher Nolan",
 		"titleSort":"zzChristopher Nolan","members":[{"ids":["imdb://tt1","tmdb://1"]},{"ids":["tmdb://2"]}]}]`), 0o644)
 	os.WriteFile(filepath.Join(dir, "approved.json"), []byte(`[{"name":"Scary Movie","kind":"franchise","sort_title":null,
 		"tmdb_collection":["Scary Movie Collection"],"members":[{"title":"Scary Movie","year":2000,"tmdb":3},{"tmdb":4}]}]`), 0o644)
@@ -264,7 +264,7 @@ func runOnce(t *testing.T, h *fake.Harness) *stage.Report {
 // JPEG bytes, and a second run that writes anything at all.
 func TestRunMakesBothAppsMatchThenStops(t *testing.T) {
 	h := fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "mid"})
-	px := &app{colls: []*coll{{ID: "900", Title: "‎Christopher Nolan", Sort: "zzChristopher Nolan", Members: []string{"101", "177"}}}}
+	px := &app{colls: []*coll{{ID: "900", Title: "\u200eChristopher Nolan", Sort: "zzChristopher Nolan", Members: []string{"101", "177"}}}}
 	jf := &app{}
 	posters := map[string]string{}
 	servePlex(h, px, 1, 2, 3, 4)
@@ -277,7 +277,7 @@ func TestRunMakesBothAppsMatchThenStops(t *testing.T) {
 		t.Fatalf("plex adds to the owner's collection = %+v; want only 102", add)
 	}
 	want := []coll{
-		{ID: "900", Title: "‎Christopher Nolan", Sort: "zzChristopher Nolan", Members: []string{"101", "177", "102"}},
+		{ID: "900", Title: "\u200eChristopher Nolan", Sort: "zzChristopher Nolan", Members: []string{"101", "177", "102"}},
 		{ID: "901", Title: "Scary Movie", Members: []string{"103", "104"}, Other: "kept"},
 	}
 	for i, c := range px.colls {
