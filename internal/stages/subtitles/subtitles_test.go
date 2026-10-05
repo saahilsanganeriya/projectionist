@@ -149,6 +149,7 @@ func (f *fixture) options(extra string) {
 	f.h.SetOptions(`roots = ["` + f.path("Movies") + `", "` + f.path("TV") + `"]
 stats_file = "` + filepath.Join(f.dir, "sub_stats.tsv") + `"
 secrets_dir = "` + f.dir + `"
+legacy_quota = "` + f.dir + `"
 alass = "` + filepath.Join(f.h.Env.FFmpeg.Dir, "alass") + `"
 workers = 1
 ` + extra)
@@ -246,7 +247,8 @@ func (f *fixture) outcomes() map[string]string {
 
 // Catches titles recorded (a week lost, silently) that a provider never searched or let be tried: an outage, TMDB
 // out, or the download quota, which must also stop every OpenSubtitles request until it resumes 24 h later with no
-// alert (it is routine); a candidate already rejected for the file downloaded again while its title waits; a refused
+// alert (it is routine), and at cutover until subfetch2.py's own recorded resume time (its last 24 h of downloads
+// carried over); a candidate already rejected for the file downloaded again while its title waits; a refused
 // search deferring its own title too (one title's refusal would hold up every run), or recording it while another
 // provider is out for the quota; and dead download links (plain 404s) parking OpenSubtitles with an alert instead of
 // moving on as subfetch2.py does.
@@ -301,6 +303,22 @@ func TestRunProviderTrouble(t *testing.T) {
 	rep := refused.run(t)
 	if got := refused.outcomes(); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "HTTP 403") || len(got) != 2 || got[refused.path(ran)] != "error" {
 		t.Errorf("searches refused: alerts %q, recorded %v; want one alert, Ran recorded, Clerks and Show deferred", rep.Alerts, got)
+	}
+
+	legacy := newFixture(t) // cutover: subfetch2.py's own files say the IP waits another hour, after 2 downloads
+	old := t.TempDir()
+	os.WriteFile(filepath.Join(old, "quota.csv"), []byte("utc,reason,resume_after\n2026-10-05T05:00:00+00:00,x,"+
+		legacy.h.Now.Add(time.Hour).Format(time.RFC3339)+"\n"), 0o644)
+	os.WriteFile(filepath.Join(old, "downloads.csv"), []byte("utc,download_quota\n2026-10-04T05:00:00+00:00,190\n2026-10-05T05:00:00+00:00,189\n"), 0o644)
+	legacy.options(`providers = ["opensubtitles"]`)
+	os.Rename(filepath.Join(old, "quota.csv"), filepath.Join(legacy.dir, "quota.csv"))
+	os.Rename(filepath.Join(old, "downloads.csv"), filepath.Join(legacy.dir, "downloads.csv"))
+	var st quotaState
+	if legacy.run(t); legacy.requestCount() != 0 || len(legacy.outcomes()) != 1 {
+		t.Errorf("legacy quota wait: %d OpenSubtitles requests, recorded %v; want none, only Heat's extraction", legacy.requestCount(), legacy.outcomes())
+	}
+	if legacy.h.Env.Store.GetJSON(context.Background(), name, "opensubtitles_quota", &st); len(st.Downloads) != 1 {
+		t.Errorf("imported %d of subfetch2.py's downloads; want the 1 within 24 h", len(st.Downloads))
 	}
 
 	both := newFixture(t) // OpenSubtitles waits out its quota while OpenSubtitles.com refuses a bad key

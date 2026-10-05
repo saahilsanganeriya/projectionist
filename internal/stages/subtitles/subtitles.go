@@ -22,6 +22,7 @@ package subtitles
 import (
 	"bytes"
 	"context"
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"math"
@@ -63,17 +64,20 @@ type Options struct {
 	SecretsDir string        `toml:"secrets_dir"`
 	Alass      string        `toml:"alass"`
 	Providers  []string      `toml:"providers"` // opensubtitles-com and subdl also need opensubtitles_api_key, subdl_api_key in secrets_dir
+	// subfetch2.py's OUT folder: its quota.csv and downloads.csv seed the OpenSubtitles quota once, at cutover.
+	LegacyQuota string `toml:"legacy_quota"`
 }
 
 func defaults() Options {
 	return Options{
-		Roots:      []string{"/volume1/media/Movies", "/volume1/media/TV"},
-		StatsFile:  "/state/sub_stats.tsv",
-		RetryAfter: 7 * 24 * time.Hour,
-		Workers:    3,
-		SecretsDir: "/run/secrets",
-		Alass:      "/usr/local/bin/alass",
-		Providers:  []string{"opensubtitles", "opensubtitles-com", "subdl", "gestdown", "sitec"},
+		Roots:       []string{"/volume1/media/Movies", "/volume1/media/TV"},
+		StatsFile:   "/state/sub_stats.tsv",
+		RetryAfter:  7 * 24 * time.Hour,
+		Workers:     3,
+		SecretsDir:  "/run/secrets",
+		Alass:       "/usr/local/bin/alass",
+		Providers:   []string{"opensubtitles", "opensubtitles-com", "subdl", "gestdown", "sitec"},
+		LegacyQuota: "/volume1/PlexMediaServer/subtitle-downloads",
 	}
 }
 
@@ -196,7 +200,11 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 				pace: newPacer(time.Second), dl: newPacer(dlGap)}
 			l.dl.quota429 = true
 			var st quotaState
-			if _, err := env.Store.GetJSON(ctx, name, "opensubtitles_quota", &st); err != nil {
+			found, err := env.Store.GetJSON(ctx, name, "opensubtitles_quota", &st)
+			if err == nil && !found && opt.LegacyQuota != "" {
+				st, err = legacyQuota(opt.LegacyQuota, env.Now())
+			}
+			if err != nil {
 				return nil, err
 			}
 			l.restore(st)
@@ -204,6 +212,9 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 				if err := env.Store.PutJSON(context.WithoutCancel(ctx), name, "opensubtitles_quota", st); err != nil {
 					env.Log.Error("quota state not saved", "event", "store_error", "err", err)
 				}
+			}
+			if !found { // the import happens once: from now on the store holds the quota
+				l.keep(st)
 			}
 			r.providers = append(r.providers, l)
 		case "opensubtitles-com":
@@ -229,6 +240,51 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 }
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
+
+// legacyQuota is subfetch2.py v8's own record of the IP's quota: the latest resume_after in quota.csv and the last
+// 24 h of downloads.csv, so a cutover neither restarts the day's budget nor downloads into a deny. Missing files are
+// no record.
+func legacyQuota(dir string, now time.Time) (quotaState, error) {
+	read := func(file, column string) ([]time.Time, error) {
+		f, err := os.Open(filepath.Join(dir, file))
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		rows, err := csv.NewReader(f).ReadAll()
+		if err != nil || len(rows) == 0 {
+			return nil, err
+		}
+		col := slices.Index(rows[0], column)
+		var out []time.Time
+		for _, row := range rows[1:] {
+			if t, err := time.Parse(time.RFC3339, row[col]); col >= 0 && err == nil {
+				out = append(out, t)
+			}
+		}
+		return out, nil
+	}
+	var st quotaState
+	resume, err := read("quota.csv", "resume_after")
+	if err != nil {
+		return st, err
+	}
+	for _, t := range resume {
+		if t.After(st.ResumeAfter) {
+			st.ResumeAfter = t
+		}
+	}
+	downloads, err := read("downloads.csv", "utc")
+	for _, t := range downloads {
+		if t.After(now.Add(-24 * time.Hour)) {
+			st.Downloads = append(st.Downloads, t.UTC())
+		}
+	}
+	return st, err
+}
 
 // ---- the walk: stats for every subtitle file, and the videos still lacking an English sidecar ----
 
