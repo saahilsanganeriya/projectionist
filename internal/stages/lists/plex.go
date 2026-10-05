@@ -1,0 +1,598 @@
+package lists
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"projectionist/internal/plex"
+	"projectionist/internal/stage"
+)
+
+// Plex: one collection per shelf in the Movies section, custom order, Home rows for the configured lists.
+
+type plexSink struct {
+	env      *stage.Env
+	opt      Options
+	log      *slog.Logger
+	start    time.Time // the run's start, which stamps a section listing
+	w        *writer
+	m        plexMap
+	byTMDB   map[int]string // ratingKey
+	colls    []plexColl     // the section's collections, as load read them
+	machine  string
+	taken    int
+	retired  int
+	notTaken int // wanted members Plex holds under no key the map gives
+}
+
+// plexLean leaves out of a read what the stage never uses: at load 20 a 5-film collection's /children took 108 s, the
+// same members read lean 0.18 s (measured by the tonight stage, 2026-10-05).
+const plexLean = "excludeFields=summary,tagline&excludeElements=Media,Genre,Country,Director,Writer,Role,Collection,Producer,Label,Image"
+
+// mapSlack lets the map listed one run ago count as due on the next run, which starts at the last start + every and
+// so can begin a moment short of plex_refresh after the stamp (the run's start).
+const mapSlack = time.Minute
+
+// plexPage is how many movies one listing call asks for: on the busy NAS (2026-10-05) the whole section in one answer
+// took over three minutes, and 300 at a time 4 s to over a minute.
+var plexPage = 100
+
+type plexMap struct {
+	FetchedAt time.Time        `json:"fetched_at"`
+	Items     map[int]plexItem `json:"items"`
+}
+
+type plexItem struct {
+	Key     string `json:"k"`
+	Watched bool   `json:"w,omitempty"`
+}
+
+// load reads the TMDB id → ratingKey map, from Plex at most once per plex_refresh (one paged listing of the
+// section) or after a run found it wrong, else from the copy kept in the store; then the section's collections.
+func (p *plexSink) load(ctx context.Context) appReport {
+	p.w = &writer{app: "plex", log: p.log}
+	var m plexMap
+	found, err := p.env.Store.GetJSON(ctx, name, "plex_map", &m)
+	if err != nil {
+		p.log.Warn("plex map unreadable", "event", "store_error", "err", err)
+	}
+	if !found || p.start.Sub(m.FetchedAt) >= p.opt.PlexRefresh-mapSlack {
+		ctx, cancel := context.WithTimeout(ctx, p.opt.PlexBudget)
+		defer cancel()
+		fresh := plexMap{FetchedAt: p.start, Items: map[int]plexItem{}}
+		complete := false
+		for start := 0; ; start += plexPage {
+			var page struct {
+				TotalSize int `json:"totalSize"`
+				Metadata  []struct {
+					RatingKey string `json:"ratingKey"`
+					ViewCount int    `json:"viewCount"`
+					// Plex sends "guid" (plex://movie/…) beside "Guid" (the external ids); encoding/json matches keys
+					// case-insensitively, so without its own field "guid" would be decoded into Guid and fail
+					PlexGUID string `json:"guid"`
+					Guid     []struct {
+						ID string `json:"id"`
+					} `json:"Guid"`
+				} `json:"Metadata"`
+			}
+			path := fmt.Sprintf("/library/sections/%d/all?type=1&includeGuids=1&%s&X-Plex-Container-Start=%d&X-Plex-Container-Size=%d",
+				p.opt.PlexSection, plexLean, start, plexPage)
+			if !p.w.read(ctx, "section listing", func(ctx context.Context) error { return p.env.Plex.GetJSON(ctx, path, &page) }) {
+				break
+			}
+			for _, it := range page.Metadata {
+				for _, g := range it.Guid {
+					n, err := strconv.Atoi(strings.TrimPrefix(g.ID, "tmdb://"))
+					if _, dup := fresh.Items[n]; err == nil && strings.HasPrefix(g.ID, "tmdb://") && !dup {
+						fresh.Items[n] = plexItem{Key: it.RatingKey, Watched: it.ViewCount > 0}
+					}
+				}
+			}
+			if len(page.Metadata) == 0 || start+len(page.Metadata) >= page.TotalSize {
+				complete = true
+				break
+			}
+		}
+		switch {
+		case complete:
+			m = fresh
+		case len(fresh.Items) > 0:
+			// a slow Plex answered part of the listing: keep it over the old copy (a film missing from a partial map
+			// would be dropped from its shelves) and list again next run, as fetched_at stays old
+			if m.Items == nil {
+				m.Items = map[int]plexItem{}
+			}
+			for t, it := range fresh.Items {
+				m.Items[t] = it
+			}
+		}
+		if len(fresh.Items) > 0 {
+			if err := p.env.Store.PutJSON(ctx, name, "plex_map", m); err != nil {
+				p.log.Warn("plex map not kept", "event", "store_error", "err", err)
+			}
+		}
+		p.w.stopped = "" // a failed listing only means the old copy (if any) is used
+	}
+	var r appReport
+	p.m, p.byTMDB = m, map[int]string{}
+	for t, it := range m.Items {
+		p.byTMDB[t] = it.Key
+		if it.Watched {
+			r.Watched = append(r.Watched, t)
+		}
+	}
+	colls, ok := p.collections(ctx)
+	if !ok {
+		return r // the writer is stopped: reconcile waits for the next run
+	}
+	mine, intents, err := madeIn(ctx, p.env.Store.DB(), "plex")
+	if err != nil {
+		p.w.stopped = "state: " + err.Error()
+		return r
+	}
+	p.colls = colls
+	for _, c := range colls {
+		// a collection a lost create answer made is the shelf's, still to be adopted, not an owner's title
+		if !mine[c.RatingKey] && !strings.HasPrefix(c.Summary, summaryMarker) && !answersCreate(time.Unix(c.AddedAt, 0), intents...) {
+			r.Taken = append(r.Taken, fold(c.Title))
+		}
+	}
+	if err := p.env.Store.PutJSON(ctx, name, "plex_report", r); err != nil {
+		p.log.Warn("plex report not kept", "event", "store_error", "err", err)
+	}
+	return r
+}
+
+type plexColl struct {
+	RatingKey      string `json:"ratingKey"`
+	Type           string `json:"type"`
+	Title          string `json:"title"`
+	TitleSort      string `json:"titleSort"`
+	Summary        string `json:"summary"`
+	CollectionSort string `json:"collectionSort"`
+	CollectionMode string `json:"collectionMode"`
+	AddedAt        int64  `json:"addedAt"`
+}
+
+func (p *plexSink) collections(ctx context.Context) ([]plexColl, bool) {
+	var out struct {
+		Metadata []plexColl `json:"Metadata"`
+	}
+	ok := p.w.read(ctx, "collections", func(ctx context.Context) error {
+		return p.env.Plex.GetJSON(ctx, fmt.Sprintf("/library/sections/%d/collections", p.opt.PlexSection), &out)
+	})
+	return out.Metadata, ok
+}
+
+func (p *plexSink) reconcile(ctx context.Context, shelves []shelf, retire []string) {
+	if p.w.stopped != "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, p.opt.PlexBudget)
+	defer cancel()
+	p.retire(ctx, retire)
+	if len(p.byTMDB) == 0 {
+		p.w.stopped = "no TMDB id → ratingKey map yet"
+		return
+	}
+	var id struct {
+		MachineIdentifier string `json:"machineIdentifier"`
+	}
+	if !p.w.read(ctx, "identity", func(ctx context.Context) error { return p.env.Plex.GetJSON(ctx, "/identity", &id) }) {
+		return
+	}
+	p.machine = id.MachineIdentifier
+	ids := map[string]string{} // list name → collection ratingKey
+	for _, s := range shelves {
+		if key := p.shelf(ctx, s, p.colls); key != "" {
+			ids[s.List.Name] = key
+		}
+		if p.w.stopped != "" {
+			return
+		}
+	}
+	p.home(ctx, shelves, ids)
+}
+
+// retire deletes the collections of retired lists. Each is looked up by its id, never judged by the collections
+// listing, and deleted (which also drops its Home row, measured on 1.43) only when it is a collection that carries the
+// stage's summary or none: a create whose summary write never ran. One whose summary the owner rewrote is his and
+// stays. A record is forgotten only once Plex confirms the collection gone (a DELETE, or a 404); a record whose
+// create was never confirmed has no id to look up and is kept.
+func (p *plexSink) retire(ctx context.Context, keys []string) {
+	db := p.env.Store.DB()
+	for _, key := range keys {
+		row, err := getRow(ctx, db, "plex", key)
+		if err != nil {
+			p.w.stopped = "state: " + err.Error()
+			return
+		}
+		if row.ID == "" {
+			continue
+		}
+		var found struct {
+			Metadata []plexColl `json:"Metadata"`
+		}
+		gone := false
+		if !p.w.read(ctx, "look up "+key, func(ctx context.Context) error {
+			err := p.env.Plex.GetJSON(ctx, "/library/metadata/"+row.ID, &found)
+			if errors.Is(err, plex.ErrNotFound) {
+				gone = true
+				return nil
+			}
+			return err
+		}) {
+			return
+		}
+		switch {
+		case gone:
+		case len(found.Metadata) == 0:
+			continue // Plex answers the collection or 404; anything else confirms nothing
+		case found.Metadata[0].Type != "collection":
+			p.log.Warn("record names an item that is not a collection; left alone", "event", "retire_refused", "app", "plex", "list", key, "id", row.ID)
+			continue
+		case found.Metadata[0].Summary == "" || strings.HasPrefix(found.Metadata[0].Summary, summaryMarker):
+			if !p.w.write(ctx, "retire "+found.Metadata[0].Title, func(ctx context.Context) error {
+				return p.env.Plex.Do(ctx, "DELETE", "/library/collections/"+row.ID)
+			}) {
+				return
+			}
+			p.retired++
+			p.log.Info("shelf retired", "event", "collection_retired", "app", "plex", "list", key, "title", found.Metadata[0].Title, "id", row.ID)
+		default:
+			continue // the owner rewrote its summary: his now
+		}
+		if err := deleteRow(ctx, db, "plex", key); err != nil {
+			p.log.Warn("state write failed", "event", "store_error", "err", err)
+		}
+	}
+}
+
+func (p *plexSink) uri(keys []string) string {
+	return "server://" + p.machine + "/com.plexapp.plugins.library/library/metadata/" + strings.Join(keys, ",")
+}
+
+// shelf brings one collection to the shelf's state and returns its ratingKey ("" when it was not made).
+func (p *plexSink) shelf(ctx context.Context, s shelf, colls []plexColl) string {
+	db := p.env.Store.DB()
+	row, err := getRow(ctx, db, "plex", s.List.Key)
+	if err != nil {
+		p.w.stopped = "state: " + err.Error()
+		return ""
+	}
+	var want []string
+	for _, t := range s.Members {
+		if k, ok := p.byTMDB[t]; ok {
+			want = append(want, k)
+		}
+	}
+	var coll *plexColl
+	for i := range colls {
+		if row.ID != "" && colls[i].RatingKey == row.ID {
+			coll = &colls[i]
+		}
+	}
+	if coll == nil {
+		if coll = p.adoptOrCreate(ctx, s, &row, colls, want); coll == nil {
+			return ""
+		}
+	}
+	base := "/library/collections/" + coll.RatingKey
+	if coll.CollectionSort != "2" || coll.CollectionMode != "0" {
+		// custom order (the list's), and hidden from the library grid: the shelf lives in Collections and on Home
+		path := "/library/metadata/" + coll.RatingKey + "/prefs?collectionSort=2&collectionMode=0"
+		if !p.w.write(ctx, "prefs of "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "PUT", path) }) {
+			return ""
+		}
+	}
+	have, ok := p.children(ctx, coll.RatingKey)
+	if !ok {
+		return ""
+	}
+	drop, add := diffSets(have, want)
+	for _, k := range drop {
+		if !p.w.write(ctx, "drop from "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "DELETE", base+"/items/"+k) }) {
+			return ""
+		}
+	}
+	for _, b := range batches(add, 100) {
+		path := base + "/items?" + url.Values{"uri": {p.uri(b)}}.Encode()
+		if !p.w.item(ctx, "add to "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "PUT", path) }) && p.w.stopped != "" {
+			return ""
+		}
+	}
+	// Plex puts members it has no custom position for after the placed ones, by title (seen on 1.43): read the
+	// order back so only what is out of place moves
+	if len(drop)+len(add) > 0 {
+		if have, ok = p.children(ctx, coll.RatingKey); !ok {
+			return ""
+		}
+	}
+	// Plex takes no key it does not hold (1.43 drops one from a batch, refuses a batch of only such keys): a wanted key
+	// missing now is one the map got wrong, as when a film is re-added under a new key. Only members are ordered (Plex
+	// refuses to move anything else), and the section is listed again on the next run, whatever plex_refresh says.
+	held := map[string]bool{}
+	for _, k := range have {
+		held[k] = true
+	}
+	var placed []string
+	for _, k := range want {
+		if held[k] {
+			placed = append(placed, k)
+		}
+	}
+	if n := len(want) - len(placed); n > 0 {
+		p.notTaken += n
+		p.log.Warn("plex did not take members under the keys the map gives", "event", "plex_map_stale", "list", s.List.Name, "members", n)
+		p.m.FetchedAt = time.Time{}
+		if err := p.env.Store.PutJSON(ctx, name, "plex_map", p.m); err != nil {
+			p.log.Warn("plex map not kept", "event", "store_error", "err", err)
+		}
+	}
+	for _, m := range planMoves(have, placed) {
+		path := base + "/items/" + m.Item + "/move"
+		if m.After != "" {
+			path += "?after=" + m.After
+		}
+		if !p.w.write(ctx, "order "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "PUT", path) }) {
+			return ""
+		}
+	}
+	edit := url.Values{}
+	for _, f := range []struct{ field, have, want string }{
+		{"title", coll.Title, s.Title}, {"titleSort", coll.TitleSort, s.SortTitle}, {"summary", coll.Summary, s.Summary}} {
+		if f.have != f.want {
+			edit.Set(f.field+".value", f.want)
+			edit.Set(f.field+".locked", "1")
+		}
+	}
+	if len(edit) > 0 {
+		edit.Set("type", "18")
+		edit.Set("id", coll.RatingKey)
+		path := fmt.Sprintf("/library/sections/%d/all?%s", p.opt.PlexSection, edit.Encode())
+		if !p.w.write(ctx, "describe "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "PUT", path) }) {
+			return ""
+		}
+	}
+	if s.Art.key != "" && row.Poster != s.Art.key {
+		img, ctype, err := s.Art.get()
+		if err != nil {
+			p.log.Warn("poster unavailable", "event", "poster_error", "list", s.List.Name, "err", err)
+			return coll.RatingKey
+		}
+		path := "/library/metadata/" + coll.RatingKey + "/posters"
+		if !p.w.write(ctx, "poster of "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Send(ctx, "POST", path, ctype, img) }) {
+			return ""
+		}
+		row.Poster = s.Art.key
+		if err := putRow(ctx, db, "plex", s.List.Key, row); err != nil {
+			p.log.Warn("state write failed", "event", "store_error", "err", err)
+		}
+	}
+	return coll.RatingKey
+}
+
+func (p *plexSink) children(ctx context.Context, key string) ([]string, bool) {
+	var kids struct {
+		Metadata []struct {
+			RatingKey string `json:"ratingKey"`
+		} `json:"Metadata"`
+	}
+	ok := p.w.read(ctx, "members", func(ctx context.Context) error {
+		return p.env.Plex.GetJSON(ctx, "/library/collections/"+key+"/children?"+plexLean, &kids)
+	})
+	var out []string
+	for _, k := range kids.Metadata {
+		out = append(out, k.RatingKey)
+	}
+	return out, ok
+}
+
+// adoptOrCreate finds the shelf's collection when the state lost track of it, or makes it. A collection with the
+// shelf's title is adopted only when it is provably this stage's: it carries the stage's summary, or Plex made it
+// within adoptWindow of a create this stage sent. Any other is the owner's and is left alone.
+func (p *plexSink) adoptOrCreate(ctx context.Context, s shelf, row *sinkRow, colls []plexColl, want []string) *plexColl {
+	db := p.env.Store.DB()
+	if c := p.adoptable(s, row, colls); c != nil {
+		return p.keep(ctx, db, s, row, c)
+	}
+	for _, c := range colls {
+		if sameTitle(c.Title, s.Title) {
+			p.taken++
+			p.log.Warn("a collection of the owner's has this title; list not shelved", "event", "name_taken", "app", "plex",
+				"list", s.List.Name, "title", s.Title, "collection", c.RatingKey)
+			return nil
+		}
+	}
+	if len(want) == 0 {
+		return nil // nothing on the NAS yet: no empty collection
+	}
+	row.IntentAt = p.env.Now()
+	if err := putRow(ctx, db, "plex", s.List.Key, *row); err != nil { // log the intent before acting
+		p.w.stopped = "state: " + err.Error()
+		return nil
+	}
+	first := want
+	if len(first) > 100 {
+		first = first[:100]
+	}
+	path := "/library/collections?" + url.Values{"type": {"1"}, "smart": {"0"}, "title": {s.Title},
+		"sectionId": {strconv.Itoa(p.opt.PlexSection)}, "uri": {p.uri(first)}}.Encode()
+	if !p.w.writeOnce(ctx, "create "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "POST", path) }) {
+		return nil
+	}
+	fresh, ok := p.collections(ctx)
+	if !ok {
+		return nil
+	}
+	if c := p.adoptable(s, row, fresh); c != nil {
+		p.log.Info("collection made", "event", "collection_created", "app", "plex", "list", s.List.Name, "id", c.RatingKey)
+		return p.keep(ctx, db, s, row, c)
+	}
+	p.w.stopped = "created " + s.List.Name + " but cannot find it"
+	return nil
+}
+
+// adoptable returns the collection with the shelf's title that is provably the shelf's: it carries the stage's
+// summary, or Plex made it in answer to the shelf's pending create. Plex holds one collection per title, ignoring
+// case (a second create joins the first).
+func (p *plexSink) adoptable(s shelf, row *sinkRow, colls []plexColl) *plexColl {
+	for i, c := range colls {
+		if sameTitle(c.Title, s.Title) && (strings.HasPrefix(c.Summary, summaryMarker) || answersCreate(time.Unix(c.AddedAt, 0), row.IntentAt)) {
+			return &colls[i]
+		}
+	}
+	return nil
+}
+
+func (p *plexSink) keep(ctx context.Context, db *sql.DB, s shelf, row *sinkRow, c *plexColl) *plexColl {
+	if row.ID != c.RatingKey { // another collection than the record's (the old one deleted by hand): no poster yet
+		row.Poster = ""
+	}
+	row.ID, row.IntentAt = c.RatingKey, time.Time{}
+	if err := putRow(ctx, db, "plex", s.List.Key, *row); err != nil {
+		p.w.stopped = "state: " + err.Error()
+		return nil
+	}
+	return c
+}
+
+// home promotes the configured lists to the owner's own Home only (not Recommended, which every shared user sees, nor
+// friends' Homes), in the configured order after opt.HomeAfter, and demotes shelves this stage promoted that are no
+// longer configured.
+func (p *plexSink) home(ctx context.Context, shelves []shelf, ids map[string]string) {
+	db := p.env.Store.DB()
+	manage := fmt.Sprintf("/hubs/sections/%d/manage", p.opt.PlexSection)
+	type hub struct {
+		Identifier            string `json:"identifier"`
+		PromotedToOwnHome     bool   `json:"promotedToOwnHome"`
+		PromotedToRecommended bool   `json:"promotedToRecommended"`
+		PromotedToSharedHome  bool   `json:"promotedToSharedHome"`
+	}
+	var hubs struct {
+		Hub []hub `json:"Hub"`
+	}
+	read := func() bool {
+		hubs.Hub = nil
+		return p.w.read(ctx, "home rows", func(ctx context.Context) error { return p.env.Plex.GetJSON(ctx, manage, &hubs) })
+	}
+	if !read() {
+		return
+	}
+	ident := func(key string) string { return fmt.Sprintf("custom.collection.%d.%s", p.opt.PlexSection, key) }
+	state := map[string]hub{}
+	for _, h := range hubs.Hub {
+		state[h.Identifier] = h
+	}
+	var want []string
+	wanted := map[string]bool{}
+	for _, n := range p.opt.Home {
+		for name, key := range ids {
+			if strings.EqualFold(name, n) && !wanted[key] {
+				want = append(want, ident(key))
+				wanted[key] = true
+			}
+		}
+	}
+	changed := false
+	for _, s := range shelves {
+		key := ids[s.List.Name]
+		if key == "" {
+			continue
+		}
+		row, err := getRow(ctx, db, "plex", s.List.Key)
+		if err != nil {
+			p.w.stopped = "state: " + err.Error()
+			return
+		}
+		h, on := state[ident(key)], wanted[key]
+		need := false
+		switch {
+		case on:
+			need = !h.PromotedToOwnHome || h.PromotedToRecommended || h.PromotedToSharedHome
+		case row.Promoted: // promoted by this stage, no longer configured; a row the owner promoted stays
+			need = h.PromotedToOwnHome || h.PromotedToRecommended || h.PromotedToSharedHome
+		}
+		if need {
+			v := map[bool]string{true: "1", false: "0"}[on]
+			path := manage + "?" + url.Values{"metadataItemId": {key}, "promotedToRecommended": {"0"}, "promotedToOwnHome": {v},
+				"promotedToSharedHome": {"0"}}.Encode()
+			if !p.w.write(ctx, "home row "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "POST", path) }) {
+				return
+			}
+			changed = true
+		}
+		if row.Promoted != on {
+			row.Promoted = on
+			if err := putRow(ctx, db, "plex", s.List.Key, row); err != nil {
+				p.log.Warn("state write failed", "event", "store_error", "err", err)
+			}
+		}
+	}
+	if changed && !read() {
+		return
+	}
+	order := make([]string, 0, len(hubs.Hub))
+	for _, h := range hubs.Hub {
+		order = append(order, h.Identifier)
+	}
+	for _, m := range planHubMoves(order, want, p.opt.HomeAfter) {
+		path := manage + "/" + m.Item + "/move"
+		if m.After != "" {
+			path += "?after=" + m.After
+		}
+		if !p.w.write(ctx, "home order", func(ctx context.Context) error { return p.env.Plex.Do(ctx, "PUT", path) }) {
+			return
+		}
+	}
+}
+
+// planHubMoves returns the moves that put the rows in want, in that order, right after the row named after (a
+// missing after puts the first at the top); rows already in place cost nothing.
+func planHubMoves(order, want []string, after string) []move {
+	order = append([]string(nil), order...)
+	var out []move
+	prev := after
+	for _, id := range want {
+		at, prevAt := indexOf(order, id), indexOf(order, prev)
+		if at < 0 {
+			continue
+		}
+		if at != prevAt+1 {
+			m := move{Item: id}
+			if prevAt >= 0 {
+				m.After = prev
+			}
+			out = append(out, m)
+			order = append(order[:at], order[at+1:]...)
+			to := indexOf(order, prev) + 1
+			order = append(order[:to], append([]string{id}, order[to:]...)...)
+		}
+		prev = id
+	}
+	return out
+}
+
+func indexOf(xs []string, x string) int {
+	for i, v := range xs {
+		if v == x {
+			return i
+		}
+	}
+	return -1
+}
+
+// refusedItem tells an add Plex refuses from a sick Plex: 1.43 answers 400 to a batch of only keys it does not hold
+// (measured 2026-10-05), and 404 once the collection is gone.
+func refusedItem(err error) bool {
+	var se *plex.StatusError
+	return errors.As(err, &se) && (se.Code == http.StatusBadRequest || se.Code == http.StatusNotFound)
+}

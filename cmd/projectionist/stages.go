@@ -8,6 +8,7 @@ import (
 	"projectionist/internal/stages/gpuguard"
 	"projectionist/internal/stages/health"
 	"projectionist/internal/stages/jfsync"
+	"projectionist/internal/stages/lists"
 	"projectionist/internal/stages/posters"
 	"projectionist/internal/stages/remote4k"
 	"projectionist/internal/stages/rename"
@@ -27,6 +28,7 @@ func stages() []stage.Stage {
 		gpuguard.Stage{},
 		health.Stage{},
 		jfsync.Stage{},
+		lists.Stage{},
 		posters.Stage{},
 		remote4k.Stage{},
 		rename.Stage{},

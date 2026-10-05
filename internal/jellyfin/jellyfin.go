@@ -147,8 +147,3 @@ func (c *Client) MediaUpdated(ctx context.Context, paths ...string) error {
 	}
 	return c.PostJSON(ctx, "/Library/Media/Updated", body, nil)
 }
-
-// Delete sends DELETE, e.g. DELETE /Collections/<id>/Items?Ids=... to take films out of a collection.
-func (c *Client) Delete(ctx context.Context, path string) error {
-	return c.do(ctx, http.MethodDelete, path, nil, nil)
-}

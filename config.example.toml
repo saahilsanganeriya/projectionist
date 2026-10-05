@@ -284,6 +284,42 @@ sink_alert_after   = "72h"           # an app whose listing fails this long rais
 mark               = "poster-curator 2026-10" # EXIF ImageDescription on the images the stage uploads, the owner's own
                                      # uploads excepted; a later export reads a marked upload as the stage's
 
+# Letterboxd lists as Plex collections and Jellyfin BoxSets: the canon plus the owner's own public lists, owned films
+# in list order, "On the NAS: N of M · seen S · <url>" summaries, generated posters, Plex Home rows for `home`.
+# Letterboxd is read politely (one request per 2 s for the whole process, page 1 only of user pages) and cached in
+# SQLite. A shelf whose title an owner's collection already has (ignoring case) is named "<list> · Letterboxd", and an
+# own list named like a canon shelf "<list> · my list". A shelf whose list is gone (private or deleted, in skip_own,
+# dropped from the canon) is deleted from both apps. Shelves keep each list's published order.
+[stages.lists]
+every            = "24h"
+window           = "03:00-08:00"
+dry_run          = false      # true: read and count everything, write nothing
+only             = []         # shelve only these lists (names); empty = all
+letterboxd_user  = "saahilsan"
+canon_refresh    = "168h"     # canon list pages are re-read weekly
+own_refresh      = "20h"      # the owner's lists, films page and diary feed: daily
+export_dir       = "/volume1/docker/projectionist/data/letterboxd" # the unzipped Letterboxd export (lists/*.csv, watched.csv)
+own_lists        = true
+skip_own         = ["*private*"] # the owner's lists to leave out: names or slugs, any case, "*" = any text; lists
+                                 # private on Letterboxd are never shelved
+movies_dir       = "/volume1/media/Movies"
+missing_file     = "/volume1/media/_lists-missing.txt"
+plex_section     = 4
+plex_refresh     = "24h"      # one /library/sections/4/all listing (TMDB id → ratingKey, watched) per day at most
+plex_budget      = "30m"      # first build of all shelves: ~2,000 calls; later runs a handful
+jellyfin_user    = "saahil"
+jellyfin_budget  = "15m"
+home             = ["Letterboxd Top 500", "Criterion Collection", "Sight & Sound 2022"] # the owner's own Plex Home rows, in order
+home_after       = "movie.recentlyadded"
+# To take a shelf away, leave its list out here (skip_own, only, the canon): a shelf deleted by hand in Plex or
+# Jellyfin is made again on the next run. A shelf whose summary you rewrite is yours: it stays when its list goes.
+# The canon defaults to the lists below (checked 2026-10-05); a [[stages.lists.canon]] table replaces all of them.
+# [[stages.lists.canon]]
+# name    = "Criterion Collection"
+# url     = "https://letterboxd.com/jbutts15/list/the-complete-criterion-collection/"
+# limit   = 0      # keep only the first N (the Top 250 is the Top 500 with limit = 250)
+# poster  = ""     # an image file instead of the generated poster
+
 # Which Claude model the stages that call one use, by date: the first rule whose `until` is still in the future wins
 # (`until` is exclusive; no `until` = for good). "<family>:latest" is the newest model whose id contains <family>,
 # looked up daily in the Models API, so a new model is used the day it ships. This is the default when no rule is set.
