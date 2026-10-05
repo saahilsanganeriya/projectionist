@@ -2,6 +2,7 @@ package collections
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -83,10 +84,10 @@ func (r *run) apply(ctx context.Context, s sink) {
 		r.rep.Count(s.Name()+"_waiting", 1)
 		r.env.Log.Info("sink backing off", "event", "sink_waiting", "sink", s.Name(), "retry_after", b.RetryAfter.UTC().Format(time.RFC3339))
 	default:
-		r.refused, r.refusedErr = 0, nil
+		r.skipped, r.firstSkip = 0, ""
 		err := r.reconcile(ctx, s)
-		if r.refused > 0 {
-			r.rep.Alert("%s refused %d collection poster(s) sent as image/jpeg bytes: %v", s.Name(), r.refused, r.refusedErr)
+		if r.skipped > 0 {
+			r.rep.Alert("%s: %d collection change(s) refused or not possible, retried next run; first: %s", s.Name(), r.skipped, r.firstSkip)
 		}
 		switch {
 		case err == nil:
@@ -154,7 +155,8 @@ func (r *run) missing(items map[int]string) bool {
 	return false
 }
 
-// reconcile sends a sink the missing creates, member adds, sort titles and posters; it stops at the first error.
+// reconcile sends a sink the missing creates, member adds, sort titles and posters. A change the app refuses is
+// skipped for that collection only; any other error stops the sink for this run.
 func (r *run) reconcile(ctx context.Context, s sink) error {
 	items, err := r.address(ctx, s)
 	if err != nil {
@@ -181,13 +183,17 @@ func (r *run) reconcile(ctx context.Context, s sink) error {
 		if _, ok := have[key(c.Name)]; ok || len(ids) == 0 {
 			continue
 		}
-		if err := r.write(s, "create", c, len(ids), func() error { return s.Create(ctx, c.Name, ids) }); err != nil {
+		ok, err := r.write(s, "create", c, len(ids), func() error { return s.Create(ctx, c.Name, ids) })
+		if err != nil {
 			return err
+		}
+		if !ok {
+			continue
 		}
 		created++
 		if r.opt.DryRun { // what the real run does next to the collection it just made
 			if c.Sort != "" {
-				r.write(s, "sort", c, 0, nil)
+				r.write(s, "sort", c, 0, nil) // a dry run never calls send, so it cannot fail
 			}
 			if err := r.poster(ctx, s, c, ""); err != nil {
 				return err
@@ -208,7 +214,7 @@ func (r *run) reconcile(ctx context.Context, s sink) error {
 			return err
 		}
 		if c.Sort != "" && !strings.EqualFold(h.Sort, c.Sort) {
-			if err := r.write(s, "sort", c, 0, func() error { return s.SetSort(ctx, h.ID, c.Sort) }); err != nil {
+			if _, err := r.write(s, "sort", c, 0, func() error { return s.SetSort(ctx, h.ID, c.Sort) }); err != nil {
 				return err
 			}
 		}
@@ -247,8 +253,8 @@ func (r *run) members(ctx context.Context, s sink, c *collection, h held, want [
 		}
 	}
 	if len(add) > 0 {
-		if err := r.write(s, "add", c, len(add), func() error { return s.Add(ctx, h.ID, add) }); err != nil {
-			return err
+		if ok, err := r.write(s, "add", c, len(add), func() error { return s.Add(ctx, h.ID, add) }); err != nil || !ok {
+			return err // refused: nothing recorded, so the next run asks again
 		}
 	}
 	if r.opt.DryRun {
@@ -261,25 +267,58 @@ func (r *run) members(ctx context.Context, s sink, c *collection, h held, want [
 	return r.env.Store.PutJSON(ctx, name, "members/"+s.Name()+"/"+h.ID, seen)
 }
 
-// write sends one change, or only logs it in a dry run. n is the number of members it carries.
-func (r *run) write(s sink, op string, c *collection, n int, send func() error) error {
+// write sends one change, or only logs it in a dry run. n is the number of members it carries. ok is false when the
+// app refused the change (recorded by isolate); err is any other failure.
+func (r *run) write(s sink, op string, c *collection, n int, send func() error) (ok bool, err error) {
 	event := op
 	if r.opt.DryRun {
 		event = "would_" + op
 	} else if err := send(); err != nil {
-		return err
+		return false, r.isolate(s, op, c, err)
 	}
 	r.rep.Count(s.Name()+"_"+op, 1)
 	if n > 0 {
 		r.rep.Count(s.Name()+"_"+op+"_members", n)
 	}
 	r.env.Log.Info("collection "+event, "event", event, "sink", s.Name(), "collection", c.Name, "members", n, "sort", c.Sort)
+	return true, nil
+}
+
+// isolate turns the app's refusal of one collection's request into a skip, so the run goes on to the next
+// collection; any other error is returned and backs the whole sink off.
+func (r *run) isolate(s sink, op string, c *collection, err error) error {
+	if !refusal(err) {
+		return err
+	}
+	r.skip(s, op, c, err)
 	return nil
 }
 
-// poster uploads a backed-up collection's poster once per app collection: recorded, because an app may draw its
-// own poster for a collection, so the app's image list cannot tell whether ours went up. id "" is a dry run's
-// planned collection.
+func (r *run) skip(s sink, op string, c *collection, err error) {
+	r.skipped++
+	if r.firstSkip == "" {
+		r.firstSkip = fmt.Sprintf("%s %q: %v", op, c.Name, err)
+	}
+	r.rep.Count(s.Name()+"_"+op+"_skipped", 1)
+	r.env.Log.Warn("collection change skipped", "event", op+"_skipped", "sink", s.Name(), "collection", c.Name, "err", err)
+}
+
+// refusal reports whether the app answered with a 4xx: it rejected that one request, which retrying cannot fix and
+// which says nothing about the next collection. Transport errors, timeouts and 5xx mean the app is unwell. Both
+// clients end a non-2xx error with "HTTP <code>".
+func refusal(err error) bool {
+	msg := err.Error()
+	i := strings.LastIndex(msg, "HTTP ")
+	if i < 0 {
+		return false
+	}
+	code, convErr := strconv.Atoi(msg[i+len("HTTP "):])
+	return convErr == nil && code/100 == 4
+}
+
+// poster uploads an owner collection's poster once per app collection: recorded, because an app may draw its own
+// poster for a collection, so the app's image list cannot tell whether ours went up. id "" is a dry run's planned
+// collection. A poster file missing from poster_dir (the deploy copy skipped) is skipped and alerted.
 func (r *run) poster(ctx context.Context, s sink, c *collection, id string) error {
 	ps, ok := s.(posterSink)
 	if !ok || c.Poster == "" {
@@ -293,23 +332,14 @@ func (r *run) poster(ctx context.Context, s sink, c *collection, id string) erro
 	}
 	jpeg, err := os.ReadFile(c.Poster)
 	if errors.Is(err, fs.ErrNotExist) {
+		r.skip(s, "poster", c, err)
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	err = r.write(s, "poster", c, 0, func() error { return ps.Poster(ctx, id, jpeg) })
-	switch {
-	case err != nil && ctx.Err() == nil:
-		// A refused poster is cosmetic: it must not hold up members and sort titles. The run's alert names it.
-		r.refused++
-		r.rep.Count(s.Name()+"_poster_refused", 1)
-		r.env.Log.Warn("poster refused", "event", "poster_refused", "sink", s.Name(), "collection", c.Name, "err", err)
-		if r.refusedErr == nil {
-			r.refusedErr = err
-		}
-		return nil
-	case err != nil || r.opt.DryRun:
+	sent, err := r.write(s, "poster", c, 0, func() error { return ps.Poster(ctx, id, jpeg) })
+	if err != nil || !sent || r.opt.DryRun {
 		return err
 	}
 	return r.env.Store.PutJSON(ctx, name, "poster/"+s.Name()+"/"+id, c.Poster)
@@ -430,7 +460,7 @@ func (p *plexSink) SetSort(ctx context.Context, id, sort string) error {
 	return p.c.Do(ctx, http.MethodPut, fmt.Sprintf("/library/sections/%d/all?%s", p.section, q.Encode()))
 }
 
-// Plex takes no posters from here: the backed-up collections already show them there, where the backups came from.
+// Plex takes no posters from here: the owner's collections already show them there, where the export came from.
 
 // ---- Jellyfin ----
 
@@ -463,9 +493,15 @@ func (j *jellyfinSink) Address(ctx context.Context) (map[int]string, error) {
 	return out, nil
 }
 
+// Collections and Members ask as an administrator: Jellyfin 12.1 leaves ChildCount out of a BoxSet, and lists none
+// of its children, when no userId is given.
 func (j *jellyfinSink) Collections(ctx context.Context) (map[string]held, error) {
+	user, err := j.admin(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var res jfItems
-	if err := j.c.GetJSON(ctx, "/Items?IncludeItemTypes=BoxSet&Recursive=true&Fields=SortName,ChildCount", &res); err != nil {
+	if err := j.c.GetJSON(ctx, "/Items?IncludeItemTypes=BoxSet&Recursive=true&Fields=SortName,ChildCount&userId="+url.QueryEscape(user), &res); err != nil {
 		return nil, err
 	}
 	out := map[string]held{}
@@ -476,8 +512,12 @@ func (j *jellyfinSink) Collections(ctx context.Context) (map[string]held, error)
 }
 
 func (j *jellyfinSink) Members(ctx context.Context, id string) (map[string]bool, error) {
+	user, err := j.admin(ctx)
+	if err != nil {
+		return nil, err
+	}
 	var res jfItems
-	if err := j.c.GetJSON(ctx, "/Items?ParentId="+url.QueryEscape(id), &res); err != nil {
+	if err := j.c.GetJSON(ctx, "/Items?ParentId="+url.QueryEscape(id)+"&userId="+url.QueryEscape(user), &res); err != nil {
 		return nil, err
 	}
 	out := map[string]bool{}
@@ -496,7 +536,7 @@ func (j *jellyfinSink) Add(ctx context.Context, id string, items []string) error
 	return j.c.PostJSON(ctx, "/Collections/"+url.PathEscape(id)+"/Items?"+url.Values{"ids": {strings.Join(items, ",")}}.Encode(), nil, nil)
 }
 
-// admin is the user SetSort reads an item as: Jellyfin 12.1 answers GET /Items/{id} only for a user (400 otherwise).
+// admin is the administrator the stage asks as (see Collections and SetSort), looked up once per run.
 func (j *jellyfinSink) admin(ctx context.Context) (string, error) {
 	if j.user != "" {
 		return j.user, nil
@@ -537,6 +577,9 @@ func (j *jellyfinSink) SetSort(ctx context.Context, id, sort string) error {
 	return j.c.PostJSON(ctx, "/Items/"+url.PathEscape(id), item, nil)
 }
 
+// Poster uploads the image base64-encoded: Jellyfin's SetItemImage decodes its body through FromBase64Transform,
+// whatever the Content-Type says, and the Content-Type names the image format.
 func (j *jellyfinSink) Poster(ctx context.Context, id string, jpeg []byte) error {
-	return j.c.PostBody(ctx, "/Items/"+url.PathEscape(id)+"/Images/Primary", "image/jpeg", jpeg)
+	body := base64.StdEncoding.AppendEncode(nil, jpeg)
+	return j.c.PostBody(ctx, "/Items/"+url.PathEscape(id)+"/Images/Primary", "image/jpeg", body)
 }
