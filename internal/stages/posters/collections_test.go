@@ -67,8 +67,9 @@ func collectionWorld(t *testing.T, opts string, keepTitles bool) *world {
 	w.h.Fanart.Handle("GET", "/movies/4246", 200, `{"name":"Scary Movie Collection","movieposter":[{"id":"1","url":"`+w.api.URL+`/t/p/fanart/blue.jpg","lang":"en","likes":"5"}]}`)
 	w.h.Fanart.Handle("GET", "/movies/1960", 200, `{"name":"The Evil Dead","movieposter":[{"id":"2","url":"`+w.api.URL+`/t/p/fanart/red.jpg","lang":"en","likes":"9"}]}`)
 	file := func(title, colour string, wd, ht int, desc string) string {
-		return fmt.Sprintf(`{"title":%q,"imageinfo":[{"url":"x","thumburl":"%s/t/p/1920px-/%s.jpg","mime":"image/jpeg","width":%d,"height":%d,
- "extmetadata":{"ImageDescription":{"value":%q},"LicenseShortName":{"value":"CC BY-SA 4.0"}}}]}`, title, w.api.URL, colour, wd, ht, desc)
+		return fmt.Sprintf(`{"title":%q,"imageinfo":[{"url":"%[2]s/original/%[3]s.jpg","thumburl":"%[2]s/t/p/c/500px-%[3]s.jpg","mime":"image/jpeg",
+ "width":%[4]d,"height":%[5]d,"extmetadata":{"ImageDescription":{"value":%[6]q},"LicenseShortName":{"value":"CC BY-SA 4.0"}}}]}`,
+			title, w.api.URL, colour, wd, ht, desc)
 	}
 	w.set(func() {
 		w.commons = func(rw http.ResponseWriter, r *http.Request) {
@@ -78,7 +79,7 @@ func collectionWorld(t *testing.T, opts string, keepTitles bool) *world {
 				pages = `{"pageprops":{"wikibase_item":"Q99"}}` // a namesake's category
 			case strings.HasPrefix(search, "haswbstatement:P180=Q356275"):
 				pages = file("File:Paul Greengrass filming United 93.jpg", "redwide", 3000, 1500, "<b>Paul Greengrass</b> on the set") + "," +
-					file("File:Greengrass small.jpg", "yellow", 300, 200, "Paul Greengrass") + "," + file("File:Greengrass at TIFF.jpg", "green", 2000, 3000, "")
+					file("File:Greengrass small.jpg", "yellow", 300, 200, "Paul Greengrass") + "," + file("File:Greengrass at TIFF.jpg", "green", 1000, 1500, "")
 			case strings.HasPrefix(search, `incategory:"Paul Greengrass"`):
 				pages = file("File:Paul Greengrass the bowler.jpg", "yellow", 2000, 3000, "")
 			case strings.HasPrefix(search, `"Paul Greengrass" filming`):
@@ -112,7 +113,8 @@ func (w *world) pool(key string) []Candidate {
 // gathered, judged or given a poster; a franchise pool missing its TMDB collection's, fanart.tv's or its film's
 // poster (the film's as this stage chose it), or holding fanart.tv art filed under the collection's number for a film;
 // a member film's other TMDB collection feeding the pool; a Commons file kept though it is tiny, never names the
-// director or sits in a namesake's category; a co-director of one film taken for the director; a title's poster sent
+// director or sits in a namesake's category; a Commons original downloaded (Wikimedia throttles them) or a smaller
+// rendering than the photo allows; a co-director of one film taken for the director; a title's poster sent
 // while titles are dry and collections live; a collection poster sent to the wrong app item
 // or left unlocked in Plex; a director's poster not composed to 2:3 around the judge's box; a collection opened by an
 // arrival, or made in an app after the first listing, never getting its poster; and a rerun paying or uploading again.
@@ -168,7 +170,7 @@ func TestCollectionPosters(t *testing.T) {
 	for _, c := range w.pool("collection:paul greengrass") {
 		photos = append(photos, c.Source+" "+filepath.Base(c.URL))
 	}
-	if want := []string{"commons redwide.jpg", "tmdb-profile blue.jpg", "commons green.jpg"}; !slices.Equal(photos, want) {
+	if want := []string{"commons 1920px-redwide.jpg", "tmdb-profile blue.jpg", "commons 960px-green.jpg"}; !slices.Equal(photos, want) {
 		t.Fatalf("Greengrass pool %v, want %v: on-set Commons first, turns with TMDB; no tiny file, no namesake's category, no text hit "+
 			"that never names him, no co-director", photos, want)
 	}

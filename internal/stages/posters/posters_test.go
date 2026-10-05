@@ -187,7 +187,13 @@ func newWorld(t *testing.T, opts string) *world {
 		p := r.URL.Path
 		switch {
 		case strings.HasPrefix(p, "/t/p/"):
-			rw.Write(poster(strings.TrimSuffix(filepath.Base(p), ".jpg")))
+			name := strings.TrimSuffix(filepath.Base(p), ".jpg")
+			if _, after, ok := strings.Cut(name, "px-"); ok { // a Commons rendering: "<width>px-<file>"
+				name = after
+			}
+			rw.Write(poster(name))
+		case strings.HasPrefix(p, "/original/"): // Wikimedia throttles downloads of original files
+			rw.WriteHeader(http.StatusTooManyRequests)
 		case p == "/w/api.php" && w.commons != nil:
 			w.commons(rw, r)
 		case p == "/v1/models":

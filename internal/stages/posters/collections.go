@@ -311,13 +311,12 @@ func (r *run) commonsPhotos(ctx context.Context, name, qid string) ([]Candidate,
 			title := strings.TrimSuffix(strings.TrimPrefix(f.Title, "File:"), filepath.Ext(f.Title))
 			desc := f.meta("ImageDescription")
 			text := title + " " + desc + " " + f.meta("Categories")
-			if !strings.HasPrefix(ii.Mime, "image/") || ii.Mime == "image/svg+xml" || ii.Mime == "image/gif" ||
+			if ii.ThumbURL == "" || !strings.HasPrefix(ii.Mime, "image/") || ii.Mime == "image/svg+xml" || ii.Mime == "image/gif" ||
 				max(ii.Width, ii.Height) < 1000 || min(ii.Width, ii.Height) < 600 ||
 				!sure && !strings.Contains(strings.ToLower(title+" "+desc), strings.ToLower(name)) {
 				continue
 			}
 			seen[f.Title] = true
-			u := cmp.Or(ii.ThumbURL, ii.URL)
 			caption := title
 			if desc != "" {
 				caption += ": " + desc
@@ -332,7 +331,7 @@ func (r *run) commonsPhotos(ctx context.Context, name, qid string) ([]Candidate,
 			if onSet.MatchString(text) {
 				rank++
 			}
-			found = append(found, ranked{Candidate{URL: u, Thumb: strings.Replace(u, "/1920px-", "/500px-", 1), Source: srcCommons,
+			found = append(found, ranked{Candidate{URL: rendering(ii.ThumbURL, ii.Width), Thumb: ii.ThumbURL, Source: srcCommons,
 				License: f.meta("LicenseShortName"),
 				Caption: fmt.Sprintf("Wikimedia Commons, %d×%d pixels: %q", ii.Width, ii.Height, caption)}, rank})
 		}
@@ -376,8 +375,21 @@ func (r *run) commonsPhotos(ctx context.Context, name, qid string) ([]Candidate,
 	return out, nil
 }
 
-// commonsSearch lists the File pages a CirrusSearch query finds (at most 50) with their image info: a 1920-pixel
-// rendering to compose from, size, type, licence and caption.
+// rendering is the largest standard Commons rendering (1920, 1280 or 960 pixels wide) no wider than the photo, made
+// from its 500-pixel one by the width in the file name; else the 500-pixel one. Wikimedia throttles downloads of
+// original files hard (429s on the NAS), while renderings come from its thumbnail service.
+func rendering(thumb500 string, width int) string {
+	i := strings.LastIndex(thumb500, "/") + 1
+	for _, w := range []int{1920, 1280, 960} {
+		if width >= w && strings.Contains(thumb500[i:], "500px-") {
+			return thumb500[:i] + strings.Replace(thumb500[i:], "500px-", strconv.Itoa(w)+"px-", 1)
+		}
+	}
+	return thumb500
+}
+
+// commonsSearch lists the File pages a CirrusSearch query finds (at most 50) with their image info: a 500-pixel
+// rendering, size, type, licence and caption.
 func (r *run) commonsSearch(ctx context.Context, query string) ([]commonsFile, error) {
 	var resp struct {
 		Query struct {
@@ -385,7 +397,7 @@ func (r *run) commonsSearch(ctx context.Context, query string) ([]commonsFile, e
 		} `json:"query"`
 	}
 	err := r.commons(ctx, url.Values{"action": {"query"}, "generator": {"search"}, "gsrnamespace": {"6"}, "gsrsearch": {query},
-		"gsrlimit": {"50"}, "prop": {"imageinfo"}, "iiprop": {"url|size|mime|extmetadata"}, "iiurlwidth": {"1920"},
+		"gsrlimit": {"50"}, "prop": {"imageinfo"}, "iiprop": {"url|size|mime|extmetadata"}, "iiurlwidth": {"500"},
 		"iiextmetadatafilter": {"ImageDescription|Categories|LicenseShortName"}}, &resp)
 	return resp.Query.Pages, err
 }
