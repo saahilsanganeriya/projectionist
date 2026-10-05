@@ -39,7 +39,12 @@ services:
       # health stage: inspect containers, restart the ones in [stages.health].restartable. The socket is root on the
       # host and ":ro" would not limit its API; the allow-list in code is the bound.
       - /var/run/docker.sock:/var/run/docker.sock
-    secrets: [jellyfin_key] # /run/secrets/jellyfin_key, read-only
+      # ssdmirror: the USB SSD, and fill.py's folder whose PROGRESS.txt it takes over. DSM's mounts are private (no
+      # propagation): stop the container before ejecting the SSD and start it after plugging it back in. Started
+      # without the SSD, Docker makes an empty folder at that path and the stage refuses ("SSD not mounted").
+      - /volumeUSB1/usbshare1-2:/volumeUSB1/usbshare1-2
+      - /volume1/PlexMediaServer/ssd-copy:/volume1/PlexMediaServer/ssd-copy
+    secrets: [jellyfin_key, tmdb_read_token, tmdb_api_key, fanart_api_key] # /run/secrets/<name>, read-only
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
@@ -47,3 +52,9 @@ services:
 secrets:
   jellyfin_key:
     file: /volume1/docker/projectionist/secrets/jellyfin_key # root:root 0600
+  tmdb_read_token: # TMDB v4 read-access token; the v3 key below is the fallback
+    file: /volume1/docker/projectionist/secrets/tmdb_read_token
+  tmdb_api_key:
+    file: /volume1/docker/projectionist/secrets/tmdb_api_key
+  fanart_api_key:
+    file: /volume1/docker/projectionist/secrets/fanart_api_key

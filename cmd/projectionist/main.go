@@ -17,6 +17,7 @@ import (
 	_ "time/tzdata" // stage windows need zoneinfo; the slim runtime image may not ship it
 
 	"projectionist/internal/config"
+	"projectionist/internal/fanart"
 	"projectionist/internal/jellyfin"
 	"projectionist/internal/obs"
 	"projectionist/internal/plex"
@@ -25,6 +26,7 @@ import (
 	"projectionist/internal/server"
 	"projectionist/internal/stage"
 	"projectionist/internal/store"
+	"projectionist/internal/tmdb"
 	"projectionist/internal/viewers"
 )
 
@@ -85,21 +87,26 @@ func run(cfgPath, only string) int {
 	}
 	px := plex.New(cfg.Plex.URL, cfg.Plex.Preferences, cfg.Plex.Timeout)
 	jf := jellyfin.New(cfg.Jellyfin.URL, cfg.Jellyfin.KeyFile, cfg.Jellyfin.Timeout)
+	// One TMDB client for every stage, so its rate limit holds for the whole process.
+	tm := tmdb.New(tmdb.Options{ReadTokenFile: cfg.TMDB.ReadTokenFile, APIKeyFile: cfg.TMDB.APIKeyFile, CacheTTL: cfg.TMDB.CacheTTL}, st)
+	fa := fanart.New(fanart.Options{APIKeyFile: cfg.Fanart.APIKeyFile, CacheTTL: cfg.Fanart.CacheTTL}, st)
 	owners := map[string]bool{}
 	for _, o := range cfg.Owners {
 		owners[o] = true
 	}
 	metrics := obs.NewMetrics()
+	var sched *scheduler.Scheduler // stays nil for a one-off run: a trigger then has nowhere to go
 	runner := &scheduler.Runner{
 		Store: st, Log: log, Metrics: metrics,
 		Now: func() time.Time { return time.Now().UTC() },
 		NewEnv: func(s stage.Stage, l *slog.Logger) *stage.Env {
 			return &stage.Env{
-				Log: l, Store: st, Plex: px, Jellyfin: jf, Probe: prober, FFmpeg: cfg.FFmpeg, Metrics: metrics,
+				Log: l, Store: st, Plex: px, Jellyfin: jf, Probe: prober, TMDB: tm, Fanart: fa, FFmpeg: cfg.FFmpeg, Metrics: metrics,
 				Viewers: &viewers.Gate{Plex: px, Jellyfin: jf, Owners: owners, Poll: 30 * time.Second, Log: l},
 				Now:     func() time.Time { return time.Now().UTC() },
 				Loc:     cfg.Location(),
 				Options: func(v any) error { return cfg.StageOptions(s.Name(), v) },
+				Trigger: func(name string) bool { return sched != nil && sched.Trigger(name) },
 			}
 		},
 	}
@@ -130,6 +137,7 @@ func run(cfgPath, only string) int {
 		log.Error("unknown stage", "event", "config_error", "stage", only)
 		return 2
 	}
+	sched = &scheduler.Scheduler{Jobs: jobs, Runner: runner, Loc: cfg.Location()} // before any goroutine can call Trigger
 	log.Info("serving", "event", "start", "listen", cfg.Listen, "stages", len(jobs))
 	go func() {
 		if err := server.Serve(ctx, cfg.Listen, server.Handler(runner, st, metrics)); err != nil {
@@ -137,7 +145,7 @@ func run(cfgPath, only string) int {
 			stop()
 		}
 	}()
-	(&scheduler.Scheduler{Jobs: jobs, Runner: runner, Loc: cfg.Location()}).Run(ctx)
+	sched.Run(ctx)
 	log.Info("stopped", "event", "stop")
 	return 0
 }
