@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -281,6 +283,43 @@ func TestProbesWaitForGuests(t *testing.T) {
 	h.Plex.Handle("GET", "/status/sessions", 200, `<MediaContainer size="0"></MediaContainer>`)
 	if rep := run(t, h); rep.Counts[unreadable] != 1 || len(rep.Alerts) != 0 {
 		t.Fatalf("after the guest left: counts = %v, alerts = %v", rep.Counts, rep.Alerts)
+	}
+}
+
+// Catches: a run cancelled mid-probe (shutdown, redeploy) filing the killed ffprobes as unreadable videos, which the
+// next run would alert on, instead of failing and judging nothing.
+func TestCancelledProbesJudgeNothing(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	root := t.TempDir()
+	h.SetOptions(`root = "` + root + `"`)
+	started, never := filepath.Join(t.TempDir(), "started"), filepath.Join(t.TempDir(), "never")
+	syscall.Mkfifo(started, 0o600)
+	syscall.Mkfifo(never, 0o600)
+	h.Script(t, "ffprobe", `echo > "`+started+`"; exec cat "`+never+`"`) // blocks until killed
+	put(t, root, "Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", "film")
+	os.Mkdir(filepath.Join(root, "TV"), 0o755)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { os.ReadFile(started); cancel() }()
+	if err := (Stage{}).Run(ctx, h.Env, &stage.Report{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+}
+
+// Catches: the run failing because the renamer moved a video away between the walk and its probe.
+func TestVideoMovedMidRun(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	root := t.TempDir()
+	h.SetOptions(`root = "` + root + `"`)
+	fakeProbe(t, h)
+	video := filepath.Join(root, "Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv")
+	put(t, root, strings.TrimPrefix(video, root+"/"), "film")
+	os.Mkdir(filepath.Join(root, "TV"), 0o755)
+	h.Plex.HandleFunc("GET", "/status/sessions", func(w http.ResponseWriter, r *http.Request) {
+		os.Remove(video) // the viewer check runs right before the first probe
+		w.Write([]byte(`<MediaContainer size="0"></MediaContainer>`))
+	})
+	if rep := run(t, h); rep.Counts[unreadable] != 0 {
+		t.Fatalf("counts = %v", rep.Counts)
 	}
 }
 
