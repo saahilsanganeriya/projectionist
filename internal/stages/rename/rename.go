@@ -68,6 +68,9 @@ type Stage struct{}
 
 func (Stage) Name() string { return name }
 
+// skipDirs are never planned: Synology thumbnails, the recycle bin, and Plex's own optimized copies.
+var skipDirs = set("@eaDir", "#recycle", "Plex Versions")
+
 var partialExt = set(".!qb", ".part", ".partial", ".crdownload", ".tmp") // a folder holding one is still downloading
 
 func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
@@ -159,8 +162,8 @@ func scan(root string, settled time.Time) (*library, error) {
 			if p == lib {
 				return nil
 			}
-			if d.IsDir() && (d.Name() == "@eaDir" || d.Name() == "#recycle") {
-				return filepath.SkipDir // a folder holding a recycle bin looks empty here; prune re-checks the disk
+			if d.IsDir() && skipDirs[d.Name()] {
+				return filepath.SkipDir // a folder holding one looks empty here; prune re-checks the disk
 			}
 			info, err := d.Info()
 			if err != nil {
@@ -349,8 +352,9 @@ func sortedInts(m map[int]bool) []int {
 }
 
 // probeWorkUnits reads resolution and codec for every video of a film or show unit that is not all "keep", so
-// version and duplicate-episode labels are right; it returns how many it read. A file ffprobe cannot read keeps zero
-// facts. Units already in the scheme keep their labels from their names and are never probed.
+// version and duplicate-episode labels are right; it returns how many it read. A file ffprobe cannot read gets no
+// facts, so a label that needs them is left for review. Units already in the scheme keep their labels from their
+// names and are never probed.
 func probeWorkUnits(ctx context.Context, env *stage.Env, in *Input, plan Plan) int {
 	unsettled := map[string]bool{} // a version label may hinge on a resolution even when the unit only has a "leave"
 	for _, o := range plan.Ops {
@@ -369,8 +373,7 @@ func probeWorkUnits(ctx context.Context, env *stage.Env, in *Input, plan Plan) i
 		info, err := env.Probe.Probe(ctx, o.Src)
 		if err != nil || info.Video == nil {
 			env.Log.Warn("probe failed", "event", "probe_error", "item", o.Src, "err", err)
-			in.Video[o.Src] = VideoFacts{}
-			continue
+			continue // no facts: a label that needs them leaves its unit for review
 		}
 		in.Video[o.Src] = VideoFacts{info.Video.Width, info.Video.Height, info.Video.Codec}
 		n++

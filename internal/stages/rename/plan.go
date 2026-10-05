@@ -344,7 +344,13 @@ func (p *planner) planMovies() (*videoPlan, []Op, []Review) {
 		if len(keep) == 0 {
 			continue
 		}
-		labels := p.movieLabels(keep, folder, base)
+		labels, unread := p.movieLabels(keep, folder, base)
+		if unread != "" {
+			for _, f := range keep {
+				ops = append(ops, Op{unit, "leave", f, "", "version labels need the resolution ffprobe could not read: " + path.Base(unread)})
+			}
+			continue
+		}
 		if !distinct(labels) {
 			for _, f := range keep {
 				ops = append(ops, Op{unit, "leave", f, "", "versions still share a label " + pyList(labels)})
@@ -363,24 +369,28 @@ func (p *planner) planMovies() (*videoPlan, []Op, []Review) {
 	return videos, ops, review
 }
 
-// movieLabels names each version: resolution, then cut, codec, release group and size until they differ.
-func (p *planner) movieLabels(keep []string, folder, base string) []string {
+// movieLabels names each version: resolution, then cut, codec, release group and size until they differ. unread
+// names a version whose label needs facts the input lacks (ffprobe could not read it).
+func (p *planner) movieLabels(keep []string, folder, base string) (labels []string, unread string) {
 	in := p.in
-	labels := make([]string, len(keep))
+	labels = make([]string, len(keep))
 	for i, f := range keep {
 		if s := stem(path.Base(f)); path.Dir(f) == folder && strings.HasPrefix(s, base+" - ") {
 			labels[i] = s[len(base)+3:] // already named by this scheme ('1080p Remote', '2160p 14Mbps'): re-runs keep it
 		} else if l := manualLabel[strings.TrimPrefix(f, p.movies+"/")]; l != "" {
 			labels[i] = l
 		} else {
+			if _, known := in.Video[f]; !known && len(keep) > 1 {
+				unread = f
+			}
 			labels[i] = resolution(in.Video[f].Width, in.Video[f].Height)
 			if strings.Contains(f, "/Remote Versions/") {
 				labels[i] += " Remote"
 			}
 		}
 	}
-	if len(keep) == 1 {
-		return labels
+	if len(keep) == 1 || unread != "" {
+		return labels, unread
 	}
 	codec := func(f string) string { return strings.ToUpper(in.Video[f].Codec) }
 	refines := []func(string) string{
@@ -423,7 +433,7 @@ func (p *planner) movieLabels(keep []string, folder, base string) []string {
 			}
 		}
 	}
-	return labels
+	return labels, ""
 }
 
 func distinct(labels []string) bool {
@@ -601,6 +611,10 @@ func (p *planner) planTV() (*videoPlan, []Op, []Review) {
 			s += " - " + c.title
 		}
 		if perEp[epKey{c.unit, c.season, c.ep}] > 1 {
+			if _, known := in.Video[f]; !known {
+				ops = append(ops, Op{c.unit, "leave", f, "", "duplicate-episode label needs the resolution ffprobe could not read"})
+				continue
+			}
 			label := clean(releaseGroup(f))
 			if label == "" {
 				label = fmt.Sprintf("%.1fGB", float64(in.Files[f])/1e9)

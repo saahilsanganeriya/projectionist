@@ -79,8 +79,8 @@ func TestPlanMovieVersions(t *testing.T) {
 	})
 }
 
-// Catches: a re-run relabelling versions already named by the scheme, a version the planner cannot tell apart
-// renamed anyway (must be left), and the manual label table being ignored.
+// Catches: a re-run relabelling versions already named by the scheme, versions the planner cannot tell apart (or
+// whose resolution ffprobe could not read) renamed anyway instead of left, and the manual label table being ignored.
 func TestPlanMovieLabelsKeptOrLeft(t *testing.T) {
 	named := mv + "Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949} - 2160p 14Mbps.mkv"
 	in := newInput(map[string]int64{named: 9_000_000_000, mv + "Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949} - 2160p.mkv": 60_000_000_000})
@@ -88,6 +88,13 @@ func TestPlanMovieLabelsKeptOrLeft(t *testing.T) {
 		in.Movies[f] = heat
 	}
 	expect(t, Build(in), map[string]string{named: "keep Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949} - 2160p 14Mbps.mkv"})
+
+	unread := newInput(map[string]int64{mv + "a/Heat.mkv": 4_000_000_000, mv + "b/Heat.2160p.mkv": 9_000_000_000})
+	for f := range unread.Files {
+		unread.Movies[f] = heat
+	}
+	unread.Video[mv+"b/Heat.2160p.mkv"] = VideoFacts{3840, 2160, "hevc"} // ffprobe could not read a/Heat.mkv
+	expect(t, Build(unread), map[string]string{mv + "a/Heat.mkv": "leave", mv + "b/Heat.2160p.mkv": "leave"})
 
 	twins := newInput(map[string]int64{mv + "a/Heat.mkv": 4_000_000_000, mv + "b/Heat.mkv": 4_000_000_001})
 	for f := range twins.Files {
@@ -143,6 +150,7 @@ func TestPlanEpisodes(t *testing.T) {
 		in.Shows[f], in.Episodes[f] = show, r
 	}
 	in.Video[tv+"Seinfeld/S06/Seinfeld.S06E02.1080p.WEB-AAA.mkv"] = VideoFacts{1920, 1080, "h264"}
+	in.Video[tv+"Seinfeld/S06/Seinfeld.S06E02.720p.HDTV-BBB.mkv"] = VideoFacts{1280, 720, "h264"}
 	s := "TV/Seinfeld (1989) {tmdb-1400}/Season "
 	expect(t, Build(in), map[string]string{
 		tv + "Seinfeld/Season 9/901 - The Butter Shave.mkv":                  "move " + s + "09/Seinfeld (1989) - S09E01 - The Butter Shave.mkv",
@@ -154,7 +162,7 @@ func TestPlanEpisodes(t *testing.T) {
 		tv + "Seinfeld/S06/Seinfeld.S06E01.mkv":                              "move " + s + "06/Seinfeld (1989) - S06E01 - The Chaperone.mkv",
 		tv + "Seinfeld/S06/copy/Seinfeld.S06E01.mkv":                         "delete TV/Seinfeld/S06/Seinfeld.S06E01.mkv",
 		tv + "Seinfeld/S06/Seinfeld.S06E02.1080p.WEB-AAA.mkv":                "move " + s + "06/Seinfeld (1989) - S06E02 - The Big Salad [1080p AAA].mkv",
-		tv + "Seinfeld/S06/Seinfeld.S06E02.720p.HDTV-BBB.mkv":                "move " + s + "06/Seinfeld (1989) - S06E02 - The Big Salad [480p BBB].mkv",
+		tv + "Seinfeld/S06/Seinfeld.S06E02.720p.HDTV-BBB.mkv":                "move " + s + "06/Seinfeld (1989) - S06E02 - The Big Salad [720p BBB].mkv",
 		tv + "Seinfeld/Seinfeld Complete + Extras/Seinfeld.S07E01.1080p.mkv": "move " + s + "07/Seinfeld (1989) - S07E01 - The Engagement.mkv",
 	})
 }
