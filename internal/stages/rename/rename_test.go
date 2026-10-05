@@ -277,3 +277,20 @@ func TestRunWaitsForViewersAndArrivals(t *testing.T) {
 		})
 	}
 }
+
+// Catches a sweep whose clutter cannot be archived failing silently (it logged the same intents and "unit-done" on
+// every run, with no alert): the folder stays, and the run names it.
+func TestSweepThatCannotArchiveAlerts(t *testing.T) {
+	l := newLibrary(t)
+	archived := filepath.Join(l.root, "_archive", "clutter", "Movies", "Gone.2010")
+	if err := os.RemoveAll(archived); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(l.root, "nowhere"), archived); err != nil { // its archive folder is a dead end
+		t.Fatal(err)
+	}
+	rep := l.run(t)
+	if !strings.Contains(strings.Join(rep.Alerts, "\n"), "sweep stopped") || !lexists(filepath.Join(l.root, "Movies/Gone.2010/.DS_Store")) {
+		t.Fatalf("alerts = %q, shell kept = %v", rep.Alerts, lexists(filepath.Join(l.root, "Movies/Gone.2010/.DS_Store")))
+	}
+}

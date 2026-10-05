@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"projectionist/internal/fake"
 )
@@ -60,11 +61,18 @@ func TestReadSubFacts(t *testing.T) {
 	}
 }
 
-// Catches a container stop being ignored by the first run's long read of every subtitle (it must return at once), and
-// a stopped run losing what it read: the next run must read only the files the stopped one did not reach.
-func TestSubFactsStopKeepsProgress(t *testing.T) {
+// Catches a container stop being ignored by the library walk or by the first run's long read of every subtitle (each
+// must return at once), and a stopped run losing what it read: the next run must read only the files the stopped one
+// did not reach.
+func TestStopReturnsAndKeepsProgress(t *testing.T) {
 	h := fake.NewEnv(t, nil)
 	dir := t.TempDir()
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel()
+	write(t, filepath.Join(dir, "Movies", "A", "A.mkv"), "a")
+	if _, err := scan(stopped, dir, time.Unix(0, 0)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("walk after a stop: err = %v, want context.Canceled", err)
+	}
 	files := map[string]int64{}
 	for _, n := range []string{"a.srt", "b.srt", "c.srt"} {
 		write(t, filepath.Join(dir, n), englishSRT(3))

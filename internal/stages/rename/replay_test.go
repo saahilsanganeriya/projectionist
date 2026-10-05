@@ -8,7 +8,7 @@
 //	RENAME_REPLAY_EXPECT  ops.tsv              the Python planner's output on the same inputs   (port check)
 //	RENAME_REPLAY_UNDO    undo.tsv             apply_ops.py's log of what was really moved        (history check)
 //	RENAME_REPLAY_OPS     ops.tsv              the recorded plan that log executed (identity per unit)
-//	RENAME_REPLAY_TMDB    dir of cached TMDB responses (optional: episode titles from TMDB instead of the recording)
+//	RENAME_REPLAY_TMDB    dir of cached TMDB responses: original names, and the episode titles production would use
 //	RENAME_REPLAY_OUT     dir for the difference listings
 //
 //	go test -tags replay -run Replay -v ./internal/stages/rename/
@@ -257,11 +257,26 @@ func titleFromFolder(name string) (Title, bool) {
 
 // TestReplayHistory: every file apply_ops.py really moved (undo.tsv, op=move) must get the same destination from the Go
 // planner when it is given the original listing, the identity taken from the destination's {tmdb-N} folder, and
-// episode numbers it works out itself from the original path.
+// episode numbers it works out itself from the original path. Episode titles come from two sources, each its own
+// subtest against the same bar: "recorded" is what the Python planner had (Plex's titles, a test oracle only), so it
+// measures the port; "tmdb" is what production reads, so it also measures how TMDB spells titles differently.
 func TestReplayHistory(t *testing.T) {
 	ri := loadReplay(t)
-	in := baseInput(ri)
 	recorded := readTSV(t, env(t, "RENAME_REPLAY_OPS"), 5)[1:]
+	undoRows := readTSV(t, env(t, "RENAME_REPLAY_UNDO"), 5)
+	cache := tmdbCache(env(t, "RENAME_REPLAY_TMDB"))
+	for _, c := range []struct {
+		name   string
+		titles titleSource
+	}{{"recorded", recordedTitles(ri)}, {"tmdb", cache}} {
+		t.Run(c.name, func(t *testing.T) {
+			historyCheck(t, ri, recorded, undoRows, cache, c.titles, "history-diffs-"+c.name+".tsv")
+		})
+	}
+}
+
+func historyCheck(t *testing.T, ri *replayInputs, recorded, undoRows [][]string, cache tmdbCache, titles titleSource, out string) {
+	in := baseInput(ri)
 	unitTitle := map[string]Title{} // the recorded plan's unit → the title its destination folder carries
 	for _, r := range recorded {
 		if r[1] != "move" && r[1] != "keep" {
@@ -285,11 +300,6 @@ func TestReplayHistory(t *testing.T) {
 	}
 	for _, r := range ri.TV {
 		plexShow[r["file"]] = true
-	}
-	var titles titleSource = recordedTitles(ri)
-	cache := tmdbCache(os.Getenv("RENAME_REPLAY_TMDB"))
-	if os.Getenv("RENAME_REPLAY_TITLES") == "tmdb" {
-		titles = cache
 	}
 	for u, tt := range unitTitle { // the rest of the identity: TMDB's original-language name
 		unitTitle[u] = cache.withOriginal(tt)
@@ -326,7 +336,7 @@ func TestReplayHistory(t *testing.T) {
 	}
 	var diffs []string
 	moves := 0
-	for _, r := range readTSV(t, env(t, "RENAME_REPLAY_UNDO"), 5) {
+	for _, r := range undoRows {
 		if r[1] != "move" {
 			continue
 		}
@@ -336,7 +346,7 @@ func TestReplayHistory(t *testing.T) {
 		}
 	}
 	sort.Strings(diffs)
-	writeLines(t, "history-diffs.tsv", diffs)
+	writeLines(t, out, diffs)
 	same := moves - len(diffs)
 	pct := 100 * float64(same) / float64(moves)
 	t.Logf("history check: %d/%d moves reproduced byte-identically (%.3f%%)", same, moves, pct)
