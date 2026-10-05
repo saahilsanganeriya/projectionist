@@ -36,7 +36,9 @@ services:
       # GPU self-test sample and the old scripts' state files (imported once at cutover): read-only.
       - /volume1/PlexMediaServer/scripts:/volume1/PlexMediaServer/scripts:ro
       - /volume1/PlexMediaServer/remote4k:/volume1/PlexMediaServer/remote4k # STATUS.txt the owner reads
-    secrets: [jellyfin_key] # /run/secrets/jellyfin_key, read-only
+      # The subtitle aligner's log: rename names the aligned copy the primary track. Read-only.
+      - /volume1/PlexMediaServer/subtitle-downloads:/volume1/PlexMediaServer/subtitle-downloads:ro
+    secrets: [jellyfin_key, tmdb_api_key] # /run/secrets/<name>, read-only
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
@@ -44,3 +46,5 @@ services:
 secrets:
   jellyfin_key:
     file: /volume1/docker/projectionist/secrets/jellyfin_key # root:root 0600
+  tmdb_api_key:
+    file: /volume1/docker/projectionist/secrets/tmdb_api_key # TMDB v3 key (or v4 read token); root:root 0600
