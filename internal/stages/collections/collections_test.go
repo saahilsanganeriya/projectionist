@@ -160,7 +160,7 @@ func servePlex(h *fake.Harness, a *app, ids ...int) {
 	h.Plex.HandleFunc("GET", "/library/sections/4/collections", a.read(func(w http.ResponseWriter, _ *http.Request) {
 		var out []any
 		for _, c := range a.colls {
-			out = append(out, map[string]string{"ratingKey": c.ID, "title": c.Title, "titleSort": c.Sort})
+			out = append(out, map[string]any{"ratingKey": c.ID, "title": c.Title, "titleSort": c.Sort, "childCount": len(c.Members)})
 		}
 		plexJSON(w, out)
 	}))
@@ -205,7 +205,7 @@ func serveJellyfin(h *fake.Harness, a *app, posters map[string]string, ids ...in
 			}
 		case q.Get("IncludeItemTypes") == "BoxSet":
 			for _, c := range a.colls {
-				out = append(out, map[string]string{"Id": c.ID, "Name": c.Title, "SortName": c.Sort})
+				out = append(out, map[string]any{"Id": c.ID, "Name": c.Title, "SortName": c.Sort, "ChildCount": len(c.Members)})
 			}
 		default:
 			for _, m := range a.find(q.Get("ParentId")).Members {
@@ -253,7 +253,8 @@ func runOnce(t *testing.T, h *fake.Harness) *stage.Report {
 
 // Catches: re-adding members an app already holds, removing the owner's extra member, rewriting a sort title that is
 // already right, a partial Jellyfin update that blanks the item's other fields, a poster sent as anything but the
-// JPEG bytes, and a second run that writes anything at all.
+// JPEG bytes, a second run that writes anything or re-reads unchanged member lists, and a changed collection whose
+// member list is not read again.
 func TestRunMakesBothAppsMatchThenStops(t *testing.T) {
 	h := fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "mid"})
 	px := &app{colls: []*coll{{ID: "900", Title: "\u200eChristopher Nolan", Sort: "zzChristopher Nolan", Members: []string{"101", "177"}}}}
@@ -297,6 +298,14 @@ func TestRunMakesBothAppsMatchThenStops(t *testing.T) {
 	runOnce(t, h)
 	if after := px.writes + jf.writes; after != before {
 		t.Errorf("second run sent %d writes; want none", after-before)
+	}
+	if n := len(h.Plex.Calls("GET", "/library/collections/900/children")); n != 1 {
+		t.Errorf("plex members of an unchanged collection read %d times over two runs; want 1", n)
+	}
+	px.colls[0].Members = px.colls[0].Members[:1] // someone took films out: the count moves, so the list is read again
+	runOnce(t, h)
+	if got := px.colls[0].Members; !reflect.DeepEqual(got, []string{"101", "102"}) {
+		t.Errorf("plex owner collection after members went missing = %v; want 102 put back", got)
 	}
 }
 

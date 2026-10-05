@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -35,7 +36,10 @@ type posterSink interface {
 }
 
 // held is a collection as an app holds it.
-type held struct{ ID, Sort string }
+type held struct {
+	ID, Sort string
+	Count    int // members, as the app counts them
+}
 
 const (
 	addressTTL   = 24 * time.Hour // the item list is re-read once a day...
@@ -196,20 +200,8 @@ func (r *run) reconcile(ctx context.Context, s sink) error {
 		if !ok {
 			continue
 		}
-		cur, err := s.Members(ctx, h.ID)
-		if err != nil {
+		if err := r.members(ctx, s, c, h, addressed(c)); err != nil {
 			return err
-		}
-		var add []string
-		for _, id := range addressed(c) {
-			if !cur[id] {
-				add = append(add, id)
-			}
-		}
-		if len(add) > 0 {
-			if err := r.write(s, "add", c, len(add), func() error { return s.Add(ctx, h.ID, add) }); err != nil {
-				return err
-			}
 		}
 		if c.Sort != "" && !strings.EqualFold(h.Sort, c.Sort) {
 			if err := r.write(s, "sort", c, 0, func() error { return s.SetSort(ctx, h.ID, c.Sort) }); err != nil {
@@ -221,6 +213,55 @@ func (r *run) reconcile(ctx context.Context, s sink) error {
 		}
 	}
 	return nil
+}
+
+// seenMembers is what this stage last saw (and added) in one app collection.
+type seenMembers struct {
+	Count int      `json:"count"`
+	Items []string `json:"items"`
+}
+
+// members adds what an app collection lacks. Its member list is read only when the app's count moved since the last
+// run or a wanted item is new, so a quiet run asks each app for one collection list, not one call per collection.
+func (r *run) members(ctx context.Context, s sink, c *collection, h held, want []string) error {
+	var seen seenMembers
+	found, err := r.env.Store.GetJSON(ctx, name, "members/"+s.Name()+"/"+h.ID, &seen)
+	if err != nil {
+		return err
+	}
+	if found && seen.Count == h.Count {
+		known := map[string]bool{}
+		for _, id := range seen.Items {
+			known[id] = true
+		}
+		news := slices.ContainsFunc(want, func(id string) bool { return !known[id] })
+		if !news {
+			return nil
+		}
+	}
+	cur, err := s.Members(ctx, h.ID)
+	if err != nil {
+		return err
+	}
+	var add []string
+	for _, id := range want {
+		if !cur[id] {
+			add = append(add, id)
+		}
+	}
+	if len(add) > 0 {
+		if err := r.write(s, "add", c, len(add), func() error { return s.Add(ctx, h.ID, add) }); err != nil {
+			return err
+		}
+	}
+	if r.opt.DryRun {
+		return nil
+	}
+	seen = seenMembers{Count: len(cur) + len(add), Items: add}
+	for id := range cur {
+		seen.Items = append(seen.Items, id)
+	}
+	return r.env.Store.PutJSON(ctx, name, "members/"+s.Name()+"/"+h.ID, seen)
 }
 
 // write sends one change, or only logs it in a dry run. n is the number of members it carries.
@@ -314,9 +355,10 @@ func addressFile(out map[int]string, file, item string) {
 func (p *plexSink) Collections(ctx context.Context) (map[string]held, error) {
 	var mc struct {
 		Metadata []struct {
-			RatingKey string `json:"ratingKey"`
-			Title     string `json:"title"`
-			TitleSort string `json:"titleSort"`
+			RatingKey  string `json:"ratingKey"`
+			Title      string `json:"title"`
+			TitleSort  string `json:"titleSort"`
+			ChildCount int    `json:"childCount"`
 		} `json:"Metadata"`
 	}
 	if err := p.c.GetJSON(ctx, fmt.Sprintf("/library/sections/%d/collections", p.section), &mc); err != nil {
@@ -324,7 +366,7 @@ func (p *plexSink) Collections(ctx context.Context) (map[string]held, error) {
 	}
 	out := map[string]held{}
 	for _, c := range mc.Metadata {
-		out[key(c.Title)] = held{ID: c.RatingKey, Sort: c.TitleSort}
+		out[key(c.Title)] = held{ID: c.RatingKey, Sort: c.TitleSort, Count: c.ChildCount}
 	}
 	return out, nil
 }
@@ -393,10 +435,11 @@ func (*jellyfinSink) Name() string { return "jellyfin" }
 
 type jfItems struct {
 	Items []struct {
-		ID       string `json:"Id"`
-		Name     string `json:"Name"`
-		Path     string `json:"Path"`
-		SortName string `json:"SortName"`
+		ID         string `json:"Id"`
+		Name       string `json:"Name"`
+		Path       string `json:"Path"`
+		SortName   string `json:"SortName"`
+		ChildCount int    `json:"ChildCount"`
 	} `json:"Items"`
 }
 
@@ -414,12 +457,12 @@ func (j *jellyfinSink) Address(ctx context.Context) (map[int]string, error) {
 
 func (j *jellyfinSink) Collections(ctx context.Context) (map[string]held, error) {
 	var res jfItems
-	if err := j.c.GetJSON(ctx, "/Items?IncludeItemTypes=BoxSet&Recursive=true&Fields=SortName", &res); err != nil {
+	if err := j.c.GetJSON(ctx, "/Items?IncludeItemTypes=BoxSet&Recursive=true&Fields=SortName,ChildCount", &res); err != nil {
 		return nil, err
 	}
 	out := map[string]held{}
 	for _, it := range res.Items {
-		out[key(it.Name)] = held{ID: it.ID, Sort: it.SortName}
+		out[key(it.Name)] = held{ID: it.ID, Sort: it.SortName, Count: it.ChildCount}
 	}
 	return out, nil
 }
