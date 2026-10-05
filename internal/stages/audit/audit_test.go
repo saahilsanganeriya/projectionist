@@ -33,8 +33,7 @@ func put(t *testing.T, root, rel, body string, mtime ...time.Time) {
 
 // Catches: a file filed under the wrong category or missed by the scheme's file-level rules (movie name, season
 // folder, episode name incl. the rename engine's title-less form, sidecar suffix, extras placement, strays and
-// samples); a correctly named film titled "Sample" called a sample; and checks leaking into folders outside the
-// scheme (the renamer's job), Synology @eaDir or our own _archive.
+// samples), and checks leaking into folders outside the scheme (the renamer's job), Synology @eaDir or our _archive.
 func TestNamingAndPlacement(t *testing.T) {
 	m, tv := "Movies/Heat (1995) {tmdb-949}/", "TV/The Wire (2002) {tmdb-1438}/"
 	cases := []struct{ path, want string }{
@@ -57,7 +56,6 @@ func TestNamingAndPlacement(t *testing.T) {
 		{m + "poster.jpg", ""},
 		{m + ".DS_Store", ""},
 		{m + "@eaDir/thumb.jpg", ""},
-		{"Movies/The Sample (2020) {tmdb-1}/The Sample (2020) {tmdb-1}.mkv", ""},
 		{"Movies/Heat.1995.BluRay-GRP/", outsideScheme},
 		{"Movies/Heat.1995.BluRay-GRP/Heat.1995.BluRay-GRP.mkv", ""},
 		{"Movies/Heat.1995.BluRay-GRP/Subs/2_English.srt", ""},
@@ -150,8 +148,9 @@ func tree(t *testing.T, root string) map[string]string {
 
 // Catches, end to end: an unreadable video missed (ffprobe failure with its reason, empty file) or a still-arriving
 // one judged; same-size files with different bytes called identical; embedded or sidecar English subtitles missed
-// (and a forced-only track counted as English); the report not written; anything in the library touched; an alert
-// on the first run, on a quiet category, or a growth not alerted with the new item named.
+// (and a forced-only track counted as English); a correctly named episode titled "The Sample" taken for a sample
+// and dropped from the count; the report not written; anything in the library touched; an alert on the first run,
+// on a quiet category, or a growth not alerted with the new item named.
 func TestRunEndToEnd(t *testing.T) {
 	h := fake.NewEnv(t, nil)
 	root := t.TempDir()
@@ -168,7 +167,7 @@ func TestRunEndToEnd(t *testing.T) {
 	put(t, root, wire+"S01E01 - A.mkv", "embedded")
 	put(t, root, wire+"S01E02 - B.mkv", "e2")
 	put(t, root, wire+"S01E02 - B.en.srt", "1")
-	put(t, root, wire+"S01E03 - C.mkv", "e3")
+	put(t, root, wire+"S01E03 - The Sample.mkv", "e3")
 	put(t, root, wire+"S01E04 - D.mkv", "e4")
 	put(t, root, wire+"S01E04 - D.en.forced.srt", "1")
 	before := tree(t, root)
