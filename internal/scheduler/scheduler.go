@@ -152,22 +152,46 @@ type Scheduler struct {
 	Jobs   []Job
 	Runner *Runner
 	Loc    *time.Location
+
+	mu   sync.Mutex
+	wake map[string]chan struct{} // per job; one slot, so triggers coalesce
+}
+
+// Trigger asks for a run of the named stage now, or at its window's next opening. Any number of triggers while the
+// stage runs or waits yield exactly one extra run. False when the stage is not scheduled here.
+func (s *Scheduler) Trigger(name string) bool {
+	s.mu.Lock()
+	ch, ok := s.wake[name]
+	s.mu.Unlock()
+	if ok {
+		select {
+		case ch <- struct{}{}:
+		default: // a run is already pending
+		}
+	}
+	return ok
 }
 
 func (s *Scheduler) Run(ctx context.Context) {
+	s.mu.Lock()
+	s.wake = make(map[string]chan struct{}, len(s.Jobs))
+	for _, job := range s.Jobs {
+		s.wake[job.Stage.Name()] = make(chan struct{}, 1)
+	}
+	s.mu.Unlock()
 	var wg sync.WaitGroup
 	for _, job := range s.Jobs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.loop(ctx, job)
+			s.loop(ctx, job, s.wake[job.Stage.Name()])
 		}()
 	}
 	<-ctx.Done() // with no jobs enabled the service must still stay up (and keep serving /health)
 	wg.Wait()
 }
 
-func (s *Scheduler) loop(ctx context.Context, job Job) {
+func (s *Scheduler) loop(ctx context.Context, job Job, wake <-chan struct{}) {
 	name := job.Stage.Name()
 	var last time.Time
 	if run, ok, err := s.Runner.Store.LastRun(ctx, name); err != nil {
@@ -179,14 +203,22 @@ func (s *Scheduler) loop(ctx context.Context, job Job) {
 		}
 		s.Runner.set(name, func(st *Status) { st.LastStart, st.LastFinish, st.Outcome = run.StartedAt, run.FinishedAt, run.Outcome })
 	}
+	triggered := false
 	for {
 		next := NextRun(last, job.Every, job.Window, s.Loc, s.Runner.Now())
+		if triggered {
+			next = NextRun(time.Time{}, job.Every, job.Window, s.Loc, s.Runner.Now()) // due now, inside the window
+		}
 		s.Runner.set(name, func(st *Status) { st.NextRun = next })
 		select {
 		case <-ctx.Done():
 			return
+		case <-wake:
+			triggered = true
+			continue
 		case <-time.After(time.Until(next)):
 		}
+		triggered = false
 		last = s.Runner.Now()
 		s.Runner.RunOnce(ctx, job.Stage)
 	}

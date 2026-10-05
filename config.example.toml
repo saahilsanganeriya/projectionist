@@ -53,3 +53,18 @@ small_kbps      = 20000
 work_dir        = "/volume1/media/.projectionist/remote4k" # same share as the library: publish = one rename
 status_file     = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
 default_section = 4
+
+# Real-time trigger: inotify on the library and finished downloads. A top-level folder (a movie, a show, a download)
+# that changed and then stayed quiet for `quiet` triggers each stage in `trigger`; each is a reconciler that finds its
+# own work. One run = one `sweep` period (walk every root, then follow events), so `every` must be <= `sweep`: the next
+# period then starts at once, and a failed start retries after `every`. One watch per folder: 3,278 for these roots
+# (2026-10-05, `find` with the ignore rules below), root's other processes hold 90 of fs.inotify.max_user_watches=8192;
+# past the limit it alerts and the sweep covers the rest.
+[stages.watcher]
+every   = "1m"
+sweep   = "15m"
+quiet   = "3m" # long SMB/rsync copies keep a folder busy; it triggers this long after the last change
+roots   = ["/volume1/media/Movies", "/volume1/media/TV", "/volume1/media/_downloads/complete"]
+trigger = ["rename", "details", "subtitles", "posters", "collections", "jfsync"]
+ignore  = ["@eaDir", "#recycle", "#snapshot", "_archive", "_assets"] # never watched or counted; dot folders (.details) too
+partial_suffixes = [".part", ".!qB"] # in-progress files (and dot files): keep a folder busy, never trigger on their own
