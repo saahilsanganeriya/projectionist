@@ -21,11 +21,40 @@ import (
 // sinkState is one sink's progress toward the desired picks. A failed write is retried on a later run with
 // backoff and never fails the run.
 type sinkState struct {
-	ID           string    `json:"id,omitempty"`        // Plex collection ratingKey / Jellyfin BoxSet id
-	PosterOf     string    `json:"poster_of,omitempty"` // posterKey of the last uploaded poster
-	Fails        int       `json:"fails,omitempty"`
-	RetryAt      time.Time `json:"retry_at,omitzero"`
-	FailingSince time.Time `json:"failing_since,omitzero"`
+	ID           string         `json:"id,omitempty"`        // Plex collection ratingKey / Jellyfin BoxSet id
+	Pending      *pendingCreate `json:"pending,omitempty"`   // a create sent whose answer has not named the collection
+	PosterOf     string         `json:"poster_of,omitempty"` // posterKey of the last uploaded poster
+	Fails        int            `json:"fails,omitempty"`
+	RetryAt      time.Time      `json:"retry_at,omitzero"`
+	FailingSince time.Time      `json:"failing_since,omitzero"`
+}
+
+// pendingCreate is recorded (and saved) before a create is sent and cleared once a collection is known. If the
+// create's answer was lost, the collection it made is the one with our title that is new since Before and holds
+// exactly Items: the next run adopts it instead of making a second, which nothing would ever clean up.
+type pendingCreate struct {
+	Before []string `json:"before"` // ids of the collections with our title before the create
+	Items  []string `json:"items"`  // what the create asked for
+}
+
+// adopt returns the collection among titled that the pending create made, or "".
+func (pc *pendingCreate) adopt(titled []string, members func(id string) ([]string, error)) (string, error) {
+	if pc == nil {
+		return "", nil
+	}
+	for _, id := range titled {
+		if slices.Contains(pc.Before, id) {
+			continue
+		}
+		have, err := members(id)
+		if err != nil {
+			return "", err
+		}
+		if add, remove := diff(pc.Items, have); len(add)+len(remove) == 0 {
+			return id, nil
+		}
+	}
+	return "", nil
 }
 
 // backoff is 15 min, 30 min, 1 h, ... up to 4 h after consecutive failures.
@@ -178,6 +207,24 @@ func sortedKeys(m map[string]int) []string {
 	return keys
 }
 
+// plexMembers lists a collection's films by its tag index, through the lean section listing: a collection's own
+// /children took 108 s at load 20, this 0.18 s (2026-10-05).
+func plexMembers(ctx context.Context, px *plex.Client, section, index int) ([]string, error) {
+	var mc struct {
+		Metadata []struct {
+			RatingKey string `json:"ratingKey"`
+		} `json:"Metadata"`
+	}
+	if err := px.GetJSON(ctx, fmt.Sprintf("/library/sections/%d/all?type=1&collection=%d&%s", section, index, plexLean), &mc); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, it := range mc.Metadata {
+		out = append(out, it.RatingKey)
+	}
+	return out, nil
+}
+
 type plexTarget struct {
 	Section int
 	Title   string
@@ -190,9 +237,10 @@ func (t plexTarget) uri(rks []string) string {
 }
 
 // syncPlex converges the collection on the picks: members, summary, the day's poster, and its Home row at the
-// top of the Movies section's hubs (directly below Continue Watching and On Deck on his Home).
+// top of the Movies section's hubs (directly below Continue Watching and On Deck on his Home). persist saves the
+// state around the create, so a crash or a lost answer never leaves a second collection behind.
 func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarget, m idMap, s *sinkState, day string,
-	picks []pick, poster func() ([]byte, error)) error {
+	picks []pick, poster func() ([]byte, error), persist func() error) error {
 	if len(m.Items) == 0 {
 		return errors.New("plex: no ratingKey map yet")
 	}
@@ -203,35 +251,57 @@ func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarg
 		if err != nil {
 			return err
 		}
-		if i := slices.IndexFunc(titled, plexColl.owned); i >= 0 {
-			c = titled[i]
-		} else {
-			if len(want) == 0 {
-				return nil
-			}
-			if len(titled) > 0 {
-				log.Info("a collection with our title is not ours; making our own", "event", "plex_collection_foreign", "title", t.Title)
-			}
-			if err := px.Do(ctx, "POST", fmt.Sprintf("/library/collections?type=1&smart=0&sectionId=%d&title=%s&uri=%s",
-				t.Section, url.QueryEscape(t.Title), t.uri(want))); err != nil {
-				return err
-			}
-			after, err := plexCollections(ctx, px, t) // the create's answer is not read: ours is the one that is new
+		keys := make([]string, len(titled))
+		for i, tc := range titled {
+			keys[i] = tc.RatingKey
+		}
+		i := slices.IndexFunc(titled, plexColl.owned)
+		if i < 0 {
+			lost, err := s.Pending.adopt(keys, func(id string) ([]string, error) {
+				return plexMembers(ctx, px, t.Section, titled[slices.Index(keys, id)].Index)
+			})
 			if err != nil {
 				return err
 			}
-			j := slices.IndexFunc(after, func(a plexColl) bool {
-				return !slices.ContainsFunc(titled, func(b plexColl) bool { return b.RatingKey == a.RatingKey })
-			})
-			if j < 0 {
-				return errors.New("plex: created collection not found")
+			if i = slices.Index(keys, lost); i >= 0 {
+				log.Info("adopting the collection a create with a lost answer made", "event", "plex_write", "action", "adopt", "id", lost)
 			}
-			c, s.PosterOf = after[j], ""
-			log.Info("collection created", "event", "plex_write", "action", "create", "id", c.RatingKey, "items", len(want))
+		}
+		switch {
+		case i >= 0:
+			c = titled[i]
+		case len(want) == 0:
+			return nil
+		default:
+			if len(titled) > 0 {
+				log.Info("a collection with our title is not ours; making our own", "event", "plex_collection_foreign", "title", t.Title)
+			}
+			s.Pending = &pendingCreate{Before: keys, Items: want}
+			if err := persist(); err != nil {
+				return err
+			}
+			var made struct {
+				Metadata []plexColl `json:"Metadata"`
+			}
+			if err := px.DoJSON(ctx, "POST", fmt.Sprintf("/library/collections?type=1&smart=0&sectionId=%d&title=%s&uri=%s",
+				t.Section, url.QueryEscape(t.Title), t.uri(want)), &made); err != nil {
+				return err
+			}
+			if len(made.Metadata) != 1 || made.Metadata[0].RatingKey == "" {
+				return errors.New("plex: the collection create answered no ratingKey")
+			}
+			s.ID, s.Pending, s.PosterOf = made.Metadata[0].RatingKey, nil, ""
+			if err := persist(); err != nil {
+				return err
+			}
+			log.Info("collection created", "event", "plex_write", "action", "create", "id", s.ID, "items", len(want))
+			if c, ok = rememberedPlexCollection(ctx, px, t, s.ID); !ok {
+				return fmt.Errorf("plex: collection %s not readable yet", s.ID)
+			}
 		}
 	}
 	id := c.RatingKey
-	s.ID = id
+	s.ID, s.Pending = id, nil
 	if !c.owned() { // labelled right after the create, so a run that lost its state still knows the collection
 		q := fmt.Sprintf("/library/sections/%d/all?type=18&id=%s&label.locked=1", t.Section, id)
 		for i, l := range append(c.labels(), marker) {
@@ -242,17 +312,9 @@ func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarg
 		}
 		log.Info("collection labelled", "event", "plex_write", "action", "label", "id", id, "label", marker)
 	}
-	var children struct {
-		Metadata []struct {
-			RatingKey string `json:"ratingKey"`
-		} `json:"Metadata"`
-	}
-	if err := px.GetJSON(ctx, fmt.Sprintf("/library/sections/%d/all?type=1&collection=%d&%s", t.Section, c.Index, plexLean), &children); err != nil {
+	have, err := plexMembers(ctx, px, t.Section, c.Index)
+	if err != nil {
 		return err
-	}
-	var have []string
-	for _, c := range children.Metadata {
-		have = append(have, c.RatingKey)
 	}
 	add, remove := diff(want, have)
 	if len(add) > 0 {
@@ -469,20 +531,34 @@ func jellyfinWatched(ctx context.Context, jf *jellyfin.Client, m idMap, picks []
 	return out, nil
 }
 
-// syncJellyfin converges the "Tonight" BoxSet: members, overview (the reasons) and the day's poster.
+// syncJellyfin converges the "Tonight" BoxSet: members, overview (the reasons) and the day's poster. persist saves
+// the state around the create, as for Plex.
 func syncJellyfin(ctx context.Context, log *slog.Logger, jf *jellyfin.Client, title string, m idMap, s *sinkState,
-	day string, picks []pick, poster func() ([]byte, error)) error {
+	day string, picks []pick, poster func() ([]byte, error), persist func() error) error {
 	if len(m.Items) == 0 || m.UserID == "" {
 		return errors.New("jellyfin: no item map yet")
 	}
 	want := m.desired(picks)
-	id, err := findBoxSet(ctx, jf, title, s.ID)
+	members := func(box string) ([]string, error) { return jellyfinMembers(ctx, jf, box, m.UserID) }
+	id, titled, err := findBoxSet(ctx, jf, title, s.ID)
 	if err != nil {
 		return err
 	}
 	if id == "" {
+		if id, err = s.Pending.adopt(titled, members); err != nil {
+			return err
+		}
+		if id != "" {
+			log.Info("adopting the collection a create with a lost answer made", "event", "jellyfin_write", "action", "adopt", "id", id)
+		}
+	}
+	if id == "" {
 		if len(want) == 0 {
 			return nil
+		}
+		s.Pending = &pendingCreate{Before: titled, Items: want}
+		if err := persist(); err != nil {
+			return err
 		}
 		var created struct {
 			ID string `json:"Id"`
@@ -493,17 +569,16 @@ func syncJellyfin(ctx context.Context, log *slog.Logger, jf *jellyfin.Client, ti
 		if created.ID == "" {
 			return errors.New("jellyfin: collection create returned no id")
 		}
-		id, s.PosterOf = created.ID, ""
+		id, s.ID, s.Pending, s.PosterOf = created.ID, created.ID, nil, ""
+		if err := persist(); err != nil {
+			return err
+		}
 		log.Info("collection created", "event", "jellyfin_write", "action", "create", "id", id, "items", len(want))
 	}
-	s.ID = id
-	var children jfItems
-	if err := jf.GetJSON(ctx, "/Items?EnableImages=false&ParentId="+id+"&userId="+m.UserID, &children); err != nil {
+	s.ID, s.Pending = id, nil
+	have, err := members(id)
+	if err != nil {
 		return err
-	}
-	var have []string
-	for _, c := range children.Items {
-		have = append(have, c.ID)
 	}
 	add, remove := diff(want, have)
 	if len(add) > 0 {
@@ -549,28 +624,44 @@ func syncJellyfin(ctx context.Context, log *slog.Logger, jf *jellyfin.Client, ti
 	return nil
 }
 
-// findBoxSet returns the BoxSet this stage made: the remembered one if it still is a BoxSet with our title, else one
-// with our title and our tag.
-func findBoxSet(ctx context.Context, jf *jellyfin.Client, title, remembered string) (string, error) {
+// findBoxSet returns the BoxSet this stage made (the remembered one if it still is a BoxSet with our title, else one
+// with our title and our tag), and the ids of every BoxSet with our title.
+func findBoxSet(ctx context.Context, jf *jellyfin.Client, title, remembered string) (id string, titled []string, err error) {
 	var res jfItems
 	if remembered != "" {
 		if err := jf.GetJSON(ctx, "/Items?EnableImages=false&Ids="+remembered, &res); err != nil {
-			return "", err
+			return "", nil, err
 		}
 		for _, it := range res.Items {
 			if it.ID == remembered && it.Type == "BoxSet" && it.Name == title {
-				return it.ID, nil
+				return it.ID, nil, nil
 			}
 		}
 	}
 	res.Items = nil
 	if err := jf.GetJSON(ctx, "/Items?IncludeItemTypes=BoxSet&Recursive=true&EnableImages=false&Fields=Tags&SearchTerm="+url.QueryEscape(title), &res); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	for _, it := range res.Items {
-		if it.Name == title && slices.Contains(it.Tags, marker) {
-			return it.ID, nil
+		if it.Name != title {
+			continue
 		}
+		if slices.Contains(it.Tags, marker) {
+			return it.ID, nil, nil
+		}
+		titled = append(titled, it.ID)
 	}
-	return "", nil
+	return "", titled, nil
+}
+
+func jellyfinMembers(ctx context.Context, jf *jellyfin.Client, box, userID string) ([]string, error) {
+	var children jfItems
+	if err := jf.GetJSON(ctx, "/Items?EnableImages=false&ParentId="+box+"&userId="+userID, &children); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, c := range children.Items {
+		out = append(out, c.ID)
+	}
+	return out, nil
 }

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -78,7 +77,7 @@ func TestSeen(t *testing.T) {
 func TestValidate(t *testing.T) {
 	unseen := map[int]candidate{389: {film: film{TMDB: 389, Title: "12 Angry Men", Year: 1957}},
 		346: {film: film{TMDB: 346, Title: "Seven Samurai", Year: 1954}}}
-	picks, v := validate(`{"picks":[{"id":389,"title":"12 Angry Men","reason":"Like  Rope,\nall in one room."},
+	picks, v, _ := validate(`{"picks":[{"id":389,"title":"12 Angry Men","reason":"Like  Rope,\nall in one room."},
 		{"id":389,"title":"12 Angry Men","reason":"again"},{"id":680,"title":"Pulp Fiction","reason":"seen"},
 		{"id":346,"title":"Seven Samurai","reason":" "}]}`, unseen, 2)
 	if len(picks) != 1 || picks[0].TMDB != 389 || picks[0].Reason != "Like Rope, all in one room." {
@@ -89,14 +88,14 @@ func TestValidate(t *testing.T) {
 	if !slices.Equal(v, want) {
 		t.Fatalf("violations = %q", v)
 	}
-	if _, v := validate("Sure! Here are", unseen, 2); len(v) != 1 || !strings.Contains(v[0], "not JSON") {
+	if _, v, _ := validate("Sure! Here are", unseen, 2); len(v) != 1 || !strings.Contains(v[0], "not JSON") {
 		t.Fatalf("non-JSON violations = %q", v)
 	}
-	picks, _ = validate(`{"picks":[{"id":389,"title":"x","reason":"Hazy longing in a short package.12"},
+	picks, _, glued := validate(`{"picks":[{"id":389,"title":"x","reason":"Hazy longing in a short package.12"},
 		{"id":346,"title":"y","reason":"An L.A. noir like Heat, beauty-in-sorrow of Moonlight.Quiet and slow.Hmm."}]}`, unseen, 2)
 	if len(picks) != 2 || picks[0].Reason != "Hazy longing in a short package." ||
-		picks[1].Reason != "An L.A. noir like Heat, beauty-in-sorrow of Moonlight." {
-		t.Fatalf("glued notes kept: %+v", picks)
+		picks[1].Reason != "An L.A. noir like Heat, beauty-in-sorrow of Moonlight." || len(glued) != 2 {
+		t.Fatalf("glued notes kept or unreported: %+v, glued %q", picks, glued)
 	}
 }
 
@@ -134,17 +133,18 @@ func rk(id int) string   { return strconv.Itoa(100000 + id) }
 func jfID(id int) string { return fmt.Sprintf("jf%d", id) }
 
 type world struct {
-	h        *fake.Harness
-	logs     *bytes.Buffer
-	ai       *aiFake
-	plex     *plexFake
-	jf       *jfFake
-	lbHits   int
-	tmdbHits int
-	mu       sync.Mutex
+	h      *fake.Harness
+	logs   *bytes.Buffer
+	ai     *aiFake
+	plex   *plexFake
+	jf     *jfFake
+	lbHits int
+	mu     sync.Mutex
 }
 
-func newWorld(t *testing.T, options string) *world {
+// newWorld adds fillers unseen films to the library (TMDB knows them; Plex and Jellyfin do not), for tests that
+// need the real library's ~190 candidate lines.
+func newWorld(t *testing.T, options string, fillers int) *world {
 	t.Helper()
 	w := &world{h: fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "machine1"}), logs: &bytes.Buffer{}}
 	w.h.Env.Log = slog.New(slog.NewTextHandler(w.logs, nil))
@@ -153,15 +153,25 @@ func newWorld(t *testing.T, options string) *world {
 	w.h.Now = time.Date(2026, 10, 5, 15, 0, 0, 0, time.UTC) // 08:00 PDT
 
 	movies := t.TempDir()
-	for _, f := range films {
+	lib := slices.Clone(films)
+	for i := range fillers {
+		lib = append(lib, libFilm{tmdb: 700000 + i, title: fmt.Sprintf("Filler %d", i), year: 2000, director: "Filler Director", runtime: 100})
+	}
+	for _, f := range lib {
 		name := fmt.Sprintf("%s (%d) {tmdb-%d}", f.title, f.year, f.tmdb)
 		write(t, filepath.Join(movies, name, name+".mkv"), "")
+		details, _ := json.Marshal(map[string]any{"id": f.tmdb, "title": f.title, "original_title": f.title, "runtime": f.runtime,
+			"original_language": "en", "overview": "First sentence. Second sentence.", "poster_path": fmt.Sprintf("/p%d.jpg", f.tmdb),
+			"vote_average": 8.0, "vote_count": 5000, "genres": []map[string]string{{"name": "Drama"}},
+			"production_countries": []map[string]string{{"iso_3166_1": "US"}}})
+		w.h.TMDB.Handle("GET", fmt.Sprintf("/movie/%d", f.tmdb), 200, string(details))
+		w.h.TMDB.Handle("GET", fmt.Sprintf("/movie/%d/credits", f.tmdb), 200,
+			fmt.Sprintf(`{"crew":[{"job":"Writer","name":"Someone"},{"job":"Director","name":%q}]}`, f.director))
 	}
 	write(t, filepath.Join(movies, "Some.Film.2020.1080p.WEB", "a.mkv"), "") // outside the naming scheme: ignored
 
 	secrets := t.TempDir()
 	write(t, filepath.Join(secrets, "anthropic_api_key"), "sk-test-SECRET-key\n")
-	write(t, filepath.Join(secrets, "tmdb_read_token"), "a.b.c\n")
 
 	thumb := &bytes.Buffer{}
 	if err := jpeg.Encode(thumb, image.NewRGBA(image.Rect(0, 0, 34, 51)), nil); err != nil {
@@ -180,24 +190,6 @@ func newWorld(t *testing.T, options string) *world {
 			body, _ := os.ReadFile("testdata/rss.xml")
 			rw.Header().Set("ETag", `"v1"`)
 			rw.Write(body)
-		case strings.HasPrefix(r.URL.Path, "/tmdb/movie/"):
-			w.tmdbHits++
-			if r.Header.Get("Authorization") != "Bearer a.b.c" {
-				http.Error(rw, "no token", http.StatusUnauthorized)
-				return
-			}
-			id, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/tmdb/movie/"))
-			for _, f := range films {
-				if f.tmdb == id {
-					json.NewEncoder(rw).Encode(map[string]any{"title": f.title, "original_title": f.title, "runtime": f.runtime,
-						"original_language": "en", "overview": "First sentence. Second sentence.", "poster_path": fmt.Sprintf("/p%d.jpg", id),
-						"vote_average": 8.0, "vote_count": 5000, "genres": []map[string]string{{"name": "Drama"}},
-						"production_countries": []map[string]string{{"iso_3166_1": "US"}},
-						"credits":              map[string]any{"crew": []map[string]string{{"job": "Director", "name": f.director}}}})
-					return
-				}
-			}
-			http.NotFound(rw, r)
 		case strings.HasPrefix(r.URL.Path, "/img/w342/"):
 			rw.Write(thumb.Bytes())
 		default:
@@ -216,11 +208,8 @@ api_key_file = %q
 movies_dir = %q
 letterboxd_dir = "testdata/export"
 letterboxd_rss = %q
-tmdb_token_file = %q
-tmdb_base = %q
 image_base = %q
-`, w.ai.srv.URL, filepath.Join(secrets, "anthropic_api_key"), movies, ext.URL+"/saahilsan/rss/",
-		filepath.Join(secrets, "tmdb_read_token"), ext.URL+"/tmdb", ext.URL+"/img") + options)
+`, w.ai.srv.URL, filepath.Join(secrets, "anthropic_api_key"), movies, ext.URL+"/saahilsan/rss/", ext.URL+"/img") + options)
 	return w
 }
 
@@ -255,23 +244,24 @@ func (w *world) state(t *testing.T) state {
 // ---- fake Anthropic: GET /v1/models, POST /v1/messages/count_tokens, POST /v1/messages ----
 
 // The fake's token counts are the gate run's real sizes (claude-sonnet-5-5, 2026-10-05): an 18,357-token cached
-// taste block, a 40-token tail, and the 190 candidate lines' 17,240 tokens spread over this library's 7.
+// taste block, a 40-token tail, and 91 tokens per candidate line (190 lines took 17,240).
 const (
 	cachedPrefix = 18357
 	fixedTail    = 40
-	lineTokens   = 2463
+	lineTokens   = 91
 	outputTokens = 422
 )
 
 var candidateLine = regexp.MustCompile(`(?m)^\d+ \| `)
 
 type aiFake struct {
-	srv      *httptest.Server
-	mu       sync.Mutex
-	answers  []string         // the picks JSON each /v1/messages call returns, in order
-	requests []map[string]any // /v1/messages bodies
-	keys     []string
-	drop     bool // /v1/messages hangs up after reading the request, as a lost answer does
+	srv       *httptest.Server
+	mu        sync.Mutex
+	answers   []string         // the picks JSON each /v1/messages call returns, in order; "CUT:" = cut off at max_tokens
+	requests  []map[string]any // /v1/messages bodies
+	keys      []string
+	drop      bool // /v1/messages hangs up after reading the request, as a lost answer does
+	missRetry bool // a retry is billed as a cache miss (a write), as when the 5-minute entry is gone
 }
 
 type aiBody struct {
@@ -311,10 +301,10 @@ func newAIFake(t *testing.T) *aiFake {
 		switch r.URL.Path {
 		case "/v1/models":
 			io.WriteString(rw, `{"data":[
-				{"type":"model","id":"claude-sonnet-5","display_name":"Claude Sonnet 5","created_at":"2026-04-01T00:00:00Z"},
-				{"type":"model","id":"claude-haiku-4-5","display_name":"Claude Haiku 4.5","created_at":"2026-09-20T00:00:00Z"},
-				{"type":"model","id":"claude-sonnet-5-5","display_name":"Claude Sonnet 5.5","created_at":"2026-09-01T00:00:00Z"}],
-				"has_more":false,"first_id":"claude-sonnet-5","last_id":"claude-sonnet-5-5"}`)
+				{"type":"model","id":"claude-sonnet-5","created_at":"2026-04-01T00:00:00Z","capabilities":{"effort":{"supported":true,"low":{"supported":true}}}},
+				{"type":"model","id":"claude-haiku-4-5","created_at":"2025-10-01T00:00:00Z","capabilities":{"effort":{"supported":false,"low":{"supported":false}}}},
+				{"type":"model","id":"claude-sonnet-5-5","created_at":"2026-09-01T00:00:00Z","capabilities":{"effort":{"supported":true,"low":{"supported":true}}}}],
+				"has_more":false}`)
 		case "/v1/messages/count_tokens":
 			if b.MaxTokens != nil { // as the real endpoint answers
 				rw.WriteHeader(400)
@@ -335,16 +325,20 @@ func newAIFake(t *testing.T) *aiFake {
 				http.Error(rw, `{"type":"error","error":{"type":"invalid_request_error","message":"unscripted call"}}`, 400)
 				return
 			}
-			text, _ := json.Marshal(a.answers[0])
+			answer, stop, out := a.answers[0], "end_turn", outputTokens
 			a.answers = a.answers[1:]
+			if cut, ok := strings.CutPrefix(answer, "CUT:"); ok {
+				answer, stop, out = cut, "max_tokens", *b.MaxTokens
+			}
+			text, _ := json.Marshal(answer)
 			cache := "cache_creation_input_tokens" // the first turn writes the taste block, a retry reads it
-			if len(b.Messages) > 1 {
+			if len(b.Messages) > 1 && !a.missRetry {
 				cache = "cache_read_input_tokens"
 			}
 			fmt.Fprintf(rw, `{"id":"msg_%d","type":"message","role":"assistant","model":"claude-sonnet-5-5",
 				"content":[{"type":"thinking","thinking":"","signature":"c2ln"},{"type":"text","text":%s}],
-				"stop_reason":"end_turn","usage":{"input_tokens":%d,%q:%d,"output_tokens":%d}}`,
-				len(a.requests), text, b.tokens()-cachedPrefix, cache, cachedPrefix, outputTokens)
+				"stop_reason":%q,"usage":{"input_tokens":%d,%q:%d,"output_tokens":%d}}`,
+				len(a.requests), text, stop, b.tokens()-cachedPrefix, cache, cachedPrefix, out)
 		default:
 			http.NotFound(rw, r)
 		}
@@ -365,10 +359,20 @@ func (a *aiFake) calls() int {
 	return len(a.requests)
 }
 
+// effort is what request i asked for in output_config.effort ("" = none).
+func (a *aiFake) effort(i int) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	oc, _ := a.requests[i]["output_config"].(map[string]any)
+	e, _ := oc["effort"].(string)
+	return e
+}
+
 func answer3(ids ...int) string {
 	var picks []string
 	for _, id := range ids {
-		picks = append(picks, fmt.Sprintf(`{"id":%d,"title":"t%d","reason":"Shares the patience of Licorice Pizza, which he gave 5 stars."}`, id, id))
+		picks = append(picks, fmt.Sprintf(`{"id":%d,"title":"t%d","mood":"patient, warm","liked":"Licorice Pizza (2021)",`+
+			`"reason":"Shares the patience of Licorice Pizza, which he gave 5 stars."}`, id, id))
 	}
 	return `{"picks":[` + strings.Join(picks, ",") + `]}`
 }
@@ -384,6 +388,10 @@ type plexFake struct {
 	labeled bool
 	hubs    []plexHub
 	posters [][]byte
+
+	dropCreate   bool   // POST /library/collections makes the collection, then hangs up: its answer is lost
+	failReadBack int    // GET /library/metadata/900 answers 503 this many times first
+	onCreate     func() // runs inside the create, e.g. to stop the run there
 }
 
 func newPlexFake(srv *fake.Server) *plexFake {
@@ -431,6 +439,14 @@ func newPlexFake(srv *fake.Server) *plexFake {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		p.coll = members(r)
+		if p.onCreate != nil {
+			p.onCreate()
+		}
+		if p.dropCreate {
+			conn, _, _ := rw.(http.Hijacker).Hijack()
+			conn.Close()
+			return
+		}
 		mc(rw, map[string]any{"Metadata": []map[string]string{{"ratingKey": "900"}}})
 	})
 	// 777 is his own collection named "Tonight", with no label: no route writes to it, so a write fails the sink.
@@ -456,6 +472,11 @@ func newPlexFake(srv *fake.Server) *plexFake {
 	srv.HandleFunc("GET", "/library/metadata/900", func(rw http.ResponseWriter, _ *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
+		if p.failReadBack > 0 {
+			p.failReadBack--
+			http.Error(rw, "busy", http.StatusServiceUnavailable)
+			return
+		}
 		mc(rw, map[string]any{"Metadata": collection()})
 	})
 	srv.HandleFunc("PUT", "/library/collections/900/items", func(rw http.ResponseWriter, r *http.Request) {
@@ -538,11 +559,13 @@ func (p *plexFake) members() []string {
 // ---- fake Jellyfin: user "saahil", the films above, and the BoxSet the stage makes ----
 
 type jfFake struct {
-	mu       sync.Mutex
-	box      []string // nil until created
-	overview string
-	tags     []string
-	images   int
+	mu         sync.Mutex
+	box        []string // nil until created
+	overview   string
+	tags       []string
+	images     int
+	dropCreate bool   // POST /Collections makes the BoxSet, then hangs up: its answer is lost
+	onCreate   func() // runs inside the create, e.g. to stop the run there
 }
 
 func newJFFake(srv *fake.Server) *jfFake {
@@ -583,6 +606,14 @@ func newJFFake(srv *fake.Server) *jfFake {
 		j.mu.Lock()
 		defer j.mu.Unlock()
 		j.box = strings.Split(r.URL.Query().Get("Ids"), ",")
+		if j.onCreate != nil {
+			j.onCreate()
+		}
+		if j.dropCreate {
+			conn, _, _ := rw.(http.Hijacker).Hijack()
+			conn.Close()
+			return
+		}
 		io.WriteString(rw, `{"Id":"box1"}`)
 	})
 	srv.HandleFunc("POST", "/Collections/box1/Items", func(rw http.ResponseWriter, r *http.Request) {
@@ -626,12 +657,12 @@ func (j *jfFake) members() []string {
 }
 
 // Catches, across four runs at the gate's real token sizes: a watched film offered (export, feed, Plex, Jellyfin);
-// a pick outside the unseen set kept instead of retried, or the retry priced out of the default budget; the taste
-// block sent uncached or to an unresolved alias; a second AI call on the same day; a watched pick left in the
+// a pick outside the unseen set kept instead of retried; the taste block sent uncached or to an unresolved alias; a
+// second AI call on the same day; a watched pick left in the
 // row, or on its poster; yesterday's picks repeated or kept; the row shown on a friend's Home or the Recommended tab, or left
 // there by an earlier build; his own "Tonight" collection or BoxSet adopted and edited; the key reaching a log.
 func TestRunAcrossDays(t *testing.T) {
-	w := newWorld(t, "")
+	w := newWorld(t, "", 0)
 	w.ai.script(answer3(559907, 389, 346), answer3(389, 346, 655)) // the first answer offers a film he has seen
 
 	rep := w.run(t)
@@ -653,8 +684,9 @@ func TestRunAcrossDays(t *testing.T) {
 		t.Fatalf("system blocks lack the cached taste profile: %s", system)
 	}
 	userText, _ := json.Marshal(first["messages"])
-	for _, f := range films {
-		listed := strings.Contains(string(userText), fmt.Sprintf(`\n%d | %s |`, f.tmdb, f.title))
+	for _, f := range films { // a line carries TMDB's facts, the director from the credits included
+		listed := strings.Contains(string(userText), fmt.Sprintf(`\n%d | %s | %d | %s | Drama | US | %d | en | First sentence.`,
+			f.tmdb, f.title, f.year, f.director, f.runtime))
 		if unseen := f.tmdb != 559907 && slices.Index(films, f) < 7; listed != unseen {
 			t.Errorf("%s listed=%v, want %v", f.title, listed, unseen)
 		}
@@ -766,35 +798,52 @@ func TestRunAcrossDays(t *testing.T) {
 	}
 }
 
-// Catches: a call sent although it and its retry, at their worst, exceed what is left of the day's budget. At the
-// gate's sizes the call alone may cost $0.0905 and the pair $0.1412, so a $0.13 cap admits the first only.
-func TestOverBudgetRefusesTheCall(t *testing.T) {
-	w := newWorld(t, "daily_cap_usd = 0.13\n")
-	opt := defaults()
-	if err := w.h.Env.Options(&opt); err != nil {
-		t.Fatal(err)
-	}
-	st := state{Recent: map[int]string{}, Spend: map[string]float64{}}
-	err := pickFilms(context.Background(), w.h.Env, &stage.Report{}, opt, &st, "2026-10-05", rssCache{}, idMap{}, idMap{},
-		func() error { return nil })
-	if !errors.Is(err, errOverBudget) {
-		t.Fatalf("err = %v, want errOverBudget", err)
-	}
-	if w.ai.calls() != 0 || st.Spend["2026-10-05"] != 0 {
-		t.Fatalf("AI calls %d, spend %v", w.ai.calls(), st.Spend)
+// Catches the daily cap being soft. Row 1 is the round-2 review's $0.16958 case: sizing that prices the retry's
+// prefix at the cache-read rate sends all ~190 candidates, and a retry that misses the cache then bills a second
+// write, taking the pair past $0.15. Row 2: a call sent although even an empty list's pair would not fit.
+func TestDailyCapIsHard(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		cap   string
+		calls int
+	}{
+		{"a cache-missing retry still fits", "0.15", 2},
+		{"no room for the pair: no call", "0.11", 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWorld(t, "daily_cap_usd = "+c.cap+"\n", 190)
+			w.ai.missRetry = true
+			w.ai.script(answer3(559907, 389, 346), answer3(389, 346, 655)) // the first offers a film he has seen
+			rep := w.run(t)
+			spent := w.state(t).Spend["2026-10-05"]
+			if w.ai.calls() != c.calls || spent > 0.15 {
+				t.Fatalf("%d AI calls (want %d), $%.5f spent against the cap\n%s", w.ai.calls(), c.calls, spent, w.logs)
+			}
+			if c.calls == 0 {
+				if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "exceed the daily AI budget") || spent != 0 {
+					t.Fatalf("alerts %q, spent $%.5f", rep.Alerts, spent)
+				}
+				return
+			}
+			userText, _ := json.Marshal(w.ai.requests[0]["messages"])
+			shown := strings.Count(string(userText), `\n70`) // filler lines: "\n700000 | Filler 0 | ..."
+			if shown == 0 || shown >= 190 || !strings.Contains(w.logs.String(), "cache_write_tokens=18357 cache_read_tokens=0 output_tokens=422 stop=end_turn") {
+				t.Fatalf("%d filler candidates shown (want the list cut below 190), or the retry was not billed as a miss\n%s", shown, w.logs)
+			}
+		})
 	}
 }
 
 // Catches: a call whose answer was lost after it may have run (a dropped connection) being sent again by the
 // client or counted as $0, either of which lets one day bill several calls past the cap.
 func TestLostAnswerStaysCounted(t *testing.T) {
-	w := newWorld(t, "")
+	w := newWorld(t, "", 0)
 	w.ai.mu.Lock()
 	w.ai.drop = true
 	w.ai.mu.Unlock()
 	rep := w.run(t)
 	reserved := w.state(t).Spend["2026-10-05"]
-	if w.ai.calls() != 1 || reserved < 0.09 || len(rep.Alerts) != 1 || !strings.Contains(w.logs.String(), "event=tonight_ai_unknown_outcome") {
+	if w.ai.calls() != 1 || reserved < 0.05 || len(rep.Alerts) != 1 || !strings.Contains(w.logs.String(), "event=tonight_ai_unknown_outcome") {
 		t.Fatalf("run 1: %d AI calls, $%.5f counted, alerts %q\n%s", w.ai.calls(), reserved, rep.Alerts, w.logs)
 	}
 	w.h.Now = w.h.Now.Add(30 * time.Minute)
@@ -805,10 +854,100 @@ func TestLostAnswerStaysCounted(t *testing.T) {
 	}
 }
 
+// Catches a second "Tonight" collection after a failed call around the create, which nothing would ever clean up
+// (round-2 review: run 2 made a second POST /library/collections). Rows: both creates' answers are lost after the
+// apps made the collections; Plex answers the create, then fails the read-back, so the create's answer alone must
+// name the collection; the service stops (SIGTERM) inside either create, where the run's closing save fails with
+// the cancelled context and only the record saved before the create survives.
+func TestCreateNeverDuplicates(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		fault func(*world, context.CancelFunc)
+	}{
+		{"create answers lost", func(w *world, _ context.CancelFunc) { w.plex.dropCreate, w.jf.dropCreate = true, true }},
+		{"plex read-back fails", func(w *world, _ context.CancelFunc) { w.plex.failReadBack = 1 }},
+		{"stopped inside the plex create", func(w *world, stop context.CancelFunc) { w.plex.dropCreate, w.plex.onCreate = true, stop }},
+		{"stopped inside the jellyfin create", func(w *world, stop context.CancelFunc) { w.jf.dropCreate, w.jf.onCreate = true, stop }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWorld(t, "", 0)
+			w.ai.script(answer3(389, 346, 655))
+			ctx, stop := context.WithCancel(context.Background())
+			defer stop()
+			c.fault(w, stop)
+			rep := &stage.Report{}
+			err := (Stage{}).Run(ctx, w.h.Env, rep)
+			if stopped := ctx.Err() != nil; stopped != (err != nil) || (!stopped && rep.Counts["plex_retry"] != 1) {
+				t.Fatalf("run 1: err %v, counts %v\n%s", err, rep.Counts, w.logs)
+			}
+			if st := w.state(t); c.name == "plex read-back fails" && (st.Plex.ID != "900" || st.Plex.Pending != nil) {
+				t.Fatalf("after the create answered 900: plex state %+v", st.Plex)
+			}
+			w.plex.mu.Lock()
+			w.plex.dropCreate, w.plex.onCreate = false, nil
+			w.plex.mu.Unlock()
+			w.jf.mu.Lock()
+			w.jf.dropCreate, w.jf.onCreate = false, nil
+			w.jf.mu.Unlock()
+			w.h.Now = w.h.Now.Add(16 * time.Minute) // past the first 15 min backoff
+			if rep := w.run(t); rep.Counts["plex_synced"]+rep.Counts["jellyfin_synced"] != 2 {
+				t.Fatalf("run 2: counts %v\n%s", rep.Counts, w.logs)
+			}
+			creates := len(w.h.Plex.Calls("POST", "/library/collections"))
+			boxes := len(w.h.Jellyfin.Calls("POST", "/Collections"))
+			if creates != 1 || boxes != 1 || !w.plex.labeled || !slices.Contains(w.jf.tags, "projectionist") {
+				t.Fatalf("plex creates %d (labelled %v), jellyfin creates %d (tags %q): want one each, owned", creates, w.plex.labeled, boxes, w.jf.tags)
+			}
+			if st := w.state(t); st.Plex.ID != "900" || st.Jellyfin.ID != "box1" || st.Plex.Pending != nil || st.Jellyfin.Pending != nil {
+				t.Fatalf("state: plex %+v jellyfin %+v", st.Plex, st.Jellyfin)
+			}
+			if got := w.plex.members(); !slices.Equal(got, []string{rk(346), rk(389), rk(655)}) {
+				t.Fatalf("plex members %v", got)
+			}
+		})
+	}
+}
+
+// Catches the owner's dated model policy being ignored (a fixed model), a resolved Sonnet cached past the switch to
+// Haiku, and effort sent to Haiku 4.5, which answers 400 to output_config.effort: the first day on Haiku would have
+// no picks. The switch instant itself is llm.TestPolicy's.
+func TestModelFollowsDatedPolicy(t *testing.T) {
+	w := newWorld(t, "", 0)
+	w.ai.script(answer3(389, 346, 655), answer3(1398, 949, 18148))
+	for i, c := range []struct {
+		utc, model, effort string
+	}{
+		{"2026-11-05T07:59:59Z", "claude-sonnet-5-5", "medium"}, // 23:59:59 PST on the 4th, a second before the switch
+		{"2026-11-05T13:00:00Z", "claude-haiku-4-5", ""},        // 05:00 PST: the next day's pick, after it
+	} {
+		w.h.Now, _ = time.Parse(time.RFC3339, c.utc)
+		w.run(t)
+		if w.ai.calls() != i+1 || w.ai.requests[i]["model"] != c.model || w.ai.effort(i) != c.effort {
+			t.Fatalf("%s: call %d model %v effort %q; want %s, %q\n%s", c.utc, w.ai.calls(), w.ai.requests[min(i, w.ai.calls()-1)]["model"],
+				w.ai.effort(min(i, w.ai.calls()-1)), c.model, c.effort, w.logs)
+		}
+	}
+}
+
+// Catches an answer cut off at max_tokens (thinking shares them with the JSON) costing the day its picks: the retry
+// must say why and think less, or it is cut off the same way.
+func TestCutOffAnswerRetriesAtLowEffort(t *testing.T) {
+	w := newWorld(t, "", 0)
+	w.ai.script(`CUT:{"picks":[{"id":389,"title":"12 Angry Men","mood":"tense","liked":"Rope","reason":"Like Rope, it`, answer3(389, 346, 655))
+	w.run(t)
+	retry, _ := json.Marshal(w.ai.requests[1]["messages"])
+	if w.ai.effort(0) != "medium" || w.ai.effort(1) != "low" || !strings.Contains(string(retry), "cut off at the length limit") {
+		t.Fatalf("efforts %q then %q; retry %s", w.ai.effort(0), w.ai.effort(1), retry)
+	}
+	if got := tmdbIDs(w.state(t).Picks); !slices.Equal(got, []int{389, 346, 655}) {
+		t.Fatalf("picks %v", got)
+	}
+}
+
 // Catches: a Plex outage failing the run, raising an alert on the first miss, retrying every run instead of
 // backing off, or holding up Jellyfin.
 func TestPlexOutageNeverFailsTheRun(t *testing.T) {
-	w := newWorld(t, "daily_cap_usd = 0.5\n") // without Plex's plays Pulp Fiction is offered too: one more real-size line
+	w := newWorld(t, "", 0)
 	w.ai.script(answer3(389, 346, 655))
 	w.h.Plex.Handle("GET", "/library/sections/4/all", http.StatusServiceUnavailable, "scanning")
 	rep := w.run(t)

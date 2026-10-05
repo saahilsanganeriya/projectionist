@@ -1,12 +1,13 @@
 // Package llm calls Claude through the Anthropic API directly (no gateway): one Messages call, Message Batches for
-// bulk work at half price, the newest model of a family from the Models API (for aliases like "haiku:latest"), and
-// the dollar cost of every call so a stage can hold a hard budget.
+// bulk work at half price, a dated model policy whose "family:latest" aliases resolve to the newest model of that
+// family from the Models API, and the dollar cost of every call so a stage can hold a hard budget.
 //
 // Failure policy: every request has the HTTP client's timeout; 429 and 5xx (529 = overloaded) are retried twice with
-// jittered backoff (or the server's retry-after), as are connections that were never made; anything else fails at
-// once. A POST that may have reached the server (a timeout or a connection dropped after sending, or a 2xx body that
-// could not be read) is never retried, because the API takes no idempotency key: it fails with ErrUnknownOutcome so
-// the caller can count it as billed. Errors never carry the key or a request body.
+// jittered backoff (or the server's retry-after), as are requests whose body never fully left this process (a refused
+// connection, an upload cut off part-way): the API cannot have processed those. Anything else fails at once. A POST
+// whose whole body was sent but whose answer was lost (a timeout or a dropped connection after sending, or a 2xx body
+// that could not be read) is never retried, because the API takes no idempotency key: it fails with
+// ErrUnknownOutcome so the caller can count it as billed. Errors never carry the key or a request body.
 package llm
 
 import (
@@ -19,11 +20,11 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -41,10 +42,16 @@ type Client struct {
 // ---- Messages ----
 
 type Request struct {
-	Model     string    `json:"model"`
-	MaxTokens int       `json:"max_tokens"`
-	System    string    `json:"system,omitempty"`
-	Messages  []Message `json:"messages"`
+	Model        string        `json:"model"`
+	MaxTokens    int           `json:"max_tokens"` // thinking counts towards it
+	System       string        `json:"system,omitempty"`
+	Messages     []Message     `json:"messages"`
+	OutputConfig *EffortConfig `json:"output_config,omitempty"`
+}
+
+// EffortConfig is output_config.effort ("low" ... "max"); only a model whose capabilities list it accepts it.
+type EffortConfig struct {
+	Effort string `json:"effort"`
 }
 
 type Message struct {
@@ -115,28 +122,78 @@ func (c *Client) Messages(ctx context.Context, req Request) (Response, error) {
 
 // ---- Models ----
 
+// Model is a resolved model id and what the request may ask of it.
+type Model struct {
+	ID        string `json:"id"`
+	LowEffort bool   `json:"low_effort"` // accepts output_config.effort "low" (adaptive-thinking models do)
+}
+
 // Latest is the newest model (by release date) whose id contains family, e.g. "haiku". Callers cache the answer
-// for a day, so a new model is picked up the day it ships.
-func (c *Client) Latest(ctx context.Context, family string) (string, error) {
+// for a day, so a new model is picked up the day it ships. One page of 1,000 is every model the API lists.
+func (c *Client) Latest(ctx context.Context, family string) (Model, error) {
 	var list struct {
 		Data []struct {
-			ID        string    `json:"id"`
-			CreatedAt time.Time `json:"created_at"`
+			ID           string    `json:"id"`
+			CreatedAt    time.Time `json:"created_at"`
+			Capabilities struct {
+				Effort struct {
+					Low struct {
+						Supported bool `json:"supported"`
+					} `json:"low"`
+				} `json:"effort"`
+			} `json:"capabilities"`
 		} `json:"data"`
 	}
 	if err := c.call(ctx, http.MethodGet, "/v1/models?limit=1000", nil, &list); err != nil {
-		return "", err
+		return Model{}, err
 	}
-	best, bestAt := "", time.Time{}
+	var best Model
+	var bestAt time.Time
 	for _, m := range list.Data { // newest first, so a tie keeps the first
-		if strings.Contains(m.ID, family) && (best == "" || m.CreatedAt.After(bestAt)) {
-			best, bestAt = m.ID, m.CreatedAt
+		if strings.Contains(m.ID, family) && (best.ID == "" || m.CreatedAt.After(bestAt)) {
+			best, bestAt = Model{ID: m.ID, LowEffort: m.Capabilities.Effort.Low.Supported}, m.CreatedAt
 		}
 	}
-	if best == "" {
-		return "", fmt.Errorf("anthropic: no model id contains %q", family)
+	if best.ID == "" {
+		return Model{}, fmt.Errorf("anthropic: no model id contains %q", family)
 	}
 	return best, nil
+}
+
+// ---- the model policy ----
+
+// Rule is one entry of a dated policy ([[llm.policy]] in the config): Model is a model id or a "family:latest"
+// alias, and the rule holds until Until (exclusive; unset = for good).
+type Rule struct {
+	Model string    `toml:"model"`
+	Until time.Time `toml:"until"` // RFC 3339
+}
+
+// Policy chooses the model by date: the first rule whose Until is still in the future wins.
+type Policy []Rule
+
+// DefaultPolicy is the owner's: the newest Sonnet until 2026-11-05 00:00 PST, then the newest Haiku.
+var DefaultPolicy = Policy{
+	{Model: "sonnet:latest", Until: time.Date(2026, 11, 5, 8, 0, 0, 0, time.UTC)},
+	{Model: "haiku:latest"},
+}
+
+var ErrPolicyExpired = errors.New("llm: every model policy rule has expired")
+
+// Model is the model (or alias) the policy names at now; an empty policy is DefaultPolicy.
+func (p Policy) Model(now time.Time) (string, error) {
+	if len(p) == 0 {
+		p = DefaultPolicy
+	}
+	for i, r := range p {
+		if r.Model == "" {
+			return "", fmt.Errorf("llm policy rule %d names no model", i+1)
+		}
+		if r.Until.IsZero() || now.Before(r.Until) {
+			return r.Model, nil
+		}
+	}
+	return "", ErrPolicyExpired
 }
 
 // ---- Message Batches ----
@@ -296,9 +353,13 @@ func (c *Client) open(ctx context.Context, method, path string, in any) (io.Read
 		}
 	}
 	for attempt := 0; ; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, method, c.API+path, bytes.NewReader(payload))
+		req, err := http.NewRequestWithContext(ctx, method, c.API+path, nil)
 		if err != nil {
 			return nil, err
+		}
+		body := &sentBody{r: bytes.NewReader(payload)}
+		if in != nil {
+			req.Body, req.ContentLength = body, int64(len(payload))
 		}
 		req.Header.Set("x-api-key", strings.TrimSpace(key))
 		req.Header.Set("anthropic-version", apiVersion)
@@ -312,10 +373,8 @@ func (c *Client) open(ctx context.Context, method, path string, in any) (io.Read
 			if ue := (*url.Error)(nil); errors.As(err, &ue) {
 				err = ue.Err // keeps the URL out of the message
 			}
-			var op *net.OpError
-			neverSent := errors.As(err, &op) && op.Op == "dial"
 			err = fmt.Errorf("anthropic %s %s: %w", method, path, err)
-			if method == http.MethodPost && !neverSent {
+			if method == http.MethodPost && body.sent.Load() {
 				return nil, fmt.Errorf("%w: %w", ErrUnknownOutcome, err)
 			}
 		case resp.StatusCode/100 == 2:
@@ -342,6 +401,23 @@ func (c *Client) open(ctx context.Context, method, path string, in any) (io.Read
 		}
 	}
 }
+
+// sentBody records whether the transport has read the whole payload. A request whose body was cut off before that
+// never reached the API complete, so it cannot have been processed or billed.
+type sentBody struct {
+	r    *bytes.Reader
+	sent atomic.Bool // the transport reads the body on its own goroutine
+}
+
+func (b *sentBody) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	if b.r.Len() == 0 {
+		b.sent.Store(true)
+	}
+	return n, err
+}
+
+func (b *sentBody) Close() error { return nil }
 
 func apiError(resp *http.Response) error {
 	defer resp.Body.Close()

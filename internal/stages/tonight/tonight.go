@@ -6,10 +6,13 @@
 // once. Once per day, after pick_after, it re-picks. The same picks fill a "Tonight" BoxSet in Jellyfin.
 //
 //	Letterboxd export + RSS ─┐
-//	library folders {tmdb-N} ├─► unseen candidates ─► 1 AI call/day (≤ daily_cap_usd) ─► picks (state)
-//	TMDB facts (cached)     ─┘                                                         │
-//	                                                     Plex collection + Home row ◄──┤ queued, retried,
-//	                                                     Jellyfin BoxSet           ◄──┘ never fail the run
+//	library folders {tmdb-N} ├─► unseen candidates ─► 1 AI call/day (+1 retry, both ≤ daily_cap_usd) ─► picks (state)
+//	TMDB facts (cached)     ─┘                                                                       │
+//	                                                   Plex collection + Home row ◄──────────────────┤ queued, retried,
+//	                                                   Jellyfin BoxSet           ◄──────────────────┘ never fail the run
+//
+// The model is the dated policy's choice ([[llm.policy]], env.LLM): the newest Sonnet until 2026-11-05, then the
+// newest Haiku.
 //
 // The stage never writes watched state, never touches Continue Watching / On Deck, and never deletes anything
 // of his: it edits only the collection it owns.
@@ -30,8 +33,7 @@ import (
 const name = "tonight"
 
 type Options struct {
-	Model          string        `toml:"model"`  // "sonnet:latest" (newest Sonnet, resolved daily) or an exact model id
-	Effort         string        `toml:"effort"` // low, medium, high
+	Effort         string        `toml:"effort"` // low, medium, high; sent only to a model that accepts it
 	MaxTokens      int           `toml:"max_tokens"`
 	DailyCapUSD    float64       `toml:"daily_cap_usd"`
 	APIKeyFile     string        `toml:"api_key_file"`
@@ -44,8 +46,6 @@ type Options struct {
 	MoviesDir      string        `toml:"movies_dir"`
 	LetterboxdDir  string        `toml:"letterboxd_dir"`
 	LetterboxdRSS  string        `toml:"letterboxd_rss"`
-	TMDBTokenFile  string        `toml:"tmdb_token_file"`
-	TMDBBase       string        `toml:"tmdb_base"`
 	ImageBase      string        `toml:"image_base"`
 	JellyfinUser   string        `toml:"jellyfin_user"`
 	SinkTimeout    time.Duration `toml:"sink_timeout"`     // per sink per run; what is left over waits for the next run
@@ -55,13 +55,12 @@ type Options struct {
 
 func defaults() Options {
 	return Options{
-		Model: "sonnet:latest", Effort: "medium", MaxTokens: 1000, DailyCapUSD: 0.15,
+		Effort: "medium", MaxTokens: 1000, DailyCapUSD: 0.15,
 		APIKeyFile: "/run/secrets/anthropic_api_key", Picks: 5, PickAfter: "05:00", MaxCandidates: 400,
 		Section: 4, Collection: "Tonight", MoviesDir: "/volume1/media/Movies",
 		LetterboxdDir: "/volume1/docker/projectionist/data/letterboxd",
 		LetterboxdRSS: "https://letterboxd.com/saahilsan/rss/",
-		TMDBTokenFile: "/run/secrets/tmdb_read_token", TMDBBase: "https://api.themoviedb.org/3",
-		ImageBase: "https://image.tmdb.org/t/p", JellyfinUser: "saahil",
+		ImageBase:     "https://image.tmdb.org/t/p", JellyfinUser: "saahil",
 		SinkTimeout: 3 * time.Minute, PlexMapTimeout: 10 * time.Minute, MapEvery: 24 * time.Hour,
 	}
 }
@@ -71,6 +70,8 @@ type pick struct {
 	Title      string `json:"title"`
 	Year       int    `json:"year"`
 	Reason     string `json:"reason"`
+	Mood       string `json:"mood,omitempty"`
+	Liked      string `json:"liked,omitempty"` // the film or director of his the reason draws on
 	PosterPath string `json:"poster_path,omitempty"`
 }
 
@@ -79,13 +80,9 @@ type state struct {
 	Picks    []pick             `json:"picks"`         // still unwatched, in the model's order
 	Recent   map[int]string     `json:"recent"`        // tmdb → day picked; kept 14 days so the picks rotate
 	Spend    map[string]float64 `json:"spend"`         // local day → USD, including reservations for calls in flight
-	Resolved struct {
-		Alias string    `json:"alias,omitempty"`
-		ID    string    `json:"id,omitempty"`
-		At    time.Time `json:"at,omitzero"`
-	} `json:"resolved"`
-	Plex     sinkState `json:"plex"`
-	Jellyfin sinkState `json:"jellyfin"`
+	Resolved resolved           `json:"resolved"`
+	Plex     sinkState          `json:"plex"`
+	Jellyfin sinkState          `json:"jellyfin"`
 }
 
 // pickDay is the day whose picks should be showing: before pick_after the row still shows the previous day's.
@@ -167,7 +164,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		return posterJPEG, nil
 	}
 	runSink(ctx, env, rep, opt, "jellyfin", &st.Jellyfin, func(sctx context.Context) error {
-		return syncJellyfin(sctx, env.Log, env.Jellyfin, opt.Collection, jm, &st.Jellyfin, st.Day, st.Picks, poster)
+		return syncJellyfin(sctx, env.Log, env.Jellyfin, opt.Collection, jm, &st.Jellyfin, st.Day, st.Picks, poster, save)
 	})
 	refreshMap(ctx, env, opt, "plexmap", &pm, st.Plex, opt.PlexMapTimeout, true, func(c context.Context) (idMap, error) {
 		return plexMap(c, env.Plex.WithTimeout(opt.PlexMapTimeout), opt.Section)
@@ -178,7 +175,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 			return err
 		}
 		t := plexTarget{Section: opt.Section, Title: opt.Collection, Machine: prefs["ProcessedMachineIdentifier"]}
-		return syncPlex(sctx, env.Log, env.Plex, t, pm, &st.Plex, st.Day, st.Picks, poster)
+		return syncPlex(sctx, env.Log, env.Plex, t, pm, &st.Plex, st.Day, st.Picks, poster, save)
 	})
 	if err := save(); err != nil {
 		return err
@@ -309,9 +306,10 @@ func reconcile(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 	st.Picks = kept
 }
 
-// pickFilms makes the day's one AI call, plus at most one retry, inside the daily cap. Each call's worst case is
-// reserved before it is sent and settled to the billed usage after; a call whose answer was lost after it may have
-// run keeps its reservation, because it may have been billed.
+// pickFilms makes the day's one AI call, plus at most one retry, inside the daily cap. Both are sized before the
+// first is sent, at their worst (bound), so the pair can never pass the cap; each call's worst case is reserved
+// before it is sent and settled to the billed usage after. A call whose answer was lost after it may have run keeps
+// its reservation, because it may have been billed.
 func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, st *state, day string, rss rssCache,
 	pm, jm idMap, save func() error) error {
 	export, err := readExport(opt.LetterboxdDir)
@@ -322,8 +320,7 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 	if err != nil {
 		return err
 	}
-	tc := tmdbClient{Base: opt.TMDBBase, TokenFile: opt.TMDBTokenFile, HTTP: &http.Client{Timeout: 15 * time.Second}}
-	fetched, failed, err := fillFacts(ctx, env, tc, lib)
+	fetched, failed, err := fillFacts(ctx, env, lib)
 	if err != nil {
 		return err
 	}
@@ -348,37 +345,28 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 	}
 
 	a := newAI(opt.APIBase, opt.APIKeyFile, 3*time.Minute)
-	if st.Resolved.Alias != opt.Model || env.Now().Sub(st.Resolved.At) >= 24*time.Hour {
-		id, err := resolve(ctx, a, opt.Model)
-		if err != nil && st.Resolved.Alias != opt.Model {
-			return err
-		}
-		if err == nil {
-			st.Resolved.Alias, st.Resolved.ID, st.Resolved.At = opt.Model, id, env.Now()
-			env.Log.Info("model resolved", "event", "tonight_model", "alias", opt.Model, "model", id)
-		} else {
-			env.Log.Warn("model list failed; keeping yesterday's model", "event", "tonight_model_error", "model", st.Resolved.ID, "err", err)
-		}
+	m, err := resolveModel(ctx, env, a, &st.Resolved)
+	if err != nil {
+		return err
 	}
-	model := st.Resolved.ID
-	p := llm.PriceOf(model)
+	p := llm.PriceOf(m.ID)
 	if p.Assumed {
-		env.Log.Warn("no list price for the model; budgeting at twice its family's", "event", "tonight_price_assumed", "model", model)
+		env.Log.Warn("no list price for the model; budgeting at twice its family's", "event", "tonight_price_assumed", "model", m.ID)
 	}
 
 	// Size the candidate list so the call AND its retry fit what is left of today's budget. The retry re-sends the
-	// call plus the answer (at most max_tokens) and the violations, and reads back the taste block the call cached
-	// seconds earlier. fixed counts the request without candidate lines: the cached prefix plus a short tail.
+	// call plus the answer (at most max_tokens) and the violations. fixed counts the request without candidate
+	// lines: the cached prefix plus a short tail, all of it priced as a cache write.
 	taste := tasteText(hist, 400)
 	request := func(n int) llm.CachedRequest {
-		return pickRequest(model, opt, taste, []llm.Message{userMessage(prompt(day, cands[:n], opt.Picks))})
+		return pickRequest(m, opt, taste, []llm.Message{userMessage(prompt(day, cands[:n], opt.Picks))})
 	}
 	fixed, err := a.CountTokens(ctx, request(0))
 	if err != nil {
 		return err
 	}
 	pair := func(total int) float64 {
-		return bound(p, total, fixed, opt.MaxTokens, false) + bound(p, total+opt.MaxTokens+retryExtra, fixed, opt.MaxTokens, true)
+		return bound(p, total, fixed, opt.MaxTokens) + bound(p, total+opt.MaxTokens+retryExtra, fixed, opt.MaxTokens)
 	}
 	left := opt.DailyCapUSD - st.Spend[day]
 	n := min(opt.MaxCandidates, len(cands))
@@ -404,6 +392,8 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 	for _, c := range cands[:n] {
 		unseen[c.TMDB] = c
 	}
+	env.Log.Info("ai call sized", "event", "tonight_ai_sized", "model", m.ID, "candidates", n, "unseen", len(cands),
+		"counted_input_tokens", total, "pair_bound_usd", fmt.Sprintf("%.5f", pair(total)), "left_usd", fmt.Sprintf("%.5f", left))
 
 	call := func(attempt int, reserve float64) (llm.Response, error) {
 		st.Spend[day] += reserve
@@ -427,47 +417,60 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 			return llm.Response{}, err
 		}
 		u := r.Usage
-		env.Log.Info("ai call", "event", "tonight_ai_call", "attempt", attempt, "model", model, "candidates", n, "unseen", len(cands),
+		env.Log.Info("ai call", "event", "tonight_ai_call", "attempt", attempt, "model", m.ID, "candidates", n,
 			"input_tokens", u.InputTokens, "cache_write_tokens", u.CacheCreationInputTokens, "cache_read_tokens", u.CacheReadInputTokens,
 			"output_tokens", u.OutputTokens, "stop", r.StopReason, "cost_usd", fmt.Sprintf("%.5f", p.Cost(u, false)),
-			"spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]))
-		if st.Spend[day] > opt.DailyCapUSD { // only a retry that missed the cache it was bounded on gets here
+			"bound_usd", fmt.Sprintf("%.5f", reserve), "spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]))
+		if st.Spend[day] > opt.DailyCapUSD { // only a count_tokens estimate beyond bound's slack gets here
 			env.Log.Warn("over the daily AI cap", "event", "tonight_over_cap", "spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]))
 		}
 		env.Log.Debug("ai answer", "event", "tonight_ai_answer", "attempt", attempt, "text", r.Text())
 		rep.Count("ai_calls", 1)
 		return r, nil
 	}
-	r, err := call(1, bound(p, total, fixed, opt.MaxTokens, false))
+	r, err := call(1, bound(p, total, fixed, opt.MaxTokens))
 	if err != nil {
 		return err
 	}
-	picks, violations := validate(r.Text(), unseen, opt.Picks)
+	picks, violations, glued := validate(r.Text(), unseen, opt.Picks)
+	if r.StopReason == "max_tokens" {
+		// Thinking shares max_tokens with the answer, so the retry thinks less; a changed effort misses the cache,
+		// which bound already prices.
+		violations = append([]string{"the answer was cut off at the length limit before the JSON was complete"}, violations...)
+		if m.LowEffort {
+			oc := *req.OutputConfig
+			oc.Effort = "low"
+			req.OutputConfig = &oc
+		}
+	}
 	if len(violations) > 0 {
 		env.Log.Warn("picks need a retry", "event", "tonight_picks_invalid", "violations", strings.Join(violations, "; "))
 		// The answer goes back as text alone: thinking blocks are bound to their conversation and may be left out.
 		req.Messages = append(req.Messages, llm.Message{Role: "assistant", Content: []llm.Block{llm.Text(r.Text())}},
 			userMessage("Fix these problems and answer again with all "+fmt.Sprint(opt.Picks)+" picks:\n- "+strings.Join(violations, "\n- ")))
-		prefix := r.Usage.CacheCreationInputTokens + r.Usage.CacheReadInputTokens
 		if total, err = a.CountTokens(ctx, req); err != nil {
 			env.Log.Warn("retry not sized; keeping the valid picks", "event", "tonight_retry_skipped", "err", err)
-		} else if b := bound(p, total, prefix, opt.MaxTokens, true); st.Spend[day]+b > opt.DailyCapUSD {
+		} else if b := bound(p, total, fixed, opt.MaxTokens); st.Spend[day]+b > opt.DailyCapUSD {
 			env.Log.Warn("no budget left for the retry; keeping the valid picks", "event", "tonight_retry_skipped",
 				"retry_bound_usd", fmt.Sprintf("%.5f", b), "spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]))
 		} else if r2, err := call(2, b); err != nil {
 			env.Log.Warn("retry failed; keeping the valid picks", "event", "tonight_retry_error", "err", err)
-		} else if picks2, v2 := validate(r2.Text(), unseen, opt.Picks); len(picks2) > len(picks) {
-			picks = picks2
+		} else if picks2, v2, g2 := validate(r2.Text(), unseen, opt.Picks); len(picks2) > len(picks) {
+			picks, glued = picks2, append(glued, g2...)
 			if len(v2) > 0 {
 				env.Log.Warn("dropped invalid picks after the retry", "event", "tonight_picks_dropped", "violations", strings.Join(v2, "; "))
 			}
 		}
 	}
+	for _, g := range glued {
+		env.Log.Warn("a reason carried a glued note; cut", "event", "tonight_reason_glued", "reason", g)
+	}
+	rep.Count("reasons_glued", len(glued))
 	st.Day, st.Picks = day, picks
 	for _, pk := range picks {
 		st.Recent[pk.TMDB] = day
 		env.Log.Info("picked", "event", "tonight_pick", "day", day, "item", fmt.Sprintf("%s (%d)", pk.Title, pk.Year),
-			"tmdb", pk.TMDB, "reason", pk.Reason)
+			"tmdb", pk.TMDB, "mood", pk.Mood, "liked", pk.Liked, "reason", pk.Reason)
 	}
 	for d := range st.Spend {
 		if d < daysBefore(day, 7) {

@@ -11,7 +11,6 @@ import (
 	"html"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -27,6 +26,7 @@ import (
 	"projectionist/internal/library"
 	"projectionist/internal/stage"
 	"projectionist/internal/store"
+	"projectionist/internal/tmdb"
 )
 
 // ---- Letterboxd: the export CSVs plus the public RSS, which carries TMDB ids ----
@@ -331,15 +331,10 @@ const tmdbSchema = `CREATE TABLE IF NOT EXISTS tonight_tmdb (
   fetched_at TEXT NOT NULL
 )`
 
-type tmdbClient struct {
-	Base      string // https://api.themoviedb.org/3
-	TokenFile string // a v4 read-access token (sent as a header) or a v3 key (sent as api_key)
-	HTTP      *http.Client
-}
-
-// fillFacts adds cached TMDB facts to every library film and fetches the missing ones (4 at a time; TMDB allows
-// ~50 requests/s). A film TMDB cannot answer now keeps its folder identity and is retried next run.
-func fillFacts(ctx context.Context, env *stage.Env, tc tmdbClient, lib map[int]film) (fetched, failed int, err error) {
+// fillFacts adds cached TMDB facts to every library film and fetches the missing ones through the process's shared
+// TMDB client (its token bucket keeps every stage together under TMDB's rate limit), 4 at a time. A film TMDB
+// cannot answer now keeps its folder identity and is retried next run; facts are kept for good once fetched.
+func fillFacts(ctx context.Context, env *stage.Env, lib map[int]film) (fetched, failed int, err error) {
 	db := env.Store.DB()
 	if _, err := db.ExecContext(ctx, tmdbSchema); err != nil {
 		return 0, 0, err
@@ -384,7 +379,7 @@ func fillFacts(ctx context.Context, env *stage.Env, tc tmdbClient, lib map[int]f
 		go func() {
 			defer wg.Done()
 			for id := range jobs {
-				facts, ferr := tc.movie(ctx, id)
+				facts, ferr := movieFacts(ctx, env.TMDB, id)
 				mu.Lock()
 				if ferr != nil {
 					failed++
@@ -420,77 +415,30 @@ feed:
 	return fetched, failed, ctx.Err()
 }
 
-func (tc tmdbClient) movie(ctx context.Context, id int) (film, error) {
-	raw, err := os.ReadFile(tc.TokenFile)
-	if err != nil {
-		return film{}, fmt.Errorf("tmdb key: %w", err)
+// movieFacts is one film's facts: its details and its directors. A film TMDB no longer knows is Missing.
+func movieFacts(ctx context.Context, tc *tmdb.Client, id int) (film, error) {
+	d, err := tc.Details(ctx, tmdb.Movie, id)
+	if errors.Is(err, tmdb.ErrNotFound) {
+		return film{TMDB: id, Missing: true}, nil
 	}
-	key := strings.TrimSpace(string(raw))
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("%s/movie/%d?append_to_response=credits", tc.Base, id), nil)
 	if err != nil {
 		return film{}, err
 	}
-	if strings.Count(key, ".") == 2 { // a v4 read-access token is a JWT
-		req.Header.Set("Authorization", "Bearer "+key)
-	} else {
-		req.URL.RawQuery += "&api_key=" + key
-	}
-	resp, err := tc.HTTP.Do(req)
+	dirs, err := tc.Directors(ctx, id)
 	if err != nil {
-		var ue *url.Error // it quotes the URL, which may hold a v3 key
-		if errors.As(err, &ue) {
-			err = ue.Err
-		}
-		return film{}, fmt.Errorf("tmdb movie %d: %w", id, err)
+		return film{}, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return film{TMDB: id, Missing: true}, nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		return film{}, fmt.Errorf("tmdb movie %d: HTTP %d", id, resp.StatusCode)
-	}
-	var m struct {
-		Title         string  `json:"title"`
-		OriginalTitle string  `json:"original_title"`
-		Runtime       int     `json:"runtime"`
-		Language      string  `json:"original_language"`
-		Overview      string  `json:"overview"`
-		PosterPath    string  `json:"poster_path"`
-		Vote          float64 `json:"vote_average"`
-		Votes         int     `json:"vote_count"`
-		Genres        []struct {
-			Name string `json:"name"`
-		} `json:"genres"`
-		Countries []struct {
-			ISO string `json:"iso_3166_1"`
-		} `json:"production_countries"`
-		Credits struct {
-			Crew []struct {
-				Job  string `json:"job"`
-				Name string `json:"name"`
-			} `json:"crew"`
-		} `json:"credits"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&m); err != nil {
-		return film{}, fmt.Errorf("tmdb movie %d: %w", id, err)
-	}
-	f := film{TMDB: id, TMDBTitle: m.Title, OriginalTitle: m.OriginalTitle, Runtime: m.Runtime, Language: m.Language,
-		Overview: firstSentence(m.Overview, 140), PosterPath: m.PosterPath, Vote: m.Vote, Votes: m.Votes}
-	if m.OriginalTitle == m.Title {
+	f := film{TMDB: id, TMDBTitle: d.Title, OriginalTitle: d.OriginalTitle, Directors: dirs, Runtime: d.Runtime,
+		Language: d.Language, Overview: firstSentence(d.Overview, 140), PosterPath: d.PosterPath, Vote: d.VoteAverage,
+		Votes: d.VoteCount}
+	if d.OriginalTitle == d.Title {
 		f.OriginalTitle = ""
 	}
-	for _, g := range m.Genres {
+	for _, g := range d.Genres {
 		f.Genres = append(f.Genres, g.Name)
 	}
-	for _, c := range m.Countries {
+	for _, c := range d.Countries {
 		f.Countries = append(f.Countries, c.ISO)
-	}
-	for _, c := range m.Credits.Crew {
-		if c.Job == "Director" {
-			f.Directors = append(f.Directors, c.Name)
-		}
 	}
 	return f, nil
 }

@@ -35,6 +35,16 @@ cache_ttl       = "24h"
 api_key_file = "/run/secrets/fanart_api_key"
 cache_ttl    = "24h"
 
+# Which Claude model the AI stages call, by date: the first rule whose `until` (RFC 3339, exclusive) is still ahead
+# wins; no `until` = for good. "family:latest" resolves daily via GET /v1/models to that family's newest model. No
+# rules = this, the owner's policy: the newest Sonnet until 2026-11-05 00:00 PST, then the newest Haiku.
+[[llm.policy]]
+model = "sonnet:latest"
+until = 2026-11-05T08:00:00Z
+
+[[llm.policy]]
+model = "haiku:latest"
+
 # One table per stage. Common keys: enabled (default true when the table exists), every, window ("HH:MM-HH:MM",
 # in timezone, may wrap midnight). Everything else in the table belongs to the stage.
 # [stages.example]
@@ -83,17 +93,18 @@ status_file     = "/volume1/PlexMediaServer/ssd-copy/PROGRESS.txt"
 # Five unseen films for tonight, picked once a day by one Claude call over his Letterboxd ratings and reviews; a
 # Plex Movies collection "Tonight" promoted to his Home under Continue Watching, and the same BoxSet in Jellyfin.
 # Reconciles every 30 min: a pick he has since watched leaves the row at once.
+# daily_cap_usd is a hard cap: the call and its one retry are sized together before the first is sent, each at its
+# worst (the cached prompt prefix billed as a cache write, as a retry that misses the 5-minute cache pays it again;
+# 2% slack on token counts; all of max_tokens as output), and the candidate list is cut until the pair fits.
 [stages.tonight]
-every           = "30m"
-model           = "sonnet:latest" # newest Sonnet, resolved daily via GET /v1/models; or an exact model id
-effort          = "medium"
-max_tokens      = 1000            # the gate run's answer used 422; the cap reserves all of it, twice
-daily_cap_usd   = 0.15            # hard cap: a call is sent only if it and its one retry, at their worst, fit
-pick_after      = "05:00"         # in timezone: a new day's picks after this
+every           = "30m"                          # the model is [[llm.policy]]'s
+effort          = "medium"                       # sent only to a model that takes it (Haiku 4.5 does not)
+max_tokens      = 1000                           # thinking + the JSON; a cut-off answer is retried at effort "low"
+daily_cap_usd   = 0.15                           # hard: see the comment above the table
+pick_after      = "05:00"                        # in timezone: a new day's picks after this
 picks           = 5
-max_candidates  = 400             # unseen films shown to the model, best-ranked first; fewer if the cap needs it
+max_candidates  = 400                            # unseen films shown, best-ranked first; fewer when the cap needs it
 api_key_file    = "/run/secrets/anthropic_api_key"
-tmdb_token_file = "/run/secrets/tmdb_read_token"
 letterboxd_dir  = "/volume1/docker/projectionist/data/letterboxd" # the export CSVs, or the newest export folder in it
 letterboxd_rss  = "https://letterboxd.com/saahilsan/rss/"
 movies_dir      = "/volume1/media/Movies"

@@ -132,6 +132,7 @@ type Details struct {
 	OriginalTitle string      `json:"original_title"`
 	Date          Date        `json:"release_date"`
 	Overview      string      `json:"overview"`
+	Language      string      `json:"original_language"` // ISO 639-1
 	Genres        []Genre     `json:"genres"`
 	PosterPath    string      `json:"poster_path"`
 	BackdropPath  string      `json:"backdrop_path"`
@@ -140,6 +141,13 @@ type Details struct {
 	Collection    *Collection `json:"belongs_to_collection"` // films only; nil when the film is in none
 	ExternalIDs   ExternalIDs `json:"external_ids"`
 	Seasons       []Season    `json:"seasons"` // shows only; season 0 holds the specials
+	Countries     []Country   `json:"production_countries"`
+	VoteAverage   float64     `json:"vote_average"`
+	VoteCount     int         `json:"vote_count"`
+}
+
+type Country struct {
+	ISO string `json:"iso_3166_1"` // "US"
 }
 
 type Genre struct {
@@ -248,6 +256,26 @@ func (c *Client) Details(ctx context.Context, kind Kind, id int) (Details, error
 		raw.fromShow(&d.Title, &d.OriginalTitle, &d.Date)
 	}
 	return d, nil
+}
+
+// Directors names a film's directors, from its credits.
+func (c *Client) Directors(ctx context.Context, id int) ([]string, error) {
+	var credits struct {
+		Crew []struct {
+			Job  string `json:"job"`
+			Name string `json:"name"`
+		} `json:"crew"`
+	}
+	if err := c.get(ctx, fmt.Sprintf("/movie/%d/credits", id), url.Values{}, &credits); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, p := range credits.Crew {
+		if p.Job == "Director" {
+			out = append(out, p.Name)
+		}
+	}
+	return out, nil
 }
 
 // Episodes lists one season of a show; season 0 is the specials.
