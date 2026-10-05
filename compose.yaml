@@ -38,6 +38,11 @@ services:
       - /volume1/PlexMediaServer/remote4k:/volume1/PlexMediaServer/remote4k # STATUS.txt the owner reads
       # The subtitle aligner's log: rename names the aligned copy the primary track. Read-only.
       - /volume1/PlexMediaServer/subtitle-downloads:/volume1/PlexMediaServer/subtitle-downloads:ro
+      # ssdmirror: the USB SSD, and fill.py's folder whose PROGRESS.txt it takes over. DSM's mounts are private (no
+      # propagation): stop the container before ejecting the SSD and start it after plugging it back in. Started
+      # without the SSD, Docker makes an empty folder at that path and the stage refuses ("SSD not mounted").
+      - /volumeUSB1/usbshare1-2:/volumeUSB1/usbshare1-2
+      - /volume1/PlexMediaServer/ssd-copy:/volume1/PlexMediaServer/ssd-copy
     secrets: [jellyfin_key, tmdb_read_token, tmdb_api_key, fanart_api_key] # /run/secrets/<name>, read-only
     logging:
       driver: json-file

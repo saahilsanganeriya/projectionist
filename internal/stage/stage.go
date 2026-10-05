@@ -40,6 +40,9 @@ type Env struct {
 	Loc      *time.Location   // config timezone: only for text the owner reads (status files)
 	// Options decodes this stage's own keys from its [stages.<name>] table into v (call it at the top of Run).
 	Options func(v any) error
+	// Trigger asks the scheduler to run the named stage soon (inside its window); repeated triggers coalesce into
+	// one run. False when that stage is not scheduled (disabled, or a one-off `projectionist run`).
+	Trigger func(stage string) bool
 }
 
 // Report is filled in by Run. Alerts survive a returned error, so a stage can raise alerts and then fail.
