@@ -46,7 +46,7 @@ func NewEnv(t testing.TB, prefs map[string]string) *Harness {
 	log := obs.NewLogger(io.Discard, "text", "error")
 	h.Plex, h.Jellyfin, h.PrefsPath = px, jf, prefsPath
 	h.Env = &stage.Env{
-		Log: log, Store: st, Plex: pc, Jellyfin: jc, Probe: prober, FFmpeg: ff, Loc: time.UTC,
+		Log: log, Store: st, Plex: pc, Jellyfin: jc, Probe: prober, FFmpeg: ff, Loc: time.UTC, Metrics: obs.NewMetrics(),
 		Viewers: &viewers.Gate{Plex: pc, Jellyfin: jc, Owners: map[string]bool{"saahilsanganeriya": true, "saahil": true},
 			Poll: 5 * time.Millisecond, Log: log},
 		Now:     func() time.Time { return h.Now },
