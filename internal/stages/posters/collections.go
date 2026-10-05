@@ -38,7 +38,7 @@ const collectionPrefix = "collection:"
 // collectionKey names a collection the way the collections stage compares names: case-insensitive, without the
 // U+200E marks some Plex titles carry.
 func collectionKey(name string) string {
-	return collectionPrefix + strings.ToLower(strings.TrimSpace(strings.ReplaceAll(name, "‎", "")))
+	return collectionPrefix + strings.ToLower(strings.TrimSpace(strings.ReplaceAll(name, "\u200e", "")))
 }
 
 func (k kind) collection() bool { return k == franchise || k == director }

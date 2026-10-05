@@ -153,9 +153,10 @@ func TestCollectionPosters(t *testing.T) {
 	if !locked("601") || len(w.h.Jellyfin.Calls("POST", "/Items/jb1/Images/Primary")) != 1 || len(w.h.Plex.Calls("POST", "/library/metadata/603/posters")) != 1 {
 		t.Fatal("Scary Movie must be locked in Plex (type 18) and uploaded to Jellyfin's BoxSet jb1; Evil Dead uploaded to Plex 603")
 	}
-	if n := len(w.h.Plex.Calls("POST", "/library/metadata/500/posters")) + len(w.h.Jellyfin.Calls("POST", "/Items/jb0/Images/Primary")); n != 0 ||
-		w.pool("collection:alien") != nil || w.verdict(t, "collection:alien").Rule != "" {
-		t.Fatalf("the owner's collection Alien got %d uploads or a pool; his posters are never touched", n)
+	var alien int
+	w.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM posters_items WHERE key='collection:alien'`).Scan(&alien)
+	if n := len(w.h.Plex.Calls("POST", "/library/metadata/500/posters")) + len(w.h.Jellyfin.Calls("POST", "/Items/jb0/Images/Primary")); n != 0 || alien != 0 {
+		t.Fatalf("the owner's collection Alien: %d uploads, %d rows; his posters are never touched", n, alien)
 	}
 
 	// An arrival opens the director collection Paul Greengrass; Jellyfin already lists it, Plex only from tomorrow.
