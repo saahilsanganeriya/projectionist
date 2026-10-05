@@ -463,3 +463,39 @@ func TestLostScrobbleAnswerNeverRepeats(t *testing.T) {
 		t.Errorf("views after the next run = %d, %d; want exactly 3 and 2", w.apps.plex["10"].views, w.apps.plex["20"].views)
 	}
 }
+
+// Catches, against a fake plex.tv on the fake Plex: the mirror adding a film that is already there or a watched
+// one, removing anything the owner put on his watchlist himself (a show here), a lookup repeated for a film
+// already matched, and a second run writing again.
+func TestPlexWatchlistMirror(t *testing.T) {
+	w := newWorld(t)
+	var list []string // plex.tv metadata ids on the watchlist
+	list = append(list, "show1")
+	px := w.h.Plex
+	px.HandleFunc("GET", "/library/sections/watchlist/all", func(rw http.ResponseWriter, r *http.Request) {
+		md := []map[string]any{}
+		for _, k := range list {
+			md = append(md, map[string]any{"ratingKey": k, "type": "show", "Guid": []map[string]string{{"id": "tmdb://" + strings.TrimPrefix(k, "m")}}})
+		}
+		json.NewEncoder(rw).Encode(map[string]any{"MediaContainer": map[string]any{"totalSize": len(md), "Metadata": md}})
+	})
+	px.HandleFunc("GET", "/library/metadata/matches", func(rw http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Query().Get("guid"), "tmdb://")
+		json.NewEncoder(rw).Encode(map[string]any{"MediaContainer": map[string]any{"Metadata": []map[string]any{{"ratingKey": "m" + id}}}})
+	})
+	px.HandleFunc("PUT", "/actions/addToWatchlist", func(rw http.ResponseWriter, r *http.Request) {
+		list = append(list, r.URL.Query().Get("ratingKey"))
+	})
+	opts := fmt.Sprintf("plex_watchlist = true\ndiscover_url = %q\n", px.URL)
+	rep := w.run(t, opts)
+	sort.Strings(list)
+	if want := []string{"m18", "m565", "show1"}; strings.Join(list, ",") != strings.Join(want, ",") || rep.Counts["plextv.watchlist_added"] != 2 {
+		t.Fatalf("plex.tv watchlist = %v (counts %v)", list, rep.Counts)
+	}
+	w.h.Now = w.h.Now.Add(25 * time.Hour) // re-read: the two adds are now listed members, the show still the owner's
+	again := w.run(t, opts)
+	if n := len(px.Calls("PUT", "/actions/addToWatchlist")); n != 2 || len(px.Calls("PUT", "/actions/removeFromWatchlist")) != 0 ||
+		len(px.Calls("GET", "/library/metadata/matches")) != 2 {
+		t.Errorf("second run: %d adds total, counts %v", n, again.Counts)
+	}
+}
