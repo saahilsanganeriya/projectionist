@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -125,6 +126,18 @@ func plexJSON(w http.ResponseWriter, meta []any) {
 	writeJSON(w, map[string]any{"MediaContainer": map[string]any{"Metadata": meta}})
 }
 
+// page answers one page of a listing the way both apps do. An unpaged listing of the real library takes about a
+// minute, past the client timeout, so here it fails at once.
+func page(w http.ResponseWriter, all []any, start, size string) ([]any, bool) {
+	from, _ := strconv.Atoi(start)
+	n, err := strconv.Atoi(size)
+	if err != nil {
+		w.WriteHeader(http.StatusGatewayTimeout)
+		return nil, false
+	}
+	return all[min(from, len(all)):min(from+n, len(all))], true
+}
+
 func moviePath(id int) string {
 	return fmt.Sprintf("/m/Film %d (2000) {tmdb-%d}/Film %d (2000) {tmdb-%d}.mkv", id, id, id, id)
 }
@@ -135,7 +148,11 @@ func servePlex(h *fake.Harness, a *app, ids ...int) {
 	for _, id := range ids {
 		items = append(items, map[string]any{"ratingKey": fmt.Sprint(100 + id), "Media": []any{map[string]any{"Part": []any{map[string]any{"file": moviePath(id)}}}}})
 	}
-	h.Plex.HandleFunc("GET", "/library/sections/4/all", func(w http.ResponseWriter, _ *http.Request) { plexJSON(w, items) })
+	h.Plex.HandleFunc("GET", "/library/sections/4/all", func(w http.ResponseWriter, r *http.Request) {
+		if p, ok := page(w, items, r.URL.Query().Get("X-Plex-Container-Start"), r.URL.Query().Get("X-Plex-Container-Size")); ok {
+			plexJSON(w, p)
+		}
+	})
 	members := func(r *http.Request) []string {
 		_, list, _ := strings.Cut(r.URL.Query().Get("uri"), "/library/metadata/")
 		return strings.Split(list, ",")
@@ -216,6 +233,10 @@ func serveJellyfin(h *fake.Harness, a *app, posters map[string]string, ids ...in
 			for _, id := range ids {
 				out = append(out, map[string]string{"Id": fmt.Sprint("jf", id), "Path": moviePath(id)})
 			}
+			var ok bool
+			if out, ok = page(w, out, q.Get("StartIndex"), q.Get("Limit")); !ok {
+				return
+			}
 		case q.Get("IncludeItemTypes") == "BoxSet":
 			for _, c := range a.colls {
 				box := map[string]any{"Id": c.ID, "Name": c.Title, "SortName": c.Sort}
@@ -273,8 +294,11 @@ func runOnce(t *testing.T, h *fake.Harness) *stage.Report {
 // Catches: re-adding members an app already holds, removing the owner's extra member, rewriting a sort title that is
 // already right, a partial Jellyfin update that blanks the item's other fields, a poster not sent as base64 JPEG, a
 // second run that writes anything or re-reads unchanged member lists (Jellyfin read without a userId: every
-// collection looks empty, so every run re-adds every member), and a changed collection whose list is not re-read.
+// collection looks empty, so every run re-adds every member), a changed collection whose list is not re-read, and
+// an item list read as one page, which times out on the real library.
 func TestRunMakesBothAppsMatchThenStops(t *testing.T) {
+	defer func(size int) { pageSize = size }(pageSize)
+	pageSize = 3 // four films: the item lists come in two pages
 	h := fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "mid"})
 	px := &app{colls: []*coll{{ID: "900", Title: "\u200eChristopher Nolan", Sort: "zzChristopher Nolan", Members: []string{"101", "177"}}}}
 	jf := &app{}

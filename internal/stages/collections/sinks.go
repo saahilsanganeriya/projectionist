@@ -50,6 +50,11 @@ const (
 	alertAfter   = 24 * time.Hour
 )
 
+// pageSize is how many films one item-list request asks for. The whole Movies section in one answer (2,200 films,
+// 5 MB from Plex) took both apps about a minute on the loaded NAS, past their 20 s client timeout; a 200-film page
+// took 3-13 s. A var so tests can page through a small library.
+var pageSize = 200
+
 func (r *run) sinks() ([]sink, error) {
 	var out []sink
 	for _, n := range r.opt.Sinks {
@@ -355,28 +360,33 @@ type plexSink struct {
 func (*plexSink) Name() string { return "plex" }
 
 func (p *plexSink) Address(ctx context.Context) (map[int]string, error) {
-	var mc struct {
-		Metadata []struct {
-			RatingKey string `json:"ratingKey"`
-			Media     []struct {
-				Part []struct {
-					File string `json:"file"`
-				} `json:"Part"`
-			} `json:"Media"`
-		} `json:"Metadata"`
-	}
-	if err := p.c.GetJSON(ctx, fmt.Sprintf("/library/sections/%d/all?type=1", p.section), &mc); err != nil {
-		return nil, err
-	}
 	out := map[int]string{}
-	for _, it := range mc.Metadata {
-		for _, m := range it.Media {
-			for _, part := range m.Part {
-				addressFile(out, part.File, it.RatingKey)
+	for start := 0; ; start += pageSize {
+		var mc struct {
+			Metadata []struct {
+				RatingKey string `json:"ratingKey"`
+				Media     []struct {
+					Part []struct {
+						File string `json:"file"`
+					} `json:"Part"`
+				} `json:"Media"`
+			} `json:"Metadata"`
+		}
+		path := fmt.Sprintf("/library/sections/%d/all?type=1&X-Plex-Container-Start=%d&X-Plex-Container-Size=%d", p.section, start, pageSize)
+		if err := p.c.GetJSON(ctx, path, &mc); err != nil {
+			return nil, err
+		}
+		for _, it := range mc.Metadata {
+			for _, m := range it.Media {
+				for _, part := range m.Part {
+					addressFile(out, part.File, it.RatingKey)
+				}
 			}
 		}
+		if len(mc.Metadata) < pageSize {
+			return out, nil
+		}
 	}
-	return out, nil
 }
 
 // addressFile maps the TMDB id in a file's folder name to an app item; the first item for an id wins.
@@ -482,15 +492,19 @@ type jfItems struct {
 }
 
 func (j *jellyfinSink) Address(ctx context.Context) (map[int]string, error) {
-	var res jfItems
-	if err := j.c.GetJSON(ctx, "/Items?IncludeItemTypes=Movie&Recursive=true&Fields=Path", &res); err != nil {
-		return nil, err
-	}
 	out := map[int]string{}
-	for _, it := range res.Items {
-		addressFile(out, it.Path, it.ID)
+	for start := 0; ; start += pageSize {
+		var res jfItems
+		if err := j.c.GetJSON(ctx, fmt.Sprintf("/Items?IncludeItemTypes=Movie&Recursive=true&Fields=Path&StartIndex=%d&Limit=%d", start, pageSize), &res); err != nil {
+			return nil, err
+		}
+		for _, it := range res.Items {
+			addressFile(out, it.Path, it.ID)
+		}
+		if len(res.Items) < pageSize {
+			return out, nil
+		}
 	}
-	return out, nil
 }
 
 // Collections and Members ask as an administrator: Jellyfin 12.1 leaves ChildCount out of a BoxSet, and lists none
