@@ -284,8 +284,11 @@ func (s Stage) bringBack(ctx context.Context, env *stage.Env, dk *docker, c stri
 		case f == passed:
 			return nil
 		case !env.Now().Before(deadline):
-			return fmt.Errorf("%s did not answer within %s of the start (%s); container %s; last start: %v",
-				ready.name, readyTimeout, detail, state, startErr)
+			msg := fmt.Sprintf("%s did not answer within %s of the start (%s); container %s", ready.name, readyTimeout, detail, state)
+			if startErr != nil {
+				msg += "; last start: " + startErr.Error()
+			}
+			return errors.New(msg)
 		}
 		if err := s.sleep(ctx, readyPoll); err != nil {
 			return fmt.Errorf("shut down before %s answered again: %w", ready.name, err)
