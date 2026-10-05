@@ -122,6 +122,46 @@ func TestRunOnceOutcomes(t *testing.T) {
 	}
 }
 
+// Catches: a restart reading the run it stopped in (never finished, or recorded interrupted) as the stage's outcome,
+// which either hid an error the run before it ended in or, recorded as an error, held /health at 503 for a shutdown.
+func TestRestartKeepsLastFinishedOutcome(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		runs []string // outcomes oldest first; "" = never finished
+		want string
+	}{
+		{"ok, then stopped mid-run", []string{"ok", ""}, "ok"},
+		{"error, then interrupted", []string{"error", "interrupted"}, "error"},
+		{"only interrupted", []string{"interrupted"}, ""},
+	} {
+		synctest.Test(t, func(t *testing.T) {
+			st, err := store.Open(filepath.Join(t.TempDir(), "s.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			for _, o := range c.runs {
+				id, _ := st.StartRun(context.Background(), "fake", time.Now().Add(-time.Hour))
+				if o != "" {
+					st.FinishRun(context.Background(), id, time.Now().Add(-time.Hour), o, "")
+				}
+			}
+			s := &Scheduler{Loc: time.UTC, Runner: &Runner{Store: st, Log: obs.NewLogger(io.Discard, "text", "error"), Metrics: obs.NewMetrics(),
+				Now: func() time.Time { return time.Now().UTC() }, NewEnv: func(stage.Stage, *slog.Logger) *stage.Env { return &stage.Env{} }},
+				Jobs: []Job{{Stage: fakeStage{run: func(context.Context, *stage.Env, *stage.Report) error { return nil }}, Every: 24 * time.Hour}}}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { s.Run(ctx); close(done) }()
+			synctest.Wait()
+			if got := s.Runner.Snapshot()["fake"].Outcome; got != c.want {
+				t.Errorf("%s: /health shows outcome %q after a restart, want %q", c.name, got, c.want)
+			}
+			cancel()
+			<-done
+		})
+	}
+}
+
 // Catches: triggers during a run piling up into several reruns (or being lost), an idle trigger waiting for the
 // cadence instead of running now, and a trigger running a windowed stage outside its window.
 func TestTrigger(t *testing.T) {
@@ -198,44 +238,4 @@ func TestTrigger(t *testing.T) {
 		cancel()
 		<-done
 	})
-}
-
-// Catches: a restart reading the run it stopped in (never finished, or recorded interrupted) as the stage's outcome,
-// which either hid an error the run before it ended in or, recorded as an error, held /health at 503 for a shutdown.
-func TestRestartKeepsLastFinishedOutcome(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		runs []string // outcomes oldest first; "" = never finished
-		want string
-	}{
-		{"ok, then stopped mid-run", []string{"ok", ""}, "ok"},
-		{"error, then interrupted", []string{"error", "interrupted"}, "error"},
-		{"only interrupted", []string{"interrupted"}, ""},
-	} {
-		synctest.Test(t, func(t *testing.T) {
-			st, err := store.Open(filepath.Join(t.TempDir(), "s.db"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer st.Close()
-			for _, o := range c.runs {
-				id, _ := st.StartRun(context.Background(), "fake", time.Now().Add(-time.Hour))
-				if o != "" {
-					st.FinishRun(context.Background(), id, time.Now().Add(-time.Hour), o, "")
-				}
-			}
-			s := &Scheduler{Loc: time.UTC, Runner: &Runner{Store: st, Log: obs.NewLogger(io.Discard, "text", "error"), Metrics: obs.NewMetrics(),
-				Now: func() time.Time { return time.Now().UTC() }, NewEnv: func(stage.Stage, *slog.Logger) *stage.Env { return &stage.Env{} }},
-				Jobs: []Job{{Stage: fakeStage{run: func(context.Context, *stage.Env, *stage.Report) error { return nil }}, Every: 24 * time.Hour}}}
-			ctx, cancel := context.WithCancel(context.Background())
-			done := make(chan struct{})
-			go func() { s.Run(ctx); close(done) }()
-			synctest.Wait()
-			if got := s.Runner.Snapshot()["fake"].Outcome; got != c.want {
-				t.Errorf("%s: /health shows outcome %q after a restart, want %q", c.name, got, c.want)
-			}
-			cancel()
-			<-done
-		})
-	}
 }
