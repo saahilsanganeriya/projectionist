@@ -20,7 +20,8 @@ import (
 // errOverBudget refuses a call when it and its one retry, at their worst, would take the day's spend past the cap.
 var errOverBudget = errors.New("tonight: the call would exceed the daily AI budget")
 
-// retryExtra bounds the violations message a retry appends, in tokens.
+// retryExtra is what sizing allows for the violations a retry appends, in tokens. A longer list (many invalid picks
+// with long titles) is caught by the cap check made on the counted retry before it is sent.
 const retryExtra = 300
 
 // bound is the most a request can cost once sent. Its one cache breakpoint ends the system prompt, so up to prefix

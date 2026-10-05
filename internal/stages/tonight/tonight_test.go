@@ -99,6 +99,31 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+// Catches a taste block that grows with his diary until the sizing finds no room for even 4 x picks candidates and
+// the day gets no call (round-3 review), and a bound that sheds what the reasons rely on: his 4★+ films go last, his
+// oldest review first. 250 bytes holds the headings (146 counted), both 4★+ ratings (22 each) and the newest review
+// (46), but not the old review (43) as well.
+func TestTasteTextKeepsTheBestWithinItsBudget(t *testing.T) {
+	films := []rated{
+		{Name: "Old Favourite", Year: 1990, Rating: 5, Last: "2022-01-01"},
+		{Name: "New Favourite", Year: 2020, Rating: 4, Last: "2026-01-01", Review: "new review text"},
+		{Name: "Old Review", Year: 2000, Rating: 3, Last: "2022-06-01", Review: "old review text"},
+		{Name: "Meh", Year: 2010, Rating: 2, Last: "2025-01-01"},
+	}
+	got := tasteText(films, 400, 250)
+	for _, want := range []string{"5★: Old Favourite (1990)", "4★: New Favourite (2020)", "new review text"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("lost %q", want)
+		}
+	}
+	if len(got) > 250 {
+		t.Errorf("%d bytes, past the 250 budget", len(got))
+	}
+	if strings.Contains(got, "old review text") || strings.Contains(got, "Meh") {
+		t.Errorf("kept what should go first:\n%s", got)
+	}
+}
+
 // ---- the stage against fake Plex, Jellyfin, Anthropic, TMDB and Letterboxd ----
 
 type libFilm struct {
@@ -232,6 +257,14 @@ func (w *world) run(t *testing.T) *stage.Report {
 	return rep
 }
 
+func tmdbIDs(picks []pick) []int {
+	ids := make([]int, len(picks))
+	for i, p := range picks {
+		ids[i] = p.TMDB
+	}
+	return ids
+}
+
 func (w *world) state(t *testing.T) state {
 	t.Helper()
 	var st state
@@ -255,9 +288,11 @@ const (
 var candidateLine = regexp.MustCompile(`(?m)^\d+ \| `)
 
 type aiFake struct {
-	srv       *httptest.Server
-	mu        sync.Mutex
-	answers   []string         // the picks JSON each /v1/messages call returns, in order; "CUT:" = cut off at max_tokens
+	srv *httptest.Server
+	mu  sync.Mutex
+	// answers is the picks JSON each /v1/messages call returns, in order. "CUT:" = cut off at max_tokens (with nothing
+	// after it, thinking took them all and there is no text block); "MAX:" = a whole answer billed all of max_tokens.
+	answers   []string
 	requests  []map[string]any // /v1/messages bodies
 	keys      []string
 	drop      bool // /v1/messages hangs up after reading the request, as a lost answer does
@@ -268,20 +303,36 @@ type aiBody struct {
 	MaxTokens *int `json:"max_tokens"`
 	Messages  []struct {
 		Content []struct {
-			Text string `json:"text"`
+			Type string  `json:"type"`
+			Text *string `json:"text"`
 		} `json:"content"`
 	} `json:"messages"`
 }
 
-// tokens counts a request as the real API sized the gate's: prefix, tail, candidate lines, then later turns.
+// refusal is the real API's answer to a text block without text, as count_tokens gave it on 2026-10-05; "" = valid.
+func (b aiBody) refusal() string {
+	for i, m := range b.Messages {
+		for j, c := range m.Content {
+			switch {
+			case c.Type == "text" && c.Text == nil:
+				return fmt.Sprintf("messages.%d.content.%d.text.text: Field required", i, j)
+			case c.Type == "text" && strings.TrimSpace(*c.Text) == "":
+				return "messages: text content blocks must be non-empty"
+			}
+		}
+	}
+	return ""
+}
+
+// tokens counts a request as the real API sized the gate's: prefix, tail, candidate lines, then any other text.
 func (b aiBody) tokens() int {
 	n := cachedPrefix + fixedTail
-	for i, m := range b.Messages {
+	for _, m := range b.Messages {
 		for _, c := range m.Content {
-			if i == 0 {
-				n += lineTokens * len(candidateLine.FindAllString(c.Text, -1))
+			if lines := len(candidateLine.FindAllString(*c.Text, -1)); lines > 0 {
+				n += lineTokens * lines
 			} else {
-				n += len(c.Text) / 4
+				n += len(*c.Text) / 4
 			}
 		}
 	}
@@ -298,6 +349,11 @@ func newAIFake(t *testing.T) *aiFake {
 		var b aiBody
 		json.Unmarshal(raw, &b)
 		rw.Header().Set("Content-Type", "application/json")
+		if msg := b.refusal(); msg != "" && strings.HasPrefix(r.URL.Path, "/v1/messages") {
+			rw.WriteHeader(400)
+			fmt.Fprintf(rw, `{"type":"error","error":{"type":"invalid_request_error","message":%q}}`, msg)
+			return
+		}
 		switch r.URL.Path {
 		case "/v1/models":
 			io.WriteString(rw, `{"data":[
@@ -330,15 +386,25 @@ func newAIFake(t *testing.T) *aiFake {
 			if cut, ok := strings.CutPrefix(answer, "CUT:"); ok {
 				answer, stop, out = cut, "max_tokens", *b.MaxTokens
 			}
-			text, _ := json.Marshal(answer)
-			cache := "cache_creation_input_tokens" // the first turn writes the taste block, a retry reads it
-			if len(b.Messages) > 1 && !a.missRetry {
+			if whole, ok := strings.CutPrefix(answer, "MAX:"); ok {
+				answer, out = whole, *b.MaxTokens
+			}
+			content := `{"type":"thinking","thinking":"","signature":"c2ln"}`
+			if answer != "" {
+				text, _ := json.Marshal(answer)
+				content += fmt.Sprintf(`,{"type":"text","text":%s}`, text)
+			}
+			blocks := 0 // a first call sends one text block; a retry adds the problems, with or without the answer
+			for _, m := range b.Messages {
+				blocks += len(m.Content)
+			}
+			cache := "cache_creation_input_tokens" // the first call writes the taste block, a retry reads it
+			if blocks > 1 && !a.missRetry {
 				cache = "cache_read_input_tokens"
 			}
 			fmt.Fprintf(rw, `{"id":"msg_%d","type":"message","role":"assistant","model":"claude-sonnet-5-5",
-				"content":[{"type":"thinking","thinking":"","signature":"c2ln"},{"type":"text","text":%s}],
-				"stop_reason":%q,"usage":{"input_tokens":%d,%q:%d,"output_tokens":%d}}`,
-				len(a.requests), text, stop, b.tokens()-cachedPrefix, cache, cachedPrefix, out)
+				"content":[%s],"stop_reason":%q,"usage":{"input_tokens":%d,%q:%d,"output_tokens":%d}}`,
+				len(a.requests), content, stop, b.tokens()-cachedPrefix, cache, cachedPrefix, out)
 		default:
 			http.NotFound(rw, r)
 		}
@@ -659,7 +725,7 @@ func (j *jfFake) members() []string {
 // Catches, across four runs at the gate's real token sizes: a watched film offered (export, feed, Plex, Jellyfin);
 // a pick outside the unseen set kept instead of retried; the taste block sent uncached or to an unresolved alias; a
 // second AI call on the same day; a watched pick left in the
-// row, or on its poster; yesterday's picks repeated or kept; the row shown on a friend's Home or the Recommended tab, or left
+// row, or a poster uploaded for its removal; yesterday's picks repeated or kept; the row shown on a friend's Home or the Recommended tab, or left
 // there by an earlier build; his own "Tonight" collection or BoxSet adopted and edited; the key reaching a log.
 func TestRunAcrossDays(t *testing.T) {
 	w := newWorld(t, "", 0)
@@ -767,8 +833,9 @@ func TestRunAcrossDays(t *testing.T) {
 	if got := w.jf.members(); !slices.Equal(got, []string{jfID(389), jfID(655)}) || w.ai.calls() != 2 {
 		t.Fatalf("run 3: jellyfin %v, AI calls %d", got, w.ai.calls())
 	}
-	if len(w.plex.posters) != 2 || w.jf.images != 2 {
-		t.Fatalf("run 3: posters plex %d, jellyfin %d: the poster still shows the watched pick", len(w.plex.posters), w.jf.images)
+	if len(w.plex.posters) != 1 || w.jf.images != 1 {
+		t.Fatalf("run 3: posters plex %d, jellyfin %d: a watched pick's removal uploaded another (Plex keeps every one)",
+			len(w.plex.posters), w.jf.images)
 	}
 
 	// Next morning: new picks replace yesterday's, and none of yesterday's is offered again.
@@ -782,7 +849,7 @@ func TestRunAcrossDays(t *testing.T) {
 	if strings.Contains(string(again), `\n389 | 12 Angry Men`) || !strings.Contains(string(again), `\n843 | In the Mood for Love`) {
 		t.Fatalf("run 4 candidates repeat yesterday's picks: %s", again)
 	}
-	if got := w.plex.members(); !slices.Equal(got, []string{rk(949), rk(1398), rk(18148)}) || len(w.plex.posters) != 3 {
+	if got := w.plex.members(); !slices.Equal(got, []string{rk(949), rk(1398), rk(18148)}) || len(w.plex.posters) != 2 {
 		t.Fatalf("run 4: plex %v, posters %d", got, len(w.plex.posters))
 	}
 	for _, k := range w.ai.keys {
@@ -930,17 +997,51 @@ func TestModelFollowsDatedPolicy(t *testing.T) {
 }
 
 // Catches an answer cut off at max_tokens (thinking shares them with the JSON) costing the day its picks: the retry
-// must say why and think less, or it is cut off the same way.
+// must say why and think less, or it is cut off the same way. Row 2 is the round-3 review's: thinking took every
+// token, so there is no text to send back, and a retry carrying an empty text block is refused (by count_tokens first),
+// leaving the day with no picks.
 func TestCutOffAnswerRetriesAtLowEffort(t *testing.T) {
-	w := newWorld(t, "", 0)
-	w.ai.script(`CUT:{"picks":[{"id":389,"title":"12 Angry Men","mood":"tense","liked":"Rope","reason":"Like Rope, it`, answer3(389, 346, 655))
-	w.run(t)
-	retry, _ := json.Marshal(w.ai.requests[1]["messages"])
-	if w.ai.effort(0) != "medium" || w.ai.effort(1) != "low" || !strings.Contains(string(retry), "cut off at the length limit") {
-		t.Fatalf("efforts %q then %q; retry %s", w.ai.effort(0), w.ai.effort(1), retry)
+	for _, c := range []struct{ name, cut string }{
+		{"cut inside the JSON", `{"picks":[{"id":389,"title":"12 Angry Men","mood":"tense","liked":"Rope","reason":"Like Rope, it`},
+		{"cut inside thinking: no text", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWorld(t, "", 0)
+			w.ai.script("CUT:"+c.cut, answer3(389, 346, 655))
+			w.run(t)
+			if w.ai.calls() != 2 {
+				t.Fatalf("%d AI call(s), want the cut answer and a retry\n%s", w.ai.calls(), w.logs)
+			}
+			retry, _ := json.Marshal(w.ai.requests[1]["messages"])
+			if w.ai.effort(0) != "medium" || w.ai.effort(1) != "low" || !strings.Contains(string(retry), "cut off at the length limit") {
+				t.Fatalf("efforts %q then %q; retry %s", w.ai.effort(0), w.ai.effort(1), retry)
+			}
+			if got := tmdbIDs(w.state(t).Picks); !slices.Equal(got, []int{389, 346, 655}) {
+				t.Fatalf("picks %v", got)
+			}
+		})
 	}
-	if got := tmdbIDs(w.state(t).Picks); !slices.Equal(got, []int{389, 346, 655}) {
-		t.Fatalf("picks %v", got)
+}
+
+// Catches the retry being sent although, counted, it no longer fits what is left of the day. Sizing allows the retry
+// the answer (max_tokens) plus retryExtra tokens of violations; an answer that billed all of max_tokens and named 60
+// films outside the list, each with a long title, runs far past that, and only the check before the retry holds the
+// cap (round-3 review: with the fake billing 422 output tokens the check was never reached).
+func TestRetryThatNoLongerFitsIsNotSent(t *testing.T) {
+	w := newWorld(t, "", 190)
+	w.ai.missRetry = true
+	var picks []string
+	for i := range 60 {
+		picks = append(picks, fmt.Sprintf(`{"id":%d,"title":"%s","mood":"m","liked":"l","reason":"r"}`, 900000+i, strings.Repeat("Long Title ", 10)))
+	}
+	w.ai.script("MAX:"+`{"picks":[`+strings.Join(picks, ",")+`]}`, "MAX:"+answer3(389, 346, 655))
+	rep := w.run(t)
+	spent := w.state(t).Spend["2026-10-05"]
+	if w.ai.calls() != 1 || spent > 0.15 || !strings.Contains(w.logs.String(), `msg="no budget left for the retry; keeping the valid picks"`) {
+		t.Fatalf("%d AI calls, $%.5f spent: a retry past what was left of the $0.15 was sent\n%s", w.ai.calls(), spent, w.logs)
+	}
+	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "no valid picks") {
+		t.Fatalf("alerts %q", rep.Alerts)
 	}
 }
 

@@ -38,7 +38,7 @@ type entry struct {
 	TMDB    int     `json:"tmdb,omitempty"`
 	Rating  float64 `json:"rating,omitempty"` // 0.5..5; 0 = watched without a rating
 	Review  string  `json:"review,omitempty"`
-	Watched string  `json:"watched,omitempty"` // YYYY-MM-DD; feed entries only
+	Watched string  `json:"watched,omitempty"` // YYYY-MM-DD: watched, or for an export row without that, logged
 }
 
 // readExport reads ratings, reviews, diary and watched from the export in dir, or from the newest
@@ -62,7 +62,11 @@ func readExport(dir string) ([]entry, error) {
 		for _, r := range rows {
 			year, _ := strconv.Atoi(r["Year"])
 			rating, _ := strconv.ParseFloat(r["Rating"], 64)
-			out = append(out, entry{Name: r["Name"], Year: year, Rating: rating, Review: r["Review"]})
+			watched := r["Watched Date"]
+			if watched == "" {
+				watched = r["Date"]
+			}
+			out = append(out, entry{Name: r["Name"], Year: year, Rating: rating, Review: r["Review"], Watched: watched})
 		}
 	}
 	return out, nil
@@ -195,6 +199,7 @@ type rated struct {
 	Year   int
 	Rating float64
 	Review string
+	Last   string // the latest day he logged it, YYYY-MM-DD
 }
 
 // history merges the export and the feed into one latest rating (and longest review) per film. The feed is
@@ -214,6 +219,7 @@ func history(export []entry, rss map[string]entry) []rated {
 		if len(e.Review) > len(r.Review) {
 			r.Review = e.Review
 		}
+		r.Last = max(r.Last, e.Watched)
 	}
 	for _, e := range export {
 		merge(e, false)
@@ -233,35 +239,93 @@ func history(export []entry, rss map[string]entry) []rated {
 	return out
 }
 
-// tasteText renders his ratings grouped by stars, then his reviews. Sorted, so the bytes (and the prompt
-// cache) change only when his diary does.
-func tasteText(films []rated, maxReview int) string {
+// tasteBytes bounds the taste block, the prompt's largest part: 40.6 KB (about 18,400 tokens) on 2026-10-05, and his
+// diary added up to 10 KB a year (2022: 279 ratings, 33 reviews). At Sonnet prices each 1,000 tokens more leaves room
+// for about 14 fewer candidates under the cap, so unbounded growth would end in no call at all within a few years.
+const tasteBytes = 48 << 10
+
+// tasteText renders his ratings grouped by stars, then his reviews, in at most maxBytes: past that it keeps the films
+// he rated 4★ or more, then his newest reviews, then the newest of his other ratings. Sorted, so the bytes (and the
+// prompt cache) change only when his diary does.
+func tasteText(films []rated, maxReview, maxBytes int) string {
 	sort.Slice(films, func(i, j int) bool {
 		if films[i].Rating != films[j].Rating {
 			return films[i].Rating > films[j].Rating
 		}
 		return filmKey(films[i].Name, films[i].Year) < filmKey(films[j].Name, films[j].Year)
 	})
+	const ratingsHead, reviewsHead = "HIS LETTERBOXD RATINGS (stars out of 5):\n", "\n\nHIS REVIEWS:\n"
+	stars := func(r float64) string { return strconv.FormatFloat(r, 'f', -1, 64) + "★" }
+	rating := func(f rated) string { return fmt.Sprintf("%s (%d)", f.Name, f.Year) }
+	review := func(f rated) string {
+		return fmt.Sprintf("- %s (%d), %s: %s\n", f.Name, f.Year, stars(f.Rating), oneLine(f.Review, maxReview))
+	}
+
+	type part struct {
+		film   int
+		review bool
+	}
+	var parts []part
+	for i, f := range films {
+		if f.Rating > 0 {
+			parts = append(parts, part{i, false})
+		}
+		if f.Review != "" {
+			parts = append(parts, part{i, true})
+		}
+	}
+	rank := func(p part) int {
+		switch {
+		case !p.review && films[p.film].Rating >= 4:
+			return 0
+		case p.review:
+			return 1
+		}
+		return 2
+	}
+	sort.SliceStable(parts, func(a, b int) bool {
+		if ra, rb := rank(parts[a]), rank(parts[b]); ra != rb {
+			return ra < rb
+		}
+		return films[parts[a].film].Last > films[parts[b].film].Last
+	})
+	// Every star group's heading ("\n4.5★: ") is counted, and every rating's "; ", so the text never passes maxBytes.
+	used := len(ratingsHead) + len(reviewsHead) + 10*len("\n4.5★: ")
+	keptRating, keptReview := map[int]bool{}, map[int]bool{}
+	for _, p := range parts {
+		size := len("; " + rating(films[p.film]))
+		if p.review {
+			size = len(review(films[p.film]))
+		}
+		if used += size; used > maxBytes {
+			break
+		}
+		if p.review {
+			keptReview[p.film] = true
+		} else {
+			keptRating[p.film] = true
+		}
+	}
+
 	var b strings.Builder
-	b.WriteString("HIS LETTERBOXD RATINGS (stars out of 5):\n")
+	b.WriteString(ratingsHead)
 	last := -1.0
-	for _, f := range films {
-		if f.Rating == 0 {
+	for i, f := range films {
+		if !keptRating[i] {
 			continue
 		}
 		if f.Rating != last {
-			fmt.Fprintf(&b, "\n%s★: ", strconv.FormatFloat(f.Rating, 'f', -1, 64))
+			fmt.Fprintf(&b, "\n%s: ", stars(f.Rating))
 			last = f.Rating
 		} else {
 			b.WriteString("; ")
 		}
-		fmt.Fprintf(&b, "%s (%d)", f.Name, f.Year)
+		b.WriteString(rating(f))
 	}
-	b.WriteString("\n\nHIS REVIEWS:\n")
-	for _, f := range films {
-		if f.Review != "" {
-			fmt.Fprintf(&b, "- %s (%d), %s★: %s\n", f.Name, f.Year, strconv.FormatFloat(f.Rating, 'f', -1, 64),
-				oneLine(f.Review, maxReview))
+	b.WriteString(reviewsHead)
+	for i, f := range films {
+		if keptReview[i] {
+			b.WriteString(review(f))
 		}
 	}
 	return b.String()

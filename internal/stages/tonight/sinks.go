@@ -23,7 +23,7 @@ import (
 type sinkState struct {
 	ID           string         `json:"id,omitempty"`        // Plex collection ratingKey / Jellyfin BoxSet id
 	Pending      *pendingCreate `json:"pending,omitempty"`   // a create sent whose answer has not named the collection
-	PosterOf     string         `json:"poster_of,omitempty"` // posterKey of the last uploaded poster
+	PosterOf     string         `json:"poster_of,omitempty"` // the day of the last uploaded poster
 	Fails        int            `json:"fails,omitempty"`
 	RetryAt      time.Time      `json:"retry_at,omitzero"`
 	FailingSince time.Time      `json:"failing_since,omitzero"`
@@ -99,19 +99,6 @@ func diff(want, have []string) (add, remove []string) {
 		}
 	}
 	return add, remove
-}
-
-// posterKey names what a poster shows: the date and the picks' thumbnails, so a watched pick's removal redraws it.
-func posterKey(day string, picks []pick) string {
-	return fmt.Sprint(day, tmdbIDs(picks))
-}
-
-func tmdbIDs(picks []pick) []int {
-	ids := make([]int, len(picks))
-	for i, p := range picks {
-		ids[i] = p.TMDB
-	}
-	return ids
 }
 
 func summary(picks []pick) string {
@@ -336,7 +323,9 @@ func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarg
 		}
 		log.Info("collection summary set", "event", "plex_write", "action", "summary", "id", id)
 	}
-	if key := posterKey(day, picks); s.PosterOf != key && len(picks) > 0 {
+	// One poster a day, showing the day's picks: Plex keeps every poster uploaded to an item, so redrawing it when a
+	// watched pick leaves the row would add up to six a day to its poster picker, for good.
+	if s.PosterOf != day && len(picks) > 0 {
 		img, err := poster()
 		if err != nil {
 			return err
@@ -344,7 +333,7 @@ func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarg
 		if err := px.Send(ctx, "POST", "/library/metadata/"+id+"/posters", "image/jpeg", img); err != nil {
 			return err
 		}
-		s.PosterOf = key
+		s.PosterOf = day
 		log.Info("collection poster uploaded", "event", "plex_write", "action", "poster", "id", id, "bytes", len(img))
 	}
 	return promotePlexHub(ctx, log, px, t.Section, id)
@@ -609,7 +598,7 @@ func syncJellyfin(ctx context.Context, log *slog.Logger, jf *jellyfin.Client, ti
 		}
 		log.Info("collection overview set", "event", "jellyfin_write", "action", "overview", "id", id, "tag_added", !tagged)
 	}
-	if key := posterKey(day, picks); s.PosterOf != key && len(picks) > 0 {
+	if s.PosterOf != day && len(picks) > 0 { // the same poster as Plex's
 		img, err := poster()
 		if err != nil {
 			return err
@@ -618,7 +607,7 @@ func syncJellyfin(ctx context.Context, log *slog.Logger, jf *jellyfin.Client, ti
 		if err := jf.PostBody(ctx, "/Items/"+id+"/Images/Primary", "image/jpeg", body); err != nil {
 			return err
 		}
-		s.PosterOf = key
+		s.PosterOf = day
 		log.Info("collection poster uploaded", "event", "jellyfin_write", "action", "poster", "id", id, "bytes", len(img))
 	}
 	return nil

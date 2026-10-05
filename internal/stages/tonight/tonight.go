@@ -356,7 +356,7 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 	// Size the candidate list so the call AND its retry fit what is left of today's budget. The retry re-sends the
 	// call plus the answer (at most max_tokens) and the violations. fixed counts the request without candidate
 	// lines: the cached prefix plus a short tail, all of it priced as a cache write.
-	taste := tasteText(hist, 400)
+	taste := tasteText(hist, 400, tasteBytes)
 	request := func(n int) llm.CachedRequest {
 		return pickRequest(m, opt, taste, []llm.Message{userMessage(prompt(day, cands[:n], opt.Picks))})
 	}
@@ -444,9 +444,19 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 	}
 	if len(violations) > 0 {
 		env.Log.Warn("picks need a retry", "event", "tonight_picks_invalid", "violations", strings.Join(violations, "; "))
-		// The answer goes back as text alone: thinking blocks are bound to their conversation and may be left out.
-		req.Messages = append(req.Messages, llm.Message{Role: "assistant", Content: []llm.Block{llm.Text(r.Text())}},
-			userMessage("Fix these problems and answer again with all "+fmt.Sprint(opt.Picks)+" picks:\n- "+strings.Join(violations, "\n- ")))
+		problems := "\n- " + strings.Join(violations, "\n- ")
+		if text := r.Text(); strings.TrimSpace(text) != "" {
+			// The answer goes back as text alone: thinking blocks are bound to their conversation and may be left out.
+			req.Messages = append(req.Messages, llm.Message{Role: "assistant", Content: []llm.Block{llm.Text(text)}},
+				userMessage("Fix these problems and answer again with all "+fmt.Sprint(opt.Picks)+" picks:"+problems))
+		} else {
+			// Nothing to send back (cut off inside thinking, or a refusal): the API refuses an empty text block and two
+			// user turns in a row, so the one user turn goes again with the problems as a second block.
+			ask := req.Messages[0]
+			ask.Content = append(ask.Content, llm.Text("An earlier answer to this had these problems; avoid them and answer with all "+
+				fmt.Sprint(opt.Picks)+" picks:"+problems))
+			req.Messages = []llm.Message{ask}
+		}
 		if total, err = a.CountTokens(ctx, req); err != nil {
 			env.Log.Warn("retry not sized; keeping the valid picks", "event", "tonight_retry_skipped", "err", err)
 		} else if b := bound(p, total, fixed, opt.MaxTokens); st.Spend[day]+b > opt.DailyCapUSD {
