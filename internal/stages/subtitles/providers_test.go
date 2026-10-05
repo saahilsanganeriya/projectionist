@@ -1,6 +1,8 @@
 package subtitles
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -184,4 +186,61 @@ func containsDuration(ds []time.Duration, d time.Duration) bool {
 		}
 	}
 	return false
+}
+
+// Catches: Subdl asked without the key, the TMDB id or the episode, a season pack or another episode kept, the
+// zip's SRT not returned, a block page taken for a subtitle instead of parking Subdl, and the key (it rides in the
+// query string) leaking into an error.
+func TestSubdl(t *testing.T) {
+	var queries []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api":
+			queries = append(queries, r.URL.RawQuery)
+			if r.URL.Query().Get("api_key") != "sekrit" {
+				w.WriteHeader(500)
+				return
+			}
+			w.Write([]byte(`{"status":true,"subtitles":[{"release_name":"Show.S01E02.WEB","url":"/s/pack.zip","full_season":true},` +
+				`{"release_name":"Show.S01E03.WEB","url":"/s/3.zip","season":1,"episode":3},` +
+				`{"release_name":"Show.S01E02.WEB-GRP","name":"x.zip","url":"/s/2.zip","season":1,"episode":2,"hi":true}]}`))
+		case "/s/2.zip":
+			var b bytes.Buffer
+			zw := zip.NewWriter(&b)
+			f, _ := zw.Create("Show.S01E02.WEB-GRP.srt")
+			f.Write([]byte("1\n00:00:01,000 --> 00:00:02,000\ncaf\xe9\n"))
+			zw.Close()
+			w.Write(b.Bytes())
+		default:
+			w.Write([]byte("<html>blocked</html>"))
+		}
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	key := filepath.Join(dir, "subdl_api_key")
+	os.WriteFile(key, []byte("sekrit\n"), 0o600)
+	o := &subdl{api: srv.URL + "/api", dl: srv.URL, keyFile: key, hc: srv.Client(), pace: testPacer(&recorder{})}
+	got, err := o.Search(context.Background(), Query{TMDB: "1400", Name: "Show", Season: 1, Episode: 2})
+	if err != nil || len(got) != 1 || got[0].ID != "/s/2.zip" || !got[0].HearingImpaired {
+		t.Fatalf("search: %+v %v", got, err)
+	}
+	q := queries[0]
+	for _, want := range []string{"api_key=sekrit", "tmdb_id=1400", "type=tv", "season_number=1", "episode_number=2", "languages=EN"} {
+		if !strings.Contains(q, want) {
+			t.Errorf("query %q lacks %s", q, want)
+		}
+	}
+	if txt, err := o.Download(context.Background(), got[0]); err != nil || txt != "1\n00:00:01,000 --> 00:00:02,000\ncafé\n" {
+		t.Errorf("download: %q %v", txt, err)
+	}
+	if _, err := o.Download(context.Background(), Candidate{link: srv.URL + "/blocked"}); !errors.Is(err, errQuota) {
+		t.Errorf("block page: %v", err)
+	}
+
+	gone := httptest.NewServer(http.NotFoundHandler())
+	gone.Close() // connection refused: net/http's error would quote the whole URL, key included
+	o.api, o.pace = gone.URL+"/api", testPacer(&recorder{})
+	if _, err := o.Search(context.Background(), Query{TMDB: "1"}); err == nil || strings.Contains(err.Error(), "sekrit") {
+		t.Errorf("failing search error %v must not carry the key", err)
+	}
 }

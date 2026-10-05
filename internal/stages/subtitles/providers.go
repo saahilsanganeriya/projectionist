@@ -1,12 +1,13 @@
 package subtitles
 
-// Subtitle providers, called directly (never through Plex): the OpenSubtitles legacy REST API (free, no key) and
-// OpenSubtitles.com (only when its API key file exists). Ranking, the file hash, the release name and the ad
+// Subtitle providers, called directly (never through Plex): the OpenSubtitles legacy REST API (free, no key), and
+// OpenSubtitles.com and Subdl, each only when its API key file exists. Ranking, the file hash, the release name and the ad
 // stripping are ports of subfetch2.py. Every request goes through a pacer: one request per second per provider,
 // exponential backoff on 429/5xx/network errors, and a circuit breaker that parks the provider for the rest of the
 // run once its download quota is spent or it keeps failing, so the remaining titles wait for the next run.
 
 import (
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -33,6 +34,7 @@ type Query struct {
 	Size    int64
 	Hash    string // OpenSubtitles hash, 16 hex digits
 	IMDb    int    // 0 when unknown
+	TMDB    string // TMDB id from the folder name, "" when the folder has none
 	Name    string // show name, for the text search of episodes
 	Season  int    // 0 for a movie
 	Episode int
@@ -530,6 +532,101 @@ func (o *dotCom) Download(ctx context.Context, c Candidate) (string, error) {
 		return "", err
 	}
 	raw, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) { return http.NewRequest(http.MethodGet, link.Link, nil) })
+	if err != nil {
+		return "", err
+	}
+	return decodeDownload(raw, ""), nil
+}
+
+// ---- Subdl (needs an API key) ----
+
+type subdl struct {
+	api, dl string // https://api.subdl.com/api/v1/subtitles, https://dl.subdl.com
+	keyFile string
+	hc      *http.Client
+	pace    *pacer
+}
+
+func (o *subdl) Name() string { return "subdl" }
+
+// Search asks by TMDB id (else IMDb id, else the show's name); season packs are skipped, a sidecar is one episode.
+func (o *subdl) Search(ctx context.Context, q Query) ([]Candidate, error) {
+	key, err := os.ReadFile(o.keyFile)
+	if err != nil {
+		return nil, err
+	}
+	v := url.Values{"api_key": {strings.TrimSpace(string(key))}, "languages": {"EN"}, "subs_per_page": {"30"}, "hi": {"1"}, "type": {"movie"}}
+	switch {
+	case q.TMDB != "":
+		v.Set("tmdb_id", q.TMDB)
+	case q.IMDb != 0:
+		v.Set("imdb_id", fmt.Sprintf("tt%07d", q.IMDb))
+	case q.Season != 0:
+		v.Set("film_name", q.Name)
+	default:
+		return nil, nil
+	}
+	if q.Season != 0 {
+		v.Set("type", "tv")
+		v.Set("season_number", strconv.Itoa(q.Season))
+		v.Set("episode_number", strconv.Itoa(q.Episode))
+	}
+	raw, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) { return http.NewRequest(http.MethodGet, o.api+"?"+v.Encode(), nil) })
+	if err != nil {
+		return nil, err
+	}
+	var res struct {
+		Subtitles []struct {
+			Release    string          `json:"release_name"`
+			Name       string          `json:"name"`
+			URL        string          `json:"url"`
+			HI         bool            `json:"hi"`
+			FullSeason bool            `json:"full_season"`
+			Season     json.RawMessage `json:"season"`
+			Episode    json.RawMessage `json:"episode"`
+		} `json:"subtitles"`
+	}
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, fmt.Errorf("subdl search: %w", err)
+	}
+	var out []Candidate
+	for _, r := range res.Subtitles {
+		season, episode := string(bytes.Trim(r.Season, `"`)), string(bytes.Trim(r.Episode, `"`))
+		if r.FullSeason || q.Season != 0 && (season != strconv.Itoa(q.Season) || episode != strconv.Itoa(q.Episode)) {
+			continue
+		}
+		out = append(out, Candidate{Source: "subdl", ID: r.URL, Release: r.Release, FileName: r.Name, HearingImpaired: r.HI,
+			Season: season, Episode: episode, link: o.dl + r.URL, provider: o})
+	}
+	return out, nil
+}
+
+// Download fetches the zip and returns its one SRT; anything but a zip is the quota (or a block page): park.
+func (o *subdl) Download(ctx context.Context, c Candidate) (string, error) {
+	body, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) { return http.NewRequest(http.MethodGet, c.link, nil) })
+	if err != nil {
+		return "", err
+	}
+	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		o.pace.park(errQuota)
+		return "", fmt.Errorf("%w: %w", errParked, errQuota)
+	}
+	var srts []*zip.File
+	for _, f := range zr.File {
+		if strings.EqualFold(filepath.Ext(f.Name), ".srt") {
+			srts = append(srts, f)
+		}
+	}
+	if len(srts) != 1 {
+		return "", fmt.Errorf("subdl zip holds %d SRT files", len(srts))
+	}
+	rc, err := srts[0].Open()
+	if err != nil {
+		return "", err
+	}
+	defer rc.Close()
+	raw, err := io.ReadAll(io.LimitReader(rc, 16<<20))
 	if err != nil {
 		return "", err
 	}

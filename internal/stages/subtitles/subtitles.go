@@ -3,7 +3,7 @@
 // sidecar, does only the missing step.
 //
 //	embedded English text track       -> extracted with ffmpeg
-//	else candidates from the providers (OpenSubtitles legacy REST; OpenSubtitles.com with a key), best first:
+//	else candidates from the providers (OpenSubtitles legacy REST; OpenSubtitles.com, Subdl with keys), best first:
 //	  English PGS/VobSub track exists  -> cue starts fitted to its caption starts (align/retime, ported exactly)
 //	  else                             -> alass aligns the candidate to the speech in the audio
 //	accepted                           -> <video>.en.srt, else .eng.srt: created O_EXCL, never overwritten
@@ -71,8 +71,8 @@ func defaults() Options {
 
 // Stage's fields are test hooks; the zero value talks to the real services.
 type Stage struct {
-	openSubtitles, openSubtitlesCom, tmdbAPI string
-	sleep                                    func(context.Context, time.Duration) error
+	openSubtitles, openSubtitlesCom, subdlAPI, subdlDL, tmdbAPI string
+	sleep                                                       func(context.Context, time.Duration) error
 }
 
 func (Stage) Name() string { return name }
@@ -178,6 +178,10 @@ func (s Stage) newRun(env *stage.Env, opt Options, rep *stage.Report) *run {
 	if key := filepath.Join(opt.SecretsDir, "opensubtitles_api_key"); fileExists(key) {
 		r.providers = append(r.providers, &dotCom{base: or(s.openSubtitlesCom, "https://api.opensubtitles.com/api/v1"), keyFile: key,
 			userAgent: userAgent, hc: hc, pace: newPacer()})
+	}
+	if key := filepath.Join(opt.SecretsDir, "subdl_api_key"); fileExists(key) {
+		r.providers = append(r.providers, &subdl{api: or(s.subdlAPI, "https://api.subdl.com/api/v1/subtitles"),
+			dl: or(s.subdlDL, "https://dl.subdl.com"), keyFile: key, hc: hc, pace: newPacer()})
 	}
 	return r
 }
@@ -549,6 +553,9 @@ func (r *run) query(ctx context.Context, t *title) (Query, error) {
 		return Query{}, err
 	}
 	q := Query{Size: size, Hash: hash, Name: t.show, Season: t.season, Episode: t.episode}
+	if t.kind == "movie" || t.kind == "tv" {
+		q.TMDB = t.id
+	}
 	switch t.kind {
 	case "imdb":
 		q.IMDb, _ = strconv.Atoi(strings.TrimPrefix(t.id, "tt"))
