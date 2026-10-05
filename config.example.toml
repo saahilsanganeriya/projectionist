@@ -125,7 +125,7 @@ tv_section     = 2
 # the run's writes (Plex's in pages of 1,000); a failed one alerts and is tried again a day later, the old listing staying in
 # use. A play of an item added since the last listing waits for the next one. Only an app never listed retries sooner.
 address_every  = "24h"
-list_timeout   = "10m" # measured 2026-10-05 on the loaded NAS: Plex 5m41s, Jellyfin 4m56s per refresh
+list_timeout   = "30m" # per request; 2026-10-05 on the loaded NAS, mid Jellyfin first scan: Jellyfin 4m56s-9m04s, Plex 4m55s-5m41s
 # Mount read-only; the newest *.db is read once per person. Take a fresh copy (backup_plex_db.sh) just before the
 # first run: plays after the copy and before the webhook is registered are not recorded.
 plex_backups   = "/volume1/PlexMediaServer/backups"
