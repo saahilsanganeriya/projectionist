@@ -17,7 +17,6 @@
 package details
 
 import (
-	"bufio"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -33,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"projectionist/internal/library"
 	"projectionist/internal/probe"
 	"projectionist/internal/stage"
 )
@@ -136,7 +136,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) (err er
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return err
 	}
-	orig, moves, err := originals(opt.UndoLogs)
+	orig, moves, err := library.Originals(opt.UndoLogs)
 	if err != nil {
 		return err
 	}
@@ -656,47 +656,6 @@ func only(videos []video, pathsFile string) ([]video, error) {
 		}
 	}
 	return out, nil
-}
-
-// originals maps each moved path to the first name it had: logs are read in order, so a file moved twice keeps
-// the name from before its first move. A row read before is skipped: the rename stage's legacy-undo*.tsv are
-// copies of the Python logs, and replaying a move breaks a chain once its path was reused (P→Q, then R→P: a second
-// P→Q would give Q the original name R). A missing log is skipped (one appears on first use); moves counts the
-// distinct move rows.
-func originals(logs []string) (orig map[string]string, moves int, err error) {
-	orig = map[string]string{}
-	seen := map[string]bool{}
-	for _, path := range logs {
-		f, err := os.Open(path)
-		if errors.Is(err, fs.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return nil, 0, err
-		}
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 64<<10), 1<<20)
-		for sc.Scan() {
-			line := sc.Text()
-			col := strings.Split(line, "\t")
-			if len(col) != 5 || col[1] != "move" || seen[line] {
-				continue
-			}
-			seen[line] = true
-			moves++
-			if first, ok := orig[col[2]]; ok {
-				orig[col[3]] = first
-			} else {
-				orig[col[3]] = col[2]
-			}
-		}
-		err = sc.Err()
-		f.Close()
-		if err != nil {
-			return nil, 0, fmt.Errorf("%s: %w", path, err)
-		}
-	}
-	return orig, moves, nil
 }
 
 func notePath(opt Options, videoPath string) string {

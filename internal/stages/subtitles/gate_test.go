@@ -12,7 +12,9 @@ package subtitles
 // file) -> fits.tsv; GATE_DOWNLOADS (id, raw download file, declared encoding) -> decoded.tsv: the sha1 of the
 // decoded text and of that text with the ad blocks stripped; GATE_ALASS (id, video, framecrc, duration, candidate
 // files...) with GATE_ALASS_BIN and GATE_FFMPEG_DIR -> alass.tsv: per candidate, the stage's alass route scored
-// against the PGS captions it never saw, and its caption route with the alass rescue.
+// against the PGS captions it never saw, and its caption route with the alass rescue; GATE_SPOT (id, video, sidecar,
+// framecrc file or "-", duration) with the same two -> spot.tsv: a written sidecar's median distance to the video's
+// English captions where a framecrc is given, and the shift alass's alignment to the speech would give it.
 
 import (
 	"context"
@@ -195,4 +197,45 @@ func TestGateAlass(t *testing.T) {
 	}
 	wg.Wait()
 	gateWrite(t, "alass.tsv", strings.Join(out, ""))
+}
+
+func TestGateSpot(t *testing.T) {
+	lines := gateLines(t, "GATE_SPOT")
+	h := fake.NewEnv(t, nil) // nobody watching
+	h.Env.FFmpeg = config.FFmpeg{Dir: os.Getenv("GATE_FFMPEG_DIR")}
+	r := &run{env: h.Env, opt: Options{Alass: os.Getenv("GATE_ALASS_BIN")}, rep: &stage.Report{}, alerted: map[string]bool{}}
+	var b strings.Builder
+	b.WriteString("id\tcues\tcaption_median_ms\tspeech_ok\tspeech_shift_ms\tspeech_agree\n")
+	for _, line := range lines {
+		f := strings.Split(line, "\t")
+		sub, _ := os.ReadFile(f[2])
+		caption := ""
+		if f[3] != "-" {
+			framecrc, _ := os.ReadFile(f[3])
+			duration, _ := strconv.ParseFloat(f[4], 64)
+			if starts, _, ok := pgsReference(string(framecrc), duration); ok {
+				caption = strconv.FormatFloat(medianOffsetMS(cues(string(sub)), starts), 'f', 0, 64)
+			}
+		}
+		raw, _ := exec.Command(r.env.FFmpeg.FFprobePath(), "-v", "error", "-select_streams", "a", "-show_entries",
+			"stream=index:stream_disposition=default", "-of", "csv=p=0", f[1]).Output()
+		audio := strings.Split(strings.Split(string(raw), "\n")[0], ",")[0]
+		for _, l := range strings.Split(string(raw), "\n") {
+			if strings.HasSuffix(l, ",1") {
+				audio = strings.Split(l, ",")[0]
+				break
+			}
+		}
+		index, _ := strconv.Atoi(audio)
+		ti := &title{path: f[1], info: probe.Info{Audio: []probe.Audio{{Index: index, Default: true}}}}
+		speech := reference{label: "alass"}
+		a := map[string]any{}
+		ok := false
+		if err := r.hear(context.Background(), ti, &speech); err == nil {
+			_, _, ok = r.fit(context.Background(), &speech, string(sub), a)
+		}
+		speech.cleanup()
+		fmt.Fprintf(&b, "%s\t%d\t%s\t%v\t%v\t%v\n", f[0], len(cues(string(sub))), caption, ok, a["offset_ms"], a["agree"])
+	}
+	gateWrite(t, "spot.tsv", b.String())
 }

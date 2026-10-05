@@ -56,8 +56,9 @@ func TestRank(t *testing.T) {
 		{FileName: "whatever.srt", Downloads: 3, HashMatch: true, Rating: 10},
 		{Release: "Heat.1995.DVDRip", FileName: "heat.dvdrip.srt", Rating: 2.3},
 	}
+	n, _ := readNote(video)
 	for release, want := range map[string][]int{
-		releaseName(video):           {106369, -19001, 10001000, 229},
+		strings.Join(n.names, " "):   {106369, -19001, 10001000, 229},
 		"Heat (1995) {tmdb-949}.mkv": {1369, -19001, 10001000, 229},
 	} {
 		for i, c := range cands {

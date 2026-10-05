@@ -7,6 +7,11 @@
 package library
 
 import (
+	"bufio"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -127,4 +132,47 @@ func parseFolder(re *regexp.Regexp, name string) (Folder, bool) {
 	}
 	year, _ := strconv.Atoi(m[2])
 	return Folder{Title: m[1], Year: year, ID: ID{Source: m[3], Value: m[4]}}, true
+}
+
+// ---- rename logs (TSV: time, op, old path, new path, unit) ----
+
+// Originals maps each moved path to the first name it had: logs are read in order, so a file moved twice keeps
+// the name from before its first move. A row read before is skipped: the rename stage's legacy-undo*.tsv are
+// copies of the Python logs, and replaying a move breaks a chain once its path was reused (P→Q, then R→P: a second
+// P→Q would give Q the original name R). A missing log is skipped (one appears on first use); moves counts the
+// distinct move rows.
+func Originals(logs []string) (orig map[string]string, moves int, err error) {
+	orig = map[string]string{}
+	seen := map[string]bool{}
+	for _, path := range logs {
+		f, err := os.Open(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 64<<10), 1<<20)
+		for sc.Scan() {
+			line := sc.Text()
+			col := strings.Split(line, "\t")
+			if len(col) != 5 || col[1] != "move" || seen[line] {
+				continue
+			}
+			seen[line] = true
+			moves++
+			if first, ok := orig[col[2]]; ok {
+				orig[col[3]] = first
+			} else {
+				orig[col[3]] = col[2]
+			}
+		}
+		err = sc.Err()
+		f.Close()
+		if err != nil {
+			return nil, 0, fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	return orig, moves, nil
 }
