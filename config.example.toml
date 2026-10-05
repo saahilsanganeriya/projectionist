@@ -203,7 +203,8 @@ legacy_quota = "/volume1/PlexMediaServer/subtitle-downloads" # subfetch2.py's qu
 # output_dir = "/volume1/PlexMediaServer/projectionist-test/subtitles/out" # test runs: write sidecars here instead
 
 # Five unseen films for tonight, picked once a day by one Claude call over his Letterboxd ratings and reviews; a
-# Plex Movies collection "Tonight" promoted to his Home under Continue Watching, and the same BoxSet in Jellyfin.
+# Plex Movies collection "Tonight" promoted to his own Home as the first Movies row (below Continue Watching, On Deck
+# and the rows of libraries ordered before Movies), and the same BoxSet in Jellyfin.
 # Reconciles every 30 min: a pick he has since watched leaves the row at once.
 # daily_cap_usd is a hard cap: the call and its one retry are sized together before the first is sent, each at its
 # worst (the cached prompt prefix billed as a cache write, as a retry that misses the 5-minute cache pays it again;
