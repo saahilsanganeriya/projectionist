@@ -49,6 +49,8 @@ raised before the error are kept.
 | `internal/jellyfin` | `GetJSON`, `PostJSON`, `Sessions(activeWithin)`, `MediaUpdated(paths...)`. Key read from a file on every request |
 | `internal/probe` | `Prober.Probe(ctx, path) (Info, error)`: ffprobe JSON → codec, profile, bit depth, HDR10/HLG/Dolby Vision + dv_profile, size, fps, bitrate, audio and subtitle tracks, duration. Cached in `probe_cache` keyed by (path, size, mtime_ns). `Parse(raw)` is pure, for tests |
 | `internal/library` | `ParseMovie(path)` / `ParseEpisode(path)`: identity (`{tmdb-N}`, `{imdb-ttN}`, `{tvdb-N}`), year, label, season, episode range, read from the naming scheme |
+| `internal/tmdb` | `Client.Get(ctx, path, query, &v)`: TMDB v3 directly (bearer for a v4 token, `api_key` for a v3 key; URLs never in errors), `ErrNotFound` on 404, 429/5xx retried |
+| `internal/llm` | Claude on the Anthropic API directly: `Messages`, `CreateBatch`/`Batch`/`BatchResults` (half price), `Latest(ctx, "haiku")` for a `family:latest` alias (cache it a day), `PriceOf(model).Cost(usage, batch)` for a budget. Key read per request |
 | `internal/fsx` | `RenameNoReplace` (renameat2 RENAME_NOREPLACE; link+unlink fallback for files), `Clone` (FICLONE reflink, byte-copy fallback, never overwrites), `SyncDir` (one fsync per unit) |
 | `internal/obs` | `NewLogger` (UTC, key=value or JSON), `Metrics` (Prometheus text) |
 | `internal/server` | `/health` (503 while any stage's latest run is alert/error) and `/metrics` |

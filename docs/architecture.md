@@ -93,7 +93,7 @@ image, enables the stage's `[stages.<name>]` table, and imports any legacy state
 | 8 | jf-sync | `jellyfin/jf_mirror.py` | Watch state for both users equals `plex_watch.tsv`. Collections match `collections.json`. A second run changes nothing. |
 | 9 | ssd-mirror | `ssd-copy/fill.py` | The same A→Z plan for the same free space. Resumes after a kill. Runs at idle I/O priority. |
 | 10 | backups | `backup_plex_db.sh`, `export_customizations.py` | `PRAGMA integrity_check` = ok on the copy. The exported file set equals the Python's. |
-| 11 | posters | `posters/posters.py` (runs on the Mac) | Last. It needs AI gateway keys, which would become a compose secret. Replay of `decisions.json` gives identical choices. |
+| 11 | posters | `posters/posters.py` (ran on the Mac) | **Ported.** Candidates from TMDB and fanart.tv directly plus the owner's pre-rename posters (imported once from the backup); judge = the newest Haiku on the owner's Anthropic key, a backlog through Message Batches, a $5 hard budget held per call. Secrets `tmdb_read_token`, `fanart_api_key`, `anthropic_api_key`; read-only mount of `backups/`. Gate: the 12-title pilot in dry-run, each pick compared with the Python pilot's, under $0.10. |
 
 Order: small and independent stages first, so the pattern is proven before the rename stages. The shared
 probe/details work comes before the rename planner, because the planner consumes subtitle facts. The rename

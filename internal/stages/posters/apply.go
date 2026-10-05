@@ -127,7 +127,10 @@ func (r *run) apply(ctx context.Context) error {
 				last_error='' WHERE item=? AND sink=? AND url=?`, o.Item, o.Sink, o.URL); err != nil {
 				r.env.Log.Error("outbox", "event", "store_error", "err", err)
 			}
-			r.env.Store.AddEvent(context.WithoutCancel(ctx), r.env.Now(), name, item, "applied", map[string]any{"sink": o.Sink, "url": o.URL})
+			if err := r.env.Store.AddEvent(context.WithoutCancel(ctx), r.env.Now(), name, item, "applied",
+				map[string]any{"sink": o.Sink, "url": o.URL}); err != nil {
+				r.env.Log.Error("event log", "event", "store_error", "err", err)
+			}
 			r.count("applied_"+o.Sink, 1)
 		}
 	})

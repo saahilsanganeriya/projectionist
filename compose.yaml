@@ -36,7 +36,9 @@ services:
       # GPU self-test sample and the old scripts' state files (imported once at cutover): read-only.
       - /volume1/PlexMediaServer/scripts:/volume1/PlexMediaServer/scripts:ro
       - /volume1/PlexMediaServer/remote4k:/volume1/PlexMediaServer/remote4k # STATUS.txt the owner reads
-    secrets: [jellyfin_key] # /run/secrets/jellyfin_key, read-only
+      # posters: the owner's pre-rename poster export and the Plex DB backup it is matched with, read once.
+      - /volume1/PlexMediaServer/backups:/volume1/PlexMediaServer/backups:ro
+    secrets: [jellyfin_key, tmdb_read_token, fanart_api_key, anthropic_api_key] # /run/secrets/<name>, read-only
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
@@ -44,3 +46,9 @@ services:
 secrets:
   jellyfin_key:
     file: /volume1/docker/projectionist/secrets/jellyfin_key # root:root 0600
+  tmdb_read_token:
+    file: /volume1/docker/projectionist/secrets/tmdb_read_token
+  fanart_api_key:
+    file: /volume1/docker/projectionist/secrets/fanart_api_key
+  anthropic_api_key: # the owner's personal key; must exist before the project starts
+    file: /volume1/docker/projectionist/secrets/anthropic_api_key
