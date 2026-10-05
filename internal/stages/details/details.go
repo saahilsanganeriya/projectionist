@@ -5,7 +5,8 @@
 // A reconciler: each run walks the library, renders every note from cached facts and rewrites only the notes
 // whose text changed. New ffprobe runs, peak-bitrate scans and decode checks are bounded per run and cached by
 // (path, size, mtime), so a run resumes where the last one stopped; the newest files go first. Heavy work (the
-// whole-file packet scan, the decode samples) runs only while nobody but the owner is watching.
+// whole-file packet scan, the hole probe and decode samples) comes after every note is in place, so a 45-minute
+// scan never holds back a new file's note, and runs only while nobody but the owner is watching.
 //
 // Facts other stages can query:
 //
@@ -157,6 +158,23 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 			return err
 		}
 	}
+	for _, p := range r.queue {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		before := *p.row
+		if err := r.heavyFacts(ctx, p.v, p.info, p.row); err != nil {
+			return err
+		}
+		if *p.row != before {
+			if err := r.note(p.v, p.info, p.row); err != nil {
+				return err
+			}
+			if err := r.save(ctx, p.v.path, p.row); err != nil {
+				return err
+			}
+		}
+	}
 	if full {
 		for path := range rows {
 			if !seen[path] {
@@ -190,8 +208,20 @@ type run struct {
 
 	probes, peaks, decodes int  // what is left of this run's bounds
 	heavyOK                bool // false once a guest was seen: heavy work waits for a later run
+	queue                  []pending
 	newUnreadable          []string
 	newUnclean             []string
+}
+
+// pending is a video whose heavy facts are missing, queued behind the notes pass.
+type pending struct {
+	v    video
+	info probe.Info
+	row  *fileRow
+}
+
+func (r *run) needsPeak(info probe.Info, row *fileRow) bool {
+	return info.BitRate > r.opt.PeakAboveKbps*1000 && !row.PeakKbps.Valid
 }
 
 func (r *run) one(ctx context.Context, v video, row *fileRow) error {
@@ -238,11 +268,11 @@ func (r *run) one(ctx context.Context, v video, row *fileRow) error {
 	if row.Status != "ok" {
 		row.Status, row.Error, row.CheckedAt = "ok", "", r.env.Now()
 	}
-	if err := r.heavyFacts(ctx, v, info, row); err != nil {
-		return err
-	}
 	if err := r.note(v, info, row); err != nil {
 		return err
+	}
+	if (r.needsPeak(info, row) || !row.Clean.Valid) && len(r.queue) < r.opt.MaxPeakScans+r.opt.MaxDecodeChecks {
+		r.queue = append(r.queue, pending{v, info, row})
 	}
 	if *row != before {
 		return r.save(ctx, v.path, row)
@@ -278,9 +308,7 @@ func (r *run) note(v video, info probe.Info, row *fileRow) error {
 
 // heavyFacts fills in the peak bitrate (big files only) and the decode check, within this run's bounds.
 func (r *run) heavyFacts(ctx context.Context, v video, info probe.Info, row *fileRow) error {
-	needPeak := info.BitRate > r.opt.PeakAboveKbps*1000 && !row.PeakKbps.Valid
-	needClean := !row.Clean.Valid
-	if needPeak && r.peaks > 0 {
+	if r.needsPeak(info, row) && r.peaks > 0 {
 		if !r.heavyOK {
 			r.rep.Count("heavy_deferred", 1)
 		} else {
@@ -307,7 +335,7 @@ func (r *run) heavyFacts(ctx context.Context, v video, info probe.Info, row *fil
 			}
 		}
 	}
-	if needClean && r.decodes > 0 {
+	if !row.Clean.Valid && r.decodes > 0 {
 		if !r.heavyOK {
 			r.rep.Count("heavy_deferred", 1)
 			return nil

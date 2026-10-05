@@ -495,3 +495,25 @@ func TestMissingToolsFailTheRun(t *testing.T) {
 		t.Fatalf("no ffmpeg: err = %v", err)
 	}
 }
+
+// Catches: heavy work done inline, file by file, so a long scan of one film holds back every later file's note
+// (a 50 GB remux scans for ~45 min on the busy NAS).
+func TestNotesComeBeforeHeavyWork(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	l := lib{t, t.TempDir()}
+	l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", 1)
+	ran := l.add("Movies/Ran (1985) {tmdb-11645}/Ran (1985) {tmdb-11645}.mkv", 2)
+	ranNote := filepath.Join(filepath.Dir(ran), ".details", filepath.Base(ran)+".txt")
+	fixture, _ := filepath.Abs("testdata/cronos_dtshdma.json") // 15.7 Mb/s, above the threshold set below
+	seen := filepath.Join(h.Env.FFmpeg.Dir, "ran-note-at-scan")
+	h.Script(t, "ffprobe", fmt.Sprintf(`case "$*" in
+*packet=*) [ -f %q ] && echo yes > %q; echo "pts_time=N/A|dts_time=0.000|size=1000";;
+*) cat %q;;
+esac
+`, ranNote, seen, fixture))
+	h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []\npeak_above_kbps = 10000\nmax_peak_scans = 1\nmax_decode_checks = 0", l.root))
+	runOnce(t, h.Env)
+	if got, _ := os.ReadFile(seen); string(got) != "yes\n" {
+		t.Fatal("Heat's peak scan ran before Ran's note was written")
+	}
+}
