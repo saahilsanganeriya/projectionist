@@ -8,6 +8,8 @@ import (
 	"unicode"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"golang.org/x/text/encoding/charmap"
 )
 
 // pyDigit and pySpace are re's \d and \s in a str pattern: any Unicode decimal digit; any str.isspace() character.
@@ -197,6 +199,18 @@ func cp1252(b []byte) (s string, ok bool) {
 	return sb.String(), ok
 }
 
+// cp1250 is Python's strict cp1250: x/text's table, and ok=false on the five bytes Python leaves undefined.
+func cp1250(b []byte) (string, bool) {
+	for _, c := range b {
+		switch c {
+		case 0x81, 0x83, 0x88, 0x90, 0x98:
+			return "", false
+		}
+	}
+	s, err := charmap.Windows1250.NewDecoder().Bytes(b)
+	return string(s), err == nil
+}
+
 // decodeStats is sub_stats.py's decode(): BOM-led UTF-8 or UTF-16, else UTF-8, else cp1252.
 func decodeStats(raw []byte) string {
 	switch {
@@ -212,7 +226,7 @@ func decodeStats(raw []byte) string {
 }
 
 // decodeDownload is subfetch2.py's decode(raw, encoding): the provider's declared encoding, then UTF-8, then cp1252,
-// each strict, leading BOMs dropped. Declared encodings other than UTF-8, UTF-16, cp1252, Latin-1 and ASCII are
+// each strict, leading BOMs dropped. Declared encodings other than UTF-8, UTF-16, cp1252, cp1250, Latin-1 and ASCII are
 // skipped here where Python would use them (GB18030 is the commonest for English results, then cp1255, MacRoman):
 // such a file decodes as UTF-8 or cp1252 instead, so its cue times are the same and only letters outside ASCII can
 // differ from the Python's.
@@ -226,6 +240,8 @@ func decodeDownload(raw []byte, encoding string) string {
 			s, ok = string(raw), utf8.Valid(raw)
 		case "cp1252", "windows1252":
 			s, ok = cp1252(raw)
+		case "cp1250", "windows1250":
+			s, ok = cp1250(raw)
 		case "latin1", "iso88591", "l1":
 			rs := make([]rune, len(raw))
 			for i, c := range raw {

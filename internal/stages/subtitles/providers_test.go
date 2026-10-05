@@ -420,8 +420,8 @@ func TestSitec(t *testing.T) {
 }
 
 // Catches a declared UTF-16 download left undecoded (read as UTF-8 or cp1252 it is text with NULs between letters,
-// whose cues never match) or a malformed one decoded where strict decoding falls through to cp1252. Wants are
-// subfetch2.py decode()'s outputs.
+// whose cues never match), a declared cp1250 one read as cp1252 (the 176 rows the r2 decode gate missed), or a
+// malformed one decoded where strict decoding falls through to cp1252. Wants are subfetch2.py decode()'s outputs.
 func TestDecodeDownload(t *testing.T) {
 	text := "1\n00:00:01,000 --> 00:00:02,000\nCafé ♪\n"
 	var le, be []byte
@@ -438,6 +438,8 @@ func TestDecodeDownload(t *testing.T) {
 		{"lone high surrogate", "\xff\xfe1\x00\x00\xd8\n\x00", "UTF-16", "ÿþ1\x00\x00Ø\n\x00"},
 		{"high surrogate at the end", "\xff\xfe1\x00\x00\xd8", "UTF-16", "ÿþ1\x00\x00Ø"},
 		{"low surrogate first", "\xff\xfe\x00\xdc\x00\xdc", "UTF-16", "ÿþ\x00Ü\x00Ü"},
+		{"cp1250", "P\xf8\xedli\x9a \xe8\x8a", "CP1250", "Příliš čŠ"},
+		{"a byte cp1250 leaves undefined", "x\x83\xe8", "CP1250", "xƒè"},
 	} {
 		if got := decodeDownload([]byte(c.raw), c.enc); got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)
