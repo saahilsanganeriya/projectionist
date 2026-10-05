@@ -113,6 +113,21 @@ func answersCreate(created time.Time, intents ...time.Time) bool {
 	return false
 }
 
+// recordStrays gives each stray collection (by id) a record of its own and returns the record keys, so it is retired
+// like the shelf of any dropped list: looked up again, deleted only with the stage's summary, and retried by later
+// runs (the key is in no config) until the app confirms it gone.
+func recordStrays(ctx context.Context, db *sql.DB, app string, ids []string) ([]string, error) {
+	var keys []string
+	for _, id := range ids {
+		key := "stray:" + id
+		if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO lists_sinks(app, list, id) VALUES (?, ?, ?)`, app, key, id); err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	return keys, nil
+}
+
 func deleteRow(ctx context.Context, db *sql.DB, app, key string) error {
 	_, err := db.ExecContext(ctx, `DELETE FROM lists_sinks WHERE app=? AND list=?`, app, key)
 	return err

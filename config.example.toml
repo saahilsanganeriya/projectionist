@@ -306,9 +306,10 @@ window           = "03:00-08:00"
 dry_run          = false      # true: read and count everything, write nothing
 only             = []         # shelve only these lists (names); empty = all
 letterboxd_user  = "saahilsan"
-canon_refresh    = "168h"     # canon list pages are re-read weekly
+canon_refresh    = "20h"      # canon list pages are re-read on every daily run: the Top 500 changes as members rate
 own_refresh      = "20h"      # the owner's lists, films page and diary feed: daily
-export_dir       = "/volume1/docker/projectionist/data/letterboxd" # the unzipped Letterboxd export (lists/*.csv, watched.csv)
+export_dir       = "/volume1/docker/projectionist/data/letterboxd" # the unzipped Letterboxd export (lists/*.csv, watched.csv),
+                                 # mounted read-only by compose.yaml; missing or empty = an alert; "" = no export
 own_lists        = true
 skip_own         = ["*private*"] # the owner's lists to leave out: names or slugs, any case, "*" = any text; lists
                                  # private on Letterboxd are never shelved
@@ -323,11 +324,14 @@ home             = ["Letterboxd Top 500", "Criterion Collection", "Sight & Sound
 home_after       = "movie.recentlyadded"
 # To take a shelf away, leave its list out here (skip_own, only, the canon): a shelf deleted by hand in Plex or
 # Jellyfin is made again on the next run. A shelf whose summary you rewrite is yours: it stays when its list goes.
-# The canon defaults to the lists below (checked 2026-10-05); a [[stages.lists.canon]] table replaces all of them.
+# The canon defaults to the lists in lists.go's defaultCanon (checked 2026-10-05: Letterboxd Top 500, Criterion
+# Collection, Sight & Sound 2022 and its directors' poll, TSPDT 1000, Best Picture, Palme d'Or); a
+# [[stages.lists.canon]] table replaces all of them. A shelf of a canon list no longer named is deleted, if the stage
+# made it (its summary starts "On the NAS: "), even with no record of it: the gate-made "Letterboxd Top 250" goes so.
 # [[stages.lists.canon]]
 # name    = "Criterion Collection"
 # url     = "https://letterboxd.com/jbutts15/list/the-complete-criterion-collection/"
-# limit   = 0      # keep only the first N (the Top 250 is the Top 500 with limit = 250)
+# limit   = 0      # keep only the first N (a Top 250 is the Top 500 with limit = 250)
 # poster  = ""     # an image file instead of the generated poster
 
 # Which Claude model the stages that call one use, by date: the first rule whose `until` is still in the future wins

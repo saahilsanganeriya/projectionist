@@ -55,6 +55,9 @@ services:
       - /volume1/PlexMediaServer/subtitle-downloads:/volume1/PlexMediaServer/subtitle-downloads:ro
       # posters: the owner's poster exports and the Plex DB backups they are matched with, read when they change.
       - /volume1/PlexMediaServer/backups:/volume1/PlexMediaServer/backups:ro
+      # The owner's unzipped Letterboxd export: lists' export_dir (a missing or empty folder is an alert on every run)
+      # and tonight's letterboxd_dir.
+      - /volume1/docker/projectionist/data/letterboxd:/volume1/docker/projectionist/data/letterboxd:ro
     secrets: [jellyfin_key, tmdb_read_token, tmdb_api_key, fanart_api_key, anthropic_api_key] # /run/secrets/<name>, read-only
     logging:
       driver: json-file

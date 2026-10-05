@@ -38,7 +38,7 @@ const name = "lists"
 type Source struct {
 	Name   string `toml:"name"`
 	URL    string `toml:"url"`
-	Limit  int    `toml:"limit"`  // keep the first N entries: the Top 250 is the Top 500's first 250
+	Limit  int    `toml:"limit"`  // keep the first N entries (a Top 250 is the Top 500 with limit 250)
 	Poster string `toml:"poster"` // an image file to use instead of the generated poster
 }
 
@@ -72,7 +72,7 @@ func defaults() Options {
 		LetterboxdURL:  "https://letterboxd.com",
 		ShortURL:       "https://boxd.it",
 		UserAgent:      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36 projectionist/1.0 (+personal media server)",
-		CanonRefresh:   7 * 24 * time.Hour,
+		CanonRefresh:   20 * time.Hour, // read on every daily run: the Top 500 changes as members rate
 		OwnRefresh:     20 * time.Hour,
 		ExportDir:      "/volume1/docker/projectionist/data/letterboxd",
 		OwnLists:       true,
@@ -96,11 +96,12 @@ var defaultHome = []string{"Letterboxd Top 500", "Criterion Collection", "Sight 
 // Letterboxd shows them publicly.
 var defaultSkipOwn = []string{"*private*"}
 
-// defaultCanon was checked on 2026-10-05. Letterboxd retired its standalone Top 250 when the Top 500 launched
-// (2026-02-23; the old list answers 404), so the Top 250 is the Top 500's first 250 and costs no extra request.
+// defaultCanon was checked on 2026-10-05. The Top 500 is Letterboxd's own (account "official", boxd.it/8HjM): 500
+// narrative features over 5 pages, ranked by average member rating and restamped "As of <date>" as it changes, which
+// is why canon_refresh is under a day. It replaced the standalone Top 250 (2026-02-23; that list answers 404), and a
+// Top 250 shelf is no longer a default: the one the NAS gate made is retired as a stray.
 var defaultCanon = []Source{
 	{Name: "Letterboxd Top 500", URL: "https://letterboxd.com/official/list/letterboxds-top-500-films/"},
-	{Name: "Letterboxd Top 250", URL: "https://letterboxd.com/official/list/letterboxds-top-500-films/", Limit: 250},
 	{Name: "Criterion Collection", URL: "https://letterboxd.com/jbutts15/list/the-complete-criterion-collection/"},
 	{Name: "Sight & Sound 2022", URL: "https://letterboxd.com/sight_and_sound/list/the-greatest-films-of-all-time-2022/"},
 	{Name: "Sight & Sound 2022 Directors", URL: "https://letterboxd.com/sight_and_sound/list/directors-100-greatest-films-of-all-time/"},
@@ -162,8 +163,9 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		user: opt.User, f: newFetcher(opt.UserAgent, limiter, env.Log), db: db, now: env.Now, log: env.Log}
 
 	listLIDs, watched, err := readExport(opt.ExportDir)
-	if err != nil {
+	if err != nil { // the run goes on without it: the export only adds list codes and older watched films
 		env.Log.Warn("letterboxd export unreadable", "event", "export_error", "err", err)
+		rep.Alert("letterboxd export not read (mount it read-only, or set export_dir = \"\"): %v", err)
 	}
 	made, err := shelvedKeys(ctx, db)
 	if err != nil {
@@ -280,7 +282,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	summary := fmt.Sprintf("%d lists, %d films unresolved, %d Letterboxd requests in %s", len(lists), unresolved,
 		lb.f.requests, env.Now().Sub(start).Round(time.Second))
 	if opt.DryRun {
-		rep.Summary = fmt.Sprintf("dry run: %s; %d shelves to retire", summary, len(retire))
+		rep.Summary = fmt.Sprintf("dry run: %s; %d shelves to retire, %d strays", summary, len(retire), len(px.strays)+len(jf.strays))
 		return nil
 	}
 	for _, w := range []*writer{px.w, jf.w} {
@@ -347,9 +349,37 @@ func (r appReport) watched() map[int]bool {
 // titles the same way. Using one title in both apps keeps a later mirror of the owner's collection out of the shelf.
 func shelfTitle(name string, taken map[string]bool) string {
 	if taken[fold(name)] {
-		return name + " · Letterboxd"
+		return name + takenSuffix
 	}
 	return name
+}
+
+const takenSuffix = " · Letterboxd"
+
+// stray tells whether a collection is a shelf the stage made for a canon list the config no longer names, though no
+// record says so: the state database was lost, or another database's run made it (the NAS gate's Top 250). It
+// carries the stage's summary, that summary links no list of the owner's (an own list merely unreadable now is never
+// retired), and no configured canon list would adopt it by its title. The owner's own collections carry no such
+// summary, and one whose summary he rewrote is his.
+func stray(title, summary string, opt Options) bool {
+	i := strings.LastIndex(summary, " · ")
+	if !strings.HasPrefix(summary, summaryMarker) || i < 0 {
+		return false
+	}
+	link := summary[i+len(" · "):]
+	if _, whole, ok := strings.Cut(link, " of "); ok && strings.HasPrefix(link, "the first ") {
+		link = whole
+	}
+	u, err := url.Parse(link)
+	if err != nil || u.Host == "" || strings.HasPrefix(u.Path, "/"+opt.User+"/") {
+		return false
+	}
+	for _, src := range opt.Canon {
+		if sameTitle(title, src.Name) || sameTitle(title, src.Name+takenSuffix) {
+			return false
+		}
+	}
+	return true
 }
 
 func fold(title string) string { return strings.ToLower(strings.Trim(title, "\u200e ")) }
@@ -640,7 +670,7 @@ func plan(l list, films map[string]film, owned map[int]bool, seen seenSet) shelf
 		}
 	}
 	link := l.URL
-	if l.Limit > 0 { // no list of its own on Letterboxd: the Top 250 is the Top 500's head
+	if l.Limit > 0 { // a limited shelf has no list of its own on Letterboxd
 		link = fmt.Sprintf("the first %d of %s", l.Limit, l.URL)
 	}
 	s.Summary = fmt.Sprintf("On the NAS: %d of %d · seen %d · %s", s.Owned, s.Total, s.Seen, link)

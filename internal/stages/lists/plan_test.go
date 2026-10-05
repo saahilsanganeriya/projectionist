@@ -3,6 +3,7 @@ package lists
 import (
 	"context"
 	"reflect"
+	"slices"
 	"testing"
 
 	"projectionist/internal/fake"
@@ -143,8 +144,12 @@ func TestPlanHubMoves(t *testing.T) {
 }
 
 // Catches: a configured canon entry inheriting a default's limit (TOML fills an existing slice element
-// by element: the second entry here would keep the Top 250's limit), and the shared defaults changed by a decode.
+// by element: the second entry here would keep the default's limit), and the shared defaults changed by a decode.
 func TestConfiguredCanonStartsClean(t *testing.T) {
+	shipped := defaultCanon
+	defaultCanon = []Source{{Name: "D1", URL: "https://letterboxd.com/x/list/d/"}, {Name: "D2", URL: "https://letterboxd.com/x/list/d/", Limit: 250}}
+	t.Cleanup(func() { defaultCanon = shipped })
+	want0 := slices.Clone(defaultCanon)
 	h := fake.NewEnv(t, nil)
 	h.SetOptions("[[canon]]\nname = \"A\"\nurl = \"https://letterboxd.com/x/list/a/\"\n" +
 		"[[canon]]\nname = \"B\"\nurl = \"https://letterboxd.com/x/list/b/\"\n")
@@ -158,7 +163,7 @@ func TestConfiguredCanonStartsClean(t *testing.T) {
 			t.Errorf("run %d: canon = %+v", run, opt.Canon)
 		}
 	}
-	if defaultCanon[1].Name != "Letterboxd Top 250" || defaultCanon[1].Limit != 250 {
-		t.Errorf("defaults changed: %+v", defaultCanon[1])
+	if !reflect.DeepEqual(defaultCanon, want0) {
+		t.Errorf("defaults changed: %+v", defaultCanon)
 	}
 }
