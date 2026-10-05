@@ -96,6 +96,7 @@ image, enables the stage's `[stages.<name>]` table, and imports any legacy state
 | 9 | ssdmirror | `ssd-copy/fill.py` | **Ported.** On the NAS, read-only: the dry run plans the same 640 films A→Z as fill.py's own planning code on the same free space. In scratch: SIGKILL mid-file, and the rerun resumes from the partial (same bytes, no second file). Copies run at the idle I/O class; `io_class = "best-effort"` gives fill.py's nice 19 instead. |
 | 10 | backups | `backup_plex_db.sh`, `export_customizations.py` | `PRAGMA integrity_check` = ok on the copy. The exported file set equals the Python's. |
 | 11 | posters | `posters/posters.py` (runs on the Mac) | Last. It needs AI gateway keys, which would become a compose secret. Replay of `decisions.json` gives identical choices. |
+| 12 | audit | New (read-only library audit; replaces nothing) | Table tests on every category and file-level naming rule. A move while the run reads the library (between a folder's listing and its read, after the walk, or into a folder already read) is never a finding or an alert, and such a run is not kept as the baseline. A probe killed on 3 runs in a row files the video as unreadable. On the NAS, read-only against the real library with the report in scratch: counts per category with examples, category 1 compared with the lead's leftover-folder count. |
 
 Order: small and independent stages first, so the pattern is proven before the rename stages. The shared
 probe/details work comes before the rename planner, because the planner consumes subtitle facts. The rename
