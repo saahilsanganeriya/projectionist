@@ -11,8 +11,8 @@ package subtitles
 // it; GATE_VIDEOS (files, one per line) -> hashes.tsv; GATE_PAIRS (pairs.tsv: id, framecrc file, duration, candidate
 // file) -> fits.tsv; GATE_DOWNLOADS (id, raw download file, declared encoding) -> decoded.tsv: the sha1 of the
 // decoded text and of that text with the ad blocks stripped; GATE_ALASS (id, video, framecrc, duration, candidate
-// files...) with GATE_ALASS_BIN and GATE_FFMPEG_DIR -> alass.tsv: the stage's alass route per candidate, scored
-// against the PGS captions it never saw.
+// files...) with GATE_ALASS_BIN and GATE_FFMPEG_DIR -> alass.tsv: per candidate, the stage's alass route scored
+// against the PGS captions it never saw, and its caption route with the alass rescue.
 
 import (
 	"context"
@@ -29,6 +29,8 @@ import (
 
 	"projectionist/internal/config"
 	"projectionist/internal/fake"
+	"projectionist/internal/probe"
+	"projectionist/internal/stage"
 )
 
 func gateLines(t *testing.T, env string) []string {
@@ -134,16 +136,17 @@ func TestGateAlass(t *testing.T) {
 	lines := gateLines(t, "GATE_ALASS")
 	h := fake.NewEnv(t, nil) // nobody watching
 	h.Env.FFmpeg = config.FFmpeg{Dir: os.Getenv("GATE_FFMPEG_DIR")}
-	r := &run{env: h.Env, opt: Options{Alass: os.Getenv("GATE_ALASS_BIN")}}
+	r := &run{env: h.Env, opt: Options{Alass: os.Getenv("GATE_ALASS_BIN")}, rep: &stage.Report{}, alerted: map[string]bool{}}
 	out := make([]string, len(lines))
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 3)
+	sem := make(chan struct{}, 1) // one alass decode at a time: the NAS is shared
 	for i, line := range lines {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			ctx := context.Background()
 			f := strings.Split(line, "\t")
 			raw, _ := exec.Command(r.env.FFmpeg.FFprobePath(), "-v", "error", "-select_streams", "a", "-show_entries",
 				"stream=index:stream_disposition=default", "-of", "csv=p=0", f[1]).Output()
@@ -154,45 +157,39 @@ func TestGateAlass(t *testing.T) {
 					break
 				}
 			}
-			dir := t.TempDir()
-			ref := reference{label: "alass", dir: dir, speech: filepath.Join(dir, "speech.srt")}
-			if _, err := r.cmd(context.Background(), r.opt.Alass, f[1], "_", ref.speech, "--index", audio); err != nil {
+			index, _ := strconv.Atoi(audio)
+			ti := &title{path: f[1], info: probe.Info{Audio: []probe.Audio{{Index: index, Default: true}}}}
+			speech := reference{label: "alass"}
+			defer speech.cleanup()
+			if err := r.hear(ctx, ti, &speech); err != nil {
 				out[i] = f[0] + "\tspeech failed: " + err.Error() + "\n"
 				return
 			}
 			framecrc, _ := os.ReadFile(f[2])
 			duration, _ := strconv.ParseFloat(f[3], 64)
-			starts, _, _ := pgsReference(string(framecrc), duration)
+			starts, bits, _ := pgsReference(string(framecrc), duration)
 			for _, cand := range f[4:] {
 				txt, _ := os.ReadFile(cand)
-				attempt := map[string]any{}
-				aligned, result, ok := r.fit(context.Background(), ref, string(txt), attempt)
-				med, check := "", ""
+				// the alass route, scored against the captions it never saw
+				a := map[string]any{}
+				aligned, result, ok := r.fit(ctx, &speech, string(txt), a)
+				med := ""
 				if ok {
 					med = strconv.FormatFloat(medianOffsetMS(cues(aligned), starts), 'f', 0, 64)
 				}
-				if aligned == "" { // what alass made of it, even when rejected
-					b, _ := os.ReadFile(filepath.Join(dir, "aligned.srt"))
-					aligned = string(b)
+				// the caption route as fetch runs it, the rescue included (it reuses the speech heard above)
+				pgs := reference{label: "pgs", bits: bits, starts: starts, dir: speech.dir, speech: speech.speech, talk: speech.talk}
+				p := map[string]any{}
+				pout, presult, pok := r.fit(ctx, &pgs, string(txt), p)
+				if !pok {
+					pout, presult, pok = r.rescue(ctx, ti, &pgs, string(txt), p)
 				}
-				speech, _ := os.ReadFile(ref.speech)
-				var first []span // the Python's speech test: each cue's first second against the speech segments
-				for _, c := range cues(aligned) {
-					first = append(first, span{c.start, min(c.end, c.start+1)})
+				pmed := ""
+				if pok {
+					pmed = strconv.FormatFloat(medianOffsetMS(cues(pout), starts), 'f', 0, 64)
 				}
-				if fit, fok := align(first, spanBits(cues(string(speech)), 1)); len(first) >= minCues {
-					check = fmt.Sprintf("%v z=%.1f agree=%d ratio=%.5f off=%.2f", fok, fit.Z, fit.Agree, fit.Ratio, fit.Offset)
-				}
-				var raw []span // the same test on the candidate as downloaded
-				for _, c := range cues(string(txt)) {
-					raw = append(raw, span{c.start, min(c.end, c.start+1)})
-				}
-				asIs := ""
-				if fit, fok := align(raw, spanBits(cues(string(speech)), 1)); len(raw) >= minCues {
-					asIs = fmt.Sprintf("as-is %v z=%.1f agree=%d ratio=%.5f off=%.2f", fok, fit.Z, fit.Agree, fit.Ratio, fit.Offset)
-				}
-				out[i] += fmt.Sprintf("%s\t%s\t%v\t%s\t%v\t%v\t%v\t%s\t%s\t%s\n", f[0], filepath.Base(cand), ok, result,
-					attempt["offset_ms"], attempt["ratio"], attempt["agree"], med, check, asIs)
+				out[i] += fmt.Sprintf("%s\t%s\talass\t%v\t%s\t%v\t%v\t%v\tz=%v\tchunks=%v\t%s\tpgs\t%v\t%s\t%v\t%s\n", f[0], filepath.Base(cand),
+					ok, result, a["offset_ms"], a["ratio"], a["agree"], a["z"], a["chunks"], med, pok, presult, p["rescue"], pmed)
 			}
 		}()
 	}
