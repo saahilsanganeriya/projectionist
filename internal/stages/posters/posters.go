@@ -9,7 +9,8 @@
 //	            English, textless or the title's own language, best voted first, near-duplicates dropped by dHash
 //	judge       one vision call per title on the owner's Anthropic key, the model chosen by the dated policy
 //	            (env.LLM), under a hard budget; a backlog goes through the Message Batches API at half price. The
-//	            owner's UPLOAD is never replaced, the owner's PICK only by a candidate scored at least 2 points higher
+//	            owner's UPLOAD and PICK are never replaced, Plex's DEFAULT only by a candidate scored at least 2 points
+//	            higher; a pool judged before is decided again from its stored scores when these rules change
 //	apply       an outbox per app (Plex, Jellyfin are sinks), retried with backoff; Plex's lock is its own step
 //
 // While anyone but the owner watches, the heavy steps wait for a later run: downloads and resizes, batch uploads and

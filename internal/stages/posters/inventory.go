@@ -94,7 +94,7 @@ func inventory(moviesRoot, tvRoot string) ([]Title, error) {
 
 const (
 	ownerUpload  = "upload"  // the owner uploaded it: never replaced
-	ownerPick    = "pick"    // the owner chose it among Plex's: replaced only by a clearly better one
+	ownerPick    = "pick"    // the owner chose it among Plex's: never replaced either
 	ownerDefault = "default" // Plex's own choice
 )
 

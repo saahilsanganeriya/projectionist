@@ -59,20 +59,20 @@ const (
 // thumbBox is the most a thumbnail measures: ⌈252/28⌉×⌈392/28⌉ = 126 visual tokens at most.
 var thumbBox = image.Rect(0, 0, 252, 392)
 
-// gather builds a title's candidate pool. An owner upload is never replaced, so it needs no other candidate. An owner
-// poster that cannot be read stops the title: without it any candidate would win, with no margin over the owner's.
+// gather builds a title's candidate pool. The owner's upload and pick are never replaced, so they need no other
+// candidate. An owner poster that cannot be read skips the title (ownerUnreadable): without it Plex's default would
+// lose to any candidate, with no margin over it, and an unreadable upload or pick must not be sent to the apps.
 func (r *run) gather(ctx context.Context, it *row) error {
 	t := it.Title
 	var pool []Candidate
 	if p, ok := r.owners[t.Key]; ok {
 		owner := Candidate{URL: "owner:" + p.File, Thumb: "owner:" + p.File, Source: srcOwner, Owner: p.State}
-		if p.State == ownerUpload {
+		if err := r.withThumb(ctx, &owner); err != nil {
+			return r.ownerUnreadable(ctx, t, p, err)
+		}
+		if p.State == ownerUpload || p.State == ownerPick {
 			it.Cands = []Candidate{owner}
 			return nil
-		}
-		if err := r.withThumb(ctx, &owner); err != nil {
-			r.alert("posters: %s waits: the owner's %s poster %s is unreadable: %v", t.Key, p.State, p.File, err)
-			return err
 		}
 		pool = append(pool, owner)
 	}
@@ -89,6 +89,33 @@ func (r *run) gather(ctx context.Context, it *row) error {
 	it.Cands = r.fill(ctx, pool, slices.DeleteFunc(info.posters, func(c Candidate) bool { return !keep(c) }),
 		slices.DeleteFunc(fan, func(c Candidate) bool { return !keep(c) }))
 	return nil
+}
+
+// ownerUnreadable alerts once about a title whose owner poster cannot be read (a truncated JPEG in the export) and
+// returns the error that skips it: it gets no verdict, so the apps keep the poster they show. The alert is recorded
+// with the title's inputs (the export's file, its size and time) and raised again only when they change, so one bad
+// file does not hold /health at 503 run after run.
+func (r *run) ownerUnreadable(ctx context.Context, t Title, p ownerPoster, readErr error) error {
+	inputs := r.poolSig(t)
+	if fi, err := os.Stat(p.File); err == nil {
+		inputs += fmt.Sprintf(" size=%d mtime=%d", fi.Size(), fi.ModTime().UnixNano())
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	told := map[string]string{} // title key → the inputs it was alerted with
+	if _, err := r.env.Store.GetJSON(ctx, name, "owner_unreadable", &told); err != nil {
+		return err
+	}
+	if told[t.Key] != inputs {
+		told[t.Key] = inputs
+		if err := r.env.Store.PutJSON(context.WithoutCancel(ctx), name, "owner_unreadable", told); err != nil {
+			return err
+		}
+		r.rep.Alert("posters: %s is skipped and keeps the poster the apps show: the owner's %s poster %s is unreadable (%v); "+
+			"this alert comes again only when that file changes", t.Key, p.State, p.File, readErr)
+	}
+	r.rep.Count("owner_unreadable", 1)
+	return fmt.Errorf("the owner's %s poster is unreadable: %w", p.State, readErr)
 }
 
 // fill takes TMDB's and fanart.tv's posters in turn, each list best first, and keeps those that are not the same art

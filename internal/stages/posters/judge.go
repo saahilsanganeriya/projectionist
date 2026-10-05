@@ -37,7 +37,7 @@ shape: {"scores": {"A": 7, "B": 4}, "reason": "<at most 15 words on why the best
 // Verdict is the decision for one candidate set; a different set (another source, a new poster) is judged again.
 type Verdict struct {
 	Choice string             `json:"choice"` // Candidate.URL
-	Rule   string             `json:"rule"`   // upload | single | judged | kept | unjudged
+	Rule   string             `json:"rule"`   // upload | owner_pick | single | judged | kept | unjudged
 	Reason string             `json:"reason,omitempty"`
 	Scores map[string]float64 `json:"scores,omitempty"` // by Candidate.URL
 	Model  string             `json:"model,omitempty"`
@@ -85,7 +85,21 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 			continue
 		}
 		of := setID(it.Cands)
-		if it.Verdict != nil && it.Verdict.Of == of || inFlight[it.Title.Key+" "+of] {
+		if inFlight[it.Title.Key+" "+of] {
+			continue
+		}
+		// A pool decided before is decided again by today's rules from its stored scores, with no call. An unjudged
+		// one whose unusable answers no longer count (callState) is asked again.
+		if old := it.Verdict; old != nil && old.Of == of && (old.Rule != "unjudged" || unusable[it.Title.Key+" "+of] >= 2) {
+			if v := redecide(it.Cands, *old); v.Choice != old.Choice || v.Rule != old.Rule {
+				v.At = r.env.Now()
+				if err := r.saveVerdict(ctx, it, v); err != nil {
+					return err
+				}
+				r.count("redecided", 1)
+				r.env.Log.Info("decided again from stored scores", "event", "title_redecided", "item", it.Title.Key,
+					"from", old.Rule, "to", v.Rule)
+			}
 			continue
 		}
 		v, decided := shortcut(it.Cands)
@@ -125,21 +139,27 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 	return nil
 }
 
-// shortcut is the verdict that needs no judge: the owner's upload stays, and a lone candidate wins.
+// shortcut is the verdict that needs no judge: the owner's upload and his pick stay, and a lone candidate wins. His
+// picks are often deliberate alternative art, where the judge prefers mainstream key art.
 func shortcut(cands []Candidate) (Verdict, bool) {
 	switch {
 	case cands[0].Owner == ownerUpload:
 		return Verdict{Choice: cands[0].URL, Rule: "upload"}, true
+	case cands[0].Owner == ownerPick:
+		return Verdict{Choice: cands[0].URL, Rule: "owner_pick"}, true
 	case len(cands) == 1:
 		return Verdict{Choice: cands[0].URL, Rule: "single"}, true
 	}
 	return Verdict{}, false
 }
 
-// decide applies the owner's policy to the judge's scores (by candidate index): Plex's own default poster yields to
-// any higher score, the owner's pick only to one at least two points higher; on a tie the earlier candidate (the
-// owner's, then the better-voted) stays.
+// decide applies the owner's policy to the judge's scores (by candidate index): his upload and pick stay (shortcut),
+// and Plex's own default poster yields only to a candidate scored at least 2 points higher (1 is within the judge's
+// noise); on a tie the earlier candidate (the owner's, then the better-voted) stays.
 func decide(cands []Candidate, scores map[int]float64) (int, string) {
+	if v, ok := shortcut(cands); ok {
+		return 0, v.Rule
+	}
 	best := -1
 	for i := range cands {
 		if s, ok := scores[i]; ok && (best < 0 || s > scores[best]) {
@@ -150,15 +170,24 @@ func decide(cands []Candidate, scores map[int]float64) (int, string) {
 		return 0, "unjudged"
 	}
 	if cands[0].Source == srcOwner {
-		margin := 1.0
-		if cands[0].Owner == ownerPick {
-			margin = 2
-		}
-		if own, ok := scores[0]; !ok || scores[best] < own+margin {
+		if own, ok := scores[0]; !ok || scores[best] < own+2 {
 			return 0, "kept"
 		}
 	}
 	return best, "judged"
+}
+
+// redecide is v, a verdict on this same pool, under today's policy: decide again from its stored scores.
+func redecide(cands []Candidate, v Verdict) Verdict {
+	byIndex := map[int]float64{}
+	for i, c := range cands {
+		if s, ok := v.Scores[c.URL]; ok {
+			byIndex[i] = s
+		}
+	}
+	i, rule := decide(cands, byIndex)
+	v.Choice, v.Rule = cands[i].URL, rule
+	return v
 }
 
 // order is the stable per-title shuffle of candidate indices behind letters A..F, which fights position bias.
@@ -266,8 +295,8 @@ func parseAnswer(text string) (map[string]float64, string, error) {
 		return nil, "", fmt.Errorf("no JSON in %q", clip(text))
 	}
 	var a struct {
-		Scores map[string]float64 `json:"scores"`
-		Reason string             `json:"reason"`
+		Scores letterScores `json:"scores"`
+		Reason string       `json:"reason"`
 	}
 	if err := json.NewDecoder(strings.NewReader(text[i:])).Decode(&a); err != nil {
 		return nil, "", fmt.Errorf("%w in %q", err, clip(text))
@@ -282,6 +311,25 @@ func parseAnswer(text string) (map[string]float64, string, error) {
 		return nil, "", fmt.Errorf("no scores in %q", clip(text))
 	}
 	return out, a.Reason, nil
+}
+
+// letterScores is the answer's "scores" object without the keys whose value is not a number: 25 of the first 2,818
+// answers put their "reason" in there too.
+type letterScores map[string]float64
+
+func (s *letterScores) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*s = letterScores{}
+	for k, v := range raw {
+		var f float64
+		if json.Unmarshal(v, &f) == nil {
+			(*s)[k] = f
+		}
+	}
+	return nil
 }
 
 func clip(s string) string {
@@ -491,9 +539,11 @@ func (r *run) setBatch(ctx context.Context, ids []int64, batch string) error {
 }
 
 // callState is, per "item of", whether a call is in flight and how many billed answers were unusable. Failures that
-// were never answered (outages, expired batches) do not count: the title is simply asked again on a later run.
+// were never answered (outages, expired batches) do not count: the title is simply asked again on a later run. Nor do
+// the answers the parser misread before it ignored a "reason" inside "scores": they had scores.
 func (r *run) callState(ctx context.Context) (map[string]bool, map[string]int, error) {
-	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT item, of, state FROM posters_calls WHERE state IN ('pending', 'unusable')`)
+	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT item, of, state FROM posters_calls WHERE state = 'pending'
+		OR state = 'unusable' AND error NOT LIKE 'json: cannot unmarshal string into Go struct field .scores of type float64%'`)
 	if err != nil {
 		return nil, nil, err
 	}
