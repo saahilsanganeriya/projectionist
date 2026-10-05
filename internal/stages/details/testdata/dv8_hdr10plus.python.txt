@@ -1,0 +1,10 @@
+Title:           Dungeons & Dragons - Honor Among Thieves (2023) {tmdb-493529}
+Original name:   Dungeons.and.Dragons.Honor.Among.Thieves.2023.2160p.HDR10Plus.DV.WEBRip.6CH.x265.HEVC-PSA.mkv
+Original folder: Dungeons.and.Dragons.Honor.Among.Thieves.2023.2160p.HDR10Plus.DV.WEBRip.6CH.x265.HEVC-PSA
+Resolution:      3840x1608 (4K)
+Video:           x265 (HEVC) · 10-bit · Dolby Vision profile 8 (+HDR10 base) · 23.976 fps · 3.5 Mb/s
+Audio:           eng AAC 5.1
+Subtitles:       eng subrip; eng subrip
+Container:       matroska · 3.51 GB · 2h 14m · 0 chapters
+Source · group:  WEBRip · PSA
+Identity:        tmdb-493529

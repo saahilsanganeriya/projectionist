@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,9 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrNotFound matches Jellyfin's 404 (errors.Is): the item or user does not exist, e.g. removed since a listing.
+var ErrNotFound = errors.New("jellyfin: not found")
 
 type Client struct {
 	base    string
@@ -23,26 +27,38 @@ func New(baseURL, keyFile string, timeout time.Duration) *Client {
 	return &Client{base: baseURL, keyFile: keyFile, http: &http.Client{Timeout: timeout}}
 }
 
+// WithTimeout is a copy of c whose requests each get timeout instead (see plex.Client.WithTimeout).
+func (c *Client) WithTimeout(timeout time.Duration) *Client {
+	return &Client{base: c.base, keyFile: c.keyFile, http: &http.Client{Timeout: timeout}}
+}
+
 func (c *Client) do(ctx context.Context, method, path string, in any, out any) error {
+	if in == nil {
+		return c.send(ctx, method, path, "", nil, out)
+	}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	return c.send(ctx, method, path, "application/json", raw, out)
+}
+
+func (c *Client) send(ctx context.Context, method, path, contentType string, body []byte, out any) error {
 	key, err := os.ReadFile(c.keyFile)
 	if err != nil {
 		return fmt.Errorf("jellyfin key: %w", err)
 	}
-	var body io.Reader
-	if in != nil {
-		raw, err := json.Marshal(in)
-		if err != nil {
-			return err
-		}
-		body = bytes.NewReader(raw)
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rd)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", fmt.Sprintf(`MediaBrowser Token="%s"`, strings.TrimSpace(string(key))))
-	if in != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -54,7 +70,7 @@ func (c *Client) do(ctx context.Context, method, path string, in any, out any) e
 		return fmt.Errorf("jellyfin %s %s: %w", method, path, err)
 	}
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("jellyfin %s %s: HTTP %d", method, path, resp.StatusCode)
+		return &StatusError{Method: method, Path: path, Code: resp.StatusCode}
 	}
 	if out == nil || len(bytes.TrimSpace(raw)) == 0 {
 		return nil
@@ -63,6 +79,20 @@ func (c *Client) do(ctx context.Context, method, path string, in any, out any) e
 		return fmt.Errorf("jellyfin %s %s: %w", method, path, err)
 	}
 	return nil
+}
+
+// StatusError is a non-2xx answer; Code tells an outage (5xx) from a refusal (401/403).
+type StatusError struct {
+	Method, Path string
+	Code         int
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("jellyfin %s %s: HTTP %d", e.Method, e.Path, e.Code)
+}
+
+func (e *StatusError) Is(target error) bool {
+	return target == ErrNotFound && e.Code == http.StatusNotFound
 }
 
 func (c *Client) GetJSON(ctx context.Context, path string, out any) error {
@@ -74,9 +104,9 @@ func (c *Client) PostJSON(ctx context.Context, path string, body, out any) error
 	return c.do(ctx, http.MethodPost, path, body, out)
 }
 
-// Delete sends a DELETE whose answer does not matter (e.g. removing items from a collection).
-func (c *Client) Delete(ctx context.Context, path string) error {
-	return c.do(ctx, http.MethodDelete, path, nil, nil)
+// PostBody sends a raw body, e.g. a base64 image for POST /Items/<id>/Images/Primary.
+func (c *Client) PostBody(ctx context.Context, path, contentType string, body []byte) error {
+	return c.send(ctx, http.MethodPost, path, contentType, body, nil)
 }
 
 type Session struct {

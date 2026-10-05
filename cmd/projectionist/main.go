@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -101,7 +102,7 @@ func run(cfgPath, only string) int {
 		Now: func() time.Time { return time.Now().UTC() },
 		NewEnv: func(s stage.Stage, l *slog.Logger) *stage.Env {
 			return &stage.Env{
-				Log: l, Store: st, Plex: px, Jellyfin: jf, Probe: prober, TMDB: tm, Fanart: fa, FFmpeg: cfg.FFmpeg,
+				Log: l, Store: st, Plex: px, Jellyfin: jf, Probe: prober, TMDB: tm, Fanart: fa, LLM: cfg.LLM.Policy, FFmpeg: cfg.FFmpeg, Metrics: metrics,
 				Viewers: &viewers.Gate{Plex: px, Jellyfin: jf, Owners: owners, Poll: 30 * time.Second, Log: l},
 				Now:     func() time.Time { return time.Now().UTC() },
 				Loc:     cfg.Location(),
@@ -115,6 +116,8 @@ func run(cfgPath, only string) int {
 	defer stop()
 
 	var jobs []scheduler.Job
+	mux := http.NewServeMux()
+	mux.Handle("/", server.Handler(runner, st, metrics))
 	for _, s := range stages() {
 		sched, err := cfg.Schedule(s.Name())
 		if err != nil {
@@ -131,6 +134,11 @@ func run(cfgPath, only string) int {
 		if only == "" && sched.Enabled {
 			w, _ := config.ParseWindow(sched.Window)
 			jobs = append(jobs, scheduler.Job{Stage: s, Every: sched.Every, Window: w})
+			if h, ok := s.(stage.Hooker); ok {
+				for pattern, handler := range h.Hooks(runner.NewEnv(s, log.With("stage", s.Name()))) {
+					mux.Handle(pattern, handler)
+				}
+			}
 		}
 	}
 	if only != "" {
@@ -140,7 +148,7 @@ func run(cfgPath, only string) int {
 	sched = &scheduler.Scheduler{Jobs: jobs, Runner: runner, Loc: cfg.Location()} // before any goroutine can call Trigger
 	log.Info("serving", "event", "start", "listen", cfg.Listen, "stages", len(jobs))
 	go func() {
-		if err := server.Serve(ctx, cfg.Listen, server.Handler(runner, st, metrics)); err != nil {
+		if err := server.Serve(ctx, cfg.Listen, mux); err != nil {
 			log.Error("http", "event", "http_error", "err", err)
 			stop()
 		}

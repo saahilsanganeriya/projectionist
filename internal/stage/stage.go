@@ -5,11 +5,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"projectionist/internal/config"
 	"projectionist/internal/fanart"
 	"projectionist/internal/jellyfin"
+	"projectionist/internal/llm"
+	"projectionist/internal/obs"
 	"projectionist/internal/plex"
 	"projectionist/internal/probe"
 	"projectionist/internal/store"
@@ -25,6 +28,12 @@ type Stage interface {
 	Run(ctx context.Context, env *Env, rep *Report) error
 }
 
+// Hooker is a stage that also takes events pushed to the service's HTTP listener (e.g. Plex webhooks). The
+// handlers only record what arrived; the stage's next run acts on it. Mounted by `serve` for enabled stages.
+type Hooker interface {
+	Hooks(env *Env) map[string]http.Handler // "POST /hooks/<name>" → handler
+}
+
 // Env is everything a stage may use. Clients read their secrets from files on every call, never from env vars.
 type Env struct {
 	Log      *slog.Logger // already tagged stage=<name>
@@ -35,7 +44,9 @@ type Env struct {
 	Probe    *probe.Prober
 	TMDB     *tmdb.Client   // the only source of identity, episodes, collections and external ids; one per process
 	Fanart   *fanart.Client // community artwork, keyed by TMDB/IMDb id (films) or TVDB id (shows)
+	LLM      llm.Policy     // which Claude model, by date ([[llm.policy]]); nil = llm.DefaultPolicy
 	FFmpeg   config.FFmpeg
+	Metrics  *obs.Metrics     // the /metrics registry, for a stage's own gauges and counters
 	Now      func() time.Time // UTC
 	Loc      *time.Location   // config timezone: only for text the owner reads (status files)
 	// Options decodes this stage's own keys from its [stages.<name>] table into v (call it at the top of Run).

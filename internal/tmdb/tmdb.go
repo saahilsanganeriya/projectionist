@@ -132,6 +132,7 @@ type Details struct {
 	OriginalTitle string      `json:"original_title"`
 	Date          Date        `json:"release_date"`
 	Overview      string      `json:"overview"`
+	Language      string      `json:"original_language"` // ISO 639-1
 	Genres        []Genre     `json:"genres"`
 	PosterPath    string      `json:"poster_path"`
 	BackdropPath  string      `json:"backdrop_path"`

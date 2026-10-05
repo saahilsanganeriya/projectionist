@@ -1,0 +1,290 @@
+{
+    "frames": [
+        {
+            "side_data_list": [
+                {
+                    "side_data_type": "Mastering display metadata",
+                    "red_x": "34000/50000",
+                    "red_y": "16000/50000",
+                    "green_x": "13250/50000",
+                    "green_y": "34500/50000",
+                    "blue_x": "7500/50000",
+                    "blue_y": "3000/50000",
+                    "white_point_x": "15635/50000",
+                    "white_point_y": "16450/50000",
+                    "min_luminance": "50/10000",
+                    "max_luminance": "10000000/10000"
+                },
+                {
+                    "side_data_type": "Content light level metadata",
+                    "max_content": 820,
+                    "max_average": 330
+                },
+                {
+                    "side_data_type": "HDR Dynamic Metadata SMPTE2094-40 (HDR10+)",
+                    "application version": 1,
+                    "num_windows": 1,
+                    "targeted_system_display_maximum_luminance": "500/1",
+                    "maxscl": "4602/100000",
+                    "maxscl": "4948/100000",
+                    "maxscl": "5225/100000",
+                    "average_maxrgb": "187/100000",
+                    "num_distribution_maxrgb_percentiles": 9,
+                    "distribution_maxrgb_percentage": 1,
+                    "distribution_maxrgb_percentile": "16/100000",
+                    "distribution_maxrgb_percentage": 5,
+                    "distribution_maxrgb_percentile": "2660/100000",
+                    "distribution_maxrgb_percentage": 10,
+                    "distribution_maxrgb_percentile": "97/100000",
+                    "distribution_maxrgb_percentage": 25,
+                    "distribution_maxrgb_percentile": "62/100000",
+                    "distribution_maxrgb_percentage": 50,
+                    "distribution_maxrgb_percentile": "123/100000",
+                    "distribution_maxrgb_percentage": 75,
+                    "distribution_maxrgb_percentile": "235/100000",
+                    "distribution_maxrgb_percentage": 90,
+                    "distribution_maxrgb_percentile": "469/100000",
+                    "distribution_maxrgb_percentage": 95,
+                    "distribution_maxrgb_percentile": "609/100000",
+                    "distribution_maxrgb_percentage": 99,
+                    "distribution_maxrgb_percentile": "2707/100000",
+                    "fraction_bright_pixels": "0/1000",
+                    "knee_point_x": "0/4095",
+                    "knee_point_y": "0/4095",
+                    "num_bezier_curve_anchors": 9,
+                    "bezier_curve_anchors": "102/1023",
+                    "bezier_curve_anchors": "205/1023",
+                    "bezier_curve_anchors": "307/1023",
+                    "bezier_curve_anchors": "410/1023",
+                    "bezier_curve_anchors": "512/1023",
+                    "bezier_curve_anchors": "614/1023",
+                    "bezier_curve_anchors": "717/1023",
+                    "bezier_curve_anchors": "819/1023",
+                    "bezier_curve_anchors": "922/1023"
+                },
+                {
+                    "side_data_type": "Dolby Vision RPU Data"
+                },
+                {
+                    "side_data_type": "Dolby Vision Metadata",
+                    "rpu_type": 2,
+                    "rpu_format": 18,
+                    "vdr_rpu_profile": 1,
+                    "vdr_rpu_level": 0,
+                    "chroma_resampling_explicit_filter_flag": 0,
+                    "coef_data_type": 0,
+                    "coef_log2_denom": 23,
+                    "vdr_rpu_normalized_idc": 1,
+                    "bl_video_full_range_flag": 0,
+                    "bl_bit_depth": 10,
+                    "el_bit_depth": 10,
+                    "vdr_bit_depth": 12,
+                    "spatial_resampling_filter_flag": 0,
+                    "el_spatial_resampling_filter_flag": 0,
+                    "disable_residual_flag": 1,
+                    "vdr_rpu_id": 0,
+                    "mapping_color_space": 0,
+                    "mapping_chroma_format_idc": 0,
+                    "nlq_method_idc": -1,
+                    "nlq_method_idc_name": "none",
+                    "num_x_partitions": 1,
+                    "num_y_partitions": 1,
+                    "components": [
+                        {
+                            "pivots": "0 1023",
+                            "pieces": [
+                                {
+                                    "mapping_idc": 0,
+                                    "mapping_idc_name": "polynomial",
+                                    "poly_order": 1,
+                                    "poly_coef": "0 8388608"
+                                }
+                            ]
+                        },
+                        {
+                            "pivots": "0 1023",
+                            "pieces": [
+                                {
+                                    "mapping_idc": 0,
+                                    "mapping_idc_name": "polynomial",
+                                    "poly_order": 1,
+                                    "poly_coef": "0 8388608"
+                                }
+                            ]
+                        },
+                        {
+                            "pivots": "0 1023",
+                            "pieces": [
+                                {
+                                    "mapping_idc": 0,
+                                    "mapping_idc_name": "polynomial",
+                                    "poly_order": 1,
+                                    "poly_coef": "0 8388608"
+                                }
+                            ]
+                        }
+                    ],
+                    "dm_metadata_id": 0,
+                    "scene_refresh_flag": 1,
+                    "ycc_to_rgb_matrix": "9574/8192 0/8192 13802/8192 9574/8192 -1540/8192 -5348/8192 9574/8192 17610/8192 0/8192",
+                    "ycc_to_rgb_offset": "16777216/268435456 134217728/268435456 134217728/268435456",
+                    "rgb_to_lms_matrix": "7222/16384 8771/16384 390/16384 2654/16384 12430/16384 1300/16384 0/16384 422/16384 15962/16384",
+                    "signal_eotf": 65535,
+                    "signal_eotf_param0": 0,
+                    "signal_eotf_param1": 0,
+                    "signal_eotf_param2": 0,
+                    "signal_bit_depth": 12,
+                    "signal_color_space": 0,
+                    "signal_chroma_format": 0,
+                    "signal_full_range_flag": 1,
+                    "source_min_pq": 7,
+                    "source_max_pq": 3079,
+                    "source_diagonal": 42
+                }
+            ]
+        },
+        {
+            "side_data_list": [
+                {
+                    "side_data_type": "Mastering display metadata",
+                    "red_x": "34000/50000",
+                    "red_y": "16000/50000",
+                    "green_x": "13250/50000",
+                    "green_y": "34500/50000",
+                    "blue_x": "7500/50000",
+                    "blue_y": "3000/50000",
+                    "white_point_x": "15635/50000",
+                    "white_point_y": "16450/50000",
+                    "min_luminance": "50/10000",
+                    "max_luminance": "10000000/10000"
+                },
+                {
+                    "side_data_type": "Content light level metadata",
+                    "max_content": 820,
+                    "max_average": 330
+                },
+                {
+                    "side_data_type": "HDR Dynamic Metadata SMPTE2094-40 (HDR10+)",
+                    "application version": 1,
+                    "num_windows": 1,
+                    "targeted_system_display_maximum_luminance": "500/1",
+                    "maxscl": "4602/100000",
+                    "maxscl": "4948/100000",
+                    "maxscl": "5225/100000",
+                    "average_maxrgb": "187/100000",
+                    "num_distribution_maxrgb_percentiles": 9,
+                    "distribution_maxrgb_percentage": 1,
+                    "distribution_maxrgb_percentile": "16/100000",
+                    "distribution_maxrgb_percentage": 5,
+                    "distribution_maxrgb_percentile": "2660/100000",
+                    "distribution_maxrgb_percentage": 10,
+                    "distribution_maxrgb_percentile": "97/100000",
+                    "distribution_maxrgb_percentage": 25,
+                    "distribution_maxrgb_percentile": "62/100000",
+                    "distribution_maxrgb_percentage": 50,
+                    "distribution_maxrgb_percentile": "123/100000",
+                    "distribution_maxrgb_percentage": 75,
+                    "distribution_maxrgb_percentile": "235/100000",
+                    "distribution_maxrgb_percentage": 90,
+                    "distribution_maxrgb_percentile": "469/100000",
+                    "distribution_maxrgb_percentage": 95,
+                    "distribution_maxrgb_percentile": "609/100000",
+                    "distribution_maxrgb_percentage": 99,
+                    "distribution_maxrgb_percentile": "2707/100000",
+                    "fraction_bright_pixels": "0/1000",
+                    "knee_point_x": "0/4095",
+                    "knee_point_y": "0/4095",
+                    "num_bezier_curve_anchors": 9,
+                    "bezier_curve_anchors": "102/1023",
+                    "bezier_curve_anchors": "205/1023",
+                    "bezier_curve_anchors": "307/1023",
+                    "bezier_curve_anchors": "410/1023",
+                    "bezier_curve_anchors": "512/1023",
+                    "bezier_curve_anchors": "614/1023",
+                    "bezier_curve_anchors": "717/1023",
+                    "bezier_curve_anchors": "819/1023",
+                    "bezier_curve_anchors": "922/1023"
+                },
+                {
+                    "side_data_type": "Dolby Vision RPU Data"
+                },
+                {
+                    "side_data_type": "Dolby Vision Metadata",
+                    "rpu_type": 2,
+                    "rpu_format": 18,
+                    "vdr_rpu_profile": 1,
+                    "vdr_rpu_level": 0,
+                    "chroma_resampling_explicit_filter_flag": 0,
+                    "coef_data_type": 0,
+                    "coef_log2_denom": 23,
+                    "vdr_rpu_normalized_idc": 1,
+                    "bl_video_full_range_flag": 0,
+                    "bl_bit_depth": 10,
+                    "el_bit_depth": 10,
+                    "vdr_bit_depth": 12,
+                    "spatial_resampling_filter_flag": 0,
+                    "el_spatial_resampling_filter_flag": 0,
+                    "disable_residual_flag": 1,
+                    "vdr_rpu_id": 0,
+                    "mapping_color_space": 0,
+                    "mapping_chroma_format_idc": 0,
+                    "nlq_method_idc": -1,
+                    "nlq_method_idc_name": "none",
+                    "num_x_partitions": 1,
+                    "num_y_partitions": 1,
+                    "components": [
+                        {
+                            "pivots": "0 1023",
+                            "pieces": [
+                                {
+                                    "mapping_idc": 0,
+                                    "mapping_idc_name": "polynomial",
+                                    "poly_order": 1,
+                                    "poly_coef": "0 8388608"
+                                }
+                            ]
+                        },
+                        {
+                            "pivots": "0 1023",
+                            "pieces": [
+                                {
+                                    "mapping_idc": 0,
+                                    "mapping_idc_name": "polynomial",
+                                    "poly_order": 1,
+                                    "poly_coef": "0 8388608"
+                                }
+                            ]
+                        },
+                        {
+                            "pivots": "0 1023",
+                            "pieces": [
+                                {
+                                    "mapping_idc": 0,
+                                    "mapping_idc_name": "polynomial",
+                                    "poly_order": 1,
+                                    "poly_coef": "0 8388608"
+                                }
+                            ]
+                        }
+                    ],
+                    "dm_metadata_id": 0,
+                    "scene_refresh_flag": 0,
+                    "ycc_to_rgb_matrix": "9574/8192 0/8192 13802/8192 9574/8192 -1540/8192 -5348/8192 9574/8192 17610/8192 0/8192",
+                    "ycc_to_rgb_offset": "16777216/268435456 134217728/268435456 134217728/268435456",
+                    "rgb_to_lms_matrix": "7222/16384 8771/16384 390/16384 2654/16384 12430/16384 1300/16384 0/16384 422/16384 15962/16384",
+                    "signal_eotf": 65535,
+                    "signal_eotf_param0": 0,
+                    "signal_eotf_param1": 0,
+                    "signal_eotf_param2": 0,
+                    "signal_bit_depth": 12,
+                    "signal_color_space": 0,
+                    "signal_chroma_format": 0,
+                    "signal_full_range_flag": 1,
+                    "source_min_pq": 7,
+                    "source_max_pq": 3079,
+                    "source_diagonal": 42
+                }
+            ]
+        }
+    ]
+}
