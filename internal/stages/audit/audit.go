@@ -143,11 +143,13 @@ type scan struct {
 	found   map[string][]string // category -> findings
 	fresh   map[string][]string // findings in a folder that changed after settled; see hold
 	videos  []*video
-	moved   int // entries listed but gone when read
+	listed  map[string]time.Time // every folder read, with its mtime from just before the read; see changed
+	moved   int                  // folders that changed while the run read them
 }
 
 func newScan(root string, settled time.Time) *scan {
-	return &scan{root: root, settled: settled, found: map[string][]string{}, fresh: map[string][]string{}}
+	return &scan{root: root, settled: settled, found: map[string][]string{}, fresh: map[string][]string{},
+		listed: map[string]time.Time{}}
 }
 
 func (s *scan) add(category, item string) { s.found[category] = append(s.found[category], item) }
@@ -178,13 +180,39 @@ func (s *scan) hold(prev map[string][]string) (held int) {
 	return held
 }
 
-// vanished counts a listed entry that has moved away since and drops its error; any other error passes through.
-func (s *scan) vanished(err error) error {
+// gone drops the error of an entry that moved away after its folder was listed (changed counts that folder); any
+// other error passes through.
+func gone(err error) error {
 	if errors.Is(err, fs.ErrNotExist) {
-		s.moved++
 		return nil
 	}
 	return err
+}
+
+// list reads a folder and notes the mtime it had just before, so changed can tell whether the listing went stale.
+func (s *scan) list(dir string) (fs.FileInfo, []fs.DirEntry, error) {
+	st, err := os.Stat(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	entries, err := readDir(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	s.listed[dir] = st.ModTime()
+	return st, entries, nil
+}
+
+// changed counts the folders whose mtime moved (or that went away) since they were read. Any entry renamed, created
+// or removed in a folder moves its mtime, so this sees what no read error can: a file moved INTO a folder the walk
+// had already read, from one it had not read yet, is otherwise missed without a trace.
+func (s *scan) changed() (n int) {
+	for dir, mtime := range s.listed {
+		if st, err := os.Stat(dir); err != nil || !st.ModTime().Equal(mtime) {
+			n++
+		}
+	}
+	return n
 }
 
 func (s *scan) isFresh(info fs.FileInfo) bool { return info.ModTime().After(s.settled) }
@@ -200,7 +228,7 @@ func lowerExt(name string) string { return strings.ToLower(filepath.Ext(name)) }
 // library walks one of Movies/ or TV/. A missing library is an error: a vanished mount must not read as "all clean".
 func (s *scan) library(ctx context.Context, lib string) error {
 	dir := filepath.Join(s.root, lib)
-	entries, err := readDir(dir)
+	_, entries, err := s.list(dir)
 	if err != nil {
 		return err
 	}
@@ -211,7 +239,7 @@ func (s *scan) library(ctx context.Context, lib string) error {
 		}
 		info, err := e.Info()
 		if err != nil {
-			if err := s.vanished(err); err != nil {
+			if err := gone(err); err != nil {
 				return err
 			}
 			continue
@@ -246,7 +274,7 @@ func (s *scan) library(ctx context.Context, lib string) error {
 func (s *scan) addVideo(e fs.DirEntry, path, show string) (*video, error) {
 	info, err := e.Info()
 	if err != nil {
-		return nil, s.vanished(err)
+		return nil, gone(err)
 	}
 	v := &video{path: path, size: info.Size(), settled: !info.ModTime().After(s.settled), show: show}
 	s.videos = append(s.videos, v)
@@ -258,15 +286,11 @@ func (s *scan) dir(ctx context.Context, dir string, at place, show string) error
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	st, err := os.Stat(dir)
+	st, entries, err := s.list(dir)
 	if err != nil {
-		return s.vanished(err)
+		return gone(err)
 	}
 	fresh := s.isFresh(st)
-	entries, err := readDir(dir)
-	if err != nil {
-		return s.vanished(err)
-	}
 	files := map[string]bool{}
 	stems := map[string]*video{}
 	for _, e := range entries {
@@ -391,15 +415,11 @@ func (s *scan) subdir(ctx context.Context, path string, at place, show string, p
 // notes reports .details/<file>.txt notes whose <file> is no longer beside the .details folder. A rename of the
 // video and the rename of its note are two steps, so a change in either folder holds the finding.
 func (s *scan) notes(dir string, parentFresh bool, parentFiles map[string]bool) error {
-	st, err := os.Stat(dir)
+	st, entries, err := s.list(dir)
 	if err != nil {
-		return s.vanished(err)
+		return gone(err)
 	}
 	fresh := parentFresh || s.isFresh(st)
-	entries, err := readDir(dir)
-	if err != nil {
-		return s.vanished(err)
-	}
 	for _, e := range entries {
 		if n := e.Name(); strings.HasSuffix(n, ".txt") && !parentFiles[strings.TrimSuffix(n, ".txt")] {
 			s.flag(fresh, orphan, s.rel(filepath.Join(dir, n)))
@@ -527,7 +547,9 @@ func (s *scan) duplicates(env *stage.Env) []string {
 		for _, v := range group {
 			sum, err := prefixHash(v.path)
 			if err != nil {
-				env.Log.Warn("cannot read for the duplicate check", "event", "read_error", "path", v.path, "err", err)
+				if gone(err) != nil {
+					env.Log.Warn("cannot read for the duplicate check", "event", "read_error", "path", v.path, "err", err)
+				}
 				continue
 			}
 			byHash[sum] = append(byHash[sum], s.rel(v.path))
@@ -637,13 +659,14 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		}
 	}
 	s.found[duplicate] = s.duplicates(env)
+	s.moved = s.changed() // after the last read of the library
 	shows := s.english()
 	held := s.hold(prev.Items)
 	for _, items := range s.found {
 		sort.Strings(items)
 	}
 	// A partial pass keeps the last complete baseline for what it could not see, a partial first pass is no baseline
-	// at all, and a walk that missed moved entries keeps the last one whole: either way the next full pass does not
+	// at all, and a run during which a folder changed keeps the last one whole: either way the next full pass does not
 	// alert on problems that were there all along.
 	next, save := snapshot{At: env.Now(), Items: s.found}, (hadPrev || notProbed == 0) && s.moved == 0
 	if notProbed > 0 && hadPrev {
@@ -714,7 +737,7 @@ func report(env *stage.Env, started time.Time, maxListed int, s *scan, shows []s
 		fmt.Fprintf(&b, " %d not probed yet (a guest was watching, Plex/Jellyfin did not answer, the file moved, or ffprobe ran out of time): the unreadable and English-subtitle counts are partial.", notProbed)
 	}
 	if s.moved > 0 {
-		fmt.Fprintf(&b, " %d files or folders moved while the walk read them, so some counts are low; the next run compares against the run before this one.", s.moved)
+		fmt.Fprintf(&b, " %d folders changed while the run read them (a rename, a move or a download), so some counts may be off; the next run compares against the run before this one.", s.moved)
 	}
 	if waiting > 0 {
 		fmt.Fprintf(&b, " %d videos or findings changed in the last few minutes and are judged next run.", waiting)

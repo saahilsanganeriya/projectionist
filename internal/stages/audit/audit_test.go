@@ -330,48 +330,63 @@ func TestNoVerdictIsNotUnreadable(t *testing.T) {
 	}
 }
 
-// Catches: an entry the renamer moves between the listing of its folder and the read turning into a false finding:
-// a moved video's subtitle credited to the video listed before it, or filed as an orphan (which alerts); a panic
-// when it is the first video of the walk; and a walk that missed a moved video, folder or notes folder saved as the
-// baseline, so the next run alerts on everything in it.
-func TestEntryMovedMidWalk(t *testing.T) {
+// Catches: an entry the renamer moves while a run reads the library turning into a false finding or alert: a moved
+// video's subtitle credited to the video listed before it, or filed as an orphan; a panic when it is the first video
+// of the walk; and a run that missed it saved as the baseline, so its return alerts. The move comes between a folder's
+// listing and its read, after the walk (before the duplicate check hashes it), or INTO a folder already read, which
+// no read error shows.
+func TestEntryMovedMidRun(t *testing.T) {
 	show := "TV/Show (2000) {tmdb-1}"
 	season := show + "/Season 01"
 	a, b := season+"/Show (2000) - S01E01 - A.mkv", season+"/Show (2000) - S01E02 - B.mkv"
+	twin := "Movies/X (2000) {tmdb-2}/X (2000) {tmdb-2}.mkv" // A's identical copy
 	cases := []struct {
-		moved     string
-		noEnglish int // during the walk that missed it
-	}{{a, 0}, {b, 1}, {season + "/.details", 1}, {season, 0}, {show, 0}}
+		from, to, at string // at: the folder whose listing triggers the move; "" = the viewer check, after the walk
+		noEnglish    int    // during the run that saw the move
+	}{
+		{a, "", season, 0}, {b, "", season, 1}, {season + "/.details", "", season, 1}, {season, "", show, 0},
+		{show, "", "TV", 0}, {twin, "", "", 1}, {a, filepath.Dir(twin) + "/A.mkv", "TV", 0},
+	}
 	t.Cleanup(func() { readDir = os.ReadDir })
 	for _, c := range cases {
 		h := fake.NewEnv(t, nil)
-		root, held := t.TempDir(), filepath.Join(t.TempDir(), "held")
+		root := t.TempDir()
 		h.SetOptions(`root = "` + root + `"`)
 		fakeProbe(t, h)
-		os.Mkdir(filepath.Join(root, "Movies"), 0o755)
 		put(t, root, a, "film")
-		put(t, root, b, "corrupt")
+		put(t, root, twin, "film")
+		put(t, root, b, "corrupt") // never cached, so every run checks the viewers before probing it
 		put(t, root, strings.TrimSuffix(b, "mkv")+"en.srt", "1")
 		put(t, root, season+"/.details/Gone.mkv.txt", "note")
-		run(t, h) // baseline: B unreadable, the note orphaned, A without English subtitles
+		run(t, h) // baseline: B unreadable, the note orphaned, A without English subtitles, A == twin
 
-		from := filepath.Join(root, c.moved)
+		from, to, armed := filepath.Join(root, c.from), filepath.Join(t.TempDir(), "held"), true
+		if c.to != "" {
+			to = filepath.Join(root, c.to)
+		}
+		move := func(at string) {
+			if armed && at == c.at {
+				armed = false
+				os.Rename(from, to)
+			}
+		}
 		readDir = func(dir string) ([]fs.DirEntry, error) {
 			entries, err := os.ReadDir(dir)
-			if dir == filepath.Dir(from) {
-				os.Rename(from, held)
-			}
+			move(strings.TrimPrefix(dir, root+"/"))
 			return entries, err
 		}
+		h.Plex.HandleFunc("GET", "/status/sessions", func(w http.ResponseWriter, r *http.Request) {
+			move("")
+			w.Write([]byte(`<MediaContainer size="0"></MediaContainer>`))
+		})
 		rep := run(t, h)
-		readDir = os.ReadDir
 		if len(rep.Alerts) != 0 || rep.Counts[noEnglish] != c.noEnglish {
-			t.Errorf("%s moved mid-walk: alerts = %q, counts = %v", c.moved, rep.Alerts, rep.Counts)
+			t.Errorf("%s moved at %q: alerts = %q, counts = %v", c.from, c.at, rep.Alerts, rep.Counts)
 		}
-		os.Rename(held, from)
+		os.Rename(to, from)
 		filepath.WalkDir(root, func(p string, _ fs.DirEntry, err error) error { return os.Chtimes(p, settledAt, settledAt) })
 		if rep := run(t, h); len(rep.Alerts) != 0 {
-			t.Errorf("%s back: alerts = %q", c.moved, rep.Alerts)
+			t.Errorf("%s back: alerts = %q", c.from, rep.Alerts)
 		}
 	}
 }
