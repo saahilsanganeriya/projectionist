@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -80,5 +82,26 @@ func TestRetries(t *testing.T) {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.Type != "invalid_request_error" || calls != 3 {
 		t.Fatalf("a 400 must fail at once with its type: %v after %d calls", err, calls)
+	}
+}
+
+// Catches: a POST that reached the server but lost its answer being retried (a second billed call, or a second batch
+// nobody records) or reported like an unbilled failure; and a connection that was never made being counted as billed.
+func TestUnknownOutcome(t *testing.T) {
+	var calls atomic.Int32
+	dropped := client(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		conn, _, _ := w.(http.Hijacker).Hijack()
+		conn.Close()
+	})
+	_, err := dropped.CreateBatch(context.Background(), nil)
+	if !errors.Is(err, ErrUnknownOutcome) || calls.Load() != 1 {
+		t.Fatalf("connection dropped after sending: %v after %d calls; want ErrUnknownOutcome after 1", err, calls.Load())
+	}
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	ln.Close()
+	refused := &Client{API: "http://" + ln.Addr().String(), HTTP: &http.Client{}, Key: dropped.Key}
+	if _, err := refused.Messages(context.Background(), Request{}); err == nil || errors.Is(err, ErrUnknownOutcome) {
+		t.Fatalf("connection refused: %v; nothing was sent, so it must not count as billed", err)
 	}
 }

@@ -2,9 +2,11 @@
 // bulk work at half price, the newest model of a family from the Models API (for aliases like "haiku:latest"), and
 // the dollar cost of every call so a stage can hold a hard budget.
 //
-// Failure policy: every request has the HTTP client's timeout; 429, 5xx (529 = overloaded) and dropped connections
-// are retried twice with jittered backoff (or the server's retry-after); anything else fails at once. Errors never
-// carry the key or a request body.
+// Failure policy: every request has the HTTP client's timeout; 429 and 5xx (529 = overloaded) are retried twice with
+// jittered backoff (or the server's retry-after), as are connections that were never made; anything else fails at
+// once. A POST that may have reached the server (a timeout or a connection dropped after sending, or a 2xx body that
+// could not be read) is never retried, because the API takes no idempotency key: it fails with ErrUnknownOutcome so
+// the caller can count it as billed. Errors never carry the key or a request body.
 package llm
 
 import (
@@ -17,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -25,6 +28,9 @@ import (
 )
 
 const apiVersion = "2023-06-01"
+
+// ErrUnknownOutcome marks a POST that may have been processed and billed although no answer was read.
+var ErrUnknownOutcome = errors.New("anthropic: outcome unknown, the request may have been processed")
 
 type Client struct {
 	API  string                 // "https://api.anthropic.com"
@@ -265,10 +271,13 @@ func (c *Client) call(ctx context.Context, method, path string, in, out any) err
 	}
 	defer body.Close()
 	raw, err := io.ReadAll(io.LimitReader(body, 64<<20))
-	if err != nil {
-		return fmt.Errorf("anthropic %s %s: %w", method, path, err)
+	if err == nil {
+		err = json.Unmarshal(raw, out)
 	}
-	if err := json.Unmarshal(raw, out); err != nil {
+	if err != nil && method == http.MethodPost { // the server answered 2xx: it did the work
+		return fmt.Errorf("anthropic %s %s: %w: %w", method, path, ErrUnknownOutcome, err)
+	}
+	if err != nil {
 		return fmt.Errorf("anthropic %s %s: %w", method, path, err)
 	}
 	return nil
@@ -303,7 +312,12 @@ func (c *Client) open(ctx context.Context, method, path string, in any) (io.Read
 			if ue := (*url.Error)(nil); errors.As(err, &ue) {
 				err = ue.Err // keeps the URL out of the message
 			}
+			var op *net.OpError
+			neverSent := errors.As(err, &op) && op.Op == "dial"
 			err = fmt.Errorf("anthropic %s %s: %w", method, path, err)
+			if method == http.MethodPost && !neverSent {
+				return nil, fmt.Errorf("%w: %w", ErrUnknownOutcome, err)
+			}
 		case resp.StatusCode/100 == 2:
 			return resp.Body, nil
 		default:
