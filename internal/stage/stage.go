@@ -11,6 +11,7 @@ import (
 	"projectionist/internal/fanart"
 	"projectionist/internal/jellyfin"
 	"projectionist/internal/llm"
+	"projectionist/internal/obs"
 	"projectionist/internal/plex"
 	"projectionist/internal/probe"
 	"projectionist/internal/store"
@@ -38,6 +39,7 @@ type Env struct {
 	Fanart   *fanart.Client // community artwork, keyed by TMDB/IMDb id (films) or TVDB id (shows)
 	LLM      llm.Policy     // which Claude model, by date ([[llm.policy]]); nil = llm.DefaultPolicy
 	FFmpeg   config.FFmpeg
+	Metrics  *obs.Metrics     // the /metrics registry, for a stage's own gauges and counters
 	Now      func() time.Time // UTC
 	Loc      *time.Location   // config timezone: only for text the owner reads (status files)
 	// Options decodes this stage's own keys from its [stages.<name>] table into v (call it at the top of Run).

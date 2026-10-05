@@ -31,6 +31,7 @@ type Status struct {
 	Outcome    string    `json:"outcome,omitempty"`
 	Alerts     []string  `json:"alerts,omitempty"`
 	Error      string    `json:"error,omitempty"`
+	Summary    string    `json:"summary,omitempty"` // the latest run's Report.Summary
 	NextRun    time.Time `json:"next_run,omitzero"`
 }
 
@@ -121,7 +122,7 @@ func (r *Runner) RunOnce(ctx context.Context, st stage.Stage) (rep stage.Report,
 	r.Metrics.Set("projectionist_stage_last_run_timestamp_seconds", float64(finished.Unix()), "stage", name)
 	r.Metrics.Set("projectionist_stage_last_duration_seconds", finished.Sub(started).Seconds(), "stage", name)
 	r.set(name, func(s *Status) {
-		s.Running, s.LastFinish, s.Outcome, s.Alerts, s.Error = false, finished, string(outcome), rep.Alerts, ""
+		s.Running, s.LastFinish, s.Outcome, s.Alerts, s.Error, s.Summary = false, finished, string(outcome), rep.Alerts, "", rep.Summary
 		if err != nil {
 			s.Error = err.Error()
 		}

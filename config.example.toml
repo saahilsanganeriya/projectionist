@@ -82,6 +82,23 @@ self_test_every = "24h"
 legacy_state    = "/volume1/PlexMediaServer/scripts/gpu_guard.state.json" # imported once at cutover
 plex_timeout    = "5s" # each Plex API call; a slower Plex never fails the run
 
+# Probes Plex, Jellyfin, qBittorrent, the Cloudflare hostnames and the containers; restarts a Jellyfin that stopped
+# answering when nobody is playing on it. New: no Python original. Needs /var/run/docker.sock (compose.yaml).
+[stages.health]
+every                 = "5m"
+timeout               = "30s"          # per probe, all at once (Cloudflare: up to 9.8 s seen); Plex/Jellyfin: also [plex]/[jellyfin] timeout
+fail_threshold        = 3              # consecutive failed runs before an alert (and a restart)
+restart_cooldown      = "1h"           # at most one restart per container per cooldown; at least 1h
+restartable           = ["jellyfin"]   # the ONLY containers projectionist may restart; left out or [] = alert only
+docker_socket         = "/var/run/docker.sock"
+jellyfin_container    = "jellyfin"
+qbittorrent_container = "qbittorrent"
+qbittorrent_url       = "http://127.0.0.1:8080" # 403 counts as up: the WebUI answers and wants a login
+[stages.health.public] # URL = the status it must answer through the Cloudflare tunnel; redirects are not followed
+"https://jellyfin.example.com"    = 302
+"https://plex.example.com"    = 401
+"https://nas.example.com" = 200
+
 # Small 4K copies of the films listed as "Remote 4K" (Plex playlist, Jellyfin playlist or Jellyfin collection);
 # replaces scripts/remote4k.py (DSM task 9).
 [stages.remote4k]

@@ -7,6 +7,9 @@ services:
     container_name: projectionist
     network_mode: host # Plex 127.0.0.1:32400, Jellyfin 127.0.0.1:8096, /health on 127.0.0.1:8097
     restart: unless-stopped
+    # Docker's default 10 s would SIGKILL a health stage in the middle of restarting Jellyfin (a 120 s stop grace,
+    # then the start). Other stages return promptly on SIGTERM (stage.Stage's contract), so they exit as before.
+    stop_grace_period: 3m
     user: "0:0" # renames must keep each file's owner and set Synology ACLs; capabilities are trimmed below
     group_add: ["937"] # videodriver: owns /dev/dri/renderD128
     devices:
@@ -39,6 +42,9 @@ services:
       # The Python renamers' logs (undo.tsv, undo_auto.tsv): each video's original name for its .details note.
       # Read-only; the rename stage's own logs live under /volume1/media/.projectionist/rename.
       - /volume1/PlexMediaServer/rename:/volume1/PlexMediaServer/rename:ro
+      # health stage: inspect containers, restart the ones in [stages.health].restartable. The socket is root on the
+      # host and ":ro" would not limit its API; the allow-list in code is the bound.
+      - /var/run/docker.sock:/var/run/docker.sock
       # ssdmirror: the USB SSD, and fill.py's folder whose PROGRESS.txt it takes over. DSM's mounts are private (no
       # propagation): stop the container before ejecting the SSD and start it after plugging it back in. Started
       # without the SSD, Docker makes an empty folder at that path and the stage refuses ("SSD not mounted").
