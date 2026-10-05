@@ -26,8 +26,8 @@ const retryExtra = 300
 
 // bound is the most a request can cost once sent. Its one cache breakpoint ends the system prompt, so up to prefix
 // tokens may be billed as a cache write: a retry meant to read them pays the write again when the cache misses (it
-// lives 5 minutes, and a retry at another effort never matches it). Later tokens are plain input; all of max_tokens
-// is output. Counts get 2% slack, because count_tokens is an estimate that "might differ by a small amount".
+// lives 5 minutes, and a model that renders effort ahead of the system prompt misses it at another effort; Sonnet 5.5
+// read it at effort "low" on 2026-10-05). Later tokens are plain input; all of max_tokens is output. Counts get 2% slack, because count_tokens is an estimate that "might differ by a small amount".
 func bound(p llm.Price, total, prefix, maxTokens int) float64 {
 	slack := func(n int) int { return n + n/50 }
 	return p.Cost(llm.Usage{CacheCreationInputTokens: slack(prefix), InputTokens: slack(total - prefix), OutputTokens: maxTokens}, false)

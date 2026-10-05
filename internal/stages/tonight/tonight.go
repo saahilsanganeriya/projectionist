@@ -433,7 +433,7 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 	}
 	picks, violations, glued := validate(r.Text(), unseen, opt.Picks)
 	if r.StopReason == "max_tokens" {
-		// Thinking shares max_tokens with the answer, so the retry thinks less; a changed effort misses the cache,
+		// Thinking shares max_tokens with the answer, so the retry thinks less; a changed effort may miss the cache,
 		// which bound already prices.
 		violations = append([]string{"the answer was cut off at the length limit before the JSON was complete"}, violations...)
 		if m.LowEffort {
