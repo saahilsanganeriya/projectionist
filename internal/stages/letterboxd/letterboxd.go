@@ -224,7 +224,7 @@ func (r *run) guarded(ctx context.Context, kind string, job func() error) error 
 	err := job()
 	switch {
 	case errors.Is(err, errChallenged):
-		b.Step++
+		b.Step = min(b.Step+1, 6) // 1, 2, 4 ... 32 h, capped at 24 h below; the cap also keeps the shift from overflowing
 		b.Until = r.env.Now().Add(min(time.Hour<<(b.Step-1), 24*time.Hour))
 		r.env.Log.Warn("letterboxd challenged; backing off", "event", "letterboxd_challenged", "kind", kind,
 			"until", b.Until.Format(time.RFC3339), "err", err)
