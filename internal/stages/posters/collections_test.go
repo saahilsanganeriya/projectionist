@@ -48,12 +48,15 @@ func collectionWorld(t *testing.T, opts string, keepTitles bool) *world {
 		"/movie/4247": `{"id":4247,"title":"Scary Movie","release_date":"2000-07-07","original_language":"en","vote_average":6.3,
  "vote_count":5000,"belongs_to_collection":{"id":4246,"name":"Scary Movie Collection"}}`,
 		"/movie/4248": `{"id":4248,"title":"Scary Movie 2","original_language":"en","vote_average":5.6,"vote_count":3000,
- "belongs_to_collection":{"id":4246,"name":"Scary Movie Collection"}}`,
+ "belongs_to_collection":{"id":999,"name":"Scary Movie Spinoffs"}}`,
+		"/collection/999/images":  `{"posters":[` + img("yellow", "en") + `]}`,
 		"/collection/4246/images": `{"posters":[` + img("red", "en") + `,` + img("yellow", "de") + `]}`,
 		"/movie/764": `{"id":764,"title":"The Evil Dead","original_language":"en","vote_average":7.3,"vote_count":3000,
  "belongs_to_collection":{"id":1960,"name":"Evil Dead Collection"}}`,
-		"/movie/764/images":           `{"posters":[` + img("green", "en") + `]}`,
-		"/movie/2502/credits":         `{"crew":[{"id":25598,"name":"Paul Greengrass","job":"Director"},{"id":7,"name":"Tony Gilroy","job":"Writer"}]}`,
+		"/movie/764/images": `{"posters":[` + img("green", "en") + `]}`,
+		"/movie/2502/credits": `{"crew":[{"id":25598,"name":"Paul Greengrass","job":"Director"},{"id":8,"name":"Co Director","job":"Director"},
+ {"id":7,"name":"Tony Gilroy","job":"Writer"}]}`,
+		"/person/8/images":            `{"profiles":[{"file_path":"/yellow.jpg","width":1000,"height":1500}]}`,
 		"/movie/9829/credits":         `{"crew":[{"id":25598,"name":"Paul Greengrass","job":"Director"}]}`,
 		"/person/25598/external_ids":  `{"wikidata_id":"Q356275"}`,
 		"/person/25598/images":        `{"profiles":[{"file_path":"/blue.jpg","width":1000,"height":1500}]}`,
@@ -72,12 +75,12 @@ func collectionWorld(t *testing.T, opts string, keepTitles bool) *world {
 			q, pages := r.URL.Query(), ""
 			switch search := q.Get("gsrsearch"); {
 			case q.Get("prop") == "pageprops" && q.Get("titles") == "Category:Paul Greengrass":
-				pages = `{"pageprops":{"wikibase_item":"Q356275"}}`
+				pages = `{"pageprops":{"wikibase_item":"Q99"}}` // a namesake's category
 			case strings.HasPrefix(search, "haswbstatement:P180=Q356275"):
 				pages = file("File:Paul Greengrass filming United 93.jpg", "redwide", 3000, 1500, "<b>Paul Greengrass</b> on the set") + "," +
-					file("File:Greengrass small.jpg", "yellow", 300, 200, "Paul Greengrass")
+					file("File:Greengrass small.jpg", "yellow", 300, 200, "Paul Greengrass") + "," + file("File:Greengrass at TIFF.jpg", "green", 2000, 3000, "")
 			case strings.HasPrefix(search, `incategory:"Paul Greengrass"`):
-				pages = file("File:Greengrass at TIFF.jpg", "green", 2000, 3000, "")
+				pages = file("File:Paul Greengrass the bowler.jpg", "yellow", 2000, 3000, "")
 			case strings.HasPrefix(search, `"Paul Greengrass" filming`):
 				pages = file("File:Sacramento skyline.jpg", "yellow", 4000, 2000, "The skyline of downtown Sacramento")
 			}
@@ -108,11 +111,13 @@ func (w *world) pool(key string) []Candidate {
 // Catches, end to end: collection posters uploaded before collection_dry_run is switched off; the owner's collection
 // gathered, judged or given a poster; a franchise pool missing its TMDB collection's, fanart.tv's or its film's
 // poster (the film's as this stage chose it), or holding fanart.tv art filed under the collection's number for a film;
-// a Commons file kept though it is tiny or never names the director; a collection poster sent to the wrong app item
+// a member film's other TMDB collection feeding the pool; a Commons file kept though it is tiny, never names the
+// director or sits in a namesake's category; a co-director of one film taken for the director; a title's poster sent
+// while titles are dry and collections live; a collection poster sent to the wrong app item
 // or left unlocked in Plex; a director's poster not composed to 2:3 around the judge's box; a collection opened by an
 // arrival, or made in an app after the first listing, never getting its poster; and a rerun paying or uploading again.
 func TestCollectionPosters(t *testing.T) {
-	w := collectionWorld(t, "", false)
+	w := collectionWorld(t, "dry_run = true\n", false)
 	film := `[{"url":"` + w.api.URL + `/t/p/original/green.jpg","thumb":"` + w.api.URL + `/t/p/w500/green.jpg","source":"tmdb"}]`
 	w.h.Env.Store.DB().Exec(schema)
 	w.h.Env.Store.DB().Exec(`INSERT INTO posters_items(key, title, cands, sig, verdict, updated_at) VALUES ('movie:tmdb-4247', '{}', ?, '', ?, '')`,
@@ -133,7 +138,11 @@ func TestCollectionPosters(t *testing.T) {
 	}
 
 	w.h.SetOptions(w.opts + "collection_dry_run = false\n")
+	w.h.Env.Store.DB().Exec(`INSERT INTO posters_sinks VALUES ('movie:tmdb-1', 'plex', ?, 'pending', '', 0, '', '')`, w.api.URL+"/t/p/original/red.jpg")
 	w.run(t)
+	if n := len(w.h.Plex.Calls("POST", "/library/metadata/101/posters")); n != 0 {
+		t.Fatalf("a title's pending poster went to Plex %d times while titles are dry", n)
+	}
 	up := w.h.Plex.Calls("POST", "/library/metadata/601/posters")
 	if len(up) != 1 || scoreOf(up[0].Body) != 9 || !bytes.Contains(up[0].Body, []byte("poster-curator 2026-10")) {
 		t.Fatalf("Plex collection 601 (Scary Movie): %d uploads; want one red poster carrying the stage's mark", len(up))
@@ -159,16 +168,17 @@ func TestCollectionPosters(t *testing.T) {
 		photos = append(photos, c.Source+" "+filepath.Base(c.URL))
 	}
 	if want := []string{"commons redwide.jpg", "tmdb-profile blue.jpg", "commons green.jpg"}; !slices.Equal(photos, want) {
-		t.Fatalf("Greengrass pool %v, want %v: on-set Commons first, turns with TMDB, no tiny file, no text hit that never names him", photos, want)
+		t.Fatalf("Greengrass pool %v, want %v: on-set Commons first, turns with TMDB; no tiny file, no namesake's category, no text hit "+
+			"that never names him, no co-director", photos, want)
 	}
 	jf := w.h.Jellyfin.Calls("POST", "/Items/jb2/Images/Primary")
 	if len(jf) != 1 {
 		t.Fatalf("Jellyfin BoxSet jb2 got %d uploads, want 1", len(jf))
 	}
 	body, _ := base64.StdEncoding.DecodeString(string(jf[0].Body))
-	if cfg, err := jpeg.DecodeConfig(bytes.NewReader(body)); err != nil || cfg.Width != posterW || cfg.Height != posterH || scoreOf(body) != 9 {
-		t.Fatalf("Greengrass poster %dx%d (err %v), score %d; want %dx%d around the red director in the photo's left quarter",
-			cfg.Width, cfg.Height, err, scoreOf(body), posterW, posterH)
+	if cfg, err := jpeg.DecodeConfig(bytes.NewReader(body)); err != nil || cfg.Width != 1000 || cfg.Height != 1500 || scoreOf(body) != 9 {
+		t.Fatalf("Greengrass poster %dx%d (err %v), score %d; want 1000x1500 around the red director in the photo's left quarter",
+			cfg.Width, cfg.Height, err, scoreOf(body))
 	}
 
 	w.h.Plex.Handle("GET", "/library/sections/4/collections", 200, `{"MediaContainer":{"Metadata":[{"ratingKey":"601","title":"Scary Movie"},
@@ -227,7 +237,7 @@ func TestComposeFramesTheDirector(t *testing.T) {
 			}
 		}
 	}
-	if out.Bounds() != image.Rect(0, 0, posterW, posterH) || red < 300*200/10 {
-		t.Fatalf("poster %v with %d red samples of %d; want %dx%d holding the director (about a quarter of it)", out.Bounds(), red, 300*200, posterW, posterH)
+	if out.Bounds() != image.Rect(0, 0, 1000, 1500) || red < 300*200/10 {
+		t.Fatalf("poster %v with %d red samples of %d; want 1000x1500 holding the director (about a quarter of it)", out.Bounds(), red, 300*200)
 	}
 }
