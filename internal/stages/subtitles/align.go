@@ -229,9 +229,9 @@ func align(spans []span, ref bitset) (fit, bool) {
 	return fit{}, false
 }
 
-// pgsReference reads `ffmpeg -map 0:<pgs> -c copy -f framecrc -`: bins within 0.2 s of each caption start, or
-// ok=false when the track has fewer than 40 captions or covers less than half of the video.
-func pgsReference(framecrc string, duration float64) (bitset, bool) {
+// pgsReference reads `ffmpeg -map 0:<pgs> -c copy -f framecrc -`: the caption start times and the bins within 0.2 s
+// of each, or ok=false when the track has fewer than 40 captions or covers less than half of the video.
+func pgsReference(framecrc string, duration float64) (starts []float64, ref bitset, ok bool) {
 	tb := 1.0 / 1000
 	seen := map[float64]bool{}
 	var ev []float64
@@ -261,13 +261,33 @@ func pgsReference(framecrc string, duration float64) (bitset, bool) {
 	}
 	sort.Float64s(ev)
 	if len(ev) < minCues || ev[len(ev)-1]-ev[0] < float64(0.5*duration) {
-		return nil, false
+		return nil, nil, false
 	}
 	spans := make([]span, len(ev))
 	for i, t := range ev {
 		spans[i] = span{t - 0.2, t + 0.2}
 	}
-	return spanBits(spans, 1.0), true
+	return ev, spanBits(spans, 1.0), true
+}
+
+// medianOffsetMS is the median distance from each cue start to the nearest reference caption start, in ms: how
+// well a written subtitle sits on the reference (refs sorted).
+func medianOffsetMS(spans []span, refs []float64) float64 {
+	d := make([]float64, 0, len(spans))
+	for _, s := range spans {
+		i := sort.SearchFloat64s(refs, s.start)
+		best := math.Inf(1)
+		for _, j := range []int{i - 1, i} {
+			if j >= 0 && j < len(refs) {
+				best = math.Min(best, math.Abs(refs[j]-s.start))
+			}
+		}
+		d = append(d, best)
+	}
+	if len(d) == 0 {
+		return math.NaN()
+	}
+	return pyMedian(d) * 1000
 }
 
 // ---- Python 3.8 statistics, exactly ----
