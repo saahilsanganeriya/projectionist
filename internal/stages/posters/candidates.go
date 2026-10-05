@@ -413,16 +413,16 @@ var WikimediaPace = func(contact bool) time.Duration {
 // wikimediaTurn waits until the run's last Wikimedia request is WikimediaPace old and holds the turn; done records
 // the request's end and passes the turn on. Requests to Wikimedia go one at a time across the run.
 func (r *run) wikimediaTurn(ctx context.Context) (done func(), err error) {
-	r.commonsMu.Lock()
-	if wait := time.Until(r.commonsLast.Add(WikimediaPace(r.opt.CommonsContact != ""))); wait > 0 {
+	r.wikiMu.Lock()
+	if wait := time.Until(r.wikiLast.Add(WikimediaPace(r.opt.CommonsContact != ""))); wait > 0 {
 		select {
 		case <-ctx.Done():
-			r.commonsMu.Unlock()
+			r.wikiMu.Unlock()
 			return nil, ctx.Err()
 		case <-time.After(wait):
 		}
 	}
-	return func() { r.commonsLast = time.Now(); r.commonsMu.Unlock() }, nil
+	return func() { r.wikiLast = time.Now(); r.wikiMu.Unlock() }, nil
 }
 
 func writeAtomic(path string, b []byte) error {

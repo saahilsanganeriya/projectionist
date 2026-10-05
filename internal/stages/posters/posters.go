@@ -181,8 +181,8 @@ type run struct {
 	gateAt   time.Time
 	gateBusy bool
 
-	commonsMu   sync.Mutex // requests to Wikimedia go one at a time, WikimediaPace apart (wikimediaTurn)
-	commonsLast time.Time
+	wikiMu   sync.Mutex // requests to Wikimedia go one at a time, WikimediaPace apart (wikimediaTurn)
+	wikiLast time.Time
 }
 
 // guestsWatching is the viewer gate, asked at most once a minute; a gate that cannot tell counts as busy.
