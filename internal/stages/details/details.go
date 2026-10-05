@@ -39,8 +39,10 @@ const name = "details"
 
 type Options struct {
 	Library  string   `toml:"library"`
-	Sections []string `toml:"sections"`  // folders under Library that hold the scheme
-	UndoLogs []string `toml:"undo_logs"` // rename logs, oldest first (TSV: time, op, old path, new path, unit)
+	Sections []string `toml:"sections"` // folders under Library that hold the scheme
+	// Rename logs, oldest first (TSV: time, op, old path, new path, unit). A missing one is skipped, but a run
+	// that reads no move row at all fails: every note would lose its original name. [] means "no logs".
+	UndoLogs []string `toml:"undo_logs"`
 	// Per-run bounds; files already probed or scanned cost nothing.
 	MaxProbes       int   `toml:"max_probes"`
 	MaxPeakScans    int   `toml:"max_peak_scans"`
@@ -56,9 +58,12 @@ type Options struct {
 
 func defaults() Options {
 	return Options{
-		Library:         "/volume1/media",
-		Sections:        []string{"Movies", "TV"},
-		UndoLogs:        []string{"/volume1/PlexMediaServer/rename/undo.tsv", "/volume1/PlexMediaServer/rename/undo_auto.tsv"},
+		Library:  "/volume1/media",
+		Sections: []string{"Movies", "TV"},
+		// The Python renamers' logs, the copies the rename stage keeps of them, then its own log.
+		UndoLogs: []string{"/volume1/PlexMediaServer/rename/undo.tsv", "/volume1/PlexMediaServer/rename/undo_auto.tsv",
+			"/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv",
+			"/volume1/media/.projectionist/rename/undo.tsv"},
 		MaxProbes:       400,
 		MaxPeakScans:    2,
 		MaxDecodeChecks: 60,
@@ -127,9 +132,12 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return err
 	}
-	orig, err := originals(opt.UndoLogs)
+	orig, moves, err := originals(opt.UndoLogs)
 	if err != nil {
 		return err
+	}
+	if len(opt.UndoLogs) > 0 && moves == 0 {
+		return fmt.Errorf("no move row in any rename log (%s): every note would lose its original name", strings.Join(opt.UndoLogs, ", "))
 	}
 	videos, subtitles, err := walk(opt.Library, opt.Sections)
 	if err != nil {
@@ -539,24 +547,31 @@ func only(videos []video, pathsFile string) ([]video, error) {
 }
 
 // originals maps each moved path to the first name it had: logs are read in order, so a file moved twice keeps
-// the name from before its first move. A missing log is skipped (the auto-renamer's log appears on first use).
-func originals(logs []string) (map[string]string, error) {
-	orig := map[string]string{}
+// the name from before its first move. A row read before is skipped: the rename stage's legacy-undo*.tsv are
+// copies of the Python logs, and replaying a move breaks a chain once its path was reused (P→Q, then R→P: a second
+// P→Q would give Q the original name R). A missing log is skipped (one appears on first use); moves counts the
+// distinct move rows.
+func originals(logs []string) (orig map[string]string, moves int, err error) {
+	orig = map[string]string{}
+	seen := map[string]bool{}
 	for _, path := range logs {
 		f, err := os.Open(path)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		sc := bufio.NewScanner(f)
 		sc.Buffer(make([]byte, 64<<10), 1<<20)
 		for sc.Scan() {
-			col := strings.Split(sc.Text(), "\t")
-			if len(col) != 5 || col[1] != "move" {
+			line := sc.Text()
+			col := strings.Split(line, "\t")
+			if len(col) != 5 || col[1] != "move" || seen[line] {
 				continue
 			}
+			seen[line] = true
+			moves++
 			if first, ok := orig[col[2]]; ok {
 				orig[col[3]] = first
 			} else {
@@ -566,10 +581,10 @@ func originals(logs []string) (map[string]string, error) {
 		err = sc.Err()
 		f.Close()
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
+			return nil, 0, fmt.Errorf("%s: %w", path, err)
 		}
 	}
-	return orig, nil
+	return orig, moves, nil
 }
 
 func notePath(opt Options, videoPath string) string {

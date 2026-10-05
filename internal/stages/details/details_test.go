@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"math/rand/v2"
 	"net/http"
 	"os"
@@ -143,21 +144,31 @@ func TestSourceGroup(t *testing.T) {
 	}
 }
 
-// Catches: a file renamed twice showing its middle name instead of its first, archive rows read as moves, and a
-// missing log (the auto-renamer's appears on first use) failing the run.
+// Catches: a file renamed twice showing its middle name instead of its first, archive rows read as moves, a
+// missing log (one appears on first use) failing the run, and the rename stage's legacy copy of a log replaying
+// its moves: after P→Q then R→P, a second P→Q would give Q the original name R.
 func TestOriginals(t *testing.T) {
 	dir := t.TempDir()
-	first, second := filepath.Join(dir, "undo.tsv"), filepath.Join(dir, "undo_auto.tsv")
-	os.WriteFile(first, []byte("t\tmove\t/m/Heat.1995.BluRay-GRP.mkv\t/m/Heat (1995) {tmdb-949}/Heat.mkv\tmovie:1\n"+
-		"t\tarchive\t/m/old.nfo\t/m/_archive/old.nfo\tmovie:1\n"+
-		"t\tunit-done\t\t\tmovie:1\n"), 0o644)
-	os.WriteFile(second, []byte("t\tmove\t/m/Heat (1995) {tmdb-949}/Heat.mkv\t/m/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv\tmovie:1\n"), 0o644)
-	orig, err := originals([]string{first, filepath.Join(dir, "missing.tsv"), second})
+	first, second, legacy := filepath.Join(dir, "undo.tsv"), filepath.Join(dir, "undo_auto.tsv"), filepath.Join(dir, "legacy-undo.tsv")
+	log := "t1\tmove\t/m/Heat.1995.BluRay-GRP.mkv\t/m/Heat (1995) {tmdb-949}/Heat.mkv\tmovie:1\n" +
+		"t1\tarchive\t/m/old.nfo\t/m/_archive/old.nfo\tmovie:1\n" +
+		"t1\tunit-done\t\t\tmovie:1\n" +
+		"t2\tmove\t/m/P.mkv\t/m/Q.mkv\tmovie:2\n" +
+		"t3\tmove\t/m/R.mkv\t/m/P.mkv\tmovie:3\n"
+	os.WriteFile(first, []byte(log), 0o644)
+	os.WriteFile(legacy, []byte(log), 0o644)
+	os.WriteFile(second, []byte("t4\tmove\t/m/Heat (1995) {tmdb-949}/Heat.mkv\t/m/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv\tmovie:1\n"), 0o644)
+	orig, moves, err := originals([]string{first, filepath.Join(dir, "missing.tsv"), second, legacy})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := orig["/m/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv"]; got != "/m/Heat.1995.BluRay-GRP.mkv" || len(orig) != 2 {
-		t.Fatalf("originals = %v", orig)
+	want := map[string]string{
+		"/m/Heat (1995) {tmdb-949}/Heat.mkv":                   "/m/Heat.1995.BluRay-GRP.mkv",
+		"/m/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv": "/m/Heat.1995.BluRay-GRP.mkv",
+		"/m/Q.mkv": "/m/P.mkv", "/m/P.mkv": "/m/R.mkv",
+	}
+	if !maps.Equal(orig, want) || moves != 4 {
+		t.Fatalf("originals = %v, %d moves", orig, moves)
 	}
 }
 
@@ -485,18 +496,26 @@ func TestVanishedVideosAreSkipped(t *testing.T) {
 	}
 }
 
-// Catches: a missing ffprobe marking every video unreadable, and a missing ffmpeg skipping every decode check
-// in silence (its exec error is an ErrNotExist, like a video moved away).
-func TestMissingToolsFailTheRun(t *testing.T) {
+// Catches: a missing ffprobe marking every video unreadable, rename logs that cannot be read (a missing mount)
+// rewriting every note without its original name, and a missing ffmpeg skipping every decode check in silence
+// (its exec error is an ErrNotExist, like a video moved away).
+func TestMissingInputsFailTheRun(t *testing.T) {
 	h := fake.NewEnv(t, nil)
 	l := lib{t, t.TempDir()}
-	l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", 1)
-	h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []", l.root))
+	heat := l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", 1)
+	options := fmt.Sprintf("library = %q\nsections = [\"Movies\"]\n", l.root)
+	h.SetOptions(options + "undo_logs = []")
 	if err := (Stage{}).Run(context.Background(), h.Env, &stage.Report{}); err == nil || !strings.Contains(err.Error(), "ffprobe") {
 		t.Fatalf("no ffprobe: err = %v (the run must stop before marking videos unreadable)", err)
 	}
 	fixture, _ := filepath.Abs("testdata/cronos_dtshdma.json")
 	h.Script(t, "ffprobe", fmt.Sprintf("cat %q\n", fixture))
+	h.SetOptions(options + fmt.Sprintf("undo_logs = [%q]", filepath.Join(t.TempDir(), "undo.tsv")))
+	err := (Stage{}).Run(context.Background(), h.Env, &stage.Report{})
+	if _, serr := os.Stat(filepath.Join(filepath.Dir(heat), ".details")); err == nil || !strings.Contains(err.Error(), "no move row in any rename log") || serr == nil {
+		t.Fatalf("no rename log: err = %v, note folder err = %v (want the run refused before any note)", err, serr)
+	}
+	h.SetOptions(options + "undo_logs = []")
 	if err := (Stage{}).Run(context.Background(), h.Env, &stage.Report{}); !errors.Is(err, fs.ErrNotExist) || !strings.Contains(err.Error(), "ffmpeg") {
 		t.Fatalf("no ffmpeg: err = %v", err)
 	}

@@ -60,7 +60,11 @@ default_section = 4
 every             = "15m"
 library           = "/volume1/media"
 sections          = ["Movies", "TV"]
-undo_logs         = ["/volume1/PlexMediaServer/rename/undo.tsv", "/volume1/PlexMediaServer/rename/undo_auto.tsv"]
+# Rename logs, oldest first: the Python renamers', the rename stage's legacy copies of them, then its own. A missing
+# log is skipped and a row read twice counts once, but a run that finds no move row at all fails ([] = no logs).
+undo_logs         = ["/volume1/PlexMediaServer/rename/undo.tsv", "/volume1/PlexMediaServer/rename/undo_auto.tsv",
+                     "/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv",
+                     "/volume1/media/.projectionist/rename/undo.tsv"]
 max_probes        = 400  # new ffprobe runs per run
 max_peak_scans    = 2    # whole-file packet scans per run (files above peak_above_kbps only; ~20 min per 50 GB)
 max_decode_checks = 60   # 3 x 5 s decode samples per file
