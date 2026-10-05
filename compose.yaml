@@ -36,7 +36,7 @@ services:
       # GPU self-test sample and the old scripts' state files (imported once at cutover): read-only.
       - /volume1/PlexMediaServer/scripts:/volume1/PlexMediaServer/scripts:ro
       - /volume1/PlexMediaServer/remote4k:/volume1/PlexMediaServer/remote4k # STATUS.txt the owner reads
-    secrets: [jellyfin_key] # /run/secrets/jellyfin_key, read-only
+    secrets: [jellyfin_key, tmdb_read_token] # /run/secrets/<name>, read-only
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
@@ -44,3 +44,5 @@ services:
 secrets:
   jellyfin_key:
     file: /volume1/docker/projectionist/secrets/jellyfin_key # root:root 0600
+  tmdb_read_token: # TMDB v4 read-access token; subtitles looks up IMDb ids with it
+    file: /volume1/docker/projectionist/secrets/tmdb_read_token

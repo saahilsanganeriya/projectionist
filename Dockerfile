@@ -14,6 +14,12 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 # The same image tag the NAS runs, so the ffmpeg we exec is byte-identical to Jellyfin's (QSV/VAAPI, iHD driver).
 FROM ${JELLYFIN_IMAGE} AS jellyfin
 
+# alass aligns a subtitle to a film's speech (the subtitles stage, when no English image track gives the timing).
+# Pinned to the last upstream commit, which adds --audio-index; Alpine's musl toolchain links it statically.
+FROM --platform=linux/amd64 rust:1.96-alpine AS alass
+RUN apk add --no-cache git musl-dev
+RUN cargo install --locked --root /out --git https://github.com/kaegi/alass --rev 874f02d9577182752a0f969b6d6b98fd65bdf1fc alass-cli
+
 FROM debian:trixie-slim
 # jellyfin-ffmpeg8's runtime dependencies (`apt-cache depends jellyfin-ffmpeg8` inside the Jellyfin image).
 RUN apt-get update \
@@ -23,6 +29,7 @@ RUN apt-get update \
       libx265-215 libzstd1 libzvbi0t64 ocl-icd-libopencl1 \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=jellyfin /usr/lib/jellyfin-ffmpeg /usr/lib/jellyfin-ffmpeg
+COPY --from=alass /out/bin/alass-cli /usr/local/bin/alass
 COPY --from=build /out/projectionist /usr/local/bin/projectionist
 ENTRYPOINT ["/usr/local/bin/projectionist"]
 CMD ["serve", "-config", "/config/projectionist.toml"]
