@@ -250,6 +250,9 @@ func (s *syncer) reconcile(ctx context.Context, app string, addr *addresses, sta
 	now := s.env.Now()
 	failures, stopped := 0, false
 	for _, u := range s.opt.Users {
+		if u.account(app) == "" { // configured with no account in this app
+			continue
+		}
 		userID, ok := addr.Users[u.account(app)]
 		if !ok {
 			s.rep.Alert("%s has no account %q for %s", app, u.account(app), u.Name)

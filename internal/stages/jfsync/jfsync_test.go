@@ -331,7 +331,7 @@ func TestPushCrossingAWrite(t *testing.T) {
 }
 
 // Catches: a person configured with no Plex account (plex = "") written as the server's unnamed account, which the
-// NAS has (their watch state would land in another account); a Plex name absent from the backup copy (an account
+// NAS has (their watch state would land in another account), or alerted about on every run; a Plex name absent from the backup copy (an account
 // added since it was taken) marked imported without an alert, so its Plex writes would replay plays Plex holds,
 // adding views its API cannot remove; and an import of one account standing for another configured later.
 func TestPlexAccountConfig(t *testing.T) {
@@ -340,7 +340,7 @@ func TestPlexAccountConfig(t *testing.T) {
 		plex, alert      string
 		imported, writes int
 	}{
-		{`""`, `plex has no account ""`, 5, 0}, // saahil's five films import
+		{`""`, "", 5, 0}, // saahil's five films import
 		{`"Roger R"`, `"Roger R" (users entry "roger") is not in the backup copy`, 0, 0},
 		{`"roger-tv"`, `plex has no account "roger-tv"`, 0, 0}, // in the copy, with no plays
 		{`"roger"`, "", 1, 1}, // the Wire episode he finished in Plex; Ran, finished in Jellyfin, goes to Plex
