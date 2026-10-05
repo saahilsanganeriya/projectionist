@@ -131,6 +131,13 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if err := r.ingest(ctx); err != nil {
 		return err
 	}
+	var feed feedCache
+	if _, err := env.Store.GetJSON(ctx, name, "rss", &feed); err != nil {
+		return err
+	}
+	if env.Now().Sub(feed.ReadAt) > feedStale {
+		rep.Alert("Letterboxd feed unread since %s: new diary entries are not reaching Plex or Jellyfin", feed.ReadAt.Format(time.RFC3339))
+	}
 	f, err := r.loadFacts(ctx)
 	if err != nil {
 		return err
@@ -260,9 +267,14 @@ func (r *run) ingest(ctx context.Context) error {
 }
 
 type feedCache struct {
-	ETag         string `json:"etag"`
-	LastModified string `json:"last_modified"`
+	ETag         string    `json:"etag"`
+	LastModified string    `json:"last_modified"`
+	ReadAt       time.Time `json:"read_at"` // last successful read (200 or 304)
 }
+
+// feedStale is how long the feed may go unread (blocked, down) before the owner hears: past it, new diary
+// entries stop reaching Plex and Jellyfin.
+const feedStale = 48 * time.Hour
 
 func (r *run) readFeed(ctx context.Context) error {
 	var c feedCache
@@ -280,9 +292,10 @@ func (r *run) readFeed(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	c.ReadAt = r.env.Now()
 	if p.status == http.StatusNotModified {
 		r.count("rss_not_modified", 1)
-		return nil
+		return r.env.Store.PutJSON(ctx, name, "rss", c)
 	}
 	entries, err := parseRSS(p.body)
 	if err != nil {
@@ -307,7 +320,7 @@ func (r *run) readFeed(ctx context.Context) error {
 			}
 		}
 	}
-	return r.env.Store.PutJSON(ctx, name, "rss", feedCache{ETag: p.header.Get("ETag"), LastModified: p.header.Get("Last-Modified")})
+	return r.env.Store.PutJSON(ctx, name, "rss", feedCache{ETag: p.header.Get("ETag"), LastModified: p.header.Get("Last-Modified"), ReadAt: c.ReadAt})
 }
 
 type crawlState struct {

@@ -397,8 +397,8 @@ func TestRunEndToEnd(t *testing.T) {
 }
 
 // Catches: a Cloudflare-blocked watchlist page shrinking the watchlist (the export's must stand), the blocked
-// kind retried inside its backoff, and a failed Plex scrobble either failing the run or leaving the play
-// recorded as done (it must be retried next run).
+// kind retried inside its backoff, a failed Plex scrobble either failing the run or leaving the play recorded
+// as done (it must be retried next run), and a feed blocked for days without an alert.
 func TestRunSurvivesBlocksAndFailures(t *testing.T) {
 	w := newWorld(t)
 	w.lb.challenge["/saahilsan/watchlist/page/2/"] = true
@@ -432,6 +432,15 @@ func TestRunSurvivesBlocksAndFailures(t *testing.T) {
 	}
 	if w.apps.plex["10"].views != 3 || w.apps.plex["20"].views != 2 {
 		t.Errorf("failed scrobbles not retried: %d, %d", w.apps.plex["10"].views, w.apps.plex["20"].views)
+	}
+	if len(rep.Alerts) != 0 {
+		t.Errorf("alerts with a fresh feed: %v", rep.Alerts)
+	}
+
+	w.lb.challenge["/saahilsan/rss/"] = true // blocked for over two days: the owner must hear of it
+	w.h.Now = w.h.Now.Add(feedStale + time.Minute)
+	if rep = w.run(t, ""); len(rep.Alerts) != 1 {
+		t.Errorf("no alert after the feed went unread past %v: %v", feedStale, rep.Alerts)
 	}
 }
 
