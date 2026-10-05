@@ -114,6 +114,7 @@ sink_refresh   = "24h"                    # re-read what Plex (one paged listing
 jellyfin_refresh = "24h"                  # re-read what Jellyfin holds this often (15-30 s a read); also before writing, once a day per film
 plex_section   = 4
 jellyfin_user  = "saahil"
+person         = "saahil"                 # the owner in the watch record (his name in jfsync's users): jfsync is told of each Plex view this stage adds
 collection     = "Watchlist"              # "" = no Watchlist collection
 plex_watchlist = false                    # also mirror onto his plex.tv watchlist (his Plex friends can see it)
 run_budget     = "25m"                    # no Plex/Jellyfin/plex.tv call starts later than this into a run; keep it under every

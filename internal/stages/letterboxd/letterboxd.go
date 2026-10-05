@@ -4,16 +4,21 @@
 // Letterboxd is the truth; Plex and Jellyfin are sinks. Inputs, all public and fetched politely (one request per
 // 2 s for the whole process, shared with every stage through lbpace; every answer that can be cached is): the RSS
 // feed (every run), the watchlist and watched-films grid pages (daily), the film pages (TMDB id, cached forever),
-// and the account export unzipped on the NAS (the backfill). An answer the stage cannot read as Letterboxd's (a
-// watchlist page not stating its size, or a crawl whose films do not add up to it; a film page naming no TMDB type;
-// a boxd.it answer without a Location) is a challenge, backed off and never cached, so new markup cannot shrink the
-// watchlist or mark a film unresolvable. Films join the library on the TMDB id in the folder names. Per app the
-// stage keeps a snapshot of what the app holds (one paged listing, re-read every sink_refresh or jellyfin_refresh,
-// both daily, and before a run that writes to it, at most once a day per film) and updates it after each write, so
-// a rerun writes nothing. Watched in an app is its own mark (a Jellyfin play count rises when playback starts). A
-// film whose writes fail in 3 runs in a row is parked, and the owner told once. Diary viewings count once each, by
-// the viewing id that the feed guid and the export's boxd.it code both carry; an entry he deletes is dropped, and
-// he is told, since a view already written stays.
+// and the account export unzipped on the NAS (the backfill). An answer the stage cannot read as Letterboxd's is never
+// cached, so new markup cannot shrink the watchlist or mark a film unresolvable: a watchlist page not stating its
+// size, or a crawl whose films do not add up to it, is a challenge and backs the crawl off; a film page naming no TMDB
+// type, or a boxd.it answer that is not a redirect to a film page, holds up that one film for a day (a second in a
+// run backs the kind off). A kind failing for 3 days, or a film unreadable for 3 days, is an alert each run. Films
+// join the library on the TMDB id in the folder names. Per app the stage keeps a snapshot of what the app holds (one
+// paged listing, re-read every sink_refresh or jellyfin_refresh, both daily, and before a run that writes to it, at
+// most once a day per film) and updates it after each write, so a rerun writes nothing. Watched in an app is its own
+// mark (a Jellyfin play count rises when playback starts). A film whose writes fail in 3 runs in a row is parked, and
+// the owner told once. Diary viewings count once each, by the viewing id that the feed guid and the export's boxd.it
+// code both carry; an entry he deletes is dropped, and he is told, since a view already written stays.
+//
+// jfsync also writes Plex views (it carries his Jellyfin plays there), and nothing can take a view back. So a film is
+// scrobbled only up to its view count read right before, and jfsync is told first that Plex holds the film's play, so
+// it does not add the same viewing again when his Jellyfin play of it reaches its record.
 //
 // Never: unwatch, lower a play count, clear a rating, or remove anything this stage did not add. Plex takes no
 // last-played date (a scrobble stamps "now"). Reviews are not synced: a Plex review is a community post whose
@@ -29,6 +34,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -56,6 +62,7 @@ type Options struct {
 
 	PlexSection   int    `toml:"plex_section"`
 	JellyfinUser  string `toml:"jellyfin_user"`
+	Person        string `toml:"person"`         // the owner in projectionist's watch record: his name in jfsync's users
 	Collection    string `toml:"collection"`     // "" = no Watchlist collection
 	PlexWatchlist bool   `toml:"plex_watchlist"` // mirror onto the owner's plex.tv watchlist (visible per his Plex privacy)
 	DiscoverURL   string `toml:"discover_url"`
@@ -80,6 +87,7 @@ func defaults() Options {
 		JFRefresh:     24 * time.Hour,
 		PlexSection:   4,
 		JellyfinUser:  "saahil",
+		Person:        "saahil",
 		Collection:    "Watchlist",
 		DiscoverURL:   "https://discover.provider.plex.tv",
 		RunBudget:     25 * time.Minute,
@@ -292,15 +300,33 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 type backoff struct {
 	Until time.Time `json:"until"`
 	Step  int       `json:"step"`
+	Since time.Time `json:"since,omitzero"` // first failure, challenged or not, since the kind last read well
+	Err   string    `json:"err,omitempty"`  // the latest failure
 }
 
+// failing names each kind's pages and what the owner loses while they keep failing. A refusal only backs off, so
+// that new markup can never shrink anything, which leaves a lasting one silent: past failingAlert he is told, each
+// run until they read well again. The feed has its own, earlier alarm (feedStale).
+var failing = map[string]struct{ pages, news string }{
+	"watchlist": {"watchlist pages", "both Watchlist collections and the missing-films file keep his watchlist as last read in full"},
+	"films":     {"watched-films pages", "films he marks watched or rates outside the diary are not picked up"},
+	"film":      {"film pages", "films new to the stage are not matched to TMDB, so nothing is written for them"},
+}
+
+const failingAlert = 72 * time.Hour
+
 // guarded runs one Letterboxd fetch job of a kind, honouring and updating that kind's challenge backoff
-// (1 h doubling to 24 h). Budget exhaustion and challenges end the job quietly; it resumes next run.
+// (1 h doubling to 24 h). Budget exhaustion, challenges and failures end the job quietly; it resumes next run.
 func (r *run) guarded(ctx context.Context, kind string, job func() error) error {
 	var b backoff
 	if _, err := r.env.Store.GetJSON(ctx, name, "backoff."+kind, &b); err != nil {
 		return err
 	}
+	defer func() {
+		if f, ok := failing[kind]; ok && !b.Since.IsZero() && r.env.Now().Sub(b.Since) >= failingAlert {
+			r.rep.Alert("Letterboxd %s failing since %s (latest: %s): %s", f.pages, b.Since.Format(time.RFC3339), b.Err, f.news)
+		}
+	}()
 	if r.env.Now().Before(b.Until) {
 		r.count("backed_off."+kind, 1)
 		return nil
@@ -313,21 +339,25 @@ func (r *run) guarded(ctx context.Context, kind string, job func() error) error 
 		r.env.Log.Warn("letterboxd challenged; backing off", "event", "letterboxd_challenged", "kind", kind,
 			"until", b.Until.Format(time.RFC3339), "err", err)
 		r.count("challenged."+kind, 1)
-		return r.env.Store.PutJSON(ctx, name, "backoff."+kind, b)
 	case errors.Is(err, errBudget):
 		r.count("budget_spent", 1)
 		return nil
 	case err != nil && ctx.Err() == nil && !isStoreErr(err):
 		r.env.Log.Warn("letterboxd fetch failed", "event", "letterboxd_error", "kind", kind, "err", err)
 		r.count("errors."+kind, 1)
-		return nil
 	case err != nil:
 		return err
+	case b.Step == 0 && b.Since.IsZero():
+		return nil
+	default:
+		b = backoff{}
+		return r.env.Store.PutJSON(ctx, name, "backoff."+kind, b)
 	}
-	if b.Step != 0 {
-		return r.env.Store.PutJSON(ctx, name, "backoff."+kind, backoff{})
+	if b.Since.IsZero() {
+		b.Since = r.env.Now()
 	}
-	return nil
+	b.Err = err.Error()
+	return r.env.Store.PutJSON(ctx, name, "backoff."+kind, b)
 }
 
 // storeErr marks a local SQLite failure, which (unlike any network trouble) fails the run.
@@ -582,15 +612,52 @@ func (r *run) recordGrid(ctx context.Context, kind string, films []gridFilm) err
 
 // ---- resolve: boxd.it codes → slugs, slugs → TMDB (each answer cached forever) ----
 
-// resolve looks up what the TMDB join lacks; learned reports whether any answer was stored.
+// unreadable is a page that answered without the markup the stage reads; it is asked again a day after Last.
+type unreadable struct {
+	First time.Time `json:"first"`
+	Last  time.Time `json:"last"`
+}
+
+// resolve looks up what the TMDB join lacks; learned reports whether any answer was stored. One answer it cannot
+// read (an interstitial with 200, a redirect to a sign-in) holds up only its own film, for a day, never as a cached
+// negative; a second in a run is most likely new markup on every page, so the whole kind backs off.
 func (r *run) resolve(ctx context.Context, f facts) (learned bool, err error) {
 	refs := f.resolveNeeds()
 	if len(refs) == 0 {
 		return false, nil
 	}
+	bad := map[string]unreadable{} // "lid:<code>" or "slug:<slug>" →
+	if _, err := r.env.Store.GetJSON(ctx, name, "unreadable", &bad); err != nil {
+		return false, err
+	}
+	for key := range bad { // a film no longer needed (taken off the watchlist) is forgotten
+		if !slices.Contains(refs, key) {
+			delete(bad, key)
+		}
+	}
+	now := r.env.Now()
+	waiting := func(key string) bool { u, ok := bad[key]; return ok && now.Sub(u.Last) < rereadEvery }
+	strikes := 0
+	refused := func(key string, err error) error {
+		u := bad[key]
+		if u.First.IsZero() {
+			u.First = now
+		}
+		u.Last = now
+		bad[key] = u
+		r.count("unreadable", 1)
+		r.env.Log.Warn("letterboxd answer unreadable; this film is asked again tomorrow", "event", "letterboxd_unreadable", "ref", key, "err", err)
+		if strikes++; strikes == 2 {
+			return fmt.Errorf("%w: a second unreadable answer this run: %w", errChallenged, err)
+		}
+		return nil
+	}
 	err = r.guarded(ctx, "film", func() error {
 		done := map[string]bool{}
 		for _, ref := range refs {
+			if waiting(ref) {
+				continue
+			}
 			slug, isSlug := strings.CutPrefix(ref, "slug:")
 			if !isSlug {
 				lid := strings.TrimPrefix(ref, "lid:")
@@ -598,39 +665,60 @@ func (r *run) resolve(ctx context.Context, f facts) (learned bool, err error) {
 				if err != nil && p.status != http.StatusNotFound {
 					return err
 				}
-				loc := p.header.Get("Location")
-				if loc == "" && p.status != http.StatusNotFound {
-					return fmt.Errorf("%w: boxd.it/%s: HTTP %d without a Location", errChallenged, lid, p.status)
+				// A code with no film behind it answers 404, cached as such; a redirect anywhere but a film page is no answer.
+				if slug = slugOf(p.header.Get("Location")); slug == "" && p.status != http.StatusNotFound {
+					if err := refused(ref, fmt.Errorf("boxd.it/%s: HTTP %d to %q, not a film page", lid, p.status, p.header.Get("Location"))); err != nil {
+						return err
+					}
+					continue
 				}
-				slug = slugOf(loc) // "" when there is no such code (404) or it is not a film: cached as such
 				if _, err := r.db.ExecContext(ctx, `INSERT OR REPLACE INTO letterboxd_lid(lid, slug) VALUES (?, ?)`, lid, slug); err != nil {
 					return storeErr{err}
 				}
+				delete(bad, ref)
 				learned = true
 				r.count("resolved_lids", 1)
 			}
-			if _, known := f.films[slug]; slug == "" || known || done[slug] {
+			if _, known := f.films[slug]; slug == "" || known || done[slug] || waiting("slug:"+slug) {
 				continue
 			}
 			done[slug] = true
 			tmdb, kind, err := r.filmPage(ctx, slug)
+			if errors.Is(err, errUnreadable) {
+				if err := refused("slug:"+slug, err); err != nil {
+					return err
+				}
+				continue
+			}
 			if err != nil {
 				return err
 			}
 			if _, err := r.db.ExecContext(ctx, `INSERT OR REPLACE INTO letterboxd_film(slug, tmdb, kind) VALUES (?, ?, ?)`, slug, tmdb, kind); err != nil {
 				return storeErr{err}
 			}
+			delete(bad, "slug:"+slug)
 			learned = true
 			r.count("resolved_films", 1)
 		}
 		return nil
 	})
+	if perr := r.env.Store.PutJSON(ctx, name, "unreadable", bad); err == nil {
+		err = perr
+	}
+	var stuck []string
+	for _, key := range sortedKeys(bad) {
+		if now.Sub(bad[key].First) >= failingAlert {
+			stuck = append(stuck, key)
+		}
+	}
+	if len(stuck) > 0 {
+		r.rep.Alert("Letterboxd pages unreadable for %s or more, so these films are not matched to TMDB: %s", failingAlert, strings.Join(stuck, ", "))
+	}
 	return learned, err
 }
 
 // filmPage reads one film page, following one slug rename (Letterboxd 301s an old slug to the new one). A 404, a
-// page naming its TMDB type and a second rename are answers; anything else is a challenge, asked again later and
-// never cached.
+// page naming its TMDB type and a second rename are answers; a page naming no type is unreadable, never cached.
 func (r *run) filmPage(ctx context.Context, slug string) (int, string, error) {
 	url := fmt.Sprintf("%s/film/%s/", r.opt.LetterboxdURL, slug)
 	for hop := 0; hop < 2; hop++ {
@@ -648,7 +736,7 @@ func (r *run) filmPage(ctx context.Context, slug string) (int, string, error) {
 		if tmdb, kind := parseFilmPage(p.body); kind != "" {
 			return tmdb, kind, nil
 		}
-		return 0, "", fmt.Errorf("%w: GET %s: HTTP %d names no data-tmdb-type", errChallenged, url, p.status)
+		return 0, "", fmt.Errorf("%w: GET %s: HTTP %d names no data-tmdb-type", errUnreadable, url, p.status)
 	}
 	return 0, "", nil
 }

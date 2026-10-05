@@ -24,7 +24,10 @@ import (
 	"strings"
 	"time"
 
+	"projectionist/internal/library"
+	"projectionist/internal/stages/jfsync"
 	"projectionist/internal/store"
+	"projectionist/internal/watch"
 )
 
 type sinkMeta struct {
@@ -576,6 +579,30 @@ func (r *run) syncPlex(ctx context.Context, wants []want, scope map[int]bool) er
 	b := &breaker{}
 	for _, u := range p.ups {
 		h := haves[u.TMDB]
+		if h.Plays < u.Plays {
+			views, err := r.viewsNow(ctx, b, u)
+			switch {
+			case isStoreErr(err):
+				return err
+			case err != nil:
+				r.failed(app, "view_count", err, u.TMDB)
+				u.Plays = h.Plays // no scrobble without a count read now
+			case views > h.Plays:
+				h.Plays, h.Played = views, true
+				if err := r.saveHave(ctx, app, haves, u.TMDB, h); err != nil {
+					return err
+				}
+				r.count(app+".viewed_since_read", 1)
+			}
+			// jfsync carries Jellyfin plays to Plex from the watch record. Told first that Plex holds this film's play,
+			// it does not scrobble the viewing again when his Jellyfin play of it reaches the record (a push resolves
+			// only once jfsync's daily listing has the film).
+			if h.Plays < u.Plays {
+				if err := jfsync.HoldPlexPlay(ctx, r.db, r.opt.Person, watch.MovieItem(library.ID{Source: "tmdb", Value: strconv.Itoa(u.TMDB)})); err != nil {
+					return storeErr{err}
+				}
+			}
+		}
 		// Plex has no "set play count": each scrobble adds one view (and stamps lastViewedAt = now; Plex takes no
 		// date). A scrobble that failed or lost its answer is not recorded: the film stays in the diff, and the next
 		// run plans it against a fresh listing, which shows whether the view landed.
@@ -615,6 +642,20 @@ func (r *run) syncPlex(ctx context.Context, wants []want, scope map[int]bool) er
 		return nil
 	}
 	return r.plexCollection(ctx, b, m, haves, p.add, p.remove)
+}
+
+// viewsNow reads one film's Plex view count right before it is scrobbled: the listing the plan came from may be
+// minutes old, and jfsync (carrying a Jellyfin play) or he may have added the view since.
+func (r *run) viewsNow(ctx context.Context, b *breaker, u update) (int, error) {
+	var md plexListing
+	path := "/library/metadata/" + url.PathEscape(u.Item) + "?excludeElements=Media,Genre,Country,Director,Writer,Role,Collection,Label,Field&excludeFields=summary,tagline"
+	if err := r.call(ctx, b, func() error { return r.env.Plex.GetJSON(ctx, path, &md) }); err != nil {
+		return 0, err
+	}
+	if len(md.Metadata) != 1 || md.Metadata[0].RatingKey != u.Item {
+		return 0, fmt.Errorf("plex: /library/metadata/%s answered %d items", u.Item, len(md.Metadata))
+	}
+	return md.Metadata[0].ViewCount, nil
 }
 
 func (r *run) plexCollection(ctx context.Context, b *breaker, m sinkMeta, haves map[int]have, add, remove []int) error {

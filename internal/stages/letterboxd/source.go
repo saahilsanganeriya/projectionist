@@ -26,6 +26,10 @@ import (
 // endpoints draw it for any client; the fetcher backs that page kind off instead of retrying.
 var errChallenged = errors.New("letterboxd: challenged")
 
+// errUnreadable is an answer without the markup the stage reads (a film page naming no TMDB type): new markup or an
+// interstitial served with 200. Never cached; asked again later.
+var errUnreadable = errors.New("letterboxd: unreadable answer")
+
 // errBudget means this run spent its request budget; the work resumes next run.
 var errBudget = errors.New("letterboxd: request budget spent")
 

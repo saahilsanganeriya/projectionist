@@ -115,7 +115,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if err := env.Options(&opt); err != nil {
 		return err
 	}
-	if err := openTables(ctx, env); err != nil {
+	if err := openTables(ctx, env.Store.DB()); err != nil {
 		return err
 	}
 	s := &syncer{env: env, opt: opt, rep: rep, ready: map[string]bool{}}
@@ -482,11 +482,11 @@ func (r sinkRow) raced(pushed time.Time) bool {
 	return !r.WrittenAt.IsZero() && !pushed.Before(r.ReadAt) && !pushed.After(r.WrittenAt.Add(raceSlack))
 }
 
-func openTables(ctx context.Context, env *stage.Env) error {
-	if err := watch.Open(ctx, env.Store.DB()); err != nil {
+func openTables(ctx context.Context, db *sql.DB) error {
+	if err := watch.Open(ctx, db); err != nil {
 		return err
 	}
-	_, err := env.Store.DB().ExecContext(ctx, `CREATE TABLE IF NOT EXISTS jfsync_sink (
+	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS jfsync_sink (
 		app TEXT NOT NULL, person TEXT NOT NULL, item TEXT NOT NULL, -- sinkKeys: a library item, or a Jellyfin item id
 		played INTEGER NOT NULL DEFAULT 0, plays INTEGER NOT NULL DEFAULT 0, position_ms INTEGER NOT NULL DEFAULT 0,
 		rating REAL, knows_play INTEGER NOT NULL DEFAULT 0, knows_position INTEGER NOT NULL DEFAULT 0,
@@ -545,6 +545,18 @@ func holdSink(ctx context.Context, db watch.Execer, app, person, item string, st
 		position_ms=excluded.position_ms, rating=excluded.rating, knows_play=excluded.knows_play,
 		knows_position=excluded.knows_position`,
 		app, person, item, st.Played, st.Plays, st.PositionMs, st.Rating, st.KnowsPlay, st.KnowsPosition)
+	return err
+}
+
+// HoldPlexPlay records that Plex holds a play of item for person, scrobbled by another stage (letterboxd, from his
+// diary). Without it, a Jellyfin play of the same viewing that reaches the record later (its push resolves only once
+// the item is listed) would be scrobbled here too: a second view nobody can remove. Only the played mark is set.
+func HoldPlexPlay(ctx context.Context, db *sql.DB, person, item string) error {
+	if err := openTables(ctx, db); err != nil {
+		return err
+	}
+	_, err := db.ExecContext(ctx, `INSERT INTO jfsync_sink(app, person, item, played, knows_play) VALUES (?, ?, ?, 1, 1)
+		ON CONFLICT(app, person, item) DO UPDATE SET played=1, knows_play=1`, plexApp, person, item)
 	return err
 }
 

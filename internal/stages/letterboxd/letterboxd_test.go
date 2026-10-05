@@ -30,6 +30,8 @@ type fakeLetterboxd struct {
 	hits      map[string]int
 	challenge map[string]bool   // paths answered with Cloudflare's 403
 	pages     map[string]string // paths answered 200 with this body instead of their usual page
+	moved     map[string]string // paths answered 302 to this Location instead
+	status    map[string]int    // paths answered with this error status instead
 	feed      []byte            // the RSS body, served with ETag etag
 	etag      string
 }
@@ -38,11 +40,11 @@ func newLetterboxd(t *testing.T) *fakeLetterboxd {
 	lids := map[string]string{"qTKY": "licorice-pizza", "aAst": "ad-astra-2019", "okja1": "okja"}
 	tmdb := map[string]int{"the-ring-2002": 565, "what-happened-was": 18, "okja": 387426, "primetime-2026": 999001, "licorice-pizza": 718032}
 	files := map[string]string{"/saahilsan/watchlist/": "watchlist.html", "/saahilsan/films/": "films.html"}
-	lb := &fakeLetterboxd{hits: map[string]int{}, challenge: map[string]bool{}, pages: map[string]string{}, feed: fixture(t, "rss.xml"), etag: `"v1"`}
+	lb := &fakeLetterboxd{hits: map[string]int{}, challenge: map[string]bool{}, pages: map[string]string{}, moved: map[string]string{}, status: map[string]int{}, feed: fixture(t, "rss.xml"), etag: `"v1"`}
 	lb.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lb.mu.Lock()
 		lb.hits[r.URL.Path]++
-		blocked, override := lb.challenge[r.URL.Path], lb.pages[r.URL.Path]
+		blocked, override, moved, status := lb.challenge[r.URL.Path], lb.pages[r.URL.Path], lb.moved[r.URL.Path], lb.status[r.URL.Path]
 		feed, etag := lb.feed, lb.etag
 		lb.mu.Unlock()
 		if !strings.Contains(r.Header.Get("User-Agent"), "Mozilla/5.0") {
@@ -52,8 +54,12 @@ func newLetterboxd(t *testing.T) *fakeLetterboxd {
 		switch slug := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/film/"), "/"); {
 		case blocked:
 			http.Error(w, "<title>Just a moment...</title>", http.StatusForbidden)
+		case status != 0:
+			http.Error(w, "server error", status)
 		case override != "":
 			io.WriteString(w, override)
+		case moved != "":
+			http.Redirect(w, r, moved, http.StatusFound)
 		case r.URL.Path == "/saahilsan/rss/" && r.Header.Get("If-None-Match") == etag:
 			w.WriteHeader(http.StatusNotModified)
 		case r.URL.Path == "/saahilsan/rss/":
@@ -98,11 +104,23 @@ func (lb *fakeLetterboxd) dropItem(guid string) {
 	lb.etag += "+"
 }
 
-// serve answers path with 200 and body from now on.
+// serve answers path with 200 and body from now on; move, with a 302 to loc. "" restores the usual answer.
 func (lb *fakeLetterboxd) serve(path, body string) {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
 	lb.pages[path] = body
+}
+
+func (lb *fakeLetterboxd) move(path, loc string) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	lb.moved[path] = loc
+}
+
+func (lb *fakeLetterboxd) fail(path string, status int) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	lb.status[path] = status
 }
 
 // editFeed changes the served feed as an edit on Letterboxd would, with a new ETag.
@@ -150,6 +168,7 @@ type apps struct {
 	jf               map[string]*jfFilm // item id →
 	jfSet            []string
 	jfBodies         []string
+	listed           func() // called, under mu, once a whole-section Plex listing is answered
 }
 
 func setupApps(t *testing.T, h *fake.Harness) *apps {
@@ -175,7 +194,17 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 				"Guid": []map[string]string{{"id": "imdb://tt0"}, {"id": fmt.Sprintf("tmdb://%d", f.tmdb)}}})
 		}
 		reply(w, map[string]any{"totalSize": len(md), "Metadata": md})
+		if a.listed != nil && r.URL.Query().Get("collection") == "" {
+			a.listed()
+		}
 	})
+	for k := range a.plex {
+		px.HandleFunc("GET", "/library/metadata/"+k, func(w http.ResponseWriter, r *http.Request) {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			reply(w, map[string]any{"Metadata": []map[string]any{{"ratingKey": k, "viewCount": a.plex[k].views}}})
+		})
+	}
 	px.HandleFunc("GET", "/library/sections/4/collections", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
@@ -557,7 +586,8 @@ func TestRunSurvivesBlocksAndFailures(t *testing.T) {
 
 	w.lb.challenge["/saahilsan/rss/"] = true // blocked for over two days: the owner must hear of it
 	w.h.Now = w.h.Now.Add(feedStale + time.Minute)
-	if rep = w.run(t, ""); len(rep.Alerts) != 1 {
+	rep = w.run(t, "")
+	if !slices.ContainsFunc(rep.Alerts, func(a string) bool { return strings.Contains(a, "feed unread") }) {
 		t.Errorf("no alert after the feed went unread past %v: %v", feedStale, rep.Alerts)
 	}
 }
@@ -968,28 +998,119 @@ func TestWatchlistCrawlCompletesOnlyAtTheStatedCount(t *testing.T) {
 
 // Catches: an answer the stage cannot read cached for good as a negative, so Licorice Pizza is never synced: a 200
 // film page naming no TMDB type (an interstitial, new markup) stored as "not a movie", and a boxd.it answer with no
-// Location stored as "not a film". A real film page always names its type: all 1,021 in the NAS state DB did, the
-// 23 TV miniseries among them as data-tmdb-type="movie" data-tmdb-id="".
+// Location, or one redirecting anywhere but a film page (a sign-in page), stored as "not a film"; one such answer
+// holding up every film queued after it (Okja must resolve in the same run); and the page asked again within the day.
+// A real film page always names its type: all 1,021 in the NAS state DB did, the 23 TV miniseries among them as
+// data-tmdb-type="movie" data-tmdb-id="".
 func TestUnreadableAnswersAreNeverCached(t *testing.T) {
-	for _, tc := range []struct{ name, path, body string }{
-		{"film page without data-tmdb-type", "/film/licorice-pizza/", `<html><body class="film"></body></html>`},
-		{"boxd.it answer without a Location", "/boxd/qTKY", `<html><body></body></html>`},
+	for _, tc := range []struct{ name, path, body, loc string }{
+		{"film page without data-tmdb-type", "/film/licorice-pizza/", `<html><body class="film"></body></html>`, ""},
+		{"boxd.it answer without a Location", "/boxd/qTKY", `<html><body></body></html>`, ""},
+		{"boxd.it redirect to a sign-in page", "/boxd/qTKY", "", "https://letterboxd.com/sign-in/"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newWorld(t)
+			db := w.h.Env.Store.DB()
 			w.lb.serve(tc.path, tc.body)
-			if rep := w.run(t, ""); rep.Counts["challenged.film"] != 1 {
-				t.Fatalf("counts %v: want the answer refused as a challenge", rep.Counts)
+			w.lb.move(tc.path, tc.loc)
+			rep := w.run(t, "")
+			var okja int
+			db.QueryRow(`SELECT tmdb FROM letterboxd_film WHERE slug='okja'`).Scan(&okja)
+			if rep.Counts["unreadable"] != 1 || rep.Counts["challenged.film"] != 0 || okja != 387426 {
+				t.Fatalf("Okja = TMDB %d (counts %v): want the one answer set aside and the films after it resolved", okja, rep.Counts)
 			}
-			w.lb.serve(tc.path, "")              // Letterboxd answers as usual again
-			w.h.Now = w.h.Now.Add(2 * time.Hour) // past the 1 h backoff
+			w.lb.serve(tc.path, "") // Letterboxd answers as usual again
+			w.lb.move(tc.path, "")
+			hits := w.lb.hits[tc.path]
+			w.h.Now = w.h.Now.Add(2 * time.Hour)
+			w.run(t, "")
+			if w.lb.hits[tc.path] != hits {
+				t.Errorf("%s asked again 2 h after an unreadable answer, want a day", tc.path)
+			}
+			w.h.Now = w.h.Now.Add(23 * time.Hour)
 			w.run(t, "")
 			var tmdb int
-			if err := w.h.Env.Store.DB().QueryRow(`SELECT tmdb FROM letterboxd_film WHERE slug='licorice-pizza'`).Scan(&tmdb); err != nil || tmdb != 718032 {
+			if err := db.QueryRow(`SELECT tmdb FROM letterboxd_film WHERE slug='licorice-pizza'`).Scan(&tmdb); err != nil || tmdb != 718032 {
 				t.Errorf("Licorice Pizza once Letterboxd answers = TMDB %d (%v), want 718032", tmdb, err)
 			}
 		})
 	}
+}
+
+// Catches: new markup on every film page spending a run's whole request budget (400 pages, 13 min at the shared
+// pace) on answers the stage cannot read: a second unreadable answer in one run backs the kind off.
+func TestUnreadableEverywhereBacksOffTheKind(t *testing.T) {
+	w := newWorld(t)
+	w.lb.serve("/film/licorice-pizza/", `<html><body class="film"></body></html>`)
+	w.lb.serve("/film/okja/", `<html><body class="film"></body></html>`)
+	if rep := w.run(t, ""); rep.Counts["unreadable"] != 2 || rep.Counts["challenged.film"] != 1 {
+		t.Errorf("two unreadable film pages: counts %v, want both set aside and the kind backed off", rep.Counts)
+	}
+}
+
+// Catches: a refusal that lasts staying silent while what it feeds freezes (the reviewer's case: watchlist pages that
+// stop stating data-num-entries leave both Watchlist collections as they were, so new watchlist films never appear),
+// likewise films pages failing with an error and a film page that stays unreadable; the owner told before three days;
+// and told still once the pages read again, or once that film no longer needs its page (the feed names its TMDB id).
+func TestLastingRefusalsAlert(t *testing.T) {
+	w := newWorld(t)
+	w.lb.serve("/saahilsan/watchlist/", `<html><head><title>Just a moment...</title></head><body></body></html>`)
+	w.lb.fail("/saahilsan/films/", http.StatusInternalServerError)
+	w.lb.serve("/film/licorice-pizza/", `<html><body class="film"></body></html>`)
+	for _, d := range []time.Duration{0, 25 * time.Hour, 25 * time.Hour, 21 * time.Hour} { // up to 71 h
+		w.h.Now = w.h.Now.Add(d)
+		if rep := w.run(t, ""); len(rep.Alerts) != 0 {
+			t.Fatalf("alerts before three days: %v", rep.Alerts)
+		}
+	}
+	w.h.Now = w.h.Now.Add(2 * time.Hour)
+	rep := w.run(t, "")
+	if len(rep.Alerts) != 3 || !strings.Contains(rep.Alerts[0], "watchlist pages failing since 2026-10-05T06:00:00Z") ||
+		!strings.Contains(rep.Alerts[1], "watched-films pages failing since") || !strings.Contains(rep.Alerts[2], "slug:licorice-pizza") {
+		t.Errorf("after 73 h: alerts %q, want the watchlist's, the films grid's and Licorice Pizza's", rep.Alerts)
+	}
+	w.lb.serve("/saahilsan/watchlist/", "")
+	w.lb.fail("/saahilsan/films/", 0)
+	w.lb.editFeed("<channel>", "<channel>"+strings.NewReplacer("The Ring, 2002", "Licorice Pizza, 2021", "the-ring-2002", "licorice-pizza",
+		"1530000000", "1530000002", ">The Ring<", ">Licorice Pizza<", ">2002<", ">2021<", ">565<", ">718032<").Replace(ringItem))
+	w.h.Now = w.h.Now.Add(25 * time.Hour)
+	if rep := w.run(t, ""); len(rep.Alerts) != 0 {
+		t.Errorf("alerts once the pages read again and the feed names Licorice Pizza's TMDB id: %v", rep.Alerts)
+	}
+}
+
+// Catches the reviewer's double view, with jfsync writing Plex views too (a view can never be taken back): a view
+// jfsync adds after this stage's listing read (carrying his Jellyfin play of the film) scrobbled again on that
+// listing's count; and jfsync not told of a view this stage adds, so that when his Jellyfin play of the same viewing
+// reaches its record (resolved once its daily listing has the film) it scrobbles that viewing too.
+func TestOneViewingIsOnePlexViewWithJFSync(t *testing.T) {
+	t.Run("jfsync scrobbles after the listing read", func(t *testing.T) {
+		w := newWorld(t)
+		w.apps.listed = func() { w.apps.plex["30"].views = 1 }
+		w.lb.logRing()
+		rep := w.run(t, "")
+		if v := w.apps.plex["30"].views; v != 1 || rep.Counts["plex.viewed_since_read"] != 1 {
+			t.Errorf("one viewing became %d Plex views (counts %v)", v, rep.Counts)
+		}
+	})
+	t.Run("the count cannot be read now", func(t *testing.T) {
+		w := newWorld(t)
+		w.h.Plex.Handle("GET", "/library/metadata/30", http.StatusInternalServerError, "")
+		w.lb.logRing()
+		if rep := w.run(t, ""); w.apps.plex["30"].views != 0 || rep.Counts["plex.failed"] != 1 {
+			t.Errorf("The Ring scrobbled to %d views without its count read now (counts %v)", w.apps.plex["30"].views, rep.Counts)
+		}
+	})
+	t.Run("jfsync learns of the viewing later", func(t *testing.T) {
+		w := newWorld(t)
+		w.lb.logRing()
+		w.run(t, "")
+		var played, knows bool
+		err := w.h.Env.Store.DB().QueryRow(`SELECT played, knows_play FROM jfsync_sink WHERE app='plex' AND person='saahil' AND item='movie/tmdb-565'`).Scan(&played, &knows)
+		if err != nil || !played || !knows || w.apps.plex["30"].views != 1 {
+			t.Errorf("after scrobbling The Ring (%d views): jfsync believes Plex holds played=%v known=%v (%v), want both", w.apps.plex["30"].views, played, knows, err)
+		}
+	})
 }
 
 // Catches: a state DB made before letterboxd_sink.played and letterboxd_entry.rated_at failing every run with "no

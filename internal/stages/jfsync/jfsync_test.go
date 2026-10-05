@@ -700,3 +700,20 @@ func TestParseHooks(t *testing.T) {
 		}
 	}
 }
+
+// Catches: a Plex view another stage added (letterboxd scrobbling his diary) unknown here, so his Jellyfin play of
+// that viewing, once it reaches the record, is scrobbled again: a second view nobody can remove.
+func TestPlayHeldByAnotherStageIsNotScrobbledAgain(t *testing.T) {
+	h, w, _, _ := newHarness(t)
+	run(t, h)
+	if err := HoldPlexPlay(context.Background(), h.Env.Store.DB(), "saahil", "movie/tmdb-11645"); err != nil {
+		t.Fatal(err)
+	}
+	done := len(w.since(0))
+	h.Now = h.Now.Add(time.Hour) // he finishes Ran in Jellyfin; letterboxd already scrobbled it from his diary
+	push(h, jellyfinApp, `{"NotificationType":"UserDataSaved","NotificationUsername":"saahil","ItemId":"b1","ItemType":"Movie","SaveReason":"PlaybackFinished","Played":true,"PlayCount":1,"PlaybackPositionTicks":0}`)
+	run(t, h)
+	if got := strings.Join(w.since(done), "\n"); strings.Contains(got, "/:/scrobble") {
+		t.Errorf("a play another stage put in Plex scrobbled again:\n%s", got)
+	}
+}
