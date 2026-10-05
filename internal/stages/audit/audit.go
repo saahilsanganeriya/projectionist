@@ -143,7 +143,7 @@ type scan struct {
 	fresh   map[string][]string // findings in a folder that changed after settled; see hold
 	videos  []*video
 	listed  map[string]time.Time // every folder read, with its mtime from just before the read; see changed
-	moved   int                  // folders that changed while the run read them
+	moved   []string             // folders that changed while the run read them, sorted
 }
 
 func newScan(root string, settled time.Time) *scan {
@@ -202,16 +202,18 @@ func (s *scan) list(dir string) (fs.FileInfo, []fs.DirEntry, error) {
 	return st, entries, nil
 }
 
-// changed counts the folders whose mtime moved (or that went away) since they were read. Any entry renamed, created
+// changed lists the folders whose mtime moved (or that went away) since they were read. Any entry renamed, created
 // or removed in a folder moves its mtime, so this sees what no read error can: a file moved INTO a folder the walk
 // had already read, from one it had not read yet, is otherwise missed without a trace.
-func (s *scan) changed() (n int) {
+func (s *scan) changed() []string {
+	var dirs []string
 	for dir, mtime := range s.listed {
 		if st, err := os.Stat(dir); err != nil || !st.ModTime().Equal(mtime) {
-			n++
+			dirs = append(dirs, s.rel(dir))
 		}
 	}
-	return n
+	sort.Strings(dirs)
+	return dirs
 }
 
 func (s *scan) isFresh(info fs.FileInfo) bool { return info.ModTime().After(s.settled) }
@@ -700,7 +702,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	// A partial pass keeps the last complete baseline for what it could not see, a partial first pass is no baseline
 	// at all, and a run during which a folder changed keeps the last one whole: either way the next full pass does not
 	// alert on problems that were there all along.
-	next, save := snapshot{At: env.Now(), Items: s.found}, (hadPrev || notProbed == 0) && s.moved == 0
+	next, save := snapshot{At: env.Now(), Items: s.found}, (hadPrev || notProbed == 0) && len(s.moved) == 0
 	if notProbed > 0 && hadPrev {
 		next.Items = maps.Clone(s.found)
 		for k := range probeBound {
@@ -719,7 +721,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	rep.Count("videos", len(s.videos))
 	rep.Count("not_probed", notProbed)
 	rep.Count("held", held)
-	rep.Count("moved_mid_run", s.moved)
+	rep.Count("moved_mid_run", len(s.moved))
 
 	text := report(env, started, opt.MaxListed, s, shows, notProbed, unsettled+held, prev, hadPrev)
 	if err := writeReport(opt.Report, text); err != nil {
@@ -743,7 +745,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if !hadPrev {
 		rep.Summary += " (no baseline yet: no growth alerts)"
 	}
-	env.Log.Info("audit written", "event", "audit_report", "path", opt.Report, "videos", len(s.videos), "not_probed", notProbed, "unsettled", unsettled, "held", held, "moved", s.moved)
+	env.Log.Info("audit written", "event", "audit_report", "path", opt.Report, "videos", len(s.videos), "not_probed", notProbed, "unsettled", unsettled, "held", held, "moved", len(s.moved))
 	return nil
 }
 
@@ -771,8 +773,8 @@ func report(env *stage.Env, started time.Time, maxListed int, s *scan, shows []s
 	if notProbed > 0 {
 		fmt.Fprintf(&b, " %d not probed yet (a guest was watching, Plex/Jellyfin did not answer, the file moved, or ffprobe ran out of time): the unreadable and English-subtitle counts are partial.", notProbed)
 	}
-	if s.moved > 0 {
-		fmt.Fprintf(&b, " %d folders changed while the run read them (a rename, a move or a download), so some counts may be off; the next run compares against the run before this one.", s.moved)
+	if len(s.moved) > 0 {
+		fmt.Fprintf(&b, " %d folders changed while the run read them (a rename, a move or a download; e.g. %s), so some counts may be off; the next run compares against the run before this one.", len(s.moved), s.moved[0])
 	}
 	if waiting > 0 {
 		fmt.Fprintf(&b, " %d videos or findings changed in the last few minutes and are judged next run.", waiting)
