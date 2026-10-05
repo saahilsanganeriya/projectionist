@@ -11,8 +11,9 @@
 // the viewing id that the feed guid and the export's boxd.it code both carry.
 //
 // Never: unwatch, lower a play count, clear a rating, or remove anything this stage did not add. Plex takes no
-// last-played date (a scrobble stamps "now"). Reviews are not synced: a Plex review is shown to everyone his
-// account-wide ratings privacy allows (his Plex friends), and Jellyfin has no per-user text field.
+// last-played date (a scrobble stamps "now"). Reviews are not synced: a Plex review is a community post whose
+// privacy the poster cannot set (createReview takes none; other members' reviews carry ANYONE or PLEX and are
+// listed to non-friends), and Jellyfin has no per-user text field (UpdateUserItemDataDto).
 package letterboxd
 
 import (
