@@ -61,10 +61,17 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 	for _, it := range rows {
 		byKey[it.Title.Key] = it
 	}
+	// A call still pending an hour after it was reserved, with no batch, belongs to a process that died mid-call
+	// (calls take minutes): it may have been billed, so its worst case stays counted and its title is free again.
+	if _, err := r.env.Store.DB().ExecContext(ctx, `UPDATE posters_calls SET state='failed', cost_usd=cost_usd+reserved_usd,
+		reserved_usd=0, error='interrupted; counted at its worst case' WHERE state='pending' AND batch_id='' AND at < ?`,
+		stamp(r.env.Now().Add(-time.Hour))); err != nil {
+		return err
+	}
 	if err := r.collectBatches(ctx, byKey); err != nil {
 		return err
 	}
-	inFlight, failures, err := r.callState(ctx)
+	inFlight, unusable, err := r.callState(ctx)
 	if err != nil {
 		return err
 	}
@@ -78,8 +85,9 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 			continue
 		}
 		v, decided := shortcut(it.Cands)
-		if !decided && failures[it.Title.Key+" "+of] >= 2 {
-			v, decided = Verdict{Choice: it.Cands[0].URL, Rule: "unjudged"}, true // two unusable answers: stop paying
+		if !decided && unusable[it.Title.Key+" "+of] >= 2 { // two paid-for answers that said nothing: stop paying
+			v, decided = Verdict{Choice: it.Cands[0].URL, Rule: "unjudged"}, true
+			r.alert("posters: %s got two unusable judge answers; it keeps its first candidate (%s)", it.Title.Key, it.Cands[0].Source)
 		}
 		if decided {
 			v.Of, v.At = of, r.env.Now()
@@ -92,6 +100,10 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 		todo = append(todo, it)
 	}
 	if len(todo) == 0 {
+		return nil
+	}
+	if r.guestsWatching(ctx) { // a batch upload is ~30 MB of a guest's upstream
+		r.count("judge_deferred", len(todo))
 		return nil
 	}
 	model, err := r.model(ctx)
@@ -190,8 +202,8 @@ func (r *run) judgeNow(ctx context.Context, model string, it *row) {
 		r.count("judge_failed", 1)
 		return
 	}
-	of := setID(it.Cands)
-	id, err := r.reserve(ctx, it.Title.Key, of, model, "sync", r.reservation(model, tokens, false))
+	held := r.reservation(model, tokens, false)
+	id, err := r.reserve(ctx, it.Title.Key, setID(it.Cands), model, "sync", held)
 	if err != nil {
 		r.budgetHit(err)
 		return
@@ -199,6 +211,9 @@ func (r *run) judgeNow(ctx context.Context, model string, it *row) {
 	start := time.Now()
 	resp, err := r.llm.Messages(ctx, req)
 	cost := llm.PriceOf(model).Cost(resp.Usage, false)
+	if errors.Is(err, llm.ErrUnknownOutcome) {
+		cost = held
+	}
 	r.finishCall(ctx, id, resp.Usage, cost, time.Since(start), err)
 	if err != nil {
 		r.env.Log.Warn("judge call", "event", "judge_failed", "item", it.Title.Key, "err", err)
@@ -208,13 +223,13 @@ func (r *run) judgeNow(ctx context.Context, model string, it *row) {
 	r.record(ctx, it, model, resp.Text(), id)
 }
 
-// record turns an answer into the title's verdict; an unusable answer marks its call failed.
+// record turns an answer into the title's verdict; an unusable answer marks its (billed) call unusable.
 func (r *run) record(ctx context.Context, it *row, model, answer string, callID int64) {
 	scores, reason, err := parseAnswer(answer)
 	if err != nil {
 		r.env.Log.Warn("unusable judge answer", "event", "judge_failed", "item", it.Title.Key, "err", err)
 		r.count("judge_failed", 1)
-		r.failCall(ctx, callID, err.Error())
+		r.closeCall(ctx, callID, "unusable", err.Error(), false)
 		return
 	}
 	byIndex := map[int]float64{}
@@ -294,10 +309,12 @@ func (r *run) submitBatches(ctx context.Context, model string, todo []*row) erro
 		}
 		b, err := r.llm.CreateBatch(ctx, reqs)
 		if err != nil {
+			// An unknown outcome may be a batch that exists and will be billed: its worst case stays counted.
+			unknown := errors.Is(err, llm.ErrUnknownOutcome)
 			for _, id := range ids {
-				r.failCall(ctx, id, err.Error())
+				r.closeCall(ctx, id, "failed", err.Error(), unknown)
 			}
-			r.alert("posters: Message Batch submission failed: %v", err)
+			r.alert("posters: Message Batch submission failed (worst case still counted: %v): %v", unknown, err)
 			return nil
 		}
 		if err := r.setBatch(ctx, ids, b.ID); err != nil {
@@ -313,7 +330,7 @@ func (r *run) submitBatches(ctx context.Context, model string, todo []*row) erro
 func (r *run) collectBatches(ctx context.Context, byKey map[string]*row) error {
 	db := r.env.Store.DB()
 	var batches []string
-	rows, err := db.QueryContext(ctx, `SELECT DISTINCT batch_id FROM posters_calls WHERE state='pending' AND mode='batch'`)
+	rows, err := db.QueryContext(ctx, `SELECT DISTINCT batch_id FROM posters_calls WHERE state='pending' AND batch_id != ''`)
 	if err != nil {
 		return err
 	}
@@ -327,13 +344,6 @@ func (r *run) collectBatches(ctx context.Context, byKey map[string]*row) error {
 	}
 	rows.Close()
 	for _, id := range batches {
-		if id == "" { // the process died between reserving and submitting: release the reservation
-			if _, err := db.ExecContext(ctx, `UPDATE posters_calls SET state='failed', reserved_usd=0, error='never submitted'
-				WHERE state='pending' AND mode='batch' AND batch_id=''`); err != nil {
-				return err
-			}
-			continue
-		}
 		b, err := r.llm.Batch(ctx, id)
 		if err != nil {
 			r.env.Log.Warn("batch poll", "event", "batch_poll_failed", "batch", id, "err", err)
@@ -351,7 +361,7 @@ func (r *run) collectBatches(ctx context.Context, byKey map[string]*row) error {
 				return fmt.Errorf("batch %s result %s: %w", id, res.CustomID, err)
 			}
 			if res.Result.Type != "succeeded" { // not billed
-				r.failCall(ctx, callID, res.Result.Type+" "+string(res.Result.Error))
+				r.closeCall(ctx, callID, "failed", res.Result.Type+" "+string(res.Result.Error), false)
 				return nil
 			}
 			msg := res.Result.Message
@@ -436,9 +446,12 @@ func (r *run) finishCall(ctx context.Context, id int64, u llm.Usage, usd float64
 		"cost_usd", usd, "duration_ms", took.Milliseconds(), "err", callErr)
 }
 
-func (r *run) failCall(ctx context.Context, id int64, msg string) {
-	if _, err := r.env.Store.DB().ExecContext(context.WithoutCancel(ctx),
-		`UPDATE posters_calls SET state='failed', reserved_usd=0, error=? WHERE id=?`, clip(msg), id); err != nil {
+// closeCall ends a call that gave no usable answer: "failed" was not billed, or (keepWorstCase) may have been and
+// stays counted at its reservation; "unusable" was billed and counts towards giving up on the title.
+func (r *run) closeCall(ctx context.Context, id int64, state, msg string, keepWorstCase bool) {
+	if _, err := r.env.Store.DB().ExecContext(context.WithoutCancel(ctx), `UPDATE posters_calls SET state=?,
+		cost_usd=cost_usd+CASE WHEN ? THEN reserved_usd ELSE 0 END, reserved_usd=0, error=? WHERE id=?`,
+		state, keepWorstCase, clip(msg), id); err != nil {
 		r.env.Log.Error("call ledger", "event", "store_error", "err", err)
 	}
 }
@@ -457,14 +470,15 @@ func (r *run) setBatch(ctx context.Context, ids []int64, batch string) error {
 	return tx.Commit()
 }
 
-// callState is, per "item of", whether a call is in flight and how many of its calls gave no usable answer.
+// callState is, per "item of", whether a call is in flight and how many billed answers were unusable. Failures that
+// were never answered (outages, expired batches) do not count: the title is simply asked again on a later run.
 func (r *run) callState(ctx context.Context) (map[string]bool, map[string]int, error) {
-	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT item, of, state FROM posters_calls WHERE state != 'done'`)
+	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT item, of, state FROM posters_calls WHERE state IN ('pending', 'unusable')`)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer rows.Close()
-	inFlight, failures := map[string]bool{}, map[string]int{}
+	inFlight, unusable := map[string]bool{}, map[string]int{}
 	for rows.Next() {
 		var item, of, state string
 		if err := rows.Scan(&item, &of, &state); err != nil {
@@ -473,10 +487,10 @@ func (r *run) callState(ctx context.Context) (map[string]bool, map[string]int, e
 		if state == "pending" {
 			inFlight[item+" "+of] = true
 		} else {
-			failures[item+" "+of]++
+			unusable[item+" "+of]++
 		}
 	}
-	return inFlight, failures, rows.Err()
+	return inFlight, unusable, rows.Err()
 }
 
 func spentUSD(ctx context.Context, db *sql.DB) (float64, error) {

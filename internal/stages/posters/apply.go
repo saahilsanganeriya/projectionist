@@ -15,8 +15,8 @@ import (
 )
 
 // Plex and Jellyfin are sinks: each verdict becomes one outbox row per app, drained while no guest watches, retried
-// with backoff, and never able to fail the run. Plex is written only when the choice is not the owner's backed-up
-// poster, which Plex already shows; Jellyfin always gets the chosen image.
+// with backoff, and never able to fail the run. Both always get the chosen image, the owner's own included: a title
+// Plex re-created during the rename no longer shows the owner's poster, and the stage may not ask Plex which it shows.
 
 const (
 	sinkPlex     = "plex"
@@ -35,20 +35,11 @@ func (r *run) enqueue(ctx context.Context, rows []*row) error {
 		if it.Verdict == nil {
 			continue
 		}
-		choice, k := it.Verdict.Choice, it.Title.Key
-		sinks := []string{sinkJellyfin, sinkPlex}
-		if strings.HasPrefix(choice, "owner:") {
-			sinks = sinks[:1]
-			// Plex still shows the owner's poster unless an earlier verdict replaced it: then put it back.
-			if _, err := tx.ExecContext(ctx, `UPDATE posters_sinks SET url=?, state='pending', attempts=0, next_at=?, last_error=''
-				WHERE item=? AND sink='plex' AND url != ?`, choice, now, k, choice); err != nil {
-				return err
-			}
-		}
-		for _, s := range sinks {
+		for _, s := range []string{sinkJellyfin, sinkPlex} {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO posters_sinks(item, sink, url, state, attempts, next_at, last_error)
 				VALUES (?, ?, ?, 'pending', 0, ?, '') ON CONFLICT(item, sink) DO UPDATE SET url=excluded.url, state='pending',
-				attempts=0, next_at=excluded.next_at, last_error='' WHERE posters_sinks.url != excluded.url`, k, s, choice, now); err != nil {
+				attempts=0, next_at=excluded.next_at, last_error='' WHERE posters_sinks.url != excluded.url`,
+				it.Title.Key, s, it.Verdict.Choice, now); err != nil {
 				return err
 			}
 		}
@@ -85,8 +76,7 @@ func (r *run) apply(ctx context.Context) error {
 	if len(items) == 0 {
 		return nil
 	}
-	if n, err := r.env.Viewers.Count(ctx); err != nil || n > 0 {
-		r.env.Log.Info("guests watching; poster uploads wait", "event", "apply_deferred", "others", n, "err", err)
+	if r.guestsWatching(ctx) {
 		r.count("apply_deferred", len(items))
 		return nil
 	}

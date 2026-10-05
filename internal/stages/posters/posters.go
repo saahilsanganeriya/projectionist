@@ -10,7 +10,10 @@
 //	judge       one vision call per title on the owner's Anthropic key, under a hard budget; a backlog goes through
 //	            the Message Batches API at half price. The owner's UPLOAD is never replaced, the owner's PICK only by
 //	            a candidate the judge scores at least 2 points higher
-//	apply       an outbox per app (Plex, Jellyfin are sinks), drained while no guest watches, retried with backoff
+//	apply       an outbox per app (Plex, Jellyfin are sinks), retried with backoff
+//
+// While anyone but the owner watches, the heavy steps wait for a later run: downloads and resizes, batch uploads and
+// poster uploads. Collecting a finished batch's results (a small download) goes on.
 package posters
 
 import (
@@ -116,7 +119,7 @@ CREATE TABLE IF NOT EXISTS posters_calls (
   model         TEXT NOT NULL,
   mode          TEXT NOT NULL, -- sync | batch
   batch_id      TEXT NOT NULL,
-  state         TEXT NOT NULL, -- pending | done | failed
+  state         TEXT NOT NULL, -- pending | done | failed (no answer) | unusable (an answer with no scores)
   input_tokens  INTEGER NOT NULL,
   output_tokens INTEGER NOT NULL,
   reserved_usd  REAL NOT NULL, -- worst case, held against the budget while pending
@@ -166,6 +169,24 @@ type run struct {
 	mu            sync.Mutex
 	rep           *stage.Report
 	budgetAlerted bool
+
+	gateMu   sync.Mutex
+	gateAt   time.Time
+	gateBusy bool
+}
+
+// guestsWatching is the viewer gate, asked at most once a minute; a gate that cannot tell counts as busy.
+func (r *run) guestsWatching(ctx context.Context) bool {
+	r.gateMu.Lock()
+	defer r.gateMu.Unlock()
+	if now := r.env.Now(); now.Sub(r.gateAt) >= time.Minute {
+		n, err := r.env.Viewers.Count(ctx)
+		r.gateAt, r.gateBusy = now, err != nil || n > 0
+		if r.gateBusy {
+			r.env.Log.Info("guests watching; heavy work waits", "event", "viewer_wait", "others", n, "err", err)
+		}
+	}
+	return r.gateBusy
 }
 
 func (r *run) count(kind string, n int) {
@@ -265,6 +286,10 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 		}
 	}
 	parallel(ctx, opt.FetchWorkers, stale, func(it *row) {
+		if r.guestsWatching(ctx) {
+			r.count("gather_deferred", 1)
+			return
+		}
 		if err := r.gather(ctx, it); err != nil {
 			env.Log.Warn("candidates", "event", "gather_failed", "item", it.Title.Key, "err", err)
 			r.count("gather_failed", 1)

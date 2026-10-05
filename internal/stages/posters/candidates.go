@@ -11,7 +11,7 @@ import (
 	"fmt"
 	"image"
 	"image/jpeg"
-	_ "image/png" // fanart.tv and owner uploads are sometimes PNG
+	_ "image/png" // fanart.tv and the owner's posters are sometimes PNG
 	"io"
 	"math/bits"
 	"math/rand/v2"
@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"golang.org/x/image/draw"
+	_ "golang.org/x/image/webp" // a few of the owner's backed-up posters are WebP behind a .jpg name
 
 	"projectionist/internal/tmdb"
 )
@@ -59,7 +60,8 @@ const (
 // thumbBox is the most a thumbnail measures: ⌈252/28⌉×⌈392/28⌉ = 126 visual tokens at most.
 var thumbBox = image.Rect(0, 0, 252, 392)
 
-// gather builds a title's candidate pool. An owner upload is never replaced, so it needs no other candidate.
+// gather builds a title's candidate pool. An owner upload is never replaced, so it needs no other candidate. An owner
+// poster that cannot be read stops the title: without it any candidate would win, with no margin over the owner's.
 func (r *run) gather(ctx context.Context, it *row) error {
 	t := it.Title
 	var pool []Candidate
@@ -70,10 +72,10 @@ func (r *run) gather(ctx context.Context, it *row) error {
 			return nil
 		}
 		if err := r.withThumb(ctx, &owner); err != nil {
-			r.env.Log.Warn("owner poster unreadable", "event", "owner_poster_unreadable", "item", t.Key, "err", err)
-		} else {
-			pool = append(pool, owner)
+			r.alert("posters: %s waits: the owner's %s poster %s is unreadable: %v", t.Key, p.State, p.File, err)
+			return err
 		}
+		pool = append(pool, owner)
 	}
 	info, err := r.tmdbInfo(ctx, t)
 	if err != nil {

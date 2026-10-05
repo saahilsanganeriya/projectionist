@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -83,14 +84,24 @@ func answer(req llm.Request) llm.Response {
 }
 
 type world struct {
-	h        *fake.Harness
-	api      *httptest.Server
-	mu       sync.Mutex
-	garbage  bool // the judge answers prose
-	models   int
-	messages int
-	batches  map[string][]llm.BatchRequest
-	ended    bool
+	h          *fake.Harness
+	backup     string // the owner's export: items.json, posters/, plex.db
+	api        *httptest.Server
+	mu         sync.Mutex
+	tmdb       map[string]string // TMDB's answers by path
+	garbage    bool              // the judge answers prose
+	overloaded bool              // the judge answers 529
+	models     int
+	messages   int // answered judge calls
+	batches    map[string][]llm.BatchRequest
+	ended      bool
+}
+
+// set changes the fake servers' behaviour between runs.
+func (w *world) set(f func()) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	f()
 }
 
 // newWorld is a library of a movie the owner picked a poster for, one he uploaded a poster for, and a show with one
@@ -98,6 +109,7 @@ type world struct {
 func newWorld(t *testing.T, opts string) *world {
 	w := &world{h: fake.NewEnv(t, nil), batches: map[string][]llm.BatchRequest{}}
 	lib, backup := t.TempDir(), t.TempDir()
+	w.backup = backup
 	for _, d := range []string{"Movies/Alpha (2001) {tmdb-1}", "Movies/Beta (2002) {tmdb-2}", "TV/Gamma (2003) {tmdb-3}/Season 01"} {
 		os.MkdirAll(filepath.Join(lib, d), 0o755)
 	}
@@ -122,20 +134,22 @@ func newWorld(t *testing.T, opts string) *world {
 	alpha := strings.Replace(posters("red", "blue", "redbig"), `]}}`, `,
  {"file_path":"/yellow.jpg","iso_639_1":"en","width":1000,"height":400,"vote_average":9,"vote_count":50},
  {"file_path":"/yellow.jpg","iso_639_1":"de","width":1000,"height":1500,"vote_average":9,"vote_count":50}]}}`, 1)
-	tmdbAnswers := map[string]string{"/3/movie/1": alpha, "/3/movie/2": posters("red"),
-		"/3/tv/3": posters("blue", "red"), "/3/tv/3/season/1": posters("green")}
+	w.tmdb = map[string]string{"/3/movie/1": alpha, "/3/movie/2": posters("red"),
+		"/3/tv/3": posters("blue", "red"), "/3/tv/3/season/1": posters("green"), "alpha2": posters("red", "blue", "yellow")}
 	w.api = httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		p := r.URL.Path
 		switch {
-		case tmdbAnswers[p] != "":
-			reply(rw, tmdbAnswers[p])
+		case w.tmdb[p] != "":
+			reply(rw, w.tmdb[p])
 		case strings.HasPrefix(p, "/t/p/"):
 			rw.Write(poster(strings.TrimSuffix(filepath.Base(p), ".jpg")))
 		case p == "/v1/models":
 			w.models++
 			reply(rw, `{"data":[{"id":"claude-haiku-4-5-20251001","created_at":"2025-10-01T00:00:00Z"},{"id":"claude-sonnet-5-5","created_at":"2026-08-01T00:00:00Z"}]}`)
+		case p == "/v1/messages" && w.overloaded:
+			rw.WriteHeader(529)
 		case p == "/v1/messages":
 			var req llm.Request
 			json.NewDecoder(r.Body).Decode(&req)
@@ -240,16 +254,23 @@ func (w *world) verdict(t *testing.T, key string) Verdict {
 	return v
 }
 
-// Catches, end to end: a letter mapped to the wrong candidate (the fake judge scores images by colour), the owner's
-// upload judged or sent to Plex, the owner's pick kept against a candidate 3 points better, Plex given no lock, an
-// upload while a guest watches, a failed upload that fails the run or is never retried, and a rerun that pays or
-// uploads again.
+// Catches, end to end: downloads, judging or uploads while a guest watches; a letter mapped to the wrong candidate
+// (the fake judge scores images by colour); the owner's upload judged or missing from Plex; the owner's pick kept
+// against a candidate 3 points better; Plex given no lock; a failed upload that fails the run or is never retried;
+// and a rerun that pays or uploads again.
 func TestRunEndToEnd(t *testing.T) {
 	w := newWorld(t, "")
 	w.h.Plex.Handle("GET", "/status/sessions", 200, `<MediaContainer size="1"><Video type="movie" title="X"><User title="roger"/></Video></MediaContainer>`)
 	rep := w.run(t)
-	if w.messages != 2 || rep.Counts["apply_deferred"] == 0 || len(w.h.Jellyfin.Calls("POST", "/Items/j1/Images/Primary")) != 0 {
-		t.Fatalf("run 1: %d judge calls (want 2: Alpha, Gamma), counts %v; nothing may upload while a guest watches", w.messages, rep.Counts)
+	if w.messages != 0 || rep.Counts["gather_deferred"] != 4 || rep.Counts["gathered"] != 0 {
+		t.Fatalf("run 1: %d judge calls, counts %v; while a guest watches nothing is downloaded or judged", w.messages, rep.Counts)
+	}
+
+	w.h.Plex.Handle("GET", "/status/sessions", 200, `<MediaContainer size="0"></MediaContainer>`)
+	w.h.Jellyfin.Handle("POST", "/Items/j3/Images/Primary", 500, "")
+	w.run(t)
+	if w.messages != 2 {
+		t.Fatalf("run 2: %d judge calls, want 2 (Alpha, Gamma)", w.messages)
 	}
 	var alpha []Candidate
 	alphaRaw := ""
@@ -266,19 +287,20 @@ func TestRunEndToEnd(t *testing.T) {
 		}
 	}
 
-	w.h.Plex.Handle("GET", "/status/sessions", 200, `<MediaContainer size="0"></MediaContainer>`)
-	w.h.Jellyfin.Handle("POST", "/Items/j3/Images/Primary", 500, "")
-	w.run(t)
-	if n := len(w.h.Plex.Calls("POST", "/library/metadata/102/posters")); n != 0 {
-		t.Fatalf("the owner's upload was sent to Plex %d times; Plex already shows it", n)
+	// Plex gets the owner's upload too: a title Plex re-created during the rename no longer shows it.
+	if own := w.h.Plex.Calls("POST", "/library/metadata/102/posters"); len(own) != 1 || scoreOf(own[0].Body) != 3 {
+		t.Fatalf("the owner's (blue) upload went to Plex %d times, want once", len(own))
 	}
 	up := w.h.Plex.Calls("POST", "/library/metadata/101/posters")
 	if len(up) != 1 || !bytes.Contains(up[0].Body, []byte("poster-curator 2026-10")) || scoreOf(up[0].Body) != 9 {
 		t.Fatalf("Plex upload for Alpha: %d calls; want one red JPEG carrying the EXIF mark", len(up))
 	}
-	locks := w.h.Plex.Calls("PUT", "/library/sections/4/all")
-	if len(locks) != 1 || locks[0].RawQuery != "type=1&id=101&thumb.locked=1" {
-		t.Fatalf("Plex lock calls %+v", locks)
+	var locks []string
+	for _, c := range w.h.Plex.Calls("PUT", "/library/sections/4/all") {
+		locks = append(locks, c.RawQuery)
+	}
+	if !slices.Contains(locks, "type=1&id=101&thumb.locked=1") || len(locks) != 2 {
+		t.Fatalf("Plex lock calls %v; want one per movie", locks)
 	}
 	jf := w.h.Jellyfin.Calls("POST", "/Items/j2/Images/Primary")
 	if len(jf) != 1 {
@@ -305,27 +327,54 @@ func TestRunEndToEnd(t *testing.T) {
 	}
 }
 
-// Catches: a title whose judge keeps answering prose being paid for on every run, and the model list asked for on
-// every run instead of once a day.
+// Catches: a title whose judge keeps answering prose being paid for on every run; an outage (calls never answered)
+// counted as unusable answers, which would freeze the backlog unjudged; and the model list asked for on every run
+// instead of once a day.
 func TestUnusableAnswersStop(t *testing.T) {
 	w := newWorld(t, "dry_run = true\n")
-	w.garbage = true
+	w.set(func() { w.overloaded = true })
+	w.run(t)
+	w.run(t)
+	w.set(func() { w.overloaded, w.garbage = false, true })
 	for range 3 {
 		w.run(t)
 	}
 	if v := w.verdict(t, "movie:tmdb-1"); w.messages != 4 || v.Rule != "unjudged" || w.models != 1 {
-		t.Fatalf("%d judge calls (want 2 titles × 2 tries), Alpha rule %q (want unjudged), %d model lists (want 1)", w.messages, v.Rule, w.models)
+		t.Fatalf("%d answered judge calls (want 2 titles × 2 tries after the outage), Alpha rule %q (want unjudged), %d model lists (want 1)",
+			w.messages, v.Rule, w.models)
 	}
 }
 
-// Catches: a backlog judged one call at a time at full price, a batch result applied to the wrong title, and a
-// pending batch's cost not held against the budget.
+// Catches: a call whose process died mid-call blocking its title and holding its reservation forever, or being
+// released at $0 though it may have been billed; and a call another run still has in flight being taken for dead.
+func TestInterruptedCalls(t *testing.T) {
+	w := newWorld(t, "dry_run = true\n")
+	w.set(func() { w.overloaded = true })
+	w.run(t) // gathers the pools; no judge call is answered
+	w.set(func() { w.overloaded = false })
+	db := w.h.Env.Store.DB()
+	for key, at := range map[string]time.Time{"movie:tmdb-1": w.h.Now.Add(-2 * time.Hour), "show:tmdb-3": w.h.Now} {
+		var raw string
+		var cands []Candidate
+		db.QueryRow(`SELECT cands FROM posters_items WHERE key=?`, key).Scan(&raw)
+		json.Unmarshal([]byte(raw), &cands)
+		db.Exec(`INSERT INTO posters_calls(at, item, of, model, mode, batch_id, state, input_tokens, output_tokens, reserved_usd,
+			cost_usd, llm_ms, error) VALUES (?, ?, ?, 'killed', 'sync', '', 'pending', 0, 0, 0.002, 0, 0, '')`, stamp(at), key, setID(cands))
+	}
+	w.run(t)
+	var cost float64
+	db.QueryRow(`SELECT cost_usd FROM posters_calls WHERE item='movie:tmdb-1' AND model='killed'`).Scan(&cost)
+	if alpha, gamma := w.verdict(t, "movie:tmdb-1"), w.verdict(t, "show:tmdb-3"); alpha.Rule != "judged" || cost != 0.002 || gamma.Rule != "" {
+		t.Fatalf("Alpha %q with its 2-hour-old call settled at $%v (want judged, $0.002); Gamma %q (want unjudged: its call is in flight)",
+			alpha.Rule, cost, gamma.Rule)
+	}
+}
+
+// Catches: a backlog judged one call at a time at full price, a batch result applied to the wrong title or to a pool
+// that changed while the batch ran (its letters name other posters now), and a pending batch's cost not held against
+// the budget.
 func TestBatchBacklog(t *testing.T) {
 	w := newWorld(t, "batch_min = 1\ndry_run = true\n")
-	// A reservation left by a run that died before submitting must be released, or this budget could not hold the batch.
-	w.h.Env.Store.DB().Exec(schema)
-	w.h.Env.Store.DB().Exec(`INSERT INTO posters_calls(at, item, of, model, mode, batch_id, state, input_tokens, output_tokens,
-		reserved_usd, cost_usd, llm_ms, error) VALUES ('', 'x', 'y', 'm', 'batch', '', 'pending', 0, 0, 4.999, 0, 0, '')`)
 	w.run(t)
 	if w.messages != 0 || len(w.batches["b1"]) != 2 || w.verdict(t, "movie:tmdb-1").Choice != "" {
 		t.Fatalf("run 1: %d messages, batch %d requests; want one batch of 2 and no verdict yet", w.messages, len(w.batches["b1"]))
@@ -333,14 +382,57 @@ func TestBatchBacklog(t *testing.T) {
 	if held, _ := spentUSD(context.Background(), w.h.Env.Store.DB()); held <= 0 {
 		t.Fatal("a submitted batch holds nothing against the budget")
 	}
-	w.mu.Lock()
-	w.ended = true
-	w.mu.Unlock()
+	// Alpha's pool changes while the batch runs (TMDB lists a new poster and the pool is gathered again).
+	w.set(func() { w.tmdb["/3/movie/1"], w.ended = w.tmdb["alpha2"], true })
+	w.h.Env.Store.DB().Exec(`UPDATE posters_items SET cands=NULL WHERE key='movie:tmdb-1'`)
+	w.run(t)
+	if v := w.verdict(t, "show:tmdb-3"); !strings.HasSuffix(v.Choice, "/red.jpg") || len(w.batches["b2"]) != 1 {
+		t.Fatalf("run 2: Gamma chose %q (want red); batch 2 has %d requests (want Alpha's new pool alone)", v.Choice, len(w.batches["b2"]))
+	}
 	w.run(t)
 	var cost float64
 	w.h.Env.Store.DB().QueryRow(`SELECT sum(cost_usd) FROM posters_calls WHERE state='done'`).Scan(&cost)
-	if v := w.verdict(t, "movie:tmdb-1"); !strings.HasSuffix(v.Choice, "/red.jpg") || math.Abs(cost-0.0015) > 1e-12 {
-		t.Fatalf("after the batch: Alpha chose %s; cost $%v, want $0.0015 (2 × (1000 in + 100 out) at half price)", v.Choice, cost)
+	if v := w.verdict(t, "movie:tmdb-1"); !strings.HasSuffix(v.Choice, "/red.jpg") || math.Abs(cost-0.00225) > 1e-12 {
+		t.Fatalf("after batch 2: Alpha chose %s; cost $%v, want $0.00225 (3 × (1000 in + 100 out) at half price)", v.Choice, cost)
+	}
+}
+
+// Catches: an owner's pick that cannot be read dropping out of the pool, so any candidate replaces it with no margin;
+// and the owner's WebP posters (one movie in the real backup) being unreadable.
+func TestOwnerPosterUnreadable(t *testing.T) {
+	webp, _ := base64.StdEncoding.DecodeString("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==") // 1×1 lossless
+	for _, c := range []struct {
+		name     string
+		file     []byte
+		wantRule string
+	}{{"webp", webp, "judged"}, {"corrupt", []byte("not an image"), ""}} {
+		w := newWorld(t, "dry_run = true\n")
+		os.WriteFile(filepath.Join(w.backup, "posters/movie/11.jpg"), c.file, 0o644) // Alpha's pick
+		rep := w.run(t)
+		var cands []Candidate
+		raw := ""
+		w.h.Env.Store.DB().QueryRow(`SELECT coalesce(cands, '') FROM posters_items WHERE key='movie:tmdb-1'`).Scan(&raw)
+		json.Unmarshal([]byte(raw), &cands)
+		if v := w.verdict(t, "movie:tmdb-1"); v.Rule != c.wantRule || c.wantRule != "" && cands[0].Source != srcOwner {
+			t.Errorf("%s: Alpha rule %q, pool %d long (want rule %q with the owner's pick first), alerts %v", c.name, v.Rule, len(cands), c.wantRule, rep.Alerts)
+		}
+		if c.wantRule == "" && (len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "unreadable")) {
+			t.Errorf("%s: alerts %v; want one naming the unreadable owner poster", c.name, rep.Alerts)
+		}
+	}
+}
+
+// Catches: a title an app does not list yet being dropped (never uploaded there) instead of waiting for the app's
+// next daily list.
+func TestWaitsForSink(t *testing.T) {
+	w := newWorld(t, "")
+	w.h.Jellyfin.Handle("GET", "/Items", 200, `{"Items":[]}`)
+	w.run(t)
+	w.h.Jellyfin.Handle("GET", "/Items", 200, `{"Items":[{"Id":"j1","Type":"Movie","ProviderIds":{"Tmdb":"1"}}]}`)
+	w.h.Now = w.h.Now.Add(25 * time.Hour)
+	w.run(t)
+	if n := len(w.h.Jellyfin.Calls("POST", "/Items/j1/Images/Primary")); n != 1 {
+		t.Fatalf("Alpha uploaded to Jellyfin %d times once Jellyfin listed it, want once", n)
 	}
 }
 
