@@ -343,18 +343,22 @@ func TestRunProviderTrouble(t *testing.T) {
 }
 
 // Catches a candidate the captions reject not given to alass (a cut the fit cannot follow), or alass's output kept
-// although the fit's in-sync test (0.5 s a chunk) leaves it more than 300 ms from the captions: Ran's candidate is
-// another cut; alass's alignment +1 s off is retimed onto the captions, one whose cues sit alternately 0.3 s late and
-// 0.35 s early is in sync by that test only.
+// without fitting the captions (its last three eighths 20 s off, though most cues sit on them) or although the fit's
+// in-sync test (0.5 s a chunk) leaves it more than 300 ms from them (cues alternately 0.3 s late and 0.35 s early).
+// Ran's candidate is another cut; alass's alignment +1 s off is retimed onto the captions.
 func TestRunRescue(t *testing.T) {
-	swing := make([]float64, len(captionTimes()))
-	for i, c := range captionTimes() {
-		swing[i] = c + []float64{0.3, -0.35}[i%2]
+	ts := captionTimes()
+	swing, tail := make([]float64, len(ts)), make([]float64, len(ts))
+	for i, c := range ts {
+		swing[i], tail[i] = c+[]float64{0.3, -0.35}[i%2], c
+		if i >= 35 { // the last three of align's chunks (7, 7, ... and 11 cues): 5 of 8 in sync, 35 of 60 cues
+			tail[i] = c + 20
+		}
 	}
 	for name, c := range map[string]struct {
 		aligned string
 		rescued bool
-	}{"+1 s": {srt(captionTimes(), 1), true}, "swinging": {srt(swing, 0), false}} {
+	}{"+1 s": {srt(ts, 1), true}, "swinging": {srt(swing, 0), false}, "tail 20 s off": {srt(tail, 0), false}} {
 		f := newFixture(t)
 		f.cut = true
 		os.WriteFile(filepath.Join(f.h.Env.FFmpeg.Dir, "realign.srt"), []byte(c.aligned), 0o644)
