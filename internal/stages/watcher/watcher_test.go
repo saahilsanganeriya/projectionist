@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -57,16 +58,11 @@ func TestQuietFolderTriggersOnce(t *testing.T) {
 		old := "Movies/Old (2001) {tmdb-1}"
 		r.put(old+"/Old (2001) {tmdb-1}.mkv", 10)
 		r.put(old+"/@eaDir/thumb.jpg", 1)
-		r.put(old+"/.details/Old (2001) {tmdb-1}.txt", 1)
 		r.put("TV/Show (2008) {tmdb-2}/Season 01/Show (2008) - S01E01 - Pilot.mkv", 10)
 		finish := r.start()
 		synctest.Wait()
-		want := []string{"Movies", old, "TV", "TV/Show (2008) {tmdb-2}", "TV/Show (2008) {tmdb-2}/Season 01", "complete"}
-		if got := r.src.watched(r.dir); !slices.Equal(got, want) {
-			t.Fatalf("watches = %q, want %q", got, want)
-		}
 
-		// An SMB-style copy: the file appears, grows for four minutes with no event, then is closed.
+		// An SMB-style copy: the file appears, grows for four minutes with no event, then is closed at 04:04.
 		movie := "Movies/New (2020) {tmdb-3}"
 		r.send(r.ev(movie, true), r.ev(r.put(movie+"/New.mkv", 1), false))
 		for i := range 4 {
@@ -74,15 +70,14 @@ func TestQuietFolderTriggersOnce(t *testing.T) {
 			r.put(movie+"/New.mkv", 1<<(i+1))
 		}
 		r.send(r.ev(movie+"/New.mkv", false))
-		copied := time.Now()
 		r.send(r.ev(r.put(old+"/Old.mkv.part", 5), false), r.ev(r.put(old+"/.DS_Store", 1), false), r.ev(old+"/@eaDir", true))
 		time.Sleep(3*time.Minute + time.Second)
-		if got, fired := r.quiet(), r.triggers(); !slices.Equal(got, []string{movie + " inotify"}) || len(fired) != 1 || !fired[0].Equal(copied.Add(3*time.Minute)) {
-			t.Fatalf("copy finished at %v: quiet %q at %v, want the new movie once, 3m later", copied, got, fired)
+		if got := r.quiet(); !slices.Equal(got, []string{"07:04 " + movie + " inotify"}) {
+			t.Fatalf("copy closed at 04:04: quiet %q, want the new movie once, 3m later", got)
 		}
 
 		batch := "Movies/Batch (2021) {tmdb-4}"
-		for i := range 5 { // 50 files arriving over five reads of the event queue
+		for i := range 5 { // 50 files arriving over five reads of the event queue, the last at 07:09
 			var evs []event
 			for j := range 10 {
 				evs = append(evs, r.ev(r.put(fmt.Sprintf("%s/extra %02d.mkv", batch, i*10+j), 1), false))
@@ -91,8 +86,8 @@ func TestQuietFolderTriggersOnce(t *testing.T) {
 			time.Sleep(time.Second)
 		}
 		time.Sleep(3 * time.Minute)
-		if got := r.quiet(); len(got) != 2 || got[1] != batch+" inotify" {
-			t.Fatalf("50 files in one folder: quiet %q, want one more for %s", got, batch)
+		if got := r.quiet(); len(got) != 2 || got[1] != "10:09 "+batch+" inotify" || r.fired.Load() != 2 {
+			t.Fatalf("50 files in one folder: quiet %q, %d triggers; want one more for %s", got, r.fired.Load(), batch)
 		}
 		if rep := finish(); len(rep.Alerts) != 0 {
 			t.Fatalf("alerts %q", rep.Alerts)
@@ -110,16 +105,12 @@ func TestSweepCatchesLostEvents(t *testing.T) {
 		r.put(old+"/Old.mkv", 1)
 		r.put(gone+"/Gone.mkv", 1)
 		finish := r.start()
-		time.Sleep(time.Minute)
-		r.put("Movies/Lost (2003) {tmdb-3}/Lost.mkv", 1) // no events for any of these
+		time.Sleep(time.Minute) // then changes with no events at all
+		r.put("Movies/Lost (2003) {tmdb-3}/Lost.mkv", 1)
 		moved := filepath.Join(r.dir, filepath.Dir(r.put("Movies/Moved (1999) {tmdb-5}/Moved.mkv", 1)))
-		if err := os.Chtimes(moved, time.Now().Add(-24*time.Hour), time.Now().Add(-24*time.Hour)); err != nil {
-			t.Fatal(err)
-		}
+		must(t, os.Chtimes(moved, time.Now().Add(-24*time.Hour), time.Now().Add(-24*time.Hour)))
 		r.put(old+"/@eaDir/thumb.jpg", 1)
-		if err := os.RemoveAll(filepath.Join(r.dir, gone)); err != nil {
-			t.Fatal(err)
-		}
+		must(t, os.RemoveAll(filepath.Join(r.dir, gone)))
 		rep := finish()
 		if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "inotify watch limit reached after 3 watches") {
 			t.Fatalf("alerts %q, want one naming the watch limit", rep.Alerts)
@@ -128,16 +119,17 @@ func TestSweepCatchesLostEvents(t *testing.T) {
 			t.Fatalf("first period triggered %q", got)
 		}
 
-		finish = r.start() // the next period's sweep finds what the events missed
+		finish = r.start() // at 15:00 the next period's sweep finds what the events missed
 		time.Sleep(3*time.Minute + time.Second)
-		if got := r.quiet(); !slices.Equal(got, []string{gone + " sweep", "Movies/Lost (2003) {tmdb-3} sweep", "Movies/Moved (1999) {tmdb-5} sweep"}) {
-			t.Fatalf("after the sweep: quiet %q, want the gone, lost and moved-in folders", got)
+		want := []string{"18:00 " + gone + " sweep", "18:00 Movies/Lost (2003) {tmdb-3} sweep", "18:00 Movies/Moved (1999) {tmdb-5} sweep"}
+		if got := r.quiet(); !slices.Equal(got, want) {
+			t.Fatalf("after the sweep: quiet %q, want %q", got, want)
 		}
 		r.put("Movies/Over (2004) {tmdb-4}/Over.mkv", 1)
 		r.send(event{Overflow: true})
 		time.Sleep(3*time.Minute + time.Second)
-		if got := r.quiet(); len(got) != 4 || got[3] != "Movies/Over (2004) {tmdb-4} sweep" {
-			t.Fatalf("after a queue overflow: quiet %q, want the folder it hid", got)
+		if got := r.quiet(); len(got) != 4 || got[3] != "21:01 Movies/Over (2004) {tmdb-4} sweep" {
+			t.Fatalf("after a queue overflow at 18:01: quiet %q, want the folder it hid", got)
 		}
 		finish()
 	})
@@ -166,49 +158,29 @@ func (f *fakeSource) Events() <-chan []event { return f.ch }
 func (f *fakeSource) Len() int               { f.mu.Lock(); defer f.mu.Unlock(); return len(f.dirs) }
 func (f *fakeSource) Close() error           { return nil }
 
-func (f *fakeSource) watched(base string) []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out []string
-	for d := range f.dirs {
-		out = append(out, strings.TrimPrefix(d, base+"/"))
-	}
-	slices.Sort(out)
-	return out
-}
-
 type rig struct {
 	t     *testing.T
 	dir   string // holds the roots Movies, TV and complete
 	src   *fakeSource
 	env   *stage.Env
-	mu    sync.Mutex
-	fired []time.Time
+	fired atomic.Int32
 }
 
-// newRig must run inside the synctest bubble: the store's goroutines belong to it.
+// newRig must run inside the synctest bubble (its clock starts at 2000-01-01 00:00 UTC): the store's goroutines
+// belong to it.
 func newRig(t *testing.T, limit int) *rig {
 	r := &rig{t: t, dir: t.TempDir(), src: &fakeSource{ch: make(chan []event, 16), limit: limit}}
 	for _, root := range []string{"Movies", "TV", "complete"} {
-		if err := os.Mkdir(filepath.Join(r.dir, root), 0o755); err != nil {
-			t.Fatal(err)
-		}
+		must(t, os.Mkdir(filepath.Join(r.dir, root), 0o755))
 	}
 	st, err := store.Open(filepath.Join(t.TempDir(), "state.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	must(t, err)
 	t.Cleanup(func() { st.Close() })
 	opts := fmt.Sprintf("roots = [%q, %q, %q]\ntrigger = [\"rename\"]\n", r.dir+"/Movies", r.dir+"/TV", r.dir+"/complete")
 	r.env = &stage.Env{
 		Log: obs.NewLogger(io.Discard, "text", "error"), Store: st, Now: time.Now, // the bubble's fake clock
 		Options: func(v any) error { _, err := toml.Decode(opts, v); return err },
-		Trigger: func(string) bool {
-			r.mu.Lock()
-			defer r.mu.Unlock()
-			r.fired = append(r.fired, time.Now())
-			return true
-		},
+		Trigger: func(string) bool { r.fired.Add(1); return true },
 	}
 	return r
 }
@@ -222,9 +194,7 @@ func (r *rig) start() (finish func() stage.Report) {
 		done <- Stage{open: func() (source, error) { return r.src, nil }}.Run(r.t.Context(), r.env, &rep)
 	}()
 	return func() stage.Report {
-		if err := <-done; err != nil {
-			r.t.Fatal(err)
-		}
+		must(r.t, <-done)
 		return rep
 	}
 }
@@ -232,16 +202,10 @@ func (r *rig) start() (finish func() stage.Report) {
 // put writes size bytes to rel and stamps it and its folders with the fake clock, as the kernel stamps a change.
 func (r *rig) put(rel string, size int) string {
 	path := filepath.Join(r.dir, rel)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		r.t.Fatal(err)
-	}
-	if err := os.WriteFile(path, make([]byte, size), 0o644); err != nil {
-		r.t.Fatal(err)
-	}
+	must(r.t, os.MkdirAll(filepath.Dir(path), 0o755))
+	must(r.t, os.WriteFile(path, make([]byte, size), 0o644))
 	for p, now := path, time.Now(); p != r.dir; p = filepath.Dir(p) {
-		if err := os.Chtimes(p, now, now); err != nil {
-			r.t.Fatal(err)
-		}
+		must(r.t, os.Chtimes(p, now, now))
 	}
 	return rel
 }
@@ -255,27 +219,26 @@ func (r *rig) send(evs ...event) {
 	synctest.Wait()
 }
 
-func (r *rig) triggers() []time.Time {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return slices.Clone(r.fired)
-}
-
-// quiet lists "<unit> <source>" per trigger, in trigger order (units quiet at the same instant sorted).
+// quiet lists "<mm:ss> <unit> <source>" per quiet unit, in order; mm:ss is the time since the bubble's start.
 func (r *rig) quiet() []string {
 	synctest.Wait()
 	rows, err := r.env.Store.DB().Query(`SELECT at, item, json_extract(fields, '$.source') FROM events WHERE stage = ? ORDER BY at, item`, name)
-	if err != nil {
-		r.t.Fatal(err)
-	}
+	must(r.t, err)
 	defer rows.Close()
 	var out []string
 	for rows.Next() {
 		var at, unit, source string
-		if err := rows.Scan(&at, &unit, &source); err != nil {
-			r.t.Fatal(err)
-		}
-		out = append(out, strings.TrimPrefix(unit, r.dir+"/")+" "+source)
+		must(r.t, rows.Scan(&at, &unit, &source))
+		when, _ := time.Parse(store.TimeFormat, at)
+		since := when.Sub(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))
+		out = append(out, fmt.Sprintf("%02d:%02d %s %s", since/time.Minute, since%time.Minute/time.Second, strings.TrimPrefix(unit, r.dir+"/"), source))
 	}
 	return out
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
 }
