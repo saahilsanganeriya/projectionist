@@ -3,6 +3,7 @@ package main
 import (
 	"projectionist/internal/stage"
 	"projectionist/internal/stages/gpuguard"
+	"projectionist/internal/stages/jfsync"
 	"projectionist/internal/stages/remote4k"
 )
 
@@ -11,6 +12,7 @@ import (
 func stages() []stage.Stage {
 	return []stage.Stage{
 		gpuguard.Stage{},
+		jfsync.Stage{},
 		remote4k.Stage{},
 	}
 }

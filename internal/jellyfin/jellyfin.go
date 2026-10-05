@@ -23,6 +23,13 @@ func New(baseURL, keyFile string, timeout time.Duration) *Client {
 	return &Client{base: baseURL, keyFile: keyFile, http: &http.Client{Timeout: timeout}}
 }
 
+// WithTimeout is a copy of c whose requests may take up to d, e.g. a whole-library listing during a scan.
+func (c *Client) WithTimeout(d time.Duration) *Client {
+	cp := *c
+	cp.http = &http.Client{Timeout: d}
+	return &cp
+}
+
 func (c *Client) do(ctx context.Context, method, path string, in any, out any) error {
 	key, err := os.ReadFile(c.keyFile)
 	if err != nil {

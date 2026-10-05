@@ -53,3 +53,21 @@ small_kbps      = 20000
 work_dir        = "/volume1/media/.projectionist/remote4k" # same share as the library: publish = one rename
 status_file     = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
 default_section = 4
+
+# Watch state (played, play count, resume position, rating) kept the same in Plex and Jellyfin from projectionist's
+# own record: Plex's webhook and the Jellyfin Webhook plugin push plays to /hooks/{plex,jellyfin}; the history that
+# lived only inside the apps is imported once (newest Plex DB backup copy, Jellyfin played/resumable items).
+[stages.jfsync]
+every          = "5m"
+apply          = true # false: plan only (no app writes); plan_file lists what would be written
+# plan_file    = "/volume1/PlexMediaServer/projectionist-test/jfsync/plan.tsv"
+movies_section = 4
+tv_section     = 2
+address_every  = "24h" # one item listing per app per day maps app ids to the library's {tmdb-N} identity
+list_timeout   = "5m"
+plex_backups   = "/volume1/PlexMediaServer/backups" # mount read-only; the newest *.db is read once
+webhook_url    = "http://127.0.0.1:8097/hooks/plex" # registered on the owner's plex.tv account; "" = leave it alone
+users = [
+  { name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" },
+  { name = "roger",  plex = "roger",             jellyfin = "roger" },
+]
