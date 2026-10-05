@@ -9,8 +9,10 @@ package subtitles
 //
 // and run it with GATE_OUT=<dir> plus any of: GATE_ROOTS (folders, one per line) -> stats.tsv as sub_stats.py prints
 // it; GATE_VIDEOS (files, one per line) -> hashes.tsv; GATE_PAIRS (pairs.tsv: id, framecrc file, duration, candidate
-// file) -> fits.tsv; GATE_ALASS (id, video, framecrc, duration, candidate files...) with GATE_ALASS_BIN and
-// GATE_FFMPEG_DIR -> alass.tsv: the stage's alass route per candidate, scored against the PGS captions it never saw.
+// file) -> fits.tsv; GATE_DOWNLOADS (id, raw download file, declared encoding) -> decoded.tsv: the sha1 of the
+// decoded text and of that text with the ad blocks stripped; GATE_ALASS (id, video, framecrc, duration, candidate
+// files...) with GATE_ALASS_BIN and GATE_FFMPEG_DIR -> alass.tsv: the stage's alass route per candidate, scored
+// against the PGS captions it never saw.
 
 import (
 	"context"
@@ -26,7 +28,7 @@ import (
 	"testing"
 
 	"projectionist/internal/config"
-	"projectionist/internal/stage"
+	"projectionist/internal/fake"
 )
 
 func gateLines(t *testing.T, env string) []string {
@@ -113,9 +115,26 @@ func TestGateFits(t *testing.T) {
 	gateWrite(t, "fits.tsv", b.String())
 }
 
+func TestGateDecode(t *testing.T) {
+	var b strings.Builder
+	for _, line := range gateLines(t, "GATE_DOWNLOADS") {
+		f := strings.Split(line, "\t")
+		raw, err := os.ReadFile(f[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		txt := decodeDownload(raw, f[2])
+		decoded, stripped := sha1.Sum([]byte(txt)), sha1.Sum([]byte(stripAds(txt)))
+		fmt.Fprintf(&b, "%s\t%s\t%s\n", f[0], hex.EncodeToString(decoded[:]), hex.EncodeToString(stripped[:]))
+	}
+	gateWrite(t, "decoded.tsv", b.String())
+}
+
 func TestGateAlass(t *testing.T) {
 	lines := gateLines(t, "GATE_ALASS")
-	r := &run{env: &stage.Env{FFmpeg: config.FFmpeg{Dir: os.Getenv("GATE_FFMPEG_DIR")}}, opt: Options{Alass: os.Getenv("GATE_ALASS_BIN")}}
+	h := fake.NewEnv(t, nil) // nobody watching
+	h.Env.FFmpeg = config.FFmpeg{Dir: os.Getenv("GATE_FFMPEG_DIR")}
+	r := &run{env: h.Env, opt: Options{Alass: os.Getenv("GATE_ALASS_BIN")}}
 	out := make([]string, len(lines))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 3)
