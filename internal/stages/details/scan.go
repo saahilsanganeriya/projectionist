@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"os/exec"
@@ -109,17 +111,22 @@ const sampleSeconds = 5
 // decodeCheck looks for holes (see holeAt), then decodes 5 s of the video at its start, middle and end:
 // truncated or zero-filled files fail here even when their headers probe fine. A sample the GPU rejects is decoded
 // again on the CPU before it counts. The samples follow the video stream's own length when the file states it:
-// the container's can run seconds longer (an audio tail).
+// the container's can run seconds longer (an audio tail). Bytes that cannot be read (EIO from a failed btrfs
+// checksum) are a verdict too, not an error: an error would fail every run at this file and hold back the files
+// queued behind it.
 func decodeCheck(ctx context.Context, ff config.FFmpeg, path string, v *probe.Video, duration float64) (clean bool, detail string, err error) {
 	if v.Duration > 0 {
 		duration = v.Duration
 	}
 	var off, size int64
 	var found bool
-	if err := idleIO(func() error { off, size, found, err = holeAt(ctx, path); return err }); err != nil {
+	err = idleIO(func() error { off, size, found, err = holeAt(ctx, path); return err })
+	switch {
+	case err != nil && (errors.Is(err, fs.ErrNotExist) || ctx.Err() != nil):
 		return false, "", err
-	}
-	if found {
+	case err != nil:
+		return false, "the file cannot be read: " + err.Error(), nil
+	case found:
 		return false, fmt.Sprintf("4 KiB of zeros at %.1f%% (byte %d): part of the file never arrived", 100*float64(off)/float64(size), off), nil
 	}
 	samples := []struct {

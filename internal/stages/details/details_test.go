@@ -420,7 +420,9 @@ func media(t *testing.T, size int, zeros ...[2]int) string {
 
 // Catches: a GPU hiccup reported as a broken file (it must be retried on the CPU), a truncated end sample
 // passing (too few frames), a 2 s extra failing for lacking 5 s of frames, the error budget off (two errors after
-// a seek pass, three fail; the null muxer's timestamp complaints are not the file's errors), a missing piece
+// a seek pass, three fail; the null muxer's timestamp complaints are not the file's errors), bytes that cannot be
+// read failing the run instead of the file (EIO from a btrfs checksum; ENOTDIR stands in, as root reads past a
+// chmod 000 and test-linux runs as root), a missing piece
 // between the samples passing (Amélie's "Home Movie" had 8 MiB of zeros
 // at 8 %), header or tail padding taken for a hole, and the end sample timed by the container when the video ends
 // sooner (a Clone Wars episode: video 1355.4 s, audio 1359.4 s, 48 of 59 frames).
@@ -448,6 +450,10 @@ func TestDecodeCheck(t *testing.T) {
 		t.Errorf("2 s clip: clean=false detail=%q err=%v", detail, err)
 	}
 	h.Script(t, "ffmpeg", "echo frame=120\n")
+	if clean, detail, err := decodeCheck(context.Background(), h.Env.FFmpeg, filepath.Join(noise, "x"), &probe.Video{Codec: "hevc", FPS: 24}, 6000); clean || err != nil ||
+		!strings.HasPrefix(detail, "the file cannot be read: ") {
+		t.Errorf("unreadable bytes: clean=%v detail=%q err=%v", clean, detail, err)
+	}
 	hole := media(t, mib, [2]int{mib / 2, mib/2 + 64<<10})
 	if clean, detail, _ := decodeCheck(context.Background(), h.Env.FFmpeg, hole, &probe.Video{Codec: "hevc", FPS: 24}, 6000); clean || !strings.HasPrefix(detail, "4 KiB of zeros at 5") {
 		t.Errorf("hole in the middle: clean=%v detail=%q", clean, detail)
