@@ -387,6 +387,19 @@ func (p *Prober) cached(ctx context.Context, path string, size, mtime int64) (In
 	return info, true, nil
 }
 
+// Moved re-keys the cached Info of a file renamed from → to. A rename keeps size and mtime, so the row stays valid
+// and the renamed file costs no new probe.
+func (p *Prober) Moved(ctx context.Context, from, to string) error {
+	_, err := p.DB.ExecContext(ctx, `UPDATE OR REPLACE probe_cache SET path=?1, info=json_set(info, '$.path', ?1) WHERE path=?2`, to, from)
+	return err
+}
+
+// Forget drops the cached Info of a file that no longer exists.
+func (p *Prober) Forget(ctx context.Context, path string) error {
+	_, err := p.DB.ExecContext(ctx, `DELETE FROM probe_cache WHERE path=?`, path)
+	return err
+}
+
 // Probe returns the file's Info, from the cache when size and mtime are unchanged.
 func (p *Prober) Probe(ctx context.Context, path string) (Info, error) {
 	st, err := os.Stat(path)
