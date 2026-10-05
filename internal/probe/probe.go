@@ -238,22 +238,16 @@ func NewProber(ffprobe string, db *sql.DB) (*Prober, error) {
 
 // Probe returns the file's Info, from the cache when size and mtime are unchanged.
 func (p *Prober) Probe(ctx context.Context, path string) (Info, error) {
+	info, ok, err := p.Cached(ctx, path)
+	if ok || err != nil {
+		return info, err
+	}
 	st, err := os.Stat(path)
 	if err != nil {
 		return Info{}, err
 	}
 	size, mtime := st.Size(), st.ModTime().UnixNano() // ModTime keeps the kernel's nanoseconds
-	var raw string
-	err = p.DB.QueryRowContext(ctx, `SELECT info FROM probe_cache WHERE path=? AND size=? AND mtime_ns=?`, path, size, mtime).Scan(&raw)
-	if err == nil {
-		var info Info
-		if json.Unmarshal([]byte(raw), &info) == nil {
-			return info, nil
-		}
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return Info{}, err
-	}
-	info, err := p.run(ctx, path)
+	info, err = p.run(ctx, path)
 	if err != nil {
 		return Info{}, err
 	}
@@ -266,6 +260,27 @@ func (p *Prober) Probe(ctx context.Context, path string) (Info, error) {
 		ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime_ns=excluded.mtime_ns, info=excluded.info, probed_at=excluded.probed_at`,
 		path, size, mtime, string(enc), time.Now().UTC().Format(time.RFC3339Nano))
 	return info, err
+}
+
+// Cached returns the stored Info when the file is unchanged since it was probed, without running ffprobe; ok is
+// false when it must be probed (again).
+func (p *Prober) Cached(ctx context.Context, path string) (info Info, ok bool, err error) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return Info{}, false, err
+	}
+	var raw string
+	err = p.DB.QueryRowContext(ctx, `SELECT info FROM probe_cache WHERE path=? AND size=? AND mtime_ns=?`, path, st.Size(), st.ModTime().UnixNano()).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Info{}, false, nil
+	}
+	if err != nil {
+		return Info{}, false, err
+	}
+	if json.Unmarshal([]byte(raw), &info) != nil {
+		return Info{}, false, nil // unreadable row: probe again
+	}
+	return info, true, nil
 }
 
 func (p *Prober) run(ctx context.Context, path string) (Info, error) {
