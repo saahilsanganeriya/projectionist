@@ -431,8 +431,8 @@ func TestHeavyStopsWhenAGuestStarts(t *testing.T) {
 			}
 		}
 	})
-	ticks := make(chan time.Time)
-	r := &run{env: h.Env, tick: func() (<-chan time.Time, func()) { return ticks, func() {} }}
+	ticks, stopped := make(chan time.Time), make(chan struct{}) // stopped: the re-check loop has ended
+	r := &run{env: h.Env, tick: func() (<-chan time.Time, func()) { return ticks, func() { close(stopped) } }}
 	var stoppedEarly, keptRunning bool
 	done, err := r.heavy(context.Background(), func(ctx context.Context) error {
 		armed.Store(true)
@@ -444,14 +444,18 @@ func TestHeavyStopsWhenAGuestStarts(t *testing.T) {
 		case <-ctx.Done():
 			stoppedEarly = true
 			return ctx.Err()
+		case <-stopped:
+			stoppedEarly = true
+			return ctx.Err()
 		}
 		select {
 		case ticks <- time.Time{}:
-			keptRunning = true // the re-check loop came back for more after finding the guest
-			return nil
+			keptRunning = true // the loop came back for more after finding the guest
+		case <-stopped:
+			keptRunning = ctx.Err() == nil // the loop ended without stopping the work
 		case <-ctx.Done():
-			return ctx.Err()
 		}
+		return ctx.Err()
 	})
 	if done || err != nil || stoppedEarly || keptRunning {
 		t.Fatalf("done=%v err=%v; stopped with nobody else watching=%v, kept running with a guest=%v", done, err, stoppedEarly, keptRunning)
