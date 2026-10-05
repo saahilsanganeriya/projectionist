@@ -624,6 +624,7 @@ func (r *run) reference(ctx context.Context, t *title) (reference, error) {
 			return reference{}, ctx.Err()
 		}
 		ref.label, ref.why = "", "alass could not read the audio: "+err.Error()
+		r.alertOnce("alass-failed", "alass failed (titles without an English image track get no subtitle): %v", err)
 	}
 	return ref, nil
 }

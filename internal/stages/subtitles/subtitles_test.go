@@ -218,6 +218,17 @@ func TestRunWritesSidecarsAndReconciles(t *testing.T) {
 	}
 }
 
+// Catches an alass failure (a wrong flag, a broken binary) recorded quietly on every title instead of alerting.
+func TestRunAlertsWhenAlassFails(t *testing.T) {
+	f := newFixture(t)
+	f.h.Script(t, "alass", "exit 1\n")
+	var rep stage.Report
+	f.st.Run(context.Background(), f.h.Env, &rep)
+	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "alass failed") {
+		t.Errorf("alerts %q", rep.Alerts)
+	}
+}
+
 // Catches: heavy work or downloads started while a guest is watching (the owner's own viewing must not block).
 func TestRunWaitsWhileGuestsWatch(t *testing.T) {
 	f := newFixture(t)
