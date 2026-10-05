@@ -390,6 +390,10 @@ func TestRunEndToEnd(t *testing.T) {
 	if n := writes(w.h) - before; n != 0 || day.Counts["plex.snapshot"] != 1 || day.Counts["jellyfin.snapshot"] != 1 {
 		t.Errorf("after the daily re-read: %d writes, counts %v", n, day.Counts)
 	}
+	w.h.Now = w.h.Now.Add(25 * time.Hour) // only "not modified" feed answers since the first read: still fresh
+	if late := w.run(t, ""); len(late.Alerts) != 0 {
+		t.Errorf("a feed answering 304 was reported stale: %v", late.Alerts)
+	}
 	var added int // the re-read must keep "added by this stage", or the film could never leave the collection
 	if err := w.h.Env.Store.DB().QueryRow(`SELECT added FROM letterboxd_sink WHERE app='plex' AND tmdb=565`).Scan(&added); err != nil || added != 1 {
 		t.Errorf("The Ring added mark after the re-read = %d (%v)", added, err)
