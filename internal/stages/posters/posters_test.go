@@ -91,6 +91,7 @@ type world struct {
 	tmdb       map[string]string // TMDB's answers by path
 	garbage    bool              // the judge answers prose
 	overloaded bool              // the judge answers 529
+	dropped    bool              // judge calls and batch creations lose their answer after the server has them
 	models     int
 	messages   int // answered judge calls
 	batches    map[string][]llm.BatchRequest
@@ -150,6 +151,9 @@ func newWorld(t *testing.T, opts string) *world {
 			reply(rw, `{"data":[{"id":"claude-haiku-4-5-20251001","created_at":"2025-10-01T00:00:00Z"},{"id":"claude-sonnet-5-5","created_at":"2026-08-01T00:00:00Z"}]}`)
 		case p == "/v1/messages" && w.overloaded:
 			rw.WriteHeader(529)
+		case (p == "/v1/messages" || p == "/v1/messages/batches") && w.dropped:
+			conn, _, _ := rw.(http.Hijacker).Hijack()
+			conn.Close()
 		case p == "/v1/messages":
 			var req llm.Request
 			json.NewDecoder(r.Body).Decode(&req)
@@ -394,6 +398,35 @@ func TestBatchBacklog(t *testing.T) {
 	w.h.Env.Store.DB().QueryRow(`SELECT sum(cost_usd) FROM posters_calls WHERE state='done'`).Scan(&cost)
 	if v := w.verdict(t, "movie:tmdb-1"); !strings.HasSuffix(v.Choice, "/red.jpg") || math.Abs(cost-0.00225) > 1e-12 {
 		t.Fatalf("after batch 2: Alpha chose %s; cost $%v, want $0.00225 (3 × (1000 in + 100 out) at half price)", v.Choice, cost)
+	}
+}
+
+// Catches: a judge call or a batch creation that may have been billed (its answer was lost) recorded at $0 or
+// released from the budget, which lets real spend pass the hard budget unseen.
+func TestUnknownOutcomeCounted(t *testing.T) {
+	for _, opts := range []string{"", "batch_min = 1\n"} {
+		w := newWorld(t, "dry_run = true\n"+opts)
+		w.set(func() { w.dropped = true })
+		w.run(t)
+		var n int
+		var spent float64
+		w.h.Env.Store.DB().QueryRow(`SELECT count(*), coalesce(sum(cost_usd), 0) FROM posters_calls WHERE state='failed' AND reserved_usd=0`).
+			Scan(&n, &spent)
+		if n != 2 || spent < 2*0.0005 {
+			t.Errorf("%q: %d calls failed with $%v counted; want 2, each at its worst case (over $0.0005)", opts, n, spent)
+		}
+	}
+}
+
+// Catches: judge calls or batch uploads made while a guest watches.
+func TestGuestDefersJudging(t *testing.T) {
+	w := newWorld(t, "dry_run = true\n")
+	w.set(func() { w.overloaded = true })
+	w.run(t) // gathers the pools; no judge call is answered
+	w.set(func() { w.overloaded = false })
+	w.h.Plex.Handle("GET", "/status/sessions", 200, `<MediaContainer size="1"><Video type="movie" title="X"><User title="roger"/></Video></MediaContainer>`)
+	if rep := w.run(t); w.messages != 0 || rep.Counts["judge_deferred"] != 2 {
+		t.Fatalf("%d judge calls answered, counts %v; want none while a guest watches", w.messages, rep.Counts)
 	}
 }
 
