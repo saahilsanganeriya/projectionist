@@ -227,7 +227,9 @@ func parseRSS(body []byte) ([]rssItem, error) {
 // ---- the owner's export (lists/*.csv, watched.csv), read only for list codes and watched films ----
 
 // readExport returns the boxd.it codes of the owner's exported lists and of every film in watched.csv. The export
-// may sit directly in dir or in one subfolder of it (the unzipped folder).
+// may sit directly in dir or in one subfolder of it (the unzipped folder). A folder that is missing or holds no export
+// is an error, not an empty export: without its compose mount the folder is absent from the container, and Docker
+// makes an empty one for a mount whose host folder is gone. dir "" reads nothing.
 func readExport(dir string) (listLIDs, watchedLIDs []string, err error) {
 	if dir == "" {
 		return nil, nil, nil
@@ -237,7 +239,11 @@ func readExport(dir string) (listLIDs, watchedLIDs []string, err error) {
 		b, _ := filepath.Glob(filepath.Join(dir, "*", pattern))
 		return append(a, b...)
 	}
-	for _, path := range files(filepath.Join("lists", "*.csv")) {
+	lists, watched := files(filepath.Join("lists", "*.csv")), files("watched.csv")
+	if len(lists)+len(watched) == 0 {
+		return nil, nil, fmt.Errorf("no letterboxd export (watched.csv, lists/*.csv) in %s, or no such folder", dir)
+	}
+	for _, path := range lists {
 		rows, err := readCSV(path)
 		if err != nil {
 			return nil, nil, err
@@ -249,7 +255,7 @@ func readExport(dir string) (listLIDs, watchedLIDs []string, err error) {
 			}
 		}
 	}
-	for _, path := range files("watched.csv") {
+	for _, path := range watched {
 		rows, err := readCSV(path)
 		if err != nil {
 			return nil, nil, err

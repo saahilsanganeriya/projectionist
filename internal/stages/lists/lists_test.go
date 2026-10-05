@@ -239,7 +239,8 @@ func TestShelvesAndRerunChangesNothing(t *testing.T) {
 // Catches: a collection the owner makes after the stage's last look at an app, with a title equal to a new shelf's
 // but for case — adopted as the shelf's, or created over (Plex files the shelf's films into it) instead of the
 // shelf waiting a run — and, once each app has reported it, the shelf not renamed in both apps (each app's owner
-// titles count for both, so the collections stage, which matches titles ignoring case, never writes into a shelf).
+// titles count for both, so the collections stage, which matches titles ignoring case, never writes into a shelf);
+// then, with the state lost, a renamed shelf taken for a dropped list's stray and deleted instead of adopted.
 func TestOwnerCollectionsKeepTheirTitles(t *testing.T) {
 	w := newWorld(t)
 	w.run(t)
@@ -261,9 +262,32 @@ func TestOwnerCollectionsKeepTheirTitles(t *testing.T) {
 	if b := w.jf.set("mine4"); b.name != "TOP 4" || b.overview != "mine" || !reflect.DeepEqual(b.items, []string{"j77"}) {
 		t.Errorf("the owner's BoxSet changed: %+v", b)
 	}
+	px3, jf4 := w.plexColl(t, "Top 3 · Letterboxd").key, w.boxSet(t, "Top 4 · Letterboxd").id
+	if _, err := w.h.Env.Store.DB().Exec(`DELETE FROM lists_sinks`); err != nil {
+		t.Fatal(err)
+	}
+	w.clock.Sleep(context.Background(), time.Hour)
+	if rep := w.run(t); w.px.coll(px3) == nil || w.jf.set(jf4) == nil || rep.Counts["shelves_retired"] != 0 {
+		t.Errorf("state lost: Top 3 kept %v, Top 4 kept %v, retired %d", w.px.coll(px3) != nil, w.jf.set(jf4) != nil, rep.Counts["shelves_retired"])
+	}
 }
 
-// Catches: a changed list (a film dropped, another moved to the top) not followed, or followed by rebuilding the
+// Catches: a canon entry renamed in the config (the same list) losing its shelf: its collection, still under the old
+// title when the apps are read, taken for a dropped list's stray and deleted instead of renamed in place.
+func TestRenamedCanonEntryKeepsItsShelf(t *testing.T) {
+	w := newWorld(t)
+	w.run(t)
+	px, jf := w.plexColl(t, "Top").key, w.boxSet(t, "Top").id
+	w.h.SetOptions(w.opts + fmt.Sprintf("home = []\n[[canon]]\nname = \"Top Films\"\nurl = %q\n", w.top))
+	w.clock.Sleep(context.Background(), time.Hour)
+	rep := w.run(t)
+	if c, b := w.px.coll(px), w.jf.set(jf); c == nil || c.title != "Top Films" || b == nil || b.name != "Top Films" || rep.Counts["shelves_retired"] != 0 {
+		t.Errorf("plex %+v, jellyfin %+v, retired %d", c, b, rep.Counts["shelves_retired"])
+	}
+}
+
+// Catches: a changed list (a film dropped, another moved to the top) not followed by the next daily run (the old
+// default canon_refresh, 168 h, left the Top 500's shelf up to a week behind its list), or followed by rebuilding the
 // Plex collection instead of the few calls the change needs.
 func TestFollowsListChanges(t *testing.T) {
 	w := newWorld(t)
@@ -275,7 +299,7 @@ func TestFollowsListChanges(t *testing.T) {
 	p2 := string(w.lb.pages["/official/list/letterboxds-top-500-films/page/2/"])
 	w.lb.pages["/official/list/letterboxds-top-500-films/page/2/"] = []byte(strings.Replace(p2, posterLI(p2, "oldboy"), "", 1))
 
-	w.clock.Sleep(context.Background(), 8*24*time.Hour) // past canon_refresh
+	w.clock.Sleep(context.Background(), 24*time.Hour) // the next daily run
 	before := len(w.px.writes())
 	w.run(t)
 	top := w.plexColl(t, "Top")
@@ -909,5 +933,115 @@ func TestPostersRenderedOnlyWhenSent(t *testing.T) {
 	w.run(t)
 	if len(renders) > 0 {
 		t.Errorf("a run with every poster in place rendered %v", renders)
+	}
+}
+
+// Catches, for the Top 250 the defaults no longer shelve: its shelf left in either app, or its Home row left, both
+// when this database recorded it and when no record exists because another database's run made it (the NAS gate:
+// Plex collection 46182 with "the first 250 of" in its summary, promoted to Home, and a BoxSet with an older head's
+// plain link); a dry run that hides those deletes; and a delete of anything the stage cannot show it made: the
+// owner's own "Letterboxd Top 250" (his summary, or none) and an unrecorded shelf of one of his own lists, which may
+// only be unreadable this run.
+func TestRetiresTheTop250(t *testing.T) {
+	const top500 = "https://letterboxd.com/official/list/letterboxds-top-500-films/"
+	gate := func(w *world) {
+		w.px.colls = append(w.px.colls, &plexColl0{key: "46182", title: "Letterboxd Top 250", items: []string{"k389"},
+			summary: "On the NAS: 143 of 250 · seen 77 · the first 250 of " + top500})
+		w.px.hubs = append(w.px.hubs, map[string]any{"identifier": "custom.collection.4.46182", "promotedToOwnHome": true})
+		w.jf.sets = append(w.jf.sets, &boxSet0{id: "bc88", name: "Letterboxd Top 250", items: []string{"j389"},
+			overview: "On the NAS: 143 of 250 · seen 77 · " + top500})
+	}
+	for _, c := range []struct {
+		name       string
+		setup      func(t *testing.T, w *world) (gone []string) // Plex keys and BoxSet ids the run must delete
+		kept       []string                                     // ... and must leave
+		wantRetire int
+	}{
+		{"recorded here", func(t *testing.T, w *world) []string {
+			w.h.SetOptions(w.opts + fmt.Sprintf("home = [\"Letterboxd Top 250\"]\n[[canon]]\nname = \"Letterboxd Top 500\"\nurl = %q\n"+
+				"[[canon]]\nname = \"Letterboxd Top 250\"\nurl = %q\nlimit = 250\n", top500, top500))
+			w.run(t)
+			gone := []string{w.plexColl(t, "Letterboxd Top 250").key, w.boxSet(t, "Letterboxd Top 250").id}
+			w.h.SetOptions(w.opts)
+			w.clock.Sleep(context.Background(), 24*time.Hour)
+			return gone
+		}, nil, 2},
+		{"made by another database's run", func(t *testing.T, w *world) []string {
+			gate(w)
+			w.px.colls = append(w.px.colls, &plexColl0{key: "602", title: "old list", items: []string{"k77"},
+				summary: "On the NAS: 1 of 1 · seen 1 · " + w.lb.srv.URL + "/saahilsan/list/old-list/"})
+			w.h.SetOptions(w.opts + "dry_run = true\n")
+			if rep := w.run(t); !strings.HasSuffix(rep.Summary, ", 2 strays") || w.px.coll("46182") == nil || w.jf.set("bc88") == nil {
+				t.Errorf("dry run: summary %q, 46182 kept %v, bc88 kept %v", rep.Summary, w.px.coll("46182") != nil, w.jf.set("bc88") != nil)
+			}
+			w.h.SetOptions(w.opts)
+			return []string{"46182", "bc88"}
+		}, []string{"602"}, 2},
+		{"the owner's own", func(t *testing.T, w *world) []string {
+			gate(w)
+			w.px.coll("46182").summary, w.jf.sets[len(w.jf.sets)-1].overview = "my picks · "+top500, ""
+			w.h.SetOptions(w.opts)
+			return nil
+		}, []string{"46182", "bc88"}, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWorld(t)
+			gone := c.setup(t, w)
+			rep := w.run(t)
+			for _, id := range gone {
+				var n int
+				w.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM lists_sinks WHERE id=?`, id).Scan(&n)
+				if w.px.coll(id) != nil || w.jf.set(id) != nil || n > 0 {
+					t.Errorf("%s left: plex %v, jellyfin %v, records %d", id, w.px.coll(id) != nil, w.jf.set(id) != nil, n)
+				}
+				for _, h := range w.px.hubs {
+					if h["identifier"] == "custom.collection.4."+id {
+						t.Errorf("home row of %s left", id)
+					}
+				}
+			}
+			for _, id := range append(c.kept, "500") { // 500: the hand-made "Nolan"
+				var n int
+				w.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM lists_sinks WHERE id=?`, id).Scan(&n)
+				if (w.px.coll(id) == nil && w.jf.set(id) == nil) || n > 0 {
+					t.Errorf("%s: deleted %v, records %d (the stage claims it)", id, w.px.coll(id) == nil && w.jf.set(id) == nil, n)
+				}
+			}
+			if top := w.plexColl(t, "Letterboxd Top 500"); slices.Contains(gone, top.key) || slices.Contains(c.kept, top.key) {
+				t.Errorf("Top 500 shelf is collection %s, a Top 250's", top.key)
+			}
+			if rep.Counts["shelves_retired"] != c.wantRetire {
+				t.Errorf("shelves_retired = %d, want %d", rep.Counts["shelves_retired"], c.wantRetire)
+			}
+		})
+	}
+}
+
+// Catches: a Letterboxd export that is not there read as an empty one, silently (the compose file once had no mount
+// for it, and Docker makes an empty folder for a mount whose host folder is gone), and an alert that stops the
+// shelves or fires with the export present or turned off.
+func TestMissingExportAlerts(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		change func(w *world, exportDir string) string // returns export_dir
+		alert  bool
+	}{
+		{"present", func(w *world, dir string) string { return dir }, false},
+		{"turned off", func(w *world, dir string) string { return "" }, false},
+		{"missing", func(w *world, dir string) string { os.RemoveAll(dir); return dir }, true},
+		{"empty", func(w *world, dir string) string { os.RemoveAll(dir); os.Mkdir(dir, 0o755); return dir }, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWorld(t)
+			dir := filepath.Join(filepath.Dir(w.missing), "export")
+			opts := strings.Replace(w.opts, fmt.Sprintf("export_dir     = %q", dir), fmt.Sprintf("export_dir = %q", c.change(w, dir)), 1)
+			w.h.SetOptions(opts + fmt.Sprintf("[[canon]]\nname = \"Top\"\nurl = %q\n", w.top))
+			rep := w.run(t)
+			alerted := slices.ContainsFunc(rep.Alerts, func(a string) bool { return strings.Contains(a, "letterboxd export not read") })
+			if alerted != c.alert || len(rep.Alerts) > 1 {
+				t.Errorf("alerts %v, want export alert %v", rep.Alerts, c.alert)
+			}
+			w.plexColl(t, "Top") // shelved all the same
+		})
 	}
 }

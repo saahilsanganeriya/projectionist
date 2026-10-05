@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ type jellyfinSink struct {
 	user     string         // the owner's user id
 	byTMDB   map[int]string // item id
 	sets     []boxSet       // the BoxSets, as load read them
+	strays   []string       // ids of BoxSets of dropped canon lists that have no record
 	taken    int
 	retired  int
 	scanning bool // the movie library is being scanned: its listings come and go, so BoxSets wait
@@ -140,6 +142,10 @@ func (j *jellyfinSink) load(ctx context.Context) appReport {
 		if !mine[b.ID] && !strings.HasPrefix(b.Overview, summaryMarker) && !answersCreate(b.DateCreated, intents...) {
 			r.Taken = append(r.Taken, fold(b.Name))
 		}
+		if !mine[b.ID] && stray(b.Name, b.Overview, j.opt) {
+			j.strays = append(j.strays, b.ID)
+			j.log.Info("shelf of a dropped canon list without a record", "event", "stray_shelf", "app", "jellyfin", "title", b.Name, "id", b.ID)
+		}
 	}
 	if err := j.env.Store.PutJSON(ctx, name, "jellyfin_report", r); err != nil {
 		j.log.Warn("jellyfin report not kept", "event", "store_error", "err", err)
@@ -171,7 +177,13 @@ func (j *jellyfinSink) reconcile(ctx context.Context, shelves []shelf, retire []
 	}
 	ctx, cancel := context.WithTimeout(ctx, j.opt.JellyfinBudget)
 	defer cancel()
-	j.retire(ctx, retire) // deleting a BoxSet does not depend on the movie listings, so it goes ahead during a scan
+	strays, err := recordStrays(ctx, j.env.Store.DB(), "jellyfin", j.strays)
+	if err != nil {
+		j.w.stopped = "state: " + err.Error()
+		return
+	}
+	// deleting a BoxSet does not depend on the movie listings, so it goes ahead during a scan
+	j.retire(ctx, slices.Concat(retire, strays))
 	if j.scanning {
 		j.w.stopped = "Jellyfin is scanning its movie library"
 		return
