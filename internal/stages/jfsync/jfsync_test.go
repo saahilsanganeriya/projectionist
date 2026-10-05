@@ -330,6 +330,28 @@ func TestPushCrossingAWrite(t *testing.T) {
 	}
 }
 
+// Catches: a webhook entry of another shape read as no entry, so the POST adding ours, which replaces the whole list,
+// would drop the owner's other hooks every day; a document of another kind read as an empty list; and the real empty
+// list (plex.tv's answer on 2026-10-05) refused.
+func TestWebhookList(t *testing.T) {
+	for raw, want := range map[string]string{
+		"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<webhooks>\n</webhooks>\n":       "",
+		`<webhooks><webhook url="http://a/1"/><webhook url="http://b/2"/></webhooks>`: "http://a/1 http://b/2",
+		`<webhooks><webhook><url>http://a/1</url></webhook></webhooks>`:               "error: unrecognised entry <webhook>",
+		`<webhooks><hook url="http://a/1"/></webhooks>`:                               "error: unrecognised entry <hook>",
+		`<html></html>`: "error: root <html>",
+	} {
+		urls, err := webhookURLs([]byte(raw))
+		got := strings.Join(urls, " ")
+		if err != nil {
+			got = "error: " + strings.TrimPrefix(err.Error(), "plex.tv webhooks: ")
+		}
+		if got != want {
+			t.Errorf("%s: got %q, want %q", raw, got, want)
+		}
+	}
+}
+
 // Catches: a person configured with no Plex account (plex = "") written as the server's unnamed account, which the
 // NAS has (their watch state would land in another account), or alerted about on every run; a Plex name absent from the backup copy (an account
 // added since it was taken) marked imported without an alert, so its Plex writes would replay plays Plex holds,

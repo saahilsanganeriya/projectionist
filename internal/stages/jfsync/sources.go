@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -672,27 +673,14 @@ func (s *syncer) ensureWebhook(ctx context.Context) {
 	}
 	endpoint := s.opt.PlexTV + "/api/v2/user/webhooks"
 	raw, err := s.env.Plex.Account(ctx, http.MethodGet, endpoint, nil)
-	var list struct {
-		Hooks []struct {
-			URL string `xml:"url,attr"`
-		} `xml:"webhook"`
-	}
+	var urls []string
 	if err == nil {
-		err = xml.Unmarshal(raw, &list)
+		urls, err = webhookURLs(raw)
 	}
-	if err == nil {
-		form := url.Values{}
-		present := false
-		for _, h := range list.Hooks {
-			form.Add("urls[]", h.URL) // the POST replaces the whole list
-			present = present || h.URL == s.opt.WebhookURL
-		}
-		if !present {
-			form.Add("urls[]", s.opt.WebhookURL)
-			_, err = s.env.Plex.Account(ctx, http.MethodPost, endpoint, form)
-			if err == nil {
-				s.env.Log.Info("plex webhook registered", "event", "webhook_registered", "url", s.opt.WebhookURL)
-			}
+	if err == nil && !slices.Contains(urls, s.opt.WebhookURL) {
+		form := url.Values{"urls[]": append(urls, s.opt.WebhookURL)} // the POST replaces the whole list
+		if _, err = s.env.Plex.Account(ctx, http.MethodPost, endpoint, form); err == nil {
+			s.env.Log.Info("plex webhook registered", "event", "webhook_registered", "url", s.opt.WebhookURL)
 		}
 	}
 	if err != nil {
@@ -703,6 +691,34 @@ func (s *syncer) ensureWebhook(ctx context.Context) {
 	if err := s.env.Store.PutJSON(ctx, name, "webhook", last); err != nil {
 		s.env.Log.Warn("webhook state write failed", "event", "store_error", "err", err)
 	}
+}
+
+// webhookURLs reads plex.tv's webhook list, <webhooks><webhook url="…"/>…</webhooks> (python-plexapi reads the same
+// shape; the owner's empty list on 2026-10-05 was "<webhooks>\n</webhooks>"). Anything else is refused, since the POST
+// that adds ours replaces the whole list and must carry every hook already there. Errors name no URL: another
+// service's webhook URL can hold its token.
+func webhookURLs(raw []byte) ([]string, error) {
+	var list struct {
+		XMLName xml.Name
+		Entries []struct {
+			XMLName xml.Name
+			URL     string `xml:"url,attr"`
+		} `xml:",any"`
+	}
+	if err := xml.Unmarshal(raw, &list); err != nil {
+		return nil, fmt.Errorf("plex.tv webhooks: %w", err)
+	}
+	if list.XMLName.Local != "webhooks" {
+		return nil, fmt.Errorf("plex.tv webhooks: root <%s>", list.XMLName.Local)
+	}
+	urls := make([]string, 0, len(list.Entries))
+	for _, e := range list.Entries {
+		if e.XMLName.Local != "webhook" || e.URL == "" {
+			return nil, fmt.Errorf("plex.tv webhooks: unrecognised entry <%s>", e.XMLName.Local)
+		}
+		urls = append(urls, e.URL)
+	}
+	return urls, nil
 }
 
 // friendToken is a shared user's token for this server, from plex.tv's shared-server list (fetched once per run).
