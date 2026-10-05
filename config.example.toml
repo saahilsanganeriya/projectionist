@@ -60,8 +60,8 @@ default_section = 4
 [stages.subtitles]
 every       = "6h"
 roots       = ["/volume1/media/Movies", "/volume1/media/TV"]
-stats_file  = "/state/sub_stats.tsv" # sub_stats.py's TSV, rewritten each run (the rename planner reads it)
-retry_after = "168h"                 # a title that got no subtitle is searched again after this
+stats_file  = "/state/sub_stats.tsv" # sub_stats.py's TSV over the whole library, refreshed each run
+retry_after = "168h"                 # a title that got no subtitle is searched again after this, then 2, 4, 8x it
 workers     = 3
 max_titles  = 0                      # per run; 0 = every due title
 secrets_dir = "/run/secrets"

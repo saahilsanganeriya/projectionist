@@ -15,7 +15,8 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 FROM ${JELLYFIN_IMAGE} AS jellyfin
 
 # alass aligns a subtitle to a film's speech (the subtitles stage, when no English image track gives the timing).
-# Pinned to the last upstream commit, which adds --audio-index; Alpine's musl toolchain links it statically.
+# Pinned to the last upstream commit: its --index flag (which audio stream) is missing from the 2019 release binary.
+# Alpine's musl toolchain links it statically.
 FROM --platform=linux/amd64 rust:1.96-alpine AS alass
 RUN apk add --no-cache git musl-dev
 RUN cargo install --locked --root /out --git https://github.com/kaegi/alass --rev 874f02d9577182752a0f969b6d6b98fd65bdf1fc alass-cli
