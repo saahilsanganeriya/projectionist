@@ -625,7 +625,7 @@ func syncJellyfin(ctx context.Context, log *slog.Logger, jf *jellyfin.Client, ti
 }
 
 // findBoxSet returns the BoxSet this stage made (the remembered one if it still is a BoxSet with our title, else one
-// with our title and our tag), and the ids of every BoxSet with our title.
+// with our title and our tag); when there is none, the ids of the untagged BoxSets with our title.
 func findBoxSet(ctx context.Context, jf *jellyfin.Client, title, remembered string) (id string, titled []string, err error) {
 	var res jfItems
 	if remembered != "" {

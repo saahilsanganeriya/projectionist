@@ -59,8 +59,7 @@ func defaults() Options {
 		APIKeyFile: "/run/secrets/anthropic_api_key", Picks: 5, PickAfter: "05:00", MaxCandidates: 400,
 		Section: 4, Collection: "Tonight", MoviesDir: "/volume1/media/Movies",
 		LetterboxdDir: "/volume1/docker/projectionist/data/letterboxd",
-		LetterboxdRSS: "https://letterboxd.com/saahilsan/rss/",
-		ImageBase:     "https://image.tmdb.org/t/p", JellyfinUser: "saahil",
+		LetterboxdRSS: "https://letterboxd.com/saahilsan/rss/", ImageBase: "https://image.tmdb.org/t/p", JellyfinUser: "saahil",
 		SinkTimeout: 3 * time.Minute, PlexMapTimeout: 10 * time.Minute, MapEvery: 24 * time.Hour,
 	}
 }
