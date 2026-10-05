@@ -322,7 +322,7 @@ func audioDetail(a probe.Audio) string {
 		parts = append(parts, "descriptive")
 	}
 	if a.Title != "" {
-		parts = append(parts, strconv.Quote(a.Title))
+		parts = append(parts, strconv.Quote(clip(a.Title)))
 	}
 	return strings.Join(parts, " · ")
 }
@@ -391,10 +391,7 @@ func attachments(mimes []string) string {
 func releaseTags(info probe.Info) string {
 	var parts []string
 	for _, t := range [][2]string{{"title", info.Title}, {"comment", info.Comment}} {
-		if v := strings.Join(strings.Fields(t[1]), " "); v != "" {
-			if r := []rune(v); len(r) > 120 {
-				v = string(r[:120]) + "…"
-			}
+		if v := clip(t[1]); v != "" {
 			parts = append(parts, t[0]+" "+strconv.Quote(v))
 		}
 	}
@@ -412,6 +409,15 @@ func lang(l string) string {
 
 func commentary(a probe.Audio) bool {
 	return a.Comment || strings.Contains(strings.ToLower(a.Title), "comment")
+}
+
+// clip collapses whitespace (titles can hold newlines) and keeps a free-text tag to one readable line.
+func clip(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > 120 {
+		return string(r[:120]) + "…"
+	}
+	return s
 }
 
 func clock(s int) string { return fmt.Sprintf("%dh %02dm %02ds", s/3600, s%3600/60, s%60) }

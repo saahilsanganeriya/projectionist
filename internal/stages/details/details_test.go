@@ -34,7 +34,8 @@ func TestRenderMatchesPython(t *testing.T) {
 			"Subtitle kinds:  1 text (subrip) · 1 image (hdmv_pgs_subtitle) · forced: eng, eng\n"}},
 		{"testdata/atropia_forced_hi", "", []string{"Subtitle kinds:  4 text (subrip) · forced: eng · SDH: eng\n",
 			"Encoder:         Lavc59.48.100 libx265\n"}},
-		{"testdata/american_pie_commentary", "", []string{`Audio 2:         AAC (LC) · stereo · commentary · "Commentary by the directors and cast"` + "\n"}},
+		{"testdata/american_pie_commentary", "", []string{`Audio 2:         AAC (LC) · stereo · commentary · "Commentary by the directors and cast"` + "\n",
+			"Audio 1:         AAC (LC) · 5.1 · default · \"Surround\"\n"}},
 		{"testdata/all_of_us_strangers_descriptive", "", []string{`Audio 2:         AC-3 · stereo · 192 kb/s · descriptive · "Descriptive"` + "\n"}},
 		{"testdata/evil_font", "", []string{"Attachments:     1 font\n"}},
 	}
@@ -81,8 +82,9 @@ func sizeFromNote(t *testing.T, container string) float64 {
 }
 
 // Catches: the HDR10+ the Python never saw (it looked for it in stream side data), Dolby Vision without a base
-// layer called "+SDR base", "DTS-HD MA + DTS:X" named as plain DTS-HD MA (the Python tested MA first), and the
-// x264/x265 rate control misread from the settings string.
+// layer called "+SDR base", "DTS-HD MA + DTS:X" named as plain DTS-HD MA (the Python tested MA first), the
+// x264/x265 rate control misread from the settings string, and a 250-character commentary title (Alien's) or a
+// multi-line tag breaking the note's one-line-per-fact shape.
 func TestNames(t *testing.T) {
 	for _, c := range []struct {
 		v    probe.Video
@@ -104,6 +106,9 @@ func TestNames(t *testing.T) {
 		if got := audioName(probe.Audio{Codec: c.codec, Profile: c.profile}); got != c.want {
 			t.Errorf("audioName(%s, %q) = %q, want %q", c.codec, c.profile, got, c.want)
 		}
+	}
+	if got := clip("Commentary\nfrom 2003 " + strings.Repeat("x", 300)); len([]rune(got)) != 121 || strings.Contains(got, "\n") || !strings.HasSuffix(got, "…") {
+		t.Errorf("clip = %q", got)
 	}
 	for settings, want := range map[string]string{
 		"x265 (build 209) - 3.6+28-8f16d2257:[Windows][GCC 14.1.0][64 bit] 10bit - H.265/HEVC codec - options: cpuid=1111039 rc=crf crf=20.0 qcomp=0.60": "x265 3.6+28 · crf 20.0",
