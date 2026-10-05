@@ -306,7 +306,8 @@ func TestRunTwoWay(t *testing.T) {
 
 // Catches: a push that crosses this stage's write to the same field lost for good. Saahil marks Heat unplayed in
 // Jellyfin while the run writes Heat's Plex play there; the next run would skip the item (its newest state came
-// from Jellyfin) and both apps would keep the play. Also: Heat's re-created Plex item, which nothing is known to
+// from Jellyfin) and both apps would keep the play. Likewise roger's Plex stop of a Ran rewatch crossing the
+// stage's scrobble, which clears the resume point. Also: Heat's re-created Plex item, which nothing is known to
 // hold, not unscrobbled.
 func TestPushCrossingAWrite(t *testing.T) {
 	h, w, _, _ := newHarness(t)
@@ -314,14 +315,18 @@ func TestPushCrossingAWrite(t *testing.T) {
 	w.during["/UserItems/a1/UserData"] = func(*http.Request) {
 		code = push(h, jellyfinApp, `{"NotificationType":"UserDataSaved","NotificationUsername":"saahil","ItemId":"a1","ItemType":"Movie","SaveReason":"TogglePlayed","Played":false}`)
 	}
+	w.during["/:/scrobble"] = func(*http.Request) {
+		push(h, plexApp, plexPlay("media.stop", "roger", "11", `,"viewOffset":600000,"duration":6000000`))
+	}
 	run(t, h)
-	delete(w.during, "/UserItems/a1/UserData")
+	w.during = map[string]func(*http.Request){}
 	done := len(w.since(0))
 	h.Now = h.Now.Add(5 * time.Minute)
 	run(t, h)
 	got := strings.Join(w.since(done), "\n")
 	if code != http.StatusNoContent || !strings.Contains(got, `/UserItems/a1/UserData?userId=u1 {"PlayCount":0,"Played":false}`) ||
-		!strings.Contains(got, "owner /:/unscrobble?identifier=com.plexapp.plugins.library&key=13") {
+		!strings.Contains(got, "owner /:/unscrobble?identifier=com.plexapp.plugins.library&key=13") ||
+		!strings.Contains(got, "friend /:/progress?identifier=com.plexapp.plugins.library&key=11&time=600000&state=stopped") {
 		t.Fatalf("after the crossing push (hook %d):\n%s", code, got)
 	}
 	done = len(w.since(0))
@@ -334,15 +339,21 @@ func TestPushCrossingAWrite(t *testing.T) {
 // (as any client's rating does); the sink then forgot what Plex holds, and every later run scrobbled Ran again for
 // roger (a view nobody can remove) and rated it again, which echoed again. Also: a real Plex scrobble crossing the
 // stage's progress write to the same film making it forget the play Plex then holds, so the next run scrobbles it
-// again; only the resume point is in doubt.
+// again (only the resume point is in doubt); and roger's own rating crossing the stage's lost, though Plex may hold
+// either.
 func TestPlexEchoesNeverRescrobble(t *testing.T) {
 	h, w, _, _ := newHarness(t)
+	rerates := true
 	w.during["/:/rate"] = func(r *http.Request) {
 		account := "saahilsanganeriya"
 		if r.Header.Get("X-Plex-Token") == fake.PlexFriendToken {
 			account = "roger"
 		}
 		push(h, plexApp, plexPlay("media.rate", account, r.URL.Query().Get("key"), `,"userRating":`+r.URL.Query().Get("rating")))
+		if rerates { // roger rates Ran 9 in Plex as the stage's 7 lands
+			rerates = false
+			push(h, plexApp, plexPlay("media.rate", account, r.URL.Query().Get("key"), `,"userRating":9`))
+		}
 	}
 	finishes := true
 	w.during["/:/progress"] = func(r *http.Request) {
@@ -357,7 +368,8 @@ func TestPlexEchoesNeverRescrobble(t *testing.T) {
 	}
 	got := strings.Join(w.since(0), "\n")
 	for call, want := range map[string]int{"friend /:/scrobble?identifier=com.plexapp.plugins.library&key=11": 1,
-		"friend /:/rate": 1, "owner /:/scrobble": 0, "owner /:/progress?identifier=com.plexapp.plugins.library&key=11&time=0&": 1} {
+		"friend /:/rate": 2, "key=11&rating=9": 1, "owner /:/scrobble": 0,
+		"owner /:/progress?identifier=com.plexapp.plugins.library&key=11&time=0&": 1} {
 		if n := strings.Count(got, call); n != want {
 			t.Errorf("%q sent %d times in 4 runs, want %d", call, n, want)
 		}

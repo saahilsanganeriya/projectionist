@@ -286,11 +286,11 @@ func (s *syncer) reconcile(ctx context.Context, app string, addr *addresses, sta
 			if !ok {
 				continue
 			}
-			keys := sinkKeys(app, id, items)
-			if app == plexApp {
-				keys = []string{k.Item} // the row of the item whose state is wanted
+			rowKey := k // Plex: the row of the item whose state is wanted
+			if app == jellyfinApp {
+				rowKey.Item = id
 			}
-			row := have[watch.Key{Person: u.Name, Item: keys[0]}]
+			row := have[rowKey]
 			w, h := view(app, want, row.State)
 			if w.Same(h) {
 				continue
