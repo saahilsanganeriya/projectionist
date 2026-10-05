@@ -1,7 +1,7 @@
 // Package library reads identity from the library's naming scheme, so stages need neither Plex's API nor its DB:
 //
 //	Movies/Title (Year) {tmdb-N}/Title (Year) {tmdb-N}[ - label].ext
-//	TV/Show (Year) {tmdb-N}/Season NN/Show (Year) - SxxEyy[-Eyy] - Title.ext
+//	TV/Show (Year) {tmdb-N}/Season NN/Show (Year) - SxxEyy[-Eyy][ - Title].ext
 //
 // Movie folders may carry {imdb-ttN} and show folders {tvdb-N} when TMDB had no match.
 package library
@@ -42,7 +42,7 @@ var (
 	movieFolder = regexp.MustCompile(`^(.+) \((\d{4})\) \{(tmdb|imdb)-([0-9a-z]+)\}$`)
 	showFolder  = regexp.MustCompile(`^(.+) \((\d{4})\) \{(tmdb|tvdb)-(\d+)\}$`)
 	seasonDir   = regexp.MustCompile(`^Season (\d{2,})$`)
-	episodeFile = regexp.MustCompile(`^(.+) \((\d{4})\) - S(\d{2,})E(\d{2,})(?:-E(\d{2,}))? - (.*)$`)
+	episodeFile = regexp.MustCompile(`^(.+) \((\d{4})\) - S(\d{2,})E(\d{2,})(?:-E(\d{2,}))?(?: - (.*))?$`) // TMDB has no title for some episodes
 )
 
 // ParseMovie reads a path ending in <movie folder>/<file>; ok is false when it is not in the scheme.
