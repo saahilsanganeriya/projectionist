@@ -74,7 +74,8 @@ ships as a single 12 MB static binary (stripped). The CPU-heavy candidates are s
 
 Rust earns a crate when a stage needs a library only Rust has, or when a profile on the J4125 shows a ≥2× wall-time
 win on a stage's critical path. The first case is subtitle sync to the speech in the audio (voice-activity
-detection plus split-aware alignment), which subtitles needs for titles without an English image track:
+detection plus split-aware alignment), which subtitles needs for titles without an English image track, and to
+rescue a downloaded subtitle whose timing the image track rejects (a cut or a drift the caption fit cannot follow):
 [alass](https://github.com/kaegi/alass), built from a pinned commit as a static musl binary in the image
 (`/usr/local/bin/alass`) and exec'd by the stage.
 

@@ -343,16 +343,31 @@ func TestRunProviderTrouble(t *testing.T) {
 }
 
 // Catches a candidate the captions reject not given to alass (a cut the fit cannot follow), or alass's output kept
-// without fitting the captions: Ran's candidate is another cut, alass's alignment (+1 s) then fits.
+// although the fit's in-sync test (0.5 s a chunk) leaves it more than 300 ms from the captions: Ran's candidate is
+// another cut; alass's alignment +1 s off is retimed onto the captions, one whose cues sit alternately 0.3 s late and
+// 0.35 s early is in sync by that test only.
 func TestRunRescue(t *testing.T) {
-	f := newFixture(t)
-	f.cut = true
-	f.run(t)
-	if o := f.outcomes()[f.path(ran)]; o != "rescued" {
-		t.Fatalf("Ran: %q, want rescued", o)
+	swing := make([]float64, len(captionTimes()))
+	for i, c := range captionTimes() {
+		swing[i] = c + []float64{0.3, -0.35}[i%2]
 	}
-	if d := cues(f.sidecar(t, ran))[0].start - f.ts[0]; d > 0.01 || d < -0.21 {
-		t.Errorf("rescued sidecar starts %.3f s off the captions", d)
+	for name, c := range map[string]struct {
+		aligned string
+		rescued bool
+	}{"+1 s": {srt(captionTimes(), 1), true}, "swinging": {srt(swing, 0), false}} {
+		f := newFixture(t)
+		f.cut = true
+		os.WriteFile(filepath.Join(f.h.Env.FFmpeg.Dir, "realign.srt"), []byte(c.aligned), 0o644)
+		f.run(t)
+		if o := f.outcomes()[f.path(ran)]; (o == "rescued") != c.rescued {
+			t.Fatalf("alass %s: Ran %q, want rescued %v", name, o, c.rescued)
+		}
+		if !c.rescued {
+			continue
+		}
+		if d := cues(f.sidecar(t, ran))[0].start - f.ts[0]; d > 0.01 || d < -0.21 {
+			t.Errorf("rescued sidecar starts %.3f s off the captions", d)
+		}
 	}
 }
 

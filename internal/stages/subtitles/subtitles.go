@@ -52,6 +52,7 @@ const (
 	userAgent  = "projectionist v0.1"
 	maxTries   = 4    // candidates downloaded per title
 	alassAgree = 0.75 // alass: share of cues that must sit within 0.5 s of the median shift (6 of 8 chunks in align)
+	rescueMax  = 300  // ms: a rescued subtitle's median distance to the captions (the gate's bar)
 )
 
 type Options struct {
@@ -911,7 +912,9 @@ func (r *run) fit(ctx context.Context, ref *reference, txt string, attempt map[s
 }
 
 // rescue gives a candidate the captions rejected (a cut, a recap or a drift the fit cannot follow) to alass, aligned
-// to the speech, and keeps alass's output when that fits the captions. Without alass it does nothing.
+// to the speech, and keeps alass's output when that fits the captions and its cues sit within rescueMax of them: the
+// fit's in-sync test allows 0.5 s per chunk, and alass's pieces can each land that far off (The Good, the Bad and the
+// Ugly: +0.5 s, then -0.46 s, a median 461 ms from its captions). Without alass it does nothing.
 func (r *run) rescue(ctx context.Context, t *title, ref *reference, txt string, attempt map[string]any) (string, string, bool) {
 	r.mu.Lock()
 	down := r.alassDown
@@ -932,7 +935,14 @@ func (r *run) rescue(ctx context.Context, t *title, ref *reference, txt string, 
 	}
 	attempt["rescue"] = "alass"
 	out, _, ok := r.fit(ctx, &reference{label: "pgs", bits: ref.bits}, aligned, attempt)
-	return out, "rescued", ok
+	if !ok {
+		return "", "", false
+	}
+	if ms := math.Round(medianOffsetMS(cues(out), ref.starts)); ms > rescueMax {
+		attempt["rescue_median_ms"] = ms
+		return "", "", false
+	}
+	return out, "rescued", true
 }
 
 // shifts compares alass's output with its input cue by cue: the median shift (ms) and the share of cues within 0.5 s
