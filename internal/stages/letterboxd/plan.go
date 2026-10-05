@@ -110,11 +110,16 @@ func (f facts) resolveNeeds() []string {
 
 // exportFilmLIDs maps (title, year) to the film's code from watched.csv and ratings.csv, so a diary row (whose URI
 // names the viewing, not the film) joins its film without a lookup. Ambiguous names map to "".
-func (f facts) exportFilmLIDs() map[[2]any]string {
-	out := map[[2]any]string{}
+type titleYear struct {
+	title string
+	year  int
+}
+
+func (f facts) exportFilmLIDs() map[titleYear]string {
+	out := map[titleYear]string{}
 	for _, rows := range [][]exportRow{f.ex.Watched, f.ex.Ratings} {
 		for _, r := range rows {
-			k := [2]any{r.Title, r.Year}
+			k := titleYear{r.Title, r.Year}
 			if prev, ok := out[k]; ok && prev != r.LID {
 				out[k] = ""
 				continue
@@ -125,8 +130,8 @@ func (f facts) exportFilmLIDs() map[[2]any]string {
 	return out
 }
 
-func (f facts) diaryLID(r exportRow, filmLID map[[2]any]string) string {
-	if lid := filmLID[[2]any{r.Title, r.Year}]; lid != "" {
+func (f facts) diaryLID(r exportRow, filmLID map[titleYear]string) string {
+	if lid := filmLID[titleYear{r.Title, r.Year}]; lid != "" {
 		return lid
 	}
 	return r.LID // the viewing's own code: boxd.it redirects it to /<user>/film/<slug>/n/

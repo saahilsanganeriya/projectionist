@@ -3,7 +3,7 @@ package letterboxd
 // ---- sinks: what Plex, Jellyfin and plex.tv hold (snapshots), and the writes that close the gap ----
 //
 // Each app runs in its own goroutine, so a slow Plex never holds up Jellyfin. A snapshot is re-read at most once
-// per sink_refresh; in between, each successful write updates the snapshot row, so a rerun plans nothing. Every
+// per sink_refresh (Jellyfin: jellyfin_refresh); in between, each successful write updates the snapshot row, so a rerun plans nothing. Every
 // call gets 3 attempts (2 s, 4 s apart); 3 failed calls in a row end that app's run, and what is left stays in
 // the diff for the next run.
 
@@ -83,10 +83,10 @@ func (r *run) loadHaves(ctx context.Context, app string) (map[int]have, error) {
 	return out, err
 }
 
+const putSink = `INSERT OR REPLACE INTO letterboxd_sink(app, tmdb, item, plays, rating, last, member, added) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+
 func (r *run) saveHave(ctx context.Context, app string, id int, h have) error {
-	_, err := r.db.ExecContext(ctx, `INSERT OR REPLACE INTO letterboxd_sink(app, tmdb, item, plays, rating, last, member, added)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, app, id, h.Item, h.Plays, h.Rating, h.Last, h.Member, h.Added)
-	if err != nil {
+	if _, err := r.db.ExecContext(ctx, putSink, app, id, h.Item, h.Plays, h.Rating, h.Last, h.Member, h.Added); err != nil {
 		return storeErr{err}
 	}
 	return nil
@@ -108,8 +108,7 @@ func (r *run) replaceSnapshot(ctx context.Context, app string, fresh map[int]hav
 		return err
 	}
 	put := func(id int, h have) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO letterboxd_sink(app, tmdb, item, plays, rating, last, member, added)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, app, id, h.Item, h.Plays, h.Rating, h.Last, h.Member, h.Added)
+		_, err := tx.ExecContext(ctx, putSink, app, id, h.Item, h.Plays, h.Rating, h.Last, h.Member, h.Added)
 		return err
 	}
 	for id, h := range fresh {
@@ -130,10 +129,41 @@ func (r *run) replaceSnapshot(ctx context.Context, app string, fresh map[int]hav
 	return tx.Commit()
 }
 
-func (r *run) meta(ctx context.Context, app string) (sinkMeta, error) {
-	var m sinkMeta
-	_, err := r.env.Store.GetJSON(ctx, name, "sink."+app, &m)
-	return m, err
+// storedSnapshot returns an app's stored snapshot; due is true when it is older than every and must be re-read.
+func (r *run) storedSnapshot(ctx context.Context, app string, every time.Duration) (m sinkMeta, haves map[int]have, due bool, err error) {
+	if _, err = r.env.Store.GetJSON(ctx, name, "sink."+app, &m); err != nil {
+		return m, nil, false, err
+	}
+	if r.env.Now().Sub(m.FetchedAt) >= every {
+		return m, nil, true, nil
+	}
+	haves, err = r.loadHaves(ctx, app)
+	return m, haves, false, err
+}
+
+// storeSnapshot saves a fresh read of an app (see replaceSnapshot) and returns it as stored.
+func (r *run) storeSnapshot(ctx context.Context, app string, m sinkMeta, fresh map[int]have, keepUnlisted bool) (map[int]have, error) {
+	if err := r.replaceSnapshot(ctx, app, fresh, keepUnlisted); err != nil {
+		return nil, storeErr{err}
+	}
+	m.FetchedAt = r.env.Now()
+	if err := r.putMeta(ctx, app, m); err != nil {
+		return nil, err
+	}
+	r.count(app+".snapshot", 1)
+	return r.loadHaves(ctx, app)
+}
+
+// setMembers records films as put into (in) or taken out of an app's membership by this stage.
+func (r *run) setMembers(ctx context.Context, app string, haves map[int]have, ids []int, in bool) error {
+	for _, id := range ids {
+		h := haves[id]
+		h.Member, h.Added = in, in
+		if err := r.saveHave(ctx, app, id, h); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (r *run) putMeta(ctx context.Context, app string, m sinkMeta) error {
@@ -142,8 +172,6 @@ func (r *run) putMeta(ctx context.Context, app string, m sinkMeta) error {
 	}
 	return nil
 }
-
-func (r *run) due(m sinkMeta, every time.Duration) bool { return r.env.Now().Sub(m.FetchedAt) >= every }
 
 func tmdbFromGuids(guids []struct {
 	ID string `json:"id"`
@@ -209,12 +237,8 @@ type plexListing struct {
 // plexSnapshot re-reads the Movies section (paged, lean fields), the Watchlist collection and its Home
 // promotion when due; otherwise it returns the stored snapshot.
 func (r *run) plexSnapshot(ctx context.Context) (sinkMeta, map[int]have, error) {
-	m, err := r.meta(ctx, "plex")
-	if err != nil {
-		return m, nil, err
-	}
-	if !r.due(m, r.opt.SinkRefresh) {
-		haves, err := r.loadHaves(ctx, "plex")
+	m, haves, due, err := r.storedSnapshot(ctx, "plex", r.opt.SinkRefresh)
+	if err != nil || !due {
 		return m, haves, err
 	}
 	var ident struct {
@@ -268,15 +292,7 @@ func (r *run) plexSnapshot(ctx context.Context) (sinkMeta, map[int]have, error) 
 			}
 		}
 	}
-	if err := r.replaceSnapshot(ctx, "plex", fresh, false); err != nil {
-		return m, nil, storeErr{err}
-	}
-	m.FetchedAt = r.env.Now()
-	if err := r.putMeta(ctx, "plex", m); err != nil {
-		return m, nil, err
-	}
-	r.count("plex.snapshot", 1)
-	haves, err := r.loadHaves(ctx, "plex")
+	haves, err = r.storeSnapshot(ctx, "plex", m, fresh, false)
 	return m, haves, err
 }
 
@@ -397,16 +413,6 @@ func (r *run) plexCollection(ctx context.Context, b *breaker, m sinkMeta, haves 
 		}
 		return url.QueryEscape("server://" + m.Machine + "/com.plexapp.plugins.library/library/metadata/" + strings.Join(keys, ","))
 	}
-	member := func(ids []int, in bool) error {
-		for _, id := range ids {
-			h := haves[id]
-			h.Member, h.Added = in, in
-			if err := r.saveHave(ctx, app, id, h); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
 	for len(add) > 0 {
 		batch := add[:min(len(add), 50)]
 		add = add[len(batch):]
@@ -463,7 +469,7 @@ func (r *run) plexCollection(ctx context.Context, b *breaker, m sinkMeta, haves 
 			r.failed(app, "collection_add", batch[0], err)
 			return nil
 		}
-		if err := member(batch, true); err != nil {
+		if err := r.setMembers(ctx, app, haves, batch, true); err != nil {
 			return err
 		}
 		r.count(app+".collection_added", len(batch))
@@ -475,7 +481,7 @@ func (r *run) plexCollection(ctx context.Context, b *breaker, m sinkMeta, haves 
 			r.failed(app, "collection_remove", id, err)
 			return nil
 		}
-		if err := member([]int{id}, false); err != nil {
+		if err := r.setMembers(ctx, app, haves, []int{id}, false); err != nil {
 			return err
 		}
 		r.count(app+".collection_removed", 1)
@@ -529,12 +535,8 @@ func jfTMDB(path string, providers map[string]string) int {
 }
 
 func (r *run) jellyfinSnapshot(ctx context.Context) (sinkMeta, map[int]have, error) {
-	m, err := r.meta(ctx, "jellyfin")
-	if err != nil {
-		return m, nil, err
-	}
-	if !r.due(m, r.opt.JFRefresh) {
-		haves, err := r.loadHaves(ctx, "jellyfin")
+	m, haves, due, err := r.storedSnapshot(ctx, "jellyfin", r.opt.JFRefresh)
+	if err != nil || !due {
 		return m, haves, err
 	}
 	var users []struct {
@@ -594,15 +596,7 @@ func (r *run) jellyfinSnapshot(ctx context.Context) (sinkMeta, map[int]have, err
 			}
 		}
 	}
-	if err := r.replaceSnapshot(ctx, "jellyfin", fresh, false); err != nil {
-		return m, nil, storeErr{err}
-	}
-	m.FetchedAt = r.env.Now()
-	if err := r.putMeta(ctx, "jellyfin", m); err != nil {
-		return m, nil, err
-	}
-	r.count("jellyfin.snapshot", 1)
-	haves, err := r.loadHaves(ctx, "jellyfin")
+	haves, err = r.storeSnapshot(ctx, "jellyfin", m, fresh, false)
 	return m, haves, err
 }
 
@@ -693,16 +687,6 @@ func (r *run) syncJellyfin(ctx context.Context, wants []want, scope map[int]bool
 		}
 		return strings.Join(out, ",")
 	}
-	member := func(tmdbs []int, in bool) error {
-		for _, id := range tmdbs {
-			h := haves[id]
-			h.Member, h.Added = in, in
-			if err := r.saveHave(ctx, app, id, h); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
 	for len(add) > 0 {
 		batch := add[:min(len(add), 50)]
 		add = add[len(batch):]
@@ -739,7 +723,7 @@ func (r *run) syncJellyfin(ctx context.Context, wants []want, scope map[int]bool
 			r.failed(app, "collection_add", batch[0], err)
 			return nil
 		}
-		if err := member(batch, true); err != nil {
+		if err := r.setMembers(ctx, app, haves, batch, true); err != nil {
 			return err
 		}
 		r.count(app+".collection_added", len(batch))
@@ -751,7 +735,7 @@ func (r *run) syncJellyfin(ctx context.Context, wants []want, scope map[int]bool
 			r.failed(app, "collection_remove", remove[0], err)
 			return nil
 		}
-		if err := member(remove, false); err != nil {
+		if err := r.setMembers(ctx, app, haves, remove, false); err != nil {
 			return err
 		}
 		r.count(app+".collection_removed", len(remove))
@@ -760,6 +744,8 @@ func (r *run) syncJellyfin(ctx context.Context, wants []want, scope map[int]bool
 }
 
 // ---- plex.tv watchlist (the Discover watchlist every Plex app shows) ----
+
+var discoverClient = &http.Client{Timeout: 20 * time.Second}
 
 func (r *run) discover(ctx context.Context, method, path string, out any) error {
 	prefs, err := r.env.Plex.Prefs() // the server's own sign-in token is the owner's plex.tv token
@@ -774,7 +760,7 @@ func (r *run) discover(ctx context.Context, method, path string, out any) error 
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("X-Plex-Client-Identifier", "projectionist")
 	req.Header.Set("X-Plex-Product", "projectionist")
-	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	resp, err := discoverClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("plex.tv %s %s: %w", method, path, err)
 	}
@@ -799,12 +785,9 @@ func (r *run) discover(ctx context.Context, method, path string, out any) error 
 }
 
 func (r *run) plexTVSnapshot(ctx context.Context) (map[int]have, error) {
-	m, err := r.meta(ctx, "plextv")
-	if err != nil || !r.due(m, r.opt.SinkRefresh) {
-		if err != nil {
-			return nil, err
-		}
-		return r.loadHaves(ctx, "plextv")
+	m, haves, due, err := r.storedSnapshot(ctx, "plextv", r.opt.SinkRefresh)
+	if err != nil || !due {
+		return haves, err
 	}
 	fresh := map[int]have{}
 	const page = 100
@@ -823,15 +806,7 @@ func (r *run) plexTVSnapshot(ctx context.Context) (map[int]have, error) {
 			break
 		}
 	}
-	if err := r.replaceSnapshot(ctx, "plextv", fresh, true); err != nil {
-		return nil, storeErr{err}
-	}
-	m.FetchedAt = r.env.Now()
-	if err := r.putMeta(ctx, "plextv", m); err != nil {
-		return nil, err
-	}
-	r.count("plextv.snapshot", 1)
-	return r.loadHaves(ctx, "plextv")
+	return r.storeSnapshot(ctx, "plextv", m, fresh, true)
 }
 
 // syncPlexTV mirrors the Letterboxd watchlist (minus watched films) onto the owner's plex.tv watchlist. Films he

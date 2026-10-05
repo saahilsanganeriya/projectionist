@@ -147,11 +147,14 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if err != nil {
 		return err
 	}
-	if err := r.resolve(ctx, f); err != nil {
+	learned, err := r.resolve(ctx, f)
+	if err != nil {
 		return err
 	}
-	if f, err = r.loadFacts(ctx); err != nil {
-		return err
+	if learned {
+		if f, err = r.loadFacts(ctx); err != nil {
+			return err
+		}
 	}
 	wants, missing, unresolved, other := f.wants()
 	r.count("letterboxd_fetches", r.fetch.fetches)
@@ -410,12 +413,13 @@ func (r *run) recordGrid(ctx context.Context, kind string, films []gridFilm) err
 
 // ---- resolve: boxd.it codes → slugs, slugs → TMDB (each answer cached forever) ----
 
-func (r *run) resolve(ctx context.Context, f facts) error {
+// resolve looks up what the TMDB join lacks; learned reports whether any answer was stored.
+func (r *run) resolve(ctx context.Context, f facts) (learned bool, err error) {
 	refs := f.resolveNeeds()
 	if len(refs) == 0 {
-		return nil
+		return false, nil
 	}
-	return r.guarded(ctx, "film", func() error {
+	err = r.guarded(ctx, "film", func() error {
 		done := map[string]bool{}
 		for _, ref := range refs {
 			slug, isSlug := strings.CutPrefix(ref, "slug:")
@@ -429,6 +433,7 @@ func (r *run) resolve(ctx context.Context, f facts) error {
 				if _, err := r.db.ExecContext(ctx, `INSERT OR REPLACE INTO letterboxd_lid(lid, slug) VALUES (?, ?)`, lid, slug); err != nil {
 					return storeErr{err}
 				}
+				learned = true
 				r.count("resolved_lids", 1)
 			}
 			if _, known := f.films[slug]; slug == "" || known || done[slug] {
@@ -442,10 +447,12 @@ func (r *run) resolve(ctx context.Context, f facts) error {
 			if _, err := r.db.ExecContext(ctx, `INSERT OR REPLACE INTO letterboxd_film(slug, tmdb, kind) VALUES (?, ?, ?)`, slug, tmdb, kind); err != nil {
 				return storeErr{err}
 			}
+			learned = true
 			r.count("resolved_films", 1)
 		}
 		return nil
 	})
+	return learned, err
 }
 
 // filmPage reads one film page, following one slug rename (Letterboxd 301s an old slug to the new one).
