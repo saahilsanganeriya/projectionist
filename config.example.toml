@@ -1,0 +1,31 @@
+# projectionist config. Mounted read-only at /config/projectionist.toml.
+# Secrets are never written here: only the paths of the files that hold them.
+
+listen   = "127.0.0.1:8097"          # /health and /metrics; host network, so keep it on loopback
+state_db = "/state/projectionist.db" # SQLite on the btrfs volume (never on SMB/NFS)
+timezone = "America/Los_Angeles"     # used only for stage windows; logs and the DB are UTC
+owners   = ["saahilsanganeriya", "saahil"] # Plex, Jellyfin accounts whose viewing never pauses a job
+
+[log]
+format = "text" # key=value lines; "json" for JSON lines
+level  = "info"
+
+[plex]
+url         = "http://127.0.0.1:32400"
+preferences = "/volume1/PlexMediaServer/AppData/Plex Media Server/Preferences.xml" # holds the token; read per request
+timeout     = "20s"
+
+[jellyfin]
+url      = "http://127.0.0.1:8096"
+key_file = "/run/secrets/jellyfin_key"
+timeout  = "20s"
+
+[ffmpeg]
+dir    = "/usr/lib/jellyfin-ffmpeg" # inside the image; same build as the Jellyfin container
+device = "/dev/dri/renderD128"
+
+# One table per stage. Common keys: enabled (default true when the table exists), every, window ("HH:MM-HH:MM",
+# in timezone, may wrap midnight). Everything else in the table belongs to the stage.
+# [stages.example]
+# every  = "15m"
+# window = "02:00-08:00"

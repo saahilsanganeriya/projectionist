@@ -1,0 +1,8 @@
+{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "h264", "profile": "High", "pix_fmt": "yuv420p", "bits_per_raw_sample": "8", "width": 1920, "height": 1080,
+     "avg_frame_rate": "0/0", "r_frame_rate": "25/1", "color_transfer": "arib-std-b67", "bit_rate": "8000000", "disposition": {"default": 1}},
+    {"index": 1, "codec_type": "audio", "codec_name": "aac", "profile": "LC", "channels": 2, "channel_layout": "stereo", "disposition": {"default": 1}, "tags": {"LANGUAGE": "ger"}}
+  ],
+  "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "60.0", "bit_rate": "8200000"}
+}

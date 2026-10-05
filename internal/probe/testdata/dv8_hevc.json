@@ -1,0 +1,14 @@
+{
+  "streams": [
+    {"index": 0, "codec_type": "video", "codec_name": "hevc", "profile": "Main 10", "pix_fmt": "yuv420p10le", "width": 3840, "height": 2160,
+     "avg_frame_rate": "24000/1001", "r_frame_rate": "24000/1001", "color_primaries": "bt2020", "color_transfer": "smpte2084", "color_space": "bt2020nc",
+     "disposition": {"default": 1, "attached_pic": 0}, "tags": {"BPS": "58123456"},
+     "side_data_list": [{"side_data_type": "DOVI configuration record", "dv_version_major": 1, "dv_profile": 8, "dv_level": 6, "dv_bl_signal_compatibility_id": 1}]},
+    {"index": 1, "codec_type": "audio", "codec_name": "truehd", "channels": 8, "channel_layout": "7.1", "disposition": {"default": 1}, "tags": {"language": "eng", "title": "TrueHD Atmos 7.1"}},
+    {"index": 2, "codec_type": "audio", "codec_name": "ac3", "channels": 6, "channel_layout": "5.1(side)", "bit_rate": "640000", "disposition": {"default": 0}, "tags": {"language": "jpn"}},
+    {"index": 3, "codec_type": "subtitle", "codec_name": "hdmv_pgs_subtitle", "disposition": {"forced": 0}, "tags": {"language": "eng"}},
+    {"index": 4, "codec_type": "subtitle", "codec_name": "subrip", "disposition": {"forced": 1, "hearing_impaired": 0}, "tags": {"language": "eng", "title": "Forced"}},
+    {"index": 5, "codec_type": "video", "codec_name": "mjpeg", "pix_fmt": "yuvj420p", "disposition": {"attached_pic": 1}}
+  ],
+  "format": {"format_name": "matroska,webm", "duration": "6612.480000", "bit_rate": "62000000", "size": "51234567890"}
+}

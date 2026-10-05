@@ -1,0 +1,41 @@
+# Container Manager project "projectionist". Host paths are mounted at the SAME paths inside the container, so
+# paths in Plex, Jellyfin, logs and the state DB mean the same file everywhere.
+name: projectionist
+services:
+  projectionist:
+    image: projectionist:latest # built on the Mac (make image), shipped with `docker save | docker load`
+    container_name: projectionist
+    network_mode: host # Plex 127.0.0.1:32400, Jellyfin 127.0.0.1:8096, /health on 127.0.0.1:8097
+    restart: unless-stopped
+    user: "0:0" # renames must keep each file's owner and set Synology ACLs; capabilities are trimmed below
+    group_add: ["937"] # videodriver: owns /dev/dri/renderD128
+    devices:
+      - /dev/dri/renderD128:/dev/dri/renderD128
+    cap_drop: [ALL]
+    cap_add:
+      - CHOWN        # new files take the source file's owner
+      - DAC_OVERRIDE # write into share folders whatever their owner
+      - FOWNER       # chmod/xattr (ACL) on files not owned by root
+      - KILL         # SIGSTOP/SIGCONT an encode while someone else watches
+      - SETUID       # run Plex's transcoder as the Plex user for its GPU self-test
+      - SETGID
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: [/tmp]
+    volumes:
+      - /volume1/docker/projectionist/config:/config:ro
+      - /volume1/docker/projectionist/state:/state
+      # The only writable media mount: renames, 4K copies, .details, subtitles.
+      - /volume1/media:/volume1/media
+      # Preferences.xml (token, GPU settings), Plex's log, its codecs and VA driver: read-only.
+      - /volume1/PlexMediaServer/AppData/Plex Media Server:/volume1/PlexMediaServer/AppData/Plex Media Server:ro
+      - /volume1/@appstore/PlexMediaServer:/volume1/@appstore/PlexMediaServer:ro
+      - /volume1/PlexMediaServer/scripts/gpu_sample.mkv:/samples/gpu_sample.mkv:ro
+    secrets: [jellyfin_key] # /run/secrets/jellyfin_key, read-only
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+secrets:
+  jellyfin_key:
+    file: /volume1/docker/projectionist/secrets/jellyfin_key # root:root 0600
