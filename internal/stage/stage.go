@@ -10,6 +10,7 @@ import (
 	"projectionist/internal/config"
 	"projectionist/internal/fanart"
 	"projectionist/internal/jellyfin"
+	"projectionist/internal/llm"
 	"projectionist/internal/plex"
 	"projectionist/internal/probe"
 	"projectionist/internal/store"
@@ -35,6 +36,7 @@ type Env struct {
 	Probe    *probe.Prober
 	TMDB     *tmdb.Client   // the only source of identity, episodes, collections and external ids; one per process
 	Fanart   *fanart.Client // community artwork, keyed by TMDB/IMDb id (films) or TVDB id (shows)
+	LLM      llm.Policy     // which Claude model, by date ([[llm.policy]]); nil = llm.DefaultPolicy
 	FFmpeg   config.FFmpeg
 	Now      func() time.Time // UTC
 	Loc      *time.Location   // config timezone: only for text the owner reads (status files)

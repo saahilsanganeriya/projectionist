@@ -5,6 +5,7 @@ import (
 	"projectionist/internal/stages/collections"
 	"projectionist/internal/stages/details"
 	"projectionist/internal/stages/gpuguard"
+	"projectionist/internal/stages/posters"
 	"projectionist/internal/stages/remote4k"
 	"projectionist/internal/stages/rename"
 	"projectionist/internal/stages/ssdmirror"
@@ -19,6 +20,7 @@ func stages() []stage.Stage {
 		collections.Stage{},
 		details.Stage{},
 		gpuguard.Stage{},
+		posters.Stage{},
 		remote4k.Stage{},
 		rename.Stage{},
 		ssdmirror.Stage{},

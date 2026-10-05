@@ -6,6 +6,7 @@
 package plex
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -71,13 +72,21 @@ func (c *Client) token() (string, error) {
 	return prefs["PlexOnlineToken"], nil
 }
 
-// do sends the token as a header, never in the URL, so request logs cannot leak it.
 func (c *Client) do(ctx context.Context, method, path, accept string) ([]byte, error) {
+	return c.send(ctx, method, path, accept, "", nil)
+}
+
+// send carries the token as a header, never in the URL, so request logs cannot leak it.
+func (c *Client) send(ctx context.Context, method, path, accept, contentType string, body []byte) ([]byte, error) {
 	tok, err := c.token()
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, nil)
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rd)
 	if err != nil {
 		return nil, err
 	}
@@ -85,24 +94,33 @@ func (c *Client) do(ctx context.Context, method, path, accept string) ([]byte, e
 	if accept != "" {
 		req.Header.Set("Accept", accept)
 	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("plex %s %s: %w", method, path, err)
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	answer, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
 		return nil, fmt.Errorf("plex %s %s: %w", method, path, err)
 	}
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("plex %s %s: HTTP %d", method, path, resp.StatusCode)
 	}
-	return body, nil
+	return answer, nil
 }
 
 // Do sends a request whose answer does not matter (PUT /:/prefs).
 func (c *Client) Do(ctx context.Context, method, path string) error {
 	_, err := c.do(ctx, method, path, "")
+	return err
+}
+
+// Send is Do with a request body, e.g. a poster's bytes for POST /library/metadata/<id>/posters.
+func (c *Client) Send(ctx context.Context, method, path, contentType string, body []byte) error {
+	_, err := c.send(ctx, method, path, "", contentType, body)
 	return err
 }
 
