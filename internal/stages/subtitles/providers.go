@@ -36,7 +36,8 @@ type Query struct {
 	IMDb    int    // 0 when unknown
 	TMDB    string // TMDB id from the folder name, "" when the folder has none
 	Name    string // show name, for the text search of episodes
-	Season  int    // 0 for a movie
+	Show    bool   // an episode; its Season is 0 for a special
+	Season  int
 	Episode int
 }
 
@@ -332,6 +333,10 @@ func (o *legacy) search(ctx context.Context, q Query, source string, params ...s
 	params = append(params, "sublanguageid-eng")
 	sort.Strings(params)
 	body, err := o.get(ctx, o.base+strings.Join(params, "/"))
+	var se *statusError
+	if errors.As(err, &se) && se.code/100 == 3 {
+		return nil, nil // a search the API rewrites (season 0, an unpadded IMDb id) is redirected to host "_": nothing
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -366,7 +371,7 @@ func (o *legacy) Search(ctx context.Context, q Query) ([]Candidate, error) {
 		return nil, err
 	}
 	hashHits := len(found)
-	if q.Season == 0 {
+	if !q.Show {
 		if q.IMDb != 0 {
 			more, err := o.search(ctx, q, "opensubtitles-imdb", fmt.Sprintf("imdbid-%07d", q.IMDb))
 			return append(found, more...), err
@@ -468,14 +473,14 @@ func (o *dotCom) call(ctx context.Context, method, path string, payload any, out
 func (o *dotCom) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	v := url.Values{"languages": {"en"}, "moviehash": {q.Hash}}
 	switch {
-	case q.Season != 0 && q.IMDb != 0:
+	case q.Show && q.IMDb != 0:
 		v.Set("parent_imdb_id", strconv.Itoa(q.IMDb))
 	case q.IMDb != 0:
 		v.Set("imdb_id", strconv.Itoa(q.IMDb))
-	case q.Season != 0:
+	case q.Show:
 		v.Set("query", pyLower(q.Name))
 	}
-	if q.Season != 0 {
+	if q.Show {
 		v.Set("season_number", strconv.Itoa(q.Season))
 		v.Set("episode_number", strconv.Itoa(q.Episode))
 	}
@@ -514,7 +519,7 @@ func (o *dotCom) Search(ctx context.Context, q Query) ([]Candidate, error) {
 			HashMatch: a.MoviehashMatch, HearingImpaired: a.HearingImpaired, Downloads: a.DownloadCount, provider: o,
 			Season: strconv.Itoa(a.Feature.Season), Episode: strconv.Itoa(a.Feature.Episode),
 		}
-		if q.Season == 0 || c.HashMatch || (c.Season == strconv.Itoa(q.Season) && c.Episode == strconv.Itoa(q.Episode)) {
+		if !q.Show || c.HashMatch || (c.Season == strconv.Itoa(q.Season) && c.Episode == strconv.Itoa(q.Episode)) {
 			out = append(out, c)
 		}
 	}
@@ -566,12 +571,12 @@ func (o *subdl) Search(ctx context.Context, q Query) ([]Candidate, error) {
 		v.Set("tmdb_id", q.TMDB)
 	case q.IMDb != 0:
 		v.Set("imdb_id", fmt.Sprintf("tt%07d", q.IMDb))
-	case q.Season != 0:
+	case q.Show:
 		v.Set("film_name", q.Name)
 	default:
 		return nil, nil
 	}
-	if q.Season != 0 {
+	if q.Show {
 		v.Set("type", "tv")
 		v.Set("season_number", strconv.Itoa(q.Season))
 		v.Set("episode_number", strconv.Itoa(q.Episode))
@@ -596,7 +601,7 @@ func (o *subdl) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	var out []Candidate
 	for _, r := range res.Subtitles {
 		season, episode := string(bytes.Trim(r.Season, `"`)), string(bytes.Trim(r.Episode, `"`))
-		if q.Season != 0 && (season != strconv.Itoa(q.Season) || episode != strconv.Itoa(q.Episode)) {
+		if q.Show && (season != strconv.Itoa(q.Season) || episode != strconv.Itoa(q.Episode)) {
 			continue
 		}
 		out = append(out, Candidate{Source: "subdl", ID: r.URL, Release: r.Release, FileName: r.Name, HearingImpaired: r.HI,

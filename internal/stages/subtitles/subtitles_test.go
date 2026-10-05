@@ -125,6 +125,8 @@ cp "`+ff+`/clerks.aligned.srt" "$3"; echo "info: 'reference file FPS/input file 
 			w.Write(gz(srt(f.ts, -2.5) + "999\n00:49:00,000 --> 00:49:02,000\nAdvertise your product or brand here\n"))
 		case r.URL.Path == "/dl/clerks.gz":
 			w.Write(gz(srt(f.ts, 0)))
+		case strings.Contains(r.URL.Path, "query-"): // the API's "nothing" for some searches: a redirect to host "_"
+			http.Redirect(w, r, "http://_/search/", http.StatusMovedPermanently)
 		default:
 			w.Write([]byte("[]"))
 		}
@@ -166,8 +168,8 @@ func (f *fixture) requestCount() int {
 
 // Catches, end to end: a sidecar not written for each route (PGS fit, extraction, alass), the PGS fit not landing on
 // the captions or the ad block kept, an existing sidecar touched or its video probed, titles with English audio
-// served before the foreign one, Jellyfin not told, a rerun repeating any search, and a title without candidates
-// searched again before retry_after.
+// served before the foreign one, Jellyfin not told, a rerun repeating any search, a title without candidates
+// searched again before retry_after, and the API's redirect followed (OpenSubtitles parked, an alert).
 func TestRunWritesSidecarsAndReconciles(t *testing.T) {
 	f := newFixture(t)
 	rep := f.run(t)

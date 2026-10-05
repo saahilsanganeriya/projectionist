@@ -98,7 +98,7 @@ var videoExt = map[string]bool{".mkv": true, ".mp4": true, ".m4v": true, ".avi":
 type title struct {
 	root, path string
 	kind, id   string // TMDB kind ("movie" | "tv") and id; kind "imdb" when the folder names the IMDb id
-	show       string
+	show       string // set for an episode
 	season     int
 	episode    int
 	info       probe.Info
@@ -161,6 +161,8 @@ feed:
 
 func (s Stage) newRun(env *stage.Env, opt Options, rep *stage.Report) *run {
 	sleep, hc := s.sleep, &http.Client{Timeout: 60 * time.Second}
+	// The legacy API's redirects lead to host "_"; a redirect is an answer, never a hop to follow.
+	noRedirect := &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	if sleep == nil {
 		sleep = realSleep
 	}
@@ -174,7 +176,7 @@ func (s Stage) newRun(env *stage.Env, opt Options, rep *stage.Report) *run {
 	r := &run{env: env, opt: opt, rep: rep, alerted: map[string]bool{},
 		tmdb: &tmdb{base: or(s.tmdbAPI, "https://api.themoviedb.org/3"), tokenFile: filepath.Join(opt.SecretsDir, "tmdb_read_token"),
 			hc: &http.Client{Timeout: 20 * time.Second}, cache: map[string]int{}}}
-	r.providers = []Provider{&legacy{base: or(s.openSubtitles, "https://rest.opensubtitles.org/search/"), userAgent: userAgent, hc: hc, pace: newPacer()}}
+	r.providers = []Provider{&legacy{base: or(s.openSubtitles, "https://rest.opensubtitles.org/search/"), userAgent: userAgent, hc: noRedirect, pace: newPacer()}}
 	if key := filepath.Join(opt.SecretsDir, "opensubtitles_api_key"); fileExists(key) {
 		r.providers = append(r.providers, &dotCom{base: or(s.openSubtitlesCom, "https://api.opensubtitles.com/api/v1"), keyFile: key,
 			userAgent: userAgent, hc: hc, pace: newPacer()})
@@ -562,7 +564,7 @@ func (r *run) query(ctx context.Context, t *title) (Query, error) {
 	if err != nil {
 		return Query{}, err
 	}
-	q := Query{Size: size, Hash: hash, Name: t.show, Season: t.season, Episode: t.episode}
+	q := Query{Size: size, Hash: hash, Name: t.show, Show: t.show != "", Season: t.season, Episode: t.episode}
 	if t.kind == "movie" || t.kind == "tv" {
 		q.TMDB = t.id
 	}

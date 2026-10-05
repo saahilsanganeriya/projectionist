@@ -87,8 +87,9 @@ func testPacer(rec *recorder) *pacer {
 	return &pacer{gap: time.Second, now: func() time.Time { return time.Unix(0, 0) }, sleep: rec.sleep}
 }
 
-// Catches: path parameters out of alphabetical order (the legacy API answers nothing then), the name search skipped
-// when the IMDb search finds nothing, or a neighbouring episode's subtitle kept from a text search.
+// Catches: path parameters out of alphabetical order (the legacy API answers nothing then), a redirect (the API's
+// "nothing" for a search it rewrites, pointing at host "_") followed instead of read as no results, the name search
+// skipped when the IMDb search finds nothing, or a neighbouring episode's subtitle kept from a text search.
 func TestLegacySearchEpisode(t *testing.T) {
 	rec := &recorder{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -103,15 +104,17 @@ func TestLegacySearchEpisode(t *testing.T) {
 		case strings.Contains(r.URL.Path, "moviehash-"):
 			w.Write([]byte(`[{"IDSubtitleFile":"1","MatchedBy":"moviehash","SubFormat":"srt","SeriesSeason":"1","SeriesEpisode":"9"}]`))
 		case strings.Contains(r.URL.Path, "imdbid-"):
-			w.Write([]byte(`{"data": "no results come as an object"}`))
+			http.Redirect(w, r, "http://_/search/imdbid-1234/sublanguageid-eng", http.StatusMovedPermanently)
 		default:
 			w.Write([]byte(`[{"IDSubtitleFile":"3","SubFormat":"srt","SeriesSeason":"2","SeriesEpisode":"4"},` +
 				`{"IDSubtitleFile":"4","SubFormat":"srt","SeriesSeason":"2","SeriesEpisode":"5"}]`))
 		}
 	}))
 	defer srv.Close()
-	o := &legacy{base: srv.URL + "/search/", userAgent: userAgent, hc: srv.Client(), pace: testPacer(rec)}
-	got, err := o.Search(context.Background(), Query{Size: 42, Hash: "00ff", IMDb: 1234, Name: "Fanny & Alexander", Season: 2, Episode: 4})
+	hc := srv.Client()
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse } // as the stage builds it
+	o := &legacy{base: srv.URL + "/search/", userAgent: userAgent, hc: hc, pace: testPacer(rec)}
+	got, err := o.Search(context.Background(), Query{Size: 42, Hash: "00ff", IMDb: 1234, Name: "Fanny & Alexander", Show: true, Season: 2, Episode: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +232,7 @@ func TestSubdl(t *testing.T) {
 	key := filepath.Join(dir, "subdl_api_key")
 	os.WriteFile(key, []byte("sekrit\n"), 0o600)
 	o := &subdl{api: srv.URL + "/api", dl: srv.URL, keyFile: key, hc: srv.Client(), pace: testPacer(&recorder{})}
-	got, err := o.Search(context.Background(), Query{TMDB: "1400", Name: "Show", Season: 1, Episode: 2})
+	got, err := o.Search(context.Background(), Query{TMDB: "1400", Name: "Show", Show: true, Season: 1, Episode: 2})
 	if err != nil || len(got) != 1 || got[0].ID != "/s/2.zip" || !got[0].HearingImpaired {
 		t.Fatalf("search: %+v %v", got, err)
 	}
