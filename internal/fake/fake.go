@@ -3,6 +3,7 @@
 package fake
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -37,6 +38,7 @@ func newServer(t testing.TB, authorized func(*http.Request) bool) *Server {
 	s := &Server{routes: map[string]http.HandlerFunc{}}
 	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body)) // handlers can still read it
 		s.mu.Lock()
 		s.calls = append(s.calls, Call{Method: r.Method, Path: r.URL.Path, RawQuery: r.URL.RawQuery, Body: body})
 		h := s.routes[r.Method+" "+r.URL.Path]

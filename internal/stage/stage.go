@@ -33,7 +33,8 @@ type Env struct {
 	Probe    *probe.Prober
 	FFmpeg   config.FFmpeg
 	Now      func() time.Time // UTC
-	// Options decodes this stage's own keys from its [stages.<name>] table (unknown keys are reported at startup).
+	Loc      *time.Location   // config timezone: only for text the owner reads (status files)
+	// Options decodes this stage's own keys from its [stages.<name>] table into v (call it at the top of Run).
 	Options func(v any) error
 }
 

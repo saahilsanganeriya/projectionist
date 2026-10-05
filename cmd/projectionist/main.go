@@ -98,6 +98,7 @@ func run(cfgPath, only string) int {
 				Log: l, Store: st, Plex: px, Jellyfin: jf, Probe: prober, FFmpeg: cfg.FFmpeg,
 				Viewers: &viewers.Gate{Plex: px, Jellyfin: jf, Owners: owners, Poll: 30 * time.Second, Log: l},
 				Now:     func() time.Time { return time.Now().UTC() },
+				Loc:     cfg.Location(),
 				Options: func(v any) error { return cfg.StageOptions(s.Name(), v) },
 			}
 		},

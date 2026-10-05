@@ -1,4 +1,4 @@
-package viewers
+package viewers_test
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"projectionist/internal/jellyfin"
 	"projectionist/internal/obs"
 	"projectionist/internal/plex"
+	"projectionist/internal/viewers"
 )
 
 var owners = map[string]bool{"saahilsanganeriya": true, "saahil": true}
@@ -32,7 +33,7 @@ func TestOthers(t *testing.T) {
 		{"plex session with no user counts", []plex.Session{{User: ""}}, nil, 1},
 	}
 	for _, c := range cases {
-		if got := Others(c.px, c.jf, owners); got != c.want {
+		if got := viewers.Others(c.px, c.jf, owners); got != c.want {
 			t.Errorf("%s: Others = %d, want %d", c.name, got, c.want)
 		}
 	}
@@ -47,7 +48,7 @@ func TestCountAgainstFakeServers(t *testing.T) {
   <Track type="track" title="Song"><User title="roger"/></Track>
 </MediaContainer>`)
 	js.Handle("GET", "/Sessions", 200, `[{"Id":"a","UserName":"roger","NowPlayingItem":{"Name":"Ran"}}]`)
-	g := &Gate{Plex: pc, Jellyfin: jc, Owners: owners, Poll: time.Millisecond, Log: obs.NewLogger(io.Discard, "text", "error")}
+	g := &viewers.Gate{Plex: pc, Jellyfin: jc, Owners: owners, Poll: time.Millisecond, Log: obs.NewLogger(io.Discard, "text", "error")}
 	n, err := g.Count(context.Background())
 	if err != nil || n != 2 {
 		t.Fatalf("Count = %d, %v; want 2", n, err)

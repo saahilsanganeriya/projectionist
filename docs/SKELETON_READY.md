@@ -25,6 +25,7 @@ type Env struct {
 	Probe    *probe.Prober
 	FFmpeg   config.FFmpeg // .FFmpegPath(), .FFprobePath(), .Device
 	Now      func() time.Time // UTC
+	Loc      *time.Location   // config timezone, only for owner-facing text (status files)
 	Options  func(v any) error // decodes your [stages.<name>] keys into v (toml tags; durations as "15m")
 }
 type Report struct{ Alerts []string; Counts map[string]int; Summary string }
@@ -44,14 +45,14 @@ raised before the error are kept.
 | `internal/store` | SQLite (WAL): `StartRun/FinishRun/LastRun`, `GetJSON/PutJSON(stage, key)`, `AddEvent/LastEvent(stage, item)`, `DB()` for your own tables. Name them `<stage>_*` and create them with `CREATE TABLE IF NOT EXISTS` |
 | `internal/scheduler` | per-stage cadence + window, `Runner.RunOnce` (also used by `projectionist run <stage>`) |
 | `internal/viewers` | the pause rule: `Gate.Count`, `Gate.WaitIdle(ctx)` before moving files, `Gate.Watch(ctx, func(busy bool))` to SIGSTOP/SIGCONT a long process. Owners never block; an error counts as busy |
-| `internal/plex` | `ReadPrefs(path)` (file, no API), `Sessions`, `GetJSON` (unwraps MediaContainer), `Do(method, path)`. Token read from Preferences.xml on every request and sent as a header. Use the API only where no file source exists |
+| `internal/plex` | `Prefs()` / `ReadPrefs(path)` (file, no API), `Sessions`, `GetJSON` (unwraps MediaContainer), `Do(method, path)`. Token read from Preferences.xml on every request and sent as a header. Use the API only where no file source exists |
 | `internal/jellyfin` | `GetJSON`, `PostJSON`, `Sessions(activeWithin)`, `MediaUpdated(paths...)`. Key read from a file on every request |
 | `internal/probe` | `Prober.Probe(ctx, path) (Info, error)`: ffprobe JSON → codec, profile, bit depth, HDR10/HLG/Dolby Vision + dv_profile, size, fps, bitrate, audio and subtitle tracks, duration. Cached in `probe_cache` keyed by (path, size, mtime_ns). `Parse(raw)` is pure, for tests |
 | `internal/library` | `ParseMovie(path)` / `ParseEpisode(path)`: identity (`{tmdb-N}`, `{imdb-ttN}`, `{tvdb-N}`), year, label, season, episode range, read from the naming scheme |
 | `internal/fsx` | `RenameNoReplace` (renameat2 RENAME_NOREPLACE; link+unlink fallback for files), `Clone` (FICLONE reflink, byte-copy fallback, never overwrites), `SyncDir` (one fsync per unit) |
 | `internal/obs` | `NewLogger` (UTC, key=value or JSON), `Metrics` (Prometheus text) |
 | `internal/server` | `/health` (503 while any stage's latest run is alert/error) and `/metrics` |
-| `internal/fake` | `fake.Plex(t, prefs)` → (server, client, prefsPath); `fake.Jellyfin(t)`; `srv.Handle(method, path, status, body)`, `srv.Calls(method, path)` |
+| `internal/fake` | `fake.NewEnv(t, prefs)` → a full `stage.Env` (fake Plex + Jellyfin with no sessions, temp store, 5 ms viewer poll); `h.SetOptions(toml)`, `h.Script(t, "ffprobe"|"ffmpeg", body)` for stand-in binaries, `h.Now` to move the clock. Lower level: `fake.Plex(t, prefs)`, `fake.Jellyfin(t)`, `srv.Handle(method, path, status, body)`, `srv.HandleFunc`, `srv.Calls(method, path)`. A test in package X that imports `fake` must be `package X_test` when `fake` imports X |
 
 ## Build and run
 
@@ -67,3 +68,11 @@ raised before the error are kept.
 
 Always pass `"event", "<snake_case>"`, then fields (`item=`, `path=`, `duration_ms=`, `err=`). Never log tokens,
 keys or full payloads.
+
+## File-system facts measured on the NAS (DSM 7.4.1, kernel 4.4.302+), 2026-10-05
+
+- renameat2 RENAME_NOREPLACE works on btrfs: EEXIST onto an existing file or directory.
+- FICLONE (reflink) works within a share AND across shares. Hardlink and rename across shares fail with EXDEV:
+  each share is its own subvolume (`st_dev` differs). Keep work files in the same share as their destination.
+- Synology ACL: a plain `mkdir`/create under a folder that has its ACL inherits it. **`chmod` strips it**, `chown`
+  keeps it. Never chmod in the library; no `synoacltool` is needed (and it does not exist in the container).

@@ -49,6 +49,9 @@ func ReadPrefs(path string) (map[string]string, error) {
 	}
 }
 
+// Prefs reads the server's Preferences.xml (file, not API).
+func (c *Client) Prefs() (map[string]string, error) { return ReadPrefs(c.prefsPath) }
+
 func (c *Client) token() (string, error) {
 	prefs, err := ReadPrefs(c.prefsPath)
 	if err != nil {
