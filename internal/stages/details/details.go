@@ -4,10 +4,11 @@
 //
 // A reconciler: each run walks the library, renders every note from cached facts and rewrites only the notes
 // whose text changed. New ffprobe runs, peak-bitrate scans and decode checks are bounded per run and cached by
-// (path, size, mtime), so a run resumes where the last one stopped; the newest files go first. Heavy work (the
-// whole-file packet scan, the hole probe and decode samples) comes after every note is in place, so a 45-minute
-// scan never holds back a new file's note, and runs only while nobody but the owner is watching. Every ffprobe and
-// ffmpeg it starts runs at nice 19 and the lowest best-effort I/O priority (see background).
+// (path, size, mtime), so a run resumes where the last one stopped; the newest files go first, and a renamed file
+// (same size and mtime under a new path) keeps its facts. Heavy work (the whole-file packet scan, the hole probe
+// and decode samples) comes after every note is in place, so a 45-minute scan never holds back a new file's note.
+// Probes and heavy work run only while nobody but the owner is watching, at nice 19 and the lowest best-effort I/O
+// priority (see background). A video that moves mid-run gets no note, verdict or alert under its old name.
 //
 // Facts other stages can query:
 //
