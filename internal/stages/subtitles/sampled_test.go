@@ -426,20 +426,32 @@ func TestDialogue(t *testing.T) {
 }
 
 // Catches the sampled fit reading on when a seek does not land (no usable index: the helper reads from the start):
-// a read far past its share of the file stops the title's sampling. Linux only: the count is rchar from /proc.
+// a read far past its share of the file stops the title's sampling, for the audio (one window: a 1 GiB, 100-minute
+// film's share is 16 MB, the allowance 4 times that plus 64 MiB) and for the image track (four windows at once). Linux
+// only: the count is rchar from /proc.
 func TestSamplerStopsWhenAReadOverruns(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("rchar is read from /proc/<pid>/io")
 	}
-	h := fake.NewEnv(t, nil)
-	// 150 MB for one 90 s window of a 1 GiB, 100-minute film: its share is 16 MB, the allowance 4 times that plus 64 MiB
-	h.Script(t, "ffmpeg", "head -c 150000000 /dev/zero > /dev/null\n")
-	video := filepath.Join(t.TempDir(), "v.mkv")
-	os.WriteFile(video, []byte("v"), 0o644)
-	r := &run{env: h.Env, opt: Options{SampleWindows: 4, SampleLength: 90e9}, rep: &stage.Report{}}
-	s, _ := r.newSampler(&title{path: video, info: probe.Info{Duration: 6000, Size: 1 << 30, Audio: []probe.Audio{{Index: 1}}}})
-	why, err := s.readAll(context.Background())
-	if err != nil || !strings.Contains(why, "no usable index") || s.read < 150e6 || s.read > 151e6 {
-		t.Errorf("why %q err %v after %d bytes; want stopped after the first window's 150 MB", why, err, s.read)
+	for _, c := range []struct {
+		name, helper, script string
+		subs                 []probe.Subtitle
+		read                 float64
+	}{
+		{"audio", "ffmpeg", "head -c 150000000 /dev/zero > /dev/null\n", nil, 150e6},
+		{"image track", "ffprobe", `case "$*" in *format=start_time*) echo 0; exit 0;; esac
+head -c 400000000 /dev/zero > /dev/null; echo '{"packets":[]}'
+`, []probe.Subtitle{{Index: 2, Codec: "hdmv_pgs_subtitle", Language: "eng"}}, 400e6},
+	} {
+		h := fake.NewEnv(t, nil)
+		h.Script(t, c.helper, c.script)
+		video := filepath.Join(t.TempDir(), "v.mkv")
+		os.WriteFile(video, []byte("v"), 0o644)
+		r := &run{env: h.Env, opt: Options{SampleWindows: 4, SampleLength: 90e9}, rep: &stage.Report{}}
+		s, _ := r.newSampler(&title{path: video, info: probe.Info{Duration: 6000, Size: 1 << 30, Audio: []probe.Audio{{Index: 1}}, Subtitles: c.subs}})
+		why, err := s.readAll(context.Background())
+		if err != nil || !strings.Contains(why, "no usable index") || float64(s.read) < c.read || float64(s.read) > c.read+1e6 {
+			t.Errorf("%s: why %q err %v after %d bytes; want stopped after the first read's %.0f", c.name, why, err, s.read, c.read)
+		}
 	}
 }
