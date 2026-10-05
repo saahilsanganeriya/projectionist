@@ -77,7 +77,7 @@ apply          = true # false: plan only (no app writes); plan_file lists what w
 movies_section = 4
 tv_section     = 2
 # One item listing per app per day (the sources rule) maps app ids to the library's {tmdb-N} identity. It runs after
-# the run's writes, in pages of 1,000; a failed one alerts and is tried again a day later, the old listing staying in
+# the run's writes (Plex's in pages of 1,000); a failed one alerts and is tried again a day later, the old listing staying in
 # use. A play of an item added since the last listing waits for the next one. Only an app never listed retries sooner.
 address_every  = "24h"
 list_timeout   = "10m" # measured 2026-10-05 on the loaded NAS: Plex 5m41s, Jellyfin 4m56s per refresh

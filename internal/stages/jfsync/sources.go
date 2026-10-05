@@ -41,7 +41,7 @@ func (s *syncer) loadAddress(ctx context.Context, app string) (*addresses, error
 	return &a, err
 }
 
-// listPage is how many items one listing request asks for; a listing takes as many requests as it needs.
+// listPage is how many items one Plex listing request asks for; a listing takes as many requests as it needs.
 var listPage = 1000
 
 // due says whether an app's listing is to be refreshed: once per address_every, whether or not the last attempt
@@ -154,19 +154,16 @@ func (s *syncer) listJellyfin(ctx context.Context, a *addresses) error {
 			a.Users[u.Name] = u.ID
 		}
 	}
-	for start := 0; ; start += listPage {
-		var list struct{ Items []struct{ ID, Path string } }
-		if err := jf.GetJSON(ctx, fmt.Sprintf("/Items?Recursive=true&IncludeItemTypes=Movie,Episode&Fields=Path"+
-			"&enableImages=false&enableUserData=false&SortBy=DateCreated,SortName&StartIndex=%d&Limit=%d", start, listPage), &list); err != nil {
-			return err
-		}
-		for _, it := range list.Items {
-			if items := watch.ItemsForPath(it.Path, 0); items != nil {
-				a.Targets[it.ID] = items
-			}
-		}
-		if len(list.Items) != listPage {
-			break
+	// One request, unlike Plex: Jellyfin runs the whole query again for every page (measured 2026-10-05 mid-scan:
+	// 343 s for items 0-999, 322 s for 7,000-7,999, 296 s for all 8,473 unpaged), and the whole answer is about
+	// 7.6 MB (900 KB per 1,000 items) of the client's 64 MB cap.
+	var list struct{ Items []struct{ ID, Path string } }
+	if err := jf.GetJSON(ctx, "/Items?Recursive=true&IncludeItemTypes=Movie,Episode&Fields=Path&enableImages=false&enableUserData=false", &list); err != nil {
+		return err
+	}
+	for _, it := range list.Items {
+		if items := watch.ItemsForPath(it.Path, 0); items != nil {
+			a.Targets[it.ID] = items
 		}
 	}
 	return nil

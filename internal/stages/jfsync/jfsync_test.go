@@ -95,14 +95,13 @@ func (w *writes) since(n int) []string {
 	return append([]string(nil), w.calls[n:]...)
 }
 
-// pages answers a listing with the page its query asks for, by Plex's or Jellyfin's paging parameters.
-func pages(head, tail string, items ...string) http.HandlerFunc {
+// plexPages answers a Plex section listing with the page its query asks for.
+func plexPages(items ...string) http.HandlerFunc {
 	return func(rw http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-		start, _ := strconv.Atoi(q.Get("X-Plex-Container-Start") + q.Get("StartIndex"))
-		size, _ := strconv.Atoi(q.Get("X-Plex-Container-Size") + q.Get("Limit"))
+		start, _ := strconv.Atoi(r.URL.Query().Get("X-Plex-Container-Start"))
+		size, _ := strconv.Atoi(r.URL.Query().Get("X-Plex-Container-Size"))
 		start = min(start, len(items))
-		rw.Write([]byte(head + strings.Join(items[start:min(start+size, len(items))], ",") + tail))
+		rw.Write([]byte(`{"MediaContainer":{"Metadata":[` + strings.Join(items[start:min(start+size, len(items))], ",") + `]}}`))
 	}
 }
 
@@ -132,14 +131,14 @@ users = [{ name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" }, {
 `
 	h.SetOptions(options)
 
-	listPage = 4 // the movie and Jellyfin listings take two pages
+	listPage = 4 // the movie listing takes two pages
 	part := func(rk string, index int, file string) string {
 		return `{"ratingKey":"` + rk + `","index":` + string(rune('0'+index)) + `,"Media":[{"Part":[{"file":"` + file + `"}]}]}`
 	}
 	h.Plex.Handle("GET", "/accounts", 200, `{"MediaContainer":{"Account":[{"id":1,"name":"saahilsanganeriya"},{"id":578,"name":"roger"},{"id":9,"name":""}]}}`)
-	h.Plex.HandleFunc("GET", "/library/sections/4/all", pages(`{"MediaContainer":{"Metadata":[`, `]}}`, part("13", 0, heat),
-		part("11", 0, ran), part("12", 0, alien), part("14", 0, clerks), part("15", 0, dune), part("16", 0, fargo)))
-	h.Plex.HandleFunc("GET", "/library/sections/2/all", pages(`{"MediaContainer":{"Metadata":[`, `]}}`, part("20", 1, wire), part("21", 2, wire)))
+	h.Plex.HandleFunc("GET", "/library/sections/4/all", plexPages(part("13", 0, heat), part("11", 0, ran), part("12", 0, alien),
+		part("14", 0, clerks), part("15", 0, dune), part("16", 0, fargo)))
+	h.Plex.HandleFunc("GET", "/library/sections/2/all", plexPages(part("20", 1, wire), part("21", 2, wire)))
 	h.Plex.Handle("GET", "/api/v2/user/webhooks", 200, `<webhooks><webhook url="http://tautulli:8181/hook"/></webhooks>`)
 	h.Plex.Handle("POST", "/api/v2/user/webhooks", 201, ``)
 	h.Plex.Handle("GET", "/api/servers/mid/shared_servers", 200,
@@ -158,14 +157,14 @@ users = [{ name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" }, {
 
 	h.Jellyfin.Handle("GET", "/Users", 200, `[{"Name":"saahil","Id":"u1"},{"Name":"roger","Id":"u2"}]`)
 	// Like Jellyfin 12.1 on the NAS, user-scoped item queries leave items out; each item's own UserData is right.
-	items := pages(`{"Items":[`, `]}`, `{"Id":"a1","Path":"`+heat+`"}`, `{"Id":"b1","Path":"`+ran+`"}`, `{"Id":"c1","Path":"`+clerks+`"}`,
-		`{"Id":"d1","Path":"`+dune+`"}`, `{"Id":"e1","Path":"`+wire+`"}`, `{"Id":"f1","Path":"`+fargo+`"}`, `{"Id":"x1","Path":"/lib/Home Videos/x.mkv"}`)
 	h.Jellyfin.HandleFunc("GET", "/Items", func(rw http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("userId") != "" {
 			rw.Write([]byte(`{"Items":[]}`))
 			return
 		}
-		items(rw, r)
+		rw.Write([]byte(`{"Items":[{"Id":"a1","Path":"` + heat + `"},{"Id":"b1","Path":"` + ran + `"},{"Id":"c1","Path":"` +
+			clerks + `"},{"Id":"d1","Path":"` + dune + `"},{"Id":"e1","Path":"` + wire + `"},{"Id":"f1","Path":"` + fargo +
+			`"},{"Id":"x1","Path":"/lib/Home Videos/x.mkv"}]}`))
 	})
 	userData := map[string]string{
 		"u1/b1": `"PlaybackPositionTicks":18000000000,"LastPlayedDate":"2025-01-01T00:00:00.0000000Z"`,
@@ -224,8 +223,8 @@ func plexPlay(event, account, key, extra string) string {
 // friend's write sent with the owner's token; an existing plex.tv webhook dropped when ours is added; a rerun that
 // writes again; a pushed play not reaching the other app, or not counted as held by the app that pushed it; the
 // owner's pushed play lost because its payload names him by his plex.tv title; a state that knows only a resume
-// point sent to Jellyfin as played=false, playcount=0 (it would unmark a play there); a listing that reads only its
-// first page; and a rating sent to Jellyfin with the play it already holds, or setting LastPlayedDate to the time of
+// point sent to Jellyfin as played=false, playcount=0 (it would unmark a play there); a Plex listing that reads only
+// its first page; and a rating sent to Jellyfin with the play it already holds, or setting LastPlayedDate to the time of
 // the rating rather than of the play (it reorders "recently played").
 func TestRunTwoWay(t *testing.T) {
 	h, w, options, _ := newHarness(t)
