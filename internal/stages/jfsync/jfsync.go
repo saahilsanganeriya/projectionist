@@ -3,8 +3,12 @@
 //
 //	Plex webhook ──► POST /hooks/plex ─────┐                         ┌──► Plex      (scrobble / progress / rate)
 //	Jellyfin webhook ► POST /hooks/jellyfin ┼──► watch_events ─fold─► ┤
-//	once: Plex DB backup, Jellyfin users' ──┘    (last writer wins)   └──► Jellyfin  (UserData)
-//	      played/resumable items
+//	once: Plex DB backup, Jellyfin users' ──┤    (last writer wins)   └──► Jellyfin  (UserData)
+//	      played/resumable items             │
+//	letterboxd stage: his diary ─────────────┘
+//
+// It is the only writer of watch state to the apps. The letterboxd stage records the owner's diary as events (a
+// logged viewing, a rating) and writes nothing itself, so a "mark unplayed" newer than his diary entry stands.
 //
 // The apps are sinks. They supply only the events they push, a one-time migration of the history that existed
 // only inside them, and addressing: one listing per app per day maps each app item id to the library identity
@@ -23,9 +27,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -144,6 +150,20 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	states, err := watch.States(ctx, env.Store.DB())
 	if err != nil {
 		return err
+	}
+	// State for a person no users entry names reaches neither app: letterboxd's person spelled otherwise, or a users
+	// entry renamed. A person who is to get nothing written keeps an entry with no accounts.
+	unnamed := map[string]int{}
+	for k := range states {
+		unnamed[k.Person]++
+	}
+	for _, u := range opt.Users {
+		delete(unnamed, u.Name)
+	}
+	for _, person := range slices.Sorted(maps.Keys(unnamed)) {
+		rep.Alert("the watch record holds state for %q (%d items), whom no users entry names, so it reaches neither app: "+
+			"the letterboxd stage's person must be a users name, and a person to leave alone needs an entry with no accounts",
+			person, unnamed[person])
 	}
 	for _, app := range apps {
 		if !addrs[app].At.IsZero() {

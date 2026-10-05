@@ -105,6 +105,31 @@ plex_optimize_window  = "03:00-06:00"  # when an optimize may start (timezone ab
 "https://plex.example.com"    = 401
 "https://nas.example.com" = 200
 
+# The owner's Letterboxd diary → projectionist's watch record (jfsync, the one writer, carries it to Plex and
+# Jellyfin), and his watchlist as a "Watchlist" collection in both apps, promoted to his Plex Home.
+[stages.letterboxd]
+every          = "30m"                    # the RSS feed is read every run; grid pages once per pages_every. Letterboxd is paced
+                                          # at one request per 2 s for the whole process, shared with lists and tonight
+user           = "saahilsan"
+max_fetches    = 400                      # Letterboxd requests per run; the first lookups resume over a few runs
+pages_every    = "24h"                    # watchlist + watched-films grid crawl
+export_dir     = "/volume1/docker/projectionist/data/letterboxd" # unzipped account exports; the newest folder wins
+movies_dir     = "/volume1/media/Movies"
+missing_file   = "/volume1/media/_watchlist-missing.txt" # watchlist films not on the NAS; "" = none
+sink_refresh   = "24h"                    # re-read what Plex (one paged listing) and plex.tv hold this often; Plex also before a collection write, once a day per film
+jellyfin_refresh = "24h"                  # re-read what Jellyfin holds this often (15-30 s a read); also before a collection write, once a day per film
+plex_section   = 4
+jellyfin_user  = "saahil"
+person         = "saahil"                 # the owner in the watch record: his name in jfsync's users (jfsync alerts on any other)
+# false: only diary entries he logs after this stage first runs become watch events. true: also the export and the
+# feed's backlog (on 2026-10-05 about 465 Plex watched marks and 649 ratings, which Plex shows his friends: watch
+# history to friends of friends, ratings to friends). His decision.
+history        = false
+collection     = "Watchlist"              # "" = no Watchlist collection
+plex_watchlist = false                    # also mirror onto his plex.tv watchlist (his Plex friends can see it)
+run_budget     = "25m"                    # no Plex/Jellyfin/plex.tv call starts later than this into a run; keep it under every
+dry_run        = false                    # count events and collection writes only
+
 # Small 4K copies of the films listed as "Remote 4K" (Plex playlist, Jellyfin playlist or Jellyfin collection);
 # replaces scripts/remote4k.py (DSM task 9).
 [stages.remote4k]
