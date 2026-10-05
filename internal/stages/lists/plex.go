@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +28,7 @@ type plexSink struct {
 	m        plexMap
 	byTMDB   map[int]string // ratingKey
 	colls    []plexColl     // the section's collections, as load read them
+	strays   []string       // ratingKeys of shelves of dropped canon lists that have no record
 	machine  string
 	taken    int
 	retired  int
@@ -144,6 +146,10 @@ func (p *plexSink) load(ctx context.Context) appReport {
 		if !mine[c.RatingKey] && !strings.HasPrefix(c.Summary, summaryMarker) && !answersCreate(time.Unix(c.AddedAt, 0), intents...) {
 			r.Taken = append(r.Taken, fold(c.Title))
 		}
+		if !mine[c.RatingKey] && stray(c.Title, c.Summary, p.opt) {
+			p.strays = append(p.strays, c.RatingKey)
+			p.log.Info("shelf of a dropped canon list without a record", "event", "stray_shelf", "app", "plex", "title", c.Title, "id", c.RatingKey)
+		}
 	}
 	if err := p.env.Store.PutJSON(ctx, name, "plex_report", r); err != nil {
 		p.log.Warn("plex report not kept", "event", "store_error", "err", err)
@@ -178,7 +184,12 @@ func (p *plexSink) reconcile(ctx context.Context, shelves []shelf, retire []stri
 	}
 	ctx, cancel := context.WithTimeout(ctx, p.opt.PlexBudget)
 	defer cancel()
-	p.retire(ctx, retire)
+	strays, err := recordStrays(ctx, p.env.Store.DB(), "plex", p.strays)
+	if err != nil {
+		p.w.stopped = "state: " + err.Error()
+		return
+	}
+	p.retire(ctx, slices.Concat(retire, strays)) // retire is shared with the Jellyfin lane: never appended to
 	if len(p.byTMDB) == 0 {
 		p.w.stopped = "no TMDB id → ratingKey map yet"
 		return

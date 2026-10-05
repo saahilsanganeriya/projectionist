@@ -175,7 +175,10 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) (err er
 		probes: opt.MaxProbes, peaks: opt.MaxPeakScans, decodes: opt.MaxDecodeChecks,
 		tick: func() (<-chan time.Time, func()) { t := time.NewTicker(env.Viewers.Poll); return t.C, t.Stop }}
 	defer func() { // on every return: a verdict saved before an early return is still raised
-		if aerr := r.raiseAlerts(context.WithoutCancel(ctx)); err == nil {
+		aerr := r.raiseAlerts(context.WithoutCancel(ctx))
+		// Notes sit under the library Plex watches, so a backfill is a batch: health optimizes Plex after a big one.
+		aerr = errors.Join(aerr, env.Store.AddLibraryChanges(context.WithoutCancel(ctx), name, rep.Counts["written"]))
+		if err == nil {
 			err = aerr
 		}
 	}()

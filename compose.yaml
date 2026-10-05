@@ -45,16 +45,14 @@ services:
       # health stage: inspect containers, restart the ones in [stages.health].restartable. The socket is root on the
       # host and ":ro" would not limit its API; the allow-list in code is the bound.
       - /var/run/docker.sock:/var/run/docker.sock
-      # ssdmirror: the USB SSD, and fill.py's folder whose PROGRESS.txt it takes over. DSM's mounts are private (no
-      # propagation): stop the container before ejecting the SSD and start it after plugging it back in. Started
-      # without the SSD, Docker makes an empty folder at that path and the stage refuses ("SSD not mounted").
-      - /volumeUSB1/usbshare1-2:/volumeUSB1/usbshare1-2
-      - /volume1/PlexMediaServer/ssd-copy:/volume1/PlexMediaServer/ssd-copy
       # subtitles: subfetch2.py's quota.csv and downloads.csv, imported once at cutover (OpenSubtitles' per-IP quota).
       # rename: the aligner's log2.csv (its aligned copy takes the primary subtitle name).
       - /volume1/PlexMediaServer/subtitle-downloads:/volume1/PlexMediaServer/subtitle-downloads:ro
       # posters: the owner's poster exports and the Plex DB backups they are matched with, read when they change.
       - /volume1/PlexMediaServer/backups:/volume1/PlexMediaServer/backups:ro
+      # The owner's unzipped Letterboxd export: lists' export_dir (a missing or empty folder is an alert on every run)
+      # and tonight's letterboxd_dir.
+      - /volume1/docker/projectionist/data/letterboxd:/volume1/docker/projectionist/data/letterboxd:ro
     secrets: [jellyfin_key, tmdb_read_token, tmdb_api_key, fanart_api_key, anthropic_api_key] # /run/secrets/<name>, read-only
     logging:
       driver: json-file

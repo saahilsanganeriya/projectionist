@@ -585,6 +585,12 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 			rep.Count(k, n)
 		}
 	}
+	if !opt.DryRun { // Plex's database records each member, sort and poster: health optimizes it after a big batch
+		n := rep.Counts["plex_create_members"] + rep.Counts["plex_add_members"] + rep.Counts["plex_sort"] + rep.Counts["plex_poster"]
+		if err := env.Store.AddLibraryChanges(context.WithoutCancel(ctx), name, n); err != nil {
+			return err
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}

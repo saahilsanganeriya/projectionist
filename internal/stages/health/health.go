@@ -19,6 +19,17 @@
 //
 // Plex is a DSM package and the hostnames belong to Cloudflare: their failures only alert. Plex and Jellyfin are
 // sinks: these probes read no data from them, they only prove the apps answer, and /Sessions is the viewer check.
+//
+// Plex's speed (plex.go). On 2026-10-05 Plex's database, fragmented by mass edits, took the Movies tab 26.8 s to
+// load cold, and Plex's Optimize Database brought it to 17 ms. So every run, while the plex probe passes, times the
+// Movies hubs (/hubs/sections/<plex_movies_section>?count=12) and the Home hubs (/hubs?count=12), one after the
+// other, into projectionist_health_plex_hub_seconds{hub}. An optimize (PUT /library/optimize?async=1) is due after 3
+// runs in a row whose slower hub took longer than `plex_slow`, or once details, rename and collections have counted
+// more than `plex_batch` library changes (store.LibraryChanges) since the last one. A due optimize is sent once,
+// inside `plex_optimize_window` (config time zone), while nobody but the owners watches on Plex or Jellyfin, at most
+// once per 24 h, recorded before it is sent. The next runs follow it in Plex's /activities and time nothing; the first
+// after it ends times the hubs again, logs before and after, and alerts on every run while they stay slow. An
+// optimize Plex still lists after 1 h alerts. Only maintenance of the sink: the hub loads' answers are not read.
 package health
 
 import (
@@ -35,6 +46,7 @@ import (
 	"sync"
 	"time"
 
+	"projectionist/internal/config"
 	"projectionist/internal/jellyfin"
 	"projectionist/internal/stage"
 	"projectionist/internal/viewers"
@@ -62,6 +74,11 @@ type Options struct {
 	QBittorrentContainer string         `toml:"qbittorrent_container"`
 	QBittorrentURL       string         `toml:"qbittorrent_url"`
 	Public               map[string]int `toml:"public"` // URL → the status it must answer; no default (a map would merge)
+
+	PlexMoviesSection  int           `toml:"plex_movies_section"`  // the Movies library, whose hub row is timed
+	PlexSlow           time.Duration `toml:"plex_slow"`            // a hub load slower than this is slow
+	PlexBatch          int           `toml:"plex_batch"`           // library changes since the last optimize that make one due
+	PlexOptimizeWindow string        `toml:"plex_optimize_window"` // "HH:MM-HH:MM" in the config time zone
 }
 
 func defaults() Options {
@@ -73,6 +90,10 @@ func defaults() Options {
 		JellyfinContainer:    "jellyfin",
 		QBittorrentContainer: "qbittorrent",
 		QBittorrentURL:       "http://127.0.0.1:8080",
+		PlexMoviesSection:    4,
+		PlexSlow:             5 * time.Second,
+		PlexBatch:            500,
+		PlexOptimizeWindow:   "03:00-06:00",
 	}
 }
 
@@ -121,6 +142,7 @@ type result struct {
 type State struct {
 	Streak      map[string]int       `json:"streak"`       // service → consecutive failed runs
 	LastRestart map[string]time.Time `json:"last_restart"` // container → when this stage last restarted it
+	Plex        plexState            `json:"plex"`
 }
 
 type Stage struct {
@@ -137,6 +159,12 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if opt.Timeout <= 0 || opt.FailThreshold < 1 || opt.RestartCooldown < time.Hour {
 		return fmt.Errorf("stages.health: need timeout > 0, fail_threshold >= 1, restart_cooldown >= 1h; got %s, %d, %s",
 			opt.Timeout, opt.FailThreshold, opt.RestartCooldown)
+	}
+	// An empty window would mean any time, prime time included.
+	window, err := config.ParseWindow(opt.PlexOptimizeWindow)
+	if err != nil || !window.Set || opt.PlexSlow <= 0 || opt.PlexBatch < 1 {
+		return fmt.Errorf("stages.health: need plex_slow > 0, plex_batch >= 1, plex_optimize_window HH:MM-HH:MM; got %s, %d, %q",
+			opt.PlexSlow, opt.PlexBatch, opt.PlexOptimizeWindow)
 	}
 	st := State{Streak: map[string]int{}, LastRestart: map[string]time.Time{}}
 	if _, err := env.Store.GetJSON(ctx, name, "state", &st); err != nil {
@@ -217,6 +245,10 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	}
 	rep.Summary = summarize(results)
 	env.Log.Info("probes done", "event", "health_checked", "probes", len(results), "failed", len(results)-countPassed(results))
+	plexUp := slices.ContainsFunc(results, func(r result) bool { return r.probe == "plex" && r.fault == passed })
+	if err := upkeepPlex(ctx, env, opt, window, &st, plexUp, rep); err != nil {
+		return err
+	}
 	return env.Store.PutJSON(context.WithoutCancel(ctx), name, "state", st)
 }
 

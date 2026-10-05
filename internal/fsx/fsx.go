@@ -8,10 +8,7 @@ import (
 	"os"
 )
 
-// ErrExists is returned when a no-overwrite operation finds the target already there.
-var ErrExists = os.ErrExist
-
-// RenameNoReplace moves old to new atomically and fails with an error matching ErrExists if new exists.
+// RenameNoReplace moves old to new atomically and fails with an error matching os.ErrExist if new exists.
 func RenameNoReplace(oldPath, newPath string) error {
 	return renameNoReplace(oldPath, newPath)
 }

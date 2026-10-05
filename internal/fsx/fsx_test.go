@@ -13,8 +13,8 @@ func TestNoOverwrite(t *testing.T) {
 	a, b, c := filepath.Join(dir, "a"), filepath.Join(dir, "b"), filepath.Join(dir, "c")
 	os.WriteFile(a, []byte("A"), 0o644)
 	os.WriteFile(b, []byte("B"), 0o644)
-	if err := RenameNoReplace(a, b); !errors.Is(err, ErrExists) {
-		t.Fatalf("rename onto existing: err = %v, want ErrExists", err)
+	if err := RenameNoReplace(a, b); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("rename onto existing: err = %v, want os.ErrExist", err)
 	}
 	if got, _ := os.ReadFile(b); string(got) != "B" {
 		t.Fatal("target was overwritten")
@@ -25,8 +25,8 @@ func TestNoOverwrite(t *testing.T) {
 	if _, err := os.Lstat(a); !os.IsNotExist(err) {
 		t.Fatal("source still exists after rename")
 	}
-	if err := Clone(c, b); !errors.Is(err, ErrExists) {
-		t.Fatalf("clone onto existing: err = %v, want ErrExists", err)
+	if err := Clone(c, b); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("clone onto existing: err = %v, want os.ErrExist", err)
 	}
 	d := filepath.Join(dir, "d")
 	if err := Clone(c, d); err != nil {
