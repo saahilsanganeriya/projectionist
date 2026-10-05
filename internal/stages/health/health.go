@@ -11,7 +11,8 @@
 //   - nobody is playing on Jellyfin;
 //   - this stage has not restarted it within `restart_cooldown`.
 //
-// Plex is a DSM package and the hostnames belong to Cloudflare: their failures only alert.
+// Plex is a DSM package and the hostnames belong to Cloudflare: their failures only alert. Plex and Jellyfin are
+// sinks: these probes read no data from them, they only prove the apps answer, and /Sessions is the viewer check.
 package health
 
 import (
