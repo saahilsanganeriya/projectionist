@@ -204,6 +204,23 @@ func TestRunNewArrivalsThenUndo(t *testing.T) {
 	}
 }
 
+// Catches: one folder's collision blocking every other folder's leftover junk (the planner files all loose leftovers
+// under one "misc" unit), and a blocked unit raising no alert that names it.
+func TestProblemBlocksOnlyItsFolder(t *testing.T) {
+	l := newLibrary(t)
+	movies := filepath.Join(l.root, "Movies")
+	write(t, filepath.Join(movies, "A.2001", "notes?.txt"), "a") // "?" is illegal on SMB: its archive path is a problem
+	write(t, filepath.Join(movies, "C.2003", "junk.nfo"), "c")
+	rep := l.run(t)
+	if lexists(filepath.Join(movies, "C.2003")) || !lexists(filepath.Join(movies, "A.2001", "notes?.txt")) {
+		t.Fatalf("C.2003 archived=%v (want true), A.2001 left=%v (want true)", !lexists(filepath.Join(movies, "C.2003")),
+			lexists(filepath.Join(movies, "A.2001", "notes?.txt")))
+	}
+	if !strings.Contains(strings.Join(rep.Alerts, "\n"), "misc:"+filepath.Join(movies, "A.2001")+": illegal character") {
+		t.Fatalf("alerts = %q", rep.Alerts)
+	}
+}
+
 // Catches: moving files while a guest is watching (the owner's own viewing must not block), and moving a folder
 // that is still arriving (written to within the quiet window).
 func TestRunWaitsForViewersAndArrivals(t *testing.T) {

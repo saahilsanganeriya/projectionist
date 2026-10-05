@@ -98,16 +98,16 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		rep.Count("probed", probed)
 		plan = Build(in)
 	}
-	units, blocked := selectUnits(plan, lib)
+	units, blocked, problems := selectUnits(plan, lib)
 	for _, b := range blocked {
 		rep.Count("units_"+b.why, 1)
 		if b.why == "problem" {
-			rep.Alert("%s: %s", b.unit, strings.Join(plan.Problems[b.unit], "; "))
+			rep.Alert("%s: %s", b.unit, strings.Join(problems[b.unit], "; "))
 		}
 	}
 	review = append(review, leftItems(plan, lib)...)
 	if opt.Mode == "plan" {
-		return writePlan(opt.PlanDir, plan, units, review, lib.shells)
+		return writePlan(opt.PlanDir, plan, units, problems, review, lib.shells)
 	}
 	writeReview(env, opt.ReviewFile, review)
 	touched, err := apply(ctx, env, rep, opt, units)
@@ -480,53 +480,49 @@ func subLangs(env *stage.Env, file string) map[string]SubLang {
 
 type blockedUnit struct{ unit, why string }
 
-// selectUnits picks the units to run, in plan order: they have work, their folders have settled, the planner found
-// no problem with them, and (for loose leftovers) their folder holds no video left for review. Leftover junk is run
-// per top-level folder ("misc:<top>"), so one busy folder never holds back another.
-func selectUnits(plan Plan, lib *library) (map[string][]Op, []blockedUnit) {
+// selectUnits picks the units to run: they have work, their folders have settled, the safety checks found no
+// problem with them, and (for loose leftovers) their folder holds no video left for review. Leftover junk runs per
+// top-level folder ("misc:<top>"), so one busy or broken folder never holds back another; the checks are re-run on
+// those units, so a problem names the folder it is in.
+func selectUnits(plan Plan, lib *library) (units map[string][]Op, blocked []blockedUnit, problems map[string][]string) {
 	byUnit := map[string][]Op{}
 	var order []string
 	hasLeave := map[string]bool{}
+	ops := make([]Op, 0, len(plan.Ops))
 	for _, o := range plan.Ops {
 		if o.Op == "leave" {
 			hasLeave[lib.top(o.Src)] = true
 		}
-	}
-	for _, o := range plan.Ops {
-		u := o.Unit
-		if u == "misc" {
-			u = "misc:" + lib.top(o.Src)
+		if o.Unit == "misc" {
+			o.Unit = "misc:" + lib.top(o.Src)
 		}
-		if byUnit[u] == nil {
-			order = append(order, u)
+		ops = append(ops, o)
+		if byUnit[o.Unit] == nil {
+			order = append(order, o.Unit)
 		}
-		byUnit[u] = append(byUnit[u], o)
+		byUnit[o.Unit] = append(byUnit[o.Unit], o)
 	}
-	out := map[string][]Op{}
-	var blocked []blockedUnit
+	problems = check(ops, lib.files)
+	units = map[string][]Op{}
 	for _, u := range order {
 		ops, work, busy := byUnit[u], false, false
 		for _, o := range ops {
 			work = work || o.Op == "move" || o.Op == "archive" || o.Op == "delete"
 			busy = busy || lib.busy[lib.top(o.Src)] || (o.Dst != "" && lib.busy[lib.top(o.Dst)])
 		}
-		planned := u
-		if strings.HasPrefix(u, "misc:") {
-			planned = "misc"
-		}
 		switch {
 		case !work:
-		case len(plan.Problems[planned]) > 0:
+		case len(problems[u]) > 0:
 			blocked = append(blocked, blockedUnit{u, "problem"})
 		case busy:
 			blocked = append(blocked, blockedUnit{u, "arriving"})
 		case strings.HasPrefix(u, "misc:") && hasLeave[strings.TrimPrefix(u, "misc:")]:
 			blocked = append(blocked, blockedUnit{u, "beside_review"})
 		default:
-			out[u] = ops
+			units[u] = ops
 		}
 	}
-	return out, blocked
+	return units, blocked, problems
 }
 
 // leftItems lists what the planner left for a person: files it would not touch outside the scheme.
@@ -654,7 +650,7 @@ func undo(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options) e
 
 // ---- outputs
 
-func writePlan(dir string, plan Plan, units map[string][]Op, review []reviewItem, shells []string) error {
+func writePlan(dir string, plan Plan, units map[string][]Op, problems map[string][]string, review []reviewItem, shells []string) error {
 	if dir == "" {
 		return errors.New("rename: plan mode needs plan_dir")
 	}
@@ -671,8 +667,8 @@ func writePlan(dir string, plan Plan, units map[string][]Op, review []reviewItem
 		rv.WriteString(r.Path + "\t" + r.Why + "\n")
 	}
 	var pr strings.Builder
-	for _, u := range sortedKeys(plan.Problems) {
-		for _, p := range plan.Problems[u] {
+	for _, u := range sortedKeys(problems) {
+		for _, p := range problems[u] {
 			pr.WriteString(u + "\t" + p + "\n")
 		}
 	}
