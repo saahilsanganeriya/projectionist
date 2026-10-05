@@ -780,7 +780,7 @@ func pushJellyfin(ctx context.Context, env *stage.Env, opt Options, touched map[
 	storeCache{env}.put(ctx, "jellyfin_pending", []string{})
 }
 
-// storeCache keeps the stage's lookups in the store's kv table.
+// storeCache keeps the stage's Jellyfin queue in the store's kv table.
 type storeCache struct{ env *stage.Env }
 
 func (c storeCache) get(ctx context.Context, key string, v any) bool {
