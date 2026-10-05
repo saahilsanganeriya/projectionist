@@ -18,14 +18,11 @@ package subtitles
 // frames voiced) cannot judge: it is replaced by the stretch right after it, at most maxExtra times per title.
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math"
-	"os"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -337,14 +334,19 @@ type sampler struct {
 	started time.Time
 }
 
-// newSampler is nil, with why, for a title the sampled fit cannot serve cheaply.
+// exactSeek are the containers whose index lands a seek on the very sample playback reaches: Matroska's cues and MP4's
+// sample tables. An AVI's (MP3 audio timed by byte position) landed 1.3 s off 45 minutes into one in the gate; MPEG-TS,
+// program streams and ASF seek by bitrate.
+var exactSeek = map[string]bool{".mkv": true, ".webm": true, ".mp4": true, ".m4v": true, ".mov": true}
+
+// newSampler is nil, with why, for a title the sampled fit cannot serve cheaply or exactly.
 func (r *run) newSampler(t *title) (*sampler, string) {
 	info := t.info
 	switch {
 	case info.Duration < 10*60:
 		return nil, "shorter than 10 minutes"
-	case strings.EqualFold(filepath.Ext(t.path), ".avi") && !aviIndexed(t.path):
-		return nil, "an AVI without an index: every seek would read from the start"
+	case !exactSeek[strings.ToLower(filepath.Ext(t.path))]:
+		return nil, "a " + filepath.Ext(t.path) + " file: a seek in it does not land where playback does"
 	}
 	s := &sampler{r: r, t: t, started: r.env.Now(),
 		windows: sampleWindowsFor(info.Duration, r.opt.SampleWindows, r.opt.SampleLength.Seconds())}
@@ -604,36 +606,4 @@ func lowPass(f, rate float64) [5]float64 {
 	alpha, cw := math.Sin(w)/math.Sqrt2, math.Cos(w)
 	a0 := 1 + alpha
 	return [5]float64{(1 - cw) / 2 / a0, (1 - cw) / a0, (1 - cw) / 2 / a0, -2 * cw / a0, (1 - alpha) / a0}
-}
-
-// aviIndexed tells whether an AVI carries an index (an idx1 chunk after its movi list, or an OpenDML indx in its
-// header), reading only chunk headers.
-func aviIndexed(path string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	head := make([]byte, 12)
-	if _, err := io.ReadFull(f, head); err != nil || string(head[:4]) != "RIFF" || string(head[8:12]) != "AVI " {
-		return false
-	}
-	for pos := int64(12); ; {
-		hdr := make([]byte, 12)
-		n, _ := f.ReadAt(hdr, pos)
-		if n < 8 {
-			return false
-		}
-		id, size := string(hdr[:4]), int64(binary.LittleEndian.Uint32(hdr[4:8]))
-		switch {
-		case id == "idx1":
-			return true
-		case id == "LIST" && n == 12 && string(hdr[8:12]) == "hdrl":
-			list := make([]byte, min(size, 1<<20))
-			if _, err := f.ReadAt(list, pos+8); err == nil && bytes.Contains(list, []byte("indx")) {
-				return true
-			}
-		}
-		pos += 8 + size + size%2
-	}
 }

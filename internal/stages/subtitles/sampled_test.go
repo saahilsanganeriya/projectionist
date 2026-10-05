@@ -1,7 +1,6 @@
 package subtitles
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -254,42 +253,6 @@ func captionAt(cs []float64, t float64) float64 {
 	return -1
 }
 
-// Catches an AVI without an index sampled (every seek would read it from the start), or an indexed one (idx1 after
-// the movi list, or an OpenDML indx) sent to the queue.
-func TestAVIIndexed(t *testing.T) {
-	chunk := func(id string, body []byte) []byte {
-		b := append([]byte(id), binary.LittleEndian.AppendUint32(nil, uint32(len(body)))...)
-		b = append(b, body...)
-		if len(body)%2 == 1 {
-			b = append(b, 0)
-		}
-		return b
-	}
-	list := func(kind string, parts ...[]byte) []byte {
-		return chunk("LIST", append([]byte(kind), bytes.Join(parts, nil)...))
-	}
-	riff := func(parts ...[]byte) []byte { return chunk("RIFF", append([]byte("AVI "), bytes.Join(parts, nil)...)) }
-	hdrl := list("hdrl", chunk("avih", make([]byte, 56)), list("strl", chunk("strh", make([]byte, 56))))
-	odml := list("hdrl", chunk("avih", make([]byte, 56)), list("strl", chunk("strh", make([]byte, 56)), chunk("indx", make([]byte, 24))))
-	movi := list("movi", chunk("00dc", make([]byte, 999)))
-	dir := t.TempDir()
-	for name, c := range map[string]struct {
-		data []byte
-		want bool
-	}{
-		"idx1":     {riff(hdrl, movi, chunk("idx1", make([]byte, 16))), true},
-		"OpenDML":  {riff(odml, movi), true},
-		"no index": {riff(hdrl, movi), false},
-		"not RIFF": {[]byte("not an avi at all"), false},
-	} {
-		p := filepath.Join(dir, name+".avi")
-		os.WriteFile(p, c.data, 0o644)
-		if got := aviIndexed(p); got != c.want {
-			t.Errorf("%s: indexed %v, want %v", name, got, c.want)
-		}
-	}
-}
-
 // srtOf is an SRT of the spans.
 func srtOf(spans []span) string {
 	var b strings.Builder
@@ -418,13 +381,10 @@ func TestRunSampled(t *testing.T) {
 	}
 }
 
-// Catches a title sampled that cannot be sampled cheaply or meaningfully: under 10 minutes, an AVI without an index,
-// or no reference at all; and the reference picked wrong: the English image track whenever there is one (not a forced
-// one), else the first audio track.
+// Catches a title sampled that cannot be sampled cheaply, exactly or meaningfully: under 10 minutes, in a container
+// whose seeks do not land where playback does (AVI, MPEG-TS), or with no reference at all; and the reference picked
+// wrong: the English image track whenever there is one (not a forced one), else the first audio track.
 func TestNewSampler(t *testing.T) {
-	dir := t.TempDir()
-	plain := filepath.Join(dir, "v.avi")
-	os.WriteFile(plain, []byte("RIFF\x04\x00\x00\x00AVI "), 0o644)
 	pgs := probe.Subtitle{Index: 4, Codec: "hdmv_pgs_subtitle", Language: "eng"}
 	audio := []probe.Audio{{Index: 1, Layout: "5.1(side)"}}
 	r := &run{env: fake.NewEnv(t, nil).Env, opt: Options{SampleWindows: 4, SampleLength: 90e9}}
@@ -439,7 +399,9 @@ func TestNewSampler(t *testing.T) {
 		{"no captions", "v.mp4", probe.Info{Duration: 6000, Audio: audio}, "speech"},
 		{"no audio either", "v.mkv", probe.Info{Duration: 6000}, ""},
 		{"a featurette", "v.mkv", probe.Info{Duration: 540, Audio: audio}, ""},
-		{"an AVI without an index", plain, probe.Info{Duration: 6000, Audio: audio}, ""},
+		{"an AVI", "v.avi", probe.Info{Duration: 6000, Audio: audio}, ""},
+		{"an MPEG-TS", "v.ts", probe.Info{Duration: 6000, Audio: audio}, ""},
+		{"a QuickTime file", "v.mov", probe.Info{Duration: 6000, Audio: audio}, "speech"},
 	} {
 		s, why := r.newSampler(&title{path: c.path, info: c.info})
 		got := ""
