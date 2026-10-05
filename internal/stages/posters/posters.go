@@ -4,16 +4,17 @@
 // Each run reconciles the library against the posters_items table, so an early trigger or a crash only resumes:
 //
 //	inventory   folder names under the Movies and TV roots → titles (identity from {tmdb-N}; no app is asked)
-//	owner       once: which poster Plex showed at the pre-rename backup and whether the owner uploaded or picked it
-//	candidates  the owner's poster + TMDB's (every language, from TMDB directly) + fanart.tv's, filtered to English,
-//	            textless or the title's own language, best voted first, near-duplicates dropped by perceptual hash
-//	judge       one vision call per title on the owner's Anthropic key, under a hard budget; a backlog goes through
-//	            the Message Batches API at half price. The owner's UPLOAD is never replaced, the owner's PICK only by
-//	            a candidate the judge scores at least 2 points higher
-//	apply       an outbox per app (Plex, Jellyfin are sinks), retried with backoff
+//	owner       per export: which poster Plex showed at a Plex DB backup and whether the owner uploaded or picked it
+//	candidates  the owner's poster + TMDB's (every language, from env.TMDB) + fanart.tv's (env.Fanart), filtered to
+//	            English, textless or the title's own language, best voted first, near-duplicates dropped by dHash
+//	judge       one vision call per title on the owner's Anthropic key, the model chosen by the dated policy
+//	            (env.LLM), under a hard budget; a backlog goes through the Message Batches API at half price. The
+//	            owner's UPLOAD is never replaced, the owner's PICK only by a candidate scored at least 2 points higher
+//	apply       an outbox per app (Plex, Jellyfin are sinks), retried with backoff; Plex's lock is its own step
 //
 // While anyone but the owner watches, the heavy steps wait for a later run: downloads and resizes, batch uploads and
-// poster uploads. Collecting a finished batch's results (a small download) goes on.
+// poster uploads. The gate is asked before each title's download, each batch upload and each title's uploads (at
+// most once a minute). Collecting a finished batch's results (a small download) goes on.
 package posters
 
 import (
@@ -22,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -31,6 +31,7 @@ import (
 	"sync"
 	"time"
 
+	"projectionist/internal/fanart"
 	"projectionist/internal/llm"
 	"projectionist/internal/stage"
 	"projectionist/internal/store"
@@ -45,14 +46,13 @@ type Options struct {
 	Only             []string      `toml:"only"`    // title keys ("movie:tmdb-422", "season:tmdb-1400:2") to limit a run to
 	DryRun           bool          `toml:"dry_run"` // candidates and judge only: Plex and Jellyfin are not touched
 	CacheDir         string        `toml:"cache_dir"`
-	SecretsDir       string        `toml:"secrets_dir"`     // tmdb_read_token (or tmdb_api_key), fanart_api_key, anthropic_api_key
+	SecretsDir       string        `toml:"secrets_dir"`     // anthropic_api_key (TMDB and fanart.tv are the shared clients')
 	OwnerItems       string        `toml:"owner_items"`     // customizations/items.json: ratingKey, guid, external ids per item
 	OwnerPosters     string        `toml:"owner_posters"`   // customizations/posters/<kind>/<ratingKey>.jpg
 	OwnerBackupDB    string        `toml:"owner_backup_db"` // the Plex DB .backup taken with that export
-	Model            string        `toml:"model"`           // "haiku:latest": the newest Haiku, checked daily
-	MaxTokens        int           `toml:"max_tokens"`
-	BudgetUSD        float64       `toml:"budget_usd"` // every judge call ever, not per run
-	BatchMin         int           `toml:"batch_min"`  // this many titles to judge or more go through Message Batches
+	MaxTokens        int           `toml:"max_tokens"`      // thinking included
+	BudgetUSD        float64       `toml:"budget_usd"`      // every judge call ever, not per run
+	BatchMin         int           `toml:"batch_min"`       // this many titles to judge or more go through Message Batches
 	BatchSize        int           `toml:"batch_size"`
 	FetchWorkers     int           `toml:"fetch_workers"`
 	JudgeWorkers     int           `toml:"judge_workers"`
@@ -62,9 +62,7 @@ type Options struct {
 	SinkIndexEvery   time.Duration `toml:"sink_index_every"` // how often each app's item list is fetched
 	Mark             string        `toml:"mark"`             // EXIF ImageDescription on every uploaded image
 	AnthropicAPI     string        `toml:"anthropic_api"`
-	TMDBAPI          string        `toml:"tmdb_api"`
 	TMDBImages       string        `toml:"tmdb_images"`
-	FanartAPI        string        `toml:"fanart_api"`
 }
 
 func defaults() Options {
@@ -77,9 +75,8 @@ func defaults() Options {
 		OwnerItems:       backups + "/customizations/items.json",
 		OwnerPosters:     backups + "/customizations/posters",
 		OwnerBackupDB:    backups + "/pre-rename-20261005T0328Z/com.plexapp.plugins.library.db",
-		Model:            "haiku:latest",
-		MaxTokens:        400,
-		BudgetUSD:        5,
+		MaxTokens:        1024,
+		BudgetUSD:        12,
 		BatchMin:         25,
 		BatchSize:        200,
 		FetchWorkers:     3,
@@ -90,24 +87,22 @@ func defaults() Options {
 		SinkIndexEvery:   24 * time.Hour,
 		Mark:             "poster-curator 2026-10",
 		AnthropicAPI:     "https://api.anthropic.com",
-		TMDBAPI:          "https://api.themoviedb.org/3",
 		TMDBImages:       "https://image.tmdb.org/t/p",
-		FanartAPI:        "https://webservice.fanart.tv/v3",
 	}
 }
 
 const schema = `
 CREATE TABLE IF NOT EXISTS posters_owner (
   key   TEXT PRIMARY KEY, -- title key
-  file  TEXT NOT NULL,    -- under owner_posters: <kind>/<ratingKey>.jpg
+  file  TEXT NOT NULL,    -- the export's poster: <owner_posters>/<kind>/<ratingKey>.jpg
   state TEXT NOT NULL,    -- upload | pick | default
   guid  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS posters_items (
   key        TEXT PRIMARY KEY,
   title      TEXT NOT NULL, -- JSON Title
-  cands      TEXT,          -- JSON []Candidate; NULL until gathered
-  sig        TEXT NOT NULL, -- the sources the pool was gathered from
+  cands      TEXT,          -- JSON []Candidate (null: none found); NULL until gathered
+  sig        TEXT NOT NULL, -- the sources and owner poster the pool was gathered from
   verdict    TEXT,          -- JSON Verdict; NULL until judged
   updated_at TEXT NOT NULL
 );
@@ -132,7 +127,7 @@ CREATE TABLE IF NOT EXISTS posters_sinks (
   item       TEXT NOT NULL,
   sink       TEXT NOT NULL, -- jellyfin | plex
   url        TEXT NOT NULL, -- the candidate to show there
-  state      TEXT NOT NULL, -- pending | done
+  state      TEXT NOT NULL, -- pending | uploaded (Plex: the lock is still to set) | done
   attempts   INTEGER NOT NULL,
   next_at    TEXT NOT NULL,
   last_error TEXT NOT NULL,
@@ -141,7 +136,6 @@ CREATE TABLE IF NOT EXISTS posters_sinks (
 
 // Stage needs no state between runs: everything lives in the store.
 type Stage struct {
-	HTTP   *http.Client                      // TMDB, fanart.tv, image downloads, Anthropic; nil = 2-minute timeout
 	Secret func(name string) (string, error) // nil = read <secrets_dir>/<name> on every use
 }
 
@@ -149,22 +143,20 @@ func (Stage) Name() string { return name }
 
 // row is a title with its stored state.
 type row struct {
-	Title   Title
-	Cands   []Candidate
-	Sig     string
-	Verdict *Verdict
+	Title    Title
+	Gathered bool // Cands holds the pool, which may be empty
+	Cands    []Candidate
+	Sig      string
+	Verdict  *Verdict
 }
 
 // run carries one Run's clients and counters; the steps fan out, so shared state is guarded.
 type run struct {
-	env       *stage.Env
-	opt       Options
-	http      *http.Client
-	tmdb      *tmdb.Client
-	llm       *llm.Client
-	fanartKey string
-	owners    map[string]ownerPoster
-	memo      sync.Map // once()'s answers, per run
+	env    *stage.Env
+	opt    Options
+	http   *http.Client // image downloads
+	llm    *llm.Client
+	owners map[string]ownerPoster
 
 	mu            sync.Mutex
 	rep           *stage.Report
@@ -217,50 +209,38 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 			return strings.TrimSpace(string(b)), err
 		}
 	}
-	client := s.HTTP
-	if client == nil {
-		client = &http.Client{Timeout: 2 * time.Minute}
-	}
-	r := &run{env: env, opt: opt, http: client, rep: rep,
-		tmdb: &tmdb.Client{API: opt.TMDBAPI, HTTP: client, Key: func() (string, error) {
-			if k, err := secret("tmdb_read_token"); err == nil {
-				return k, nil
-			}
-			return secret("tmdb_api_key")
-		}},
-		llm: &llm.Client{API: opt.AnthropicAPI, HTTP: client, Key: func() (string, error) { return secret("anthropic_api_key") }},
-	}
-	if _, err := r.tmdb.Key(); err != nil {
-		return fmt.Errorf("no TMDB key: %w", err)
-	}
-	if k, err := secret("fanart_api_key"); err == nil {
-		r.fanartKey = k
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return err
+	r := &run{env: env, opt: opt, http: &http.Client{Timeout: 2 * time.Minute}, rep: rep,
+		// 10 minutes, the Anthropic SDKs' default: a batch upload of ~30 MB needs it on a slow uplink.
+		llm: &llm.Client{API: opt.AnthropicAPI, HTTP: &http.Client{Timeout: 10 * time.Minute},
+			Key: func() (string, error) { return secret("anthropic_api_key") }},
 	}
 
+	// An export (items.json, its posters and the Plex DB backup taken with it) is imported once; pointing the
+	// options at a newer export merges it in (importOwners says how).
 	var imported struct {
-		At   time.Time `json:"at"`
-		Rows int       `json:"rows"`
+		Export string    `json:"export"`
+		At     time.Time `json:"at"`
+		Rows   int       `json:"rows"`
 	}
-	found, err := env.Store.GetJSON(ctx, name, "owner_import", &imported)
-	if err != nil {
+	if _, err := env.Store.GetJSON(ctx, name, "owner_import", &imported); err != nil {
 		return err
 	}
-	if !found {
+	if export := strings.Join([]string{opt.OwnerItems, opt.OwnerPosters, opt.OwnerBackupDB}, "\n"); imported.Export != export {
 		n, err := importOwners(ctx, db, opt.OwnerItems, opt.OwnerPosters, opt.OwnerBackupDB)
 		if err != nil {
 			return fmt.Errorf("owner posters import: %w", err)
 		}
-		imported.At, imported.Rows = env.Now(), n
+		imported.Export, imported.At, imported.Rows = export, env.Now(), n
 		if err := env.Store.PutJSON(ctx, name, "owner_import", imported); err != nil {
 			return err
 		}
-		env.Log.Info("owner posters imported", "event", "owner_import", "titles", n)
+		env.Log.Info("owner posters imported", "event", "owner_import", "titles", n, "backup", opt.OwnerBackupDB)
 	}
-	if r.owners, err = loadOwners(ctx, db); err != nil {
+	owners, err := loadOwners(ctx, db)
+	if err != nil {
 		return err
 	}
+	r.owners = owners
 
 	titles, err := inventory(opt.MoviesRoot, opt.TVRoot)
 	if err != nil {
@@ -275,34 +255,36 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	}
 	rep.Count("titles", len(rows))
 
-	sig := "tmdb"
-	if r.fanartKey != "" {
-		sig += "+fanart"
-	}
 	var stale []*row
 	for _, it := range rows {
-		if it.Cands == nil || it.Sig != sig {
+		if !it.Gathered || it.Sig != r.poolSig(it.Title) {
 			stale = append(stale, it)
 		}
 	}
-	parallel(ctx, opt.FetchWorkers, stale, func(it *row) {
-		if r.guestsWatching(ctx) {
+	// A missing TMDB or fanart.tv key fails every title alike: the run stops on the first one.
+	gctx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
+	parallel(gctx, opt.FetchWorkers, stale, func(it *row) {
+		if r.guestsWatching(gctx) {
 			r.count("gather_deferred", 1)
 			return
 		}
-		if err := r.gather(ctx, it); err != nil {
+		if err := r.gather(gctx, it); err != nil {
+			if errors.Is(err, tmdb.ErrNoCredentials) || errors.Is(err, fanart.ErrNoKey) {
+				stop(err)
+			}
 			env.Log.Warn("candidates", "event", "gather_failed", "item", it.Title.Key, "err", err)
 			r.count("gather_failed", 1)
 			return
 		}
-		it.Sig = sig
+		it.Gathered, it.Sig = true, r.poolSig(it.Title)
 		if err := r.saveCandidates(ctx, it); err != nil {
 			env.Log.Error("save candidates", "event", "store_error", "item", it.Title.Key, "err", err)
 			return
 		}
 		r.count("gathered", 1)
 	})
-	if err := ctx.Err(); err != nil {
+	if err := context.Cause(gctx); err != nil {
 		return err
 	}
 	if err := r.judge(ctx, rows); err != nil {
@@ -345,7 +327,7 @@ func loadRows(ctx context.Context, db *sql.DB, titles []Title, now time.Time) ([
 		if err := tx.QueryRowContext(ctx, `SELECT cands, sig, verdict FROM posters_items WHERE key=?`, t.Key).Scan(&cands, &it.Sig, &verdict); err != nil {
 			return nil, err
 		}
-		if cands.Valid {
+		if it.Gathered = cands.Valid; cands.Valid {
 			if err := json.Unmarshal([]byte(cands.String), &it.Cands); err != nil {
 				return nil, fmt.Errorf("%s candidates: %w", t.Key, err)
 			}
@@ -359,6 +341,15 @@ func loadRows(ctx context.Context, db *sql.DB, titles []Title, now time.Time) ([
 		out = append(out, it)
 	}
 	return out, tx.Commit()
+}
+
+// poolSig names what a title's pool is gathered from: a new owner poster (a newer export) gathers it again.
+func (r *run) poolSig(t Title) string {
+	sig := "tmdb+fanart"
+	if p, ok := r.owners[t.Key]; ok {
+		sig += " owner=" + p.State + ":" + p.File
+	}
+	return sig
 }
 
 // Stores run detached from ctx: finished work is recorded even while the run is being cancelled.

@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -22,18 +21,18 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/image/draw"
 	_ "golang.org/x/image/webp" // a few of the owner's backed-up posters are WebP behind a .jpg name
 
+	"projectionist/internal/fanart"
 	"projectionist/internal/tmdb"
 )
 
 // Candidate is one poster in a title's pool. The owner's poster, when the backup has one, is always first.
 type Candidate struct {
-	URL    string  `json:"url"`   // full size: https://… or owner:<kind>/<ratingKey>.jpg
+	URL    string  `json:"url"`   // full size: https://… or owner:<owner_posters>/<kind>/<ratingKey>.jpg
 	Thumb  string  `json:"thumb"` // what the judge sees, and the thumbnail cache key
 	Source string  `json:"source"`
 	Owner  string  `json:"owner,omitempty"` // upload | pick | default, on the owner's poster only
@@ -81,11 +80,9 @@ func (r *run) gather(ctx context.Context, it *row) error {
 	if err != nil {
 		return err
 	}
-	var fan []Candidate
-	if r.fanartKey != "" {
-		if fan, err = r.fanartPosters(ctx, t, info); err != nil {
-			return err
-		}
+	fan, err := r.fanartPosters(ctx, t, info)
+	if err != nil {
+		return err
 	}
 	langs := []string{"", "xx", "00", "en", info.lang}
 	keep := func(c Candidate) bool { return slices.Contains(langs, c.Lang) }
@@ -129,83 +126,54 @@ type tmdbTitle struct {
 	tvdb    int         // shows only
 }
 
-type tmdbPoster struct {
-	FilePath string  `json:"file_path"`
-	Language *string `json:"iso_639_1"`
-	Width    int     `json:"width"`
-	Height   int     `json:"height"`
-	Average  float64 `json:"vote_average"`
-	Count    int     `json:"vote_count"`
-}
-
-type tmdbImages struct {
-	Images struct {
-		Posters []tmdbPoster `json:"posters"`
-	} `json:"images"`
-}
-
-type tmdbTop struct {
-	tmdbImages
-	Lang     string `json:"original_language"`
-	External struct {
-		TVDB int `json:"tvdb_id"`
-	} `json:"external_ids"`
-}
-
 // tmdbInfo asks TMDB for the title's posters in every language, plus what filtering them needs. A title TMDB does
-// not know has no TMDB posters; the owner's and fanart.tv's still compete.
+// not know has no TMDB posters; the owner's and fanart.tv's still compete. Every season of a show asks for the
+// show's details again: the shared client answers those from its cache.
 func (r *run) tmdbInfo(ctx context.Context, t Title) (tmdbTitle, error) {
-	id, err := once(r, "find "+t.ID.String(), func() (string, error) { return r.tmdbID(ctx, t) })
-	if errors.Is(err, tmdb.ErrNotFound) {
-		return tmdbTitle{}, nil
-	}
-	if err != nil {
-		return tmdbTitle{}, err
-	}
-	path := "/movie/" + id
+	k := tmdb.Movie
 	if t.Kind != movie {
-		path = "/tv/" + id
+		k = tmdb.TV
 	}
-	top, err := once(r, "tmdb "+path, func() (tmdbTop, error) {
-		var top tmdbTop // no language asked: TMDB then lists the images in all of them
-		err := r.tmdb.Get(ctx, path, url.Values{"append_to_response": {"images,external_ids"}}, &top)
-		if errors.Is(err, tmdb.ErrNotFound) {
-			err = nil
-		}
-		return top, err
-	})
+	id, err := r.tmdbID(ctx, t)
 	if err != nil {
-		return tmdbTitle{}, err
+		return tmdbTitle{}, ignoreNotFound(err)
 	}
-	out := tmdbTitle{lang: top.Lang, tvdb: top.External.TVDB}
+	d, err := r.env.TMDB.Details(ctx, k, id)
+	if err != nil {
+		return tmdbTitle{}, ignoreNotFound(err)
+	}
+	out := tmdbTitle{lang: d.Language, tvdb: d.ExternalIDs.TVDB}
 	if t.ID.Source == "tvdb" {
 		out.tvdb, _ = strconv.Atoi(t.ID.Value)
 	}
-	posters := top.Images.Posters
+	var imgs tmdb.Images // no language asked: TMDB then lists the images in all of them
 	if t.Kind == season {
-		var s tmdbImages
-		err := r.tmdb.Get(ctx, fmt.Sprintf("%s/season/%d", path, t.Season), url.Values{"append_to_response": {"images"}}, &s)
-		if err != nil && !errors.Is(err, tmdb.ErrNotFound) {
-			return tmdbTitle{}, err
-		}
-		posters = s.Images.Posters
+		imgs, err = r.env.TMDB.SeasonImages(ctx, id, t.Season)
+	} else {
+		imgs, err = r.env.TMDB.Images(ctx, k, id)
 	}
-	out.posters = r.tmdbCandidates(posters)
+	if err != nil && !errors.Is(err, tmdb.ErrNotFound) {
+		return tmdbTitle{}, err
+	}
+	out.posters = r.tmdbCandidates(imgs.Posters)
 	return out, nil
 }
 
-func (r *run) tmdbCandidates(ps []tmdbPoster) []Candidate {
+func ignoreNotFound(err error) error {
+	if errors.Is(err, tmdb.ErrNotFound) {
+		return nil
+	}
+	return err
+}
+
+func (r *run) tmdbCandidates(ps []tmdb.Image) []Candidate {
 	var out []Candidate
 	for _, p := range ps {
 		if p.Width < 600 || p.Height == 0 || float64(p.Width)/float64(p.Height) < 0.62 || float64(p.Width)/float64(p.Height) > 0.72 {
 			continue // a scan, a banner or a square
 		}
-		c := Candidate{URL: r.opt.TMDBImages + "/original" + p.FilePath, Thumb: r.opt.TMDBImages + "/w500" + p.FilePath,
-			Source: srcTMDB, Votes: p.Count, Rating: p.Average}
-		if p.Language != nil {
-			c.Lang = *p.Language
-		}
-		out = append(out, c)
+		out = append(out, Candidate{URL: r.opt.TMDBImages + "/original" + p.FilePath, Thumb: r.opt.TMDBImages + "/w500" + p.FilePath,
+			Source: srcTMDB, Lang: p.Language, Votes: p.VoteCount, Rating: p.VoteAverage})
 	}
 	prior := func(c Candidate) float64 {
 		return (float64(c.Votes)*c.Rating + priorVotes*5) / float64(c.Votes+priorVotes)
@@ -214,100 +182,51 @@ func (r *run) tmdbCandidates(ps []tmdbPoster) []Candidate {
 	return out
 }
 
-// tmdbID is the movie's or show's TMDB id; a folder named by an IMDb or TVDB id is looked up once per run.
-func (r *run) tmdbID(ctx context.Context, t Title) (string, error) {
+// tmdbID is the movie's or show's TMDB id; a folder named by an IMDb or TVDB id is looked up with /find.
+func (r *run) tmdbID(ctx context.Context, t Title) (int, error) {
 	if t.ID.Source == "tmdb" {
-		return t.ID.Value, nil
-	}
-	var found struct {
-		Movies []struct {
-			ID int `json:"id"`
-		} `json:"movie_results"`
-		Shows []struct {
-			ID int `json:"id"`
-		} `json:"tv_results"`
+		return strconv.Atoi(t.ID.Value)
 	}
 	source := map[string]string{"imdb": "imdb_id", "tvdb": "tvdb_id"}[t.ID.Source]
-	if err := r.tmdb.Get(ctx, "/find/"+t.ID.Value, url.Values{"external_source": {source}}, &found); err != nil {
-		return "", err
-	}
+	movies, shows, err := r.env.TMDB.Find(ctx, t.ID.Value, source)
 	switch {
-	case t.Kind == movie && len(found.Movies) > 0:
-		return strconv.Itoa(found.Movies[0].ID), nil
-	case t.Kind != movie && len(found.Shows) > 0:
-		return strconv.Itoa(found.Shows[0].ID), nil
+	case err != nil:
+		return 0, err
+	case t.Kind == movie && len(movies) > 0:
+		return movies[0].ID, nil
+	case t.Kind != movie && len(shows) > 0:
+		return shows[0].ID, nil
 	}
-	return "", tmdb.ErrNotFound
+	return 0, tmdb.ErrNotFound
 }
 
 // ---- fanart.tv ----
 
-type fanartPoster struct {
-	URL    string `json:"url"`
-	Lang   string `json:"lang"` // "00": no language
-	Likes  string `json:"likes"`
-	Season string `json:"season"`
-}
-
-type fanartList struct {
-	Movie  []fanartPoster `json:"movieposter"`
-	Show   []fanartPoster `json:"tvposter"`
-	Season []fanartPoster `json:"seasonposter"`
-}
-
 // fanartPosters lists fanart.tv's posters for the title, most liked first. Shows are keyed by TVDB id there.
 func (r *run) fanartPosters(ctx context.Context, t Title, info tmdbTitle) ([]Candidate, error) {
-	var path string
+	var imgs []fanart.Image
+	var err error
 	switch {
 	case t.Kind == movie:
-		path = "/movies/" + t.ID.Value
+		imgs, err = r.env.Fanart.Movie(ctx, t.ID.Value)
 	case info.tvdb != 0:
-		path = "/tv/" + strconv.Itoa(info.tvdb)
+		imgs, err = r.env.Fanart.TV(ctx, info.tvdb)
 	default:
 		return nil, nil
 	}
-	resp, err := once(r, "fanart "+path, func() (fanartList, error) {
-		var resp fanartList
-		raw, err := r.fetch(ctx, r.opt.FanartAPI+path+"?"+url.Values{"api_key": {r.fanartKey}}.Encode())
-		var status httpStatus
-		if errors.As(err, &status) && status == http.StatusNotFound {
-			return resp, nil
-		}
-		if err == nil {
-			err = json.Unmarshal(raw, &resp)
-		}
-		return resp, err
-	})
 	if err != nil {
-		return nil, fmt.Errorf("fanart.tv %s: %w", path, err)
+		return nil, err
 	}
-	list := map[kind][]fanartPoster{movie: resp.Movie, show: resp.Show, season: resp.Season}[t.Kind]
+	want := map[kind]string{movie: "movieposter", show: "tvposter", season: "seasonposter"}[t.Kind]
 	var out []Candidate
-	for _, p := range list {
-		if t.Kind == season && p.Season != strconv.Itoa(t.Season) {
+	for _, p := range imgs {
+		if p.Type != want || t.Kind == season && p.Season != strconv.Itoa(t.Season) {
 			continue
 		}
-		likes, _ := strconv.Atoi(p.Likes)
-		out = append(out, Candidate{URL: p.URL, Thumb: p.URL, Source: srcFanart, Lang: p.Lang, Likes: likes})
+		out = append(out, Candidate{URL: p.URL, Thumb: p.URL, Source: srcFanart, Lang: p.Lang, Likes: p.Likes})
 	}
 	slices.SortStableFunc(out, func(a, b Candidate) int { return cmp.Compare(b.Likes, a.Likes) })
 	return out, nil
-}
-
-// once runs fn the first time key is asked for in this run and shares its answer: every season of a show needs the
-// show's TMDB details and fanart.tv list.
-func once[T any](r *run, key string, fn func() (T, error)) (T, error) {
-	e, _ := r.memo.LoadOrStore(key, &memoEntry{})
-	m := e.(*memoEntry)
-	m.once.Do(func() { m.val, m.err = fn() })
-	v, _ := m.val.(T)
-	return v, m.err
-}
-
-type memoEntry struct {
-	once sync.Once
-	val  any
-	err  error
 }
 
 // ---- images ----
@@ -385,7 +304,7 @@ func dhash(img image.Image) uint64 {
 // original returns the bytes behind a candidate URL: the owner's backed-up file, or a download.
 func (r *run) original(ctx context.Context, u string) ([]byte, error) {
 	if file, ok := strings.CutPrefix(u, "owner:"); ok {
-		return os.ReadFile(filepath.Join(r.opt.OwnerPosters, filepath.Clean("/"+file)))
+		return os.ReadFile(file)
 	}
 	return r.fetch(ctx, u)
 }

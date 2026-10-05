@@ -88,7 +88,7 @@ func inventory(moviesRoot, tvRoot string) ([]Title, error) {
 	return out, nil
 }
 
-// ---- the owner's posters: a one-time migration from the pre-rename Plex backup ----
+// ---- the owner's posters: a migration from Plex DB backups (Plex itself is never asked) ----
 
 const (
 	ownerUpload  = "upload"  // the owner uploaded it: never replaced
@@ -96,10 +96,15 @@ const (
 	ownerDefault = "default" // Plex's own choice
 )
 
-// importOwners copies, once, which poster Plex showed for every movie, show and season at backup time and how it
-// got there into posters_owner. Plex is never asked: the export (items.json + one JPEG per item, named by
-// ratingKey) says which file and which external ids; the Plex DB .backup taken with it says, per guid, whether the
-// poster was uploaded (an upload:// thumb) or picked (poster field 9 locked), and which show a season belongs to.
+// importOwners merges one export into posters_owner: which poster Plex showed for every movie, show and season at
+// backup time, and how it got there. The export (items.json + one JPEG per item, named by ratingKey) says which file
+// and which external ids; the Plex DB .backup taken with it says, per guid, whether the poster was uploaded (an
+// upload:// thumb) or picked (poster field 9 locked), and which show a season belongs to.
+//
+// A later export's upload or pick replaces the earlier entry (the owner's newer intent); its default never does: a
+// title Plex re-created during the rename shows its default poster again, but the owner's upload still stands.
+// Only an export taken before this stage's first upload says who chose a poster: after it, Plex lists this stage's
+// uploads as uploads too.
 func importOwners(ctx context.Context, db *sql.DB, itemsPath, postersDir, backupDB string) (int, error) {
 	raw, err := os.ReadFile(itemsPath)
 	if err != nil {
@@ -161,8 +166,8 @@ func importOwners(ctx context.Context, db *sql.DB, itemsPath, postersDir, backup
 	out := map[string]owned{}
 	for _, it := range items {
 		pr, ok := byGUID[it.GUID]
-		file := filepath.Join(it.Kind, it.RatingKey+".jpg")
-		if _, err := os.Stat(filepath.Join(postersDir, file)); !ok || err != nil {
+		file := filepath.Join(postersDir, it.Kind, it.RatingKey+".jpg")
+		if _, err := os.Stat(file); !ok || err != nil {
 			continue
 		}
 		var keys []string
@@ -192,8 +197,9 @@ func importOwners(ctx context.Context, db *sql.DB, itemsPath, postersDir, backup
 	}
 	defer tx.Rollback()
 	for k, o := range out {
-		if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO posters_owner(key, file, state, guid) VALUES (?, ?, ?, ?)`,
-			k, o.file, o.state, o.guid); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO posters_owner(key, file, state, guid) VALUES (?, ?, ?, ?)
+			ON CONFLICT(key) DO UPDATE SET file=excluded.file, state=excluded.state, guid=excluded.guid
+			WHERE excluded.state != 'default' OR posters_owner.state = 'default'`, k, o.file, o.state, o.guid); err != nil {
 			return 0, err
 		}
 	}

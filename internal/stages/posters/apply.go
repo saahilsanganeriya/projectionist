@@ -14,9 +14,11 @@ import (
 	"projectionist/internal/library"
 )
 
-// Plex and Jellyfin are sinks: each verdict becomes one outbox row per app, drained while no guest watches, retried
-// with backoff, and never able to fail the run. Both always get the chosen image, the owner's own included: a title
-// Plex re-created during the rename no longer shows the owner's poster, and the stage may not ask Plex which it shows.
+// Plex and Jellyfin are sinks: each verdict becomes one outbox row per app, drained title by title while no guest
+// watches, retried with backoff, and never able to fail the run. Both always get the chosen image, the owner's own
+// included: a title Plex re-created during the rename no longer shows the owner's poster, and the stage may not ask
+// Plex which it shows. Plex takes two calls, upload then lock: a row whose upload went through but whose lock failed
+// is "uploaded", and its retry only locks, so a retry never adds a second copy to Plex's metadata bundle.
 
 const (
 	sinkPlex     = "plex"
@@ -48,14 +50,15 @@ func (r *run) enqueue(ctx context.Context, rows []*row) error {
 }
 
 type outboxRow struct {
-	Item, Sink, URL string
-	Attempts        int
+	Item, Sink, URL, State string
+	Attempts               int
 }
 
-// apply drains the due outbox rows. A guest watching defers the whole drain to a later run.
+// apply drains the due outbox rows. The viewer gate is asked before each title's download and uploads: a guest
+// watching defers that title to a later run.
 func (r *run) apply(ctx context.Context) error {
-	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT item, sink, url, attempts FROM posters_sinks
-		WHERE state='pending' AND next_at <= ? ORDER BY item, sink`, stamp(r.env.Now()))
+	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT item, sink, url, state, attempts FROM posters_sinks
+		WHERE state IN ('pending', 'uploaded') AND next_at <= ? ORDER BY item, sink`, stamp(r.env.Now()))
 	if err != nil {
 		return err
 	}
@@ -63,7 +66,7 @@ func (r *run) apply(ctx context.Context) error {
 	var items []string
 	for rows.Next() {
 		var o outboxRow
-		if err := rows.Scan(&o.Item, &o.Sink, &o.URL, &o.Attempts); err != nil {
+		if err := rows.Scan(&o.Item, &o.Sink, &o.URL, &o.State, &o.Attempts); err != nil {
 			rows.Close()
 			return err
 		}
@@ -76,10 +79,6 @@ func (r *run) apply(ctx context.Context) error {
 	if len(items) == 0 {
 		return nil
 	}
-	if r.guestsWatching(ctx) {
-		r.count("apply_deferred", len(items))
-		return nil
-	}
 	index := map[string]map[string]sinkItem{}
 	for _, s := range []string{sinkPlex, sinkJellyfin} {
 		idx, err := r.sinkIndex(ctx, s)
@@ -90,6 +89,10 @@ func (r *run) apply(ctx context.Context) error {
 		index[s] = idx
 	}
 	parallel(ctx, r.opt.ApplyWorkers, items, func(item string) {
+		if r.guestsWatching(ctx) {
+			r.count("apply_deferred", 1)
+			return
+		}
 		images := map[string][]byte{}
 		for _, o := range byItem[item] {
 			if index[o.Sink] == nil {
@@ -100,23 +103,30 @@ func (r *run) apply(ctx context.Context) error {
 				r.retryLater(ctx, o, "not in "+o.Sink+" yet", r.opt.SinkIndexEvery)
 				continue
 			}
-			img, ok := images[o.URL]
-			if !ok {
-				var err error
-				if img, err = r.prepare(ctx, o.URL); err != nil {
+			if o.State == "pending" {
+				img, ok := images[o.URL]
+				if !ok {
+					var err error
+					if img, err = r.prepare(ctx, o.URL); err != nil {
+						r.retryLater(ctx, o, err.Error(), backoff(o.Attempts))
+						continue
+					}
+					images[o.URL] = img
+				}
+				if err := r.upload(ctx, o.Sink, target, img); err != nil {
 					r.retryLater(ctx, o, err.Error(), backoff(o.Attempts))
 					continue
 				}
-				images[o.URL] = img
 			}
-			if err := r.push(ctx, o.Sink, target, img); err != nil {
-				r.retryLater(ctx, o, err.Error(), backoff(o.Attempts))
-				continue
+			if o.Sink == sinkPlex {
+				r.setState(ctx, o, "uploaded")
+				if err := r.env.Plex.Do(ctx, http.MethodPut, fmt.Sprintf("/library/sections/%d/all?type=%d&id=%s&thumb.locked=1",
+					target.Section, target.Type, target.ID)); err != nil {
+					r.retryLater(ctx, o, "lock: "+err.Error(), backoff(o.Attempts))
+					continue
+				}
 			}
-			if _, err := r.env.Store.DB().ExecContext(context.WithoutCancel(ctx), `UPDATE posters_sinks SET state='done',
-				last_error='' WHERE item=? AND sink=? AND url=?`, o.Item, o.Sink, o.URL); err != nil {
-				r.env.Log.Error("outbox", "event", "store_error", "err", err)
-			}
+			r.setState(ctx, o, "done")
 			if err := r.env.Store.AddEvent(context.WithoutCancel(ctx), r.env.Now(), name, item, "applied",
 				map[string]any{"sink": o.Sink, "url": o.URL}); err != nil {
 				r.env.Log.Error("event log", "event", "store_error", "err", err)
@@ -138,16 +148,20 @@ func (r *run) retryLater(ctx context.Context, o outboxRow, msg string, after tim
 	}
 }
 
-func (r *run) push(ctx context.Context, sink string, target sinkItem, img []byte) error {
+// setState records a row's progress; matching on url leaves alone a newer choice enqueued meanwhile.
+func (r *run) setState(ctx context.Context, o outboxRow, state string) {
+	if _, err := r.env.Store.DB().ExecContext(context.WithoutCancel(ctx), `UPDATE posters_sinks SET state=?, last_error=''
+		WHERE item=? AND sink=? AND url=?`, state, o.Item, o.Sink, o.URL); err != nil {
+		r.env.Log.Error("outbox", "event", "store_error", "err", err)
+	}
+}
+
+func (r *run) upload(ctx context.Context, sink string, target sinkItem, img []byte) error {
 	if sink == sinkJellyfin {
 		return r.env.Jellyfin.PostBody(ctx, "/Items/"+target.ID+"/Images/Primary", "image/jpeg",
 			[]byte(base64.StdEncoding.EncodeToString(img)))
 	}
-	if err := r.env.Plex.Send(ctx, http.MethodPost, "/library/metadata/"+target.ID+"/posters", "image/jpeg", img); err != nil {
-		return err
-	}
-	return r.env.Plex.Do(ctx, http.MethodPut, fmt.Sprintf("/library/sections/%d/all?type=%d&id=%s&thumb.locked=1",
-		target.Section, target.Type, target.ID))
+	return r.env.Plex.Send(ctx, http.MethodPost, "/library/metadata/"+target.ID+"/posters", "image/jpeg", img)
 }
 
 // prepare is the full-size image as a JPEG carrying the stage's EXIF mark, so anyone can tell its uploads apart.

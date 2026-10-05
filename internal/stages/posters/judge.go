@@ -102,7 +102,7 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 	if len(todo) == 0 {
 		return nil
 	}
-	if r.guestsWatching(ctx) { // a batch upload is ~30 MB of a guest's upstream
+	if r.guestsWatching(ctx) {
 		r.count("judge_deferred", len(todo))
 		return nil
 	}
@@ -110,9 +110,9 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 	if err != nil {
 		return err
 	}
-	if p := llm.PriceOf(model); p.Assumed {
+	if p := llm.PriceOf(model.ID); p.Assumed {
 		r.env.Log.Warn("model missing from the price table; budgeting at a conservative price", "event", "price_assumed",
-			"model", model, "usd_per_mtok_in", p.Input, "usd_per_mtok_out", p.Output)
+			"model", model.ID, "usd_per_mtok_in", p.Input, "usd_per_mtok_out", p.Output)
 	}
 	if len(todo) >= r.opt.BatchMin {
 		return r.submitBatches(ctx, model, todo)
@@ -169,8 +169,9 @@ func order(key string, n int) []int {
 	return idx
 }
 
-// request builds one title's judge call and an upper bound on its input tokens.
-func (r *run) request(ctx context.Context, model string, it *row) (llm.Request, int, error) {
+// request builds one title's judge call and an upper bound on its input tokens. A model with adaptive thinking runs it
+// at low effort: scoring six thumbnails needs little, and thinking counts towards max_tokens.
+func (r *run) request(ctx context.Context, model llm.Model, it *row) (llm.Request, int, error) {
 	t := it.Title
 	what := map[kind]string{movie: "MOVIE", show: "TV SHOW", season: "TV SEASON"}[t.Kind]
 	head := fmt.Sprintf("%s: %s (%d). %d candidate posters follow.", what, t.Name, t.Year, len(it.Cands))
@@ -186,8 +187,12 @@ func (r *run) request(ctx context.Context, model string, it *row) (llm.Request, 
 		tokens += ((c.W + 27) / 28) * ((c.H + 27) / 28)
 	}
 	content = append(content, llm.Text("Score every candidate."))
-	return llm.Request{Model: model, MaxTokens: r.opt.MaxTokens, System: systemPrompt,
-		Messages: []llm.Message{{Role: "user", Content: content}}}, tokens, nil
+	req := llm.Request{Model: model.ID, MaxTokens: r.opt.MaxTokens, System: systemPrompt,
+		Messages: []llm.Message{{Role: "user", Content: content}}}
+	if model.LowEffort {
+		req.OutputConfig = &llm.EffortConfig{Effort: "low"}
+	}
+	return req, tokens, nil
 }
 
 func (r *run) reservation(model string, inputTokens int, batch bool) float64 {
@@ -195,22 +200,22 @@ func (r *run) reservation(model string, inputTokens int, batch bool) float64 {
 }
 
 // judgeNow judges one title through the normal API.
-func (r *run) judgeNow(ctx context.Context, model string, it *row) {
+func (r *run) judgeNow(ctx context.Context, model llm.Model, it *row) {
 	req, tokens, err := r.request(ctx, model, it)
 	if err != nil {
 		r.env.Log.Warn("judge request", "event", "judge_failed", "item", it.Title.Key, "err", err)
 		r.count("judge_failed", 1)
 		return
 	}
-	held := r.reservation(model, tokens, false)
-	id, err := r.reserve(ctx, it.Title.Key, setID(it.Cands), model, "sync", held)
+	held := r.reservation(model.ID, tokens, false)
+	id, err := r.reserve(ctx, it.Title.Key, setID(it.Cands), model.ID, "sync", held)
 	if err != nil {
 		r.budgetHit(err)
 		return
 	}
 	start := time.Now()
 	resp, err := r.llm.Messages(ctx, req)
-	cost := llm.PriceOf(model).Cost(resp.Usage, false)
+	cost := llm.PriceOf(model.ID).Cost(resp.Usage, false)
 	if errors.Is(err, llm.ErrUnknownOutcome) {
 		cost = held
 	}
@@ -220,7 +225,7 @@ func (r *run) judgeNow(ctx context.Context, model string, it *row) {
 		r.count("judge_failed", 1)
 		return
 	}
-	r.record(ctx, it, model, resp.Text(), id)
+	r.record(ctx, it, model.ID, resp.Text(), id)
 }
 
 // record turns an answer into the title's verdict; an unusable answer marks its (billed) call unusable.
@@ -285,9 +290,14 @@ func clip(s string) string {
 // ---- batches ----
 
 // submitBatches sends the backlog as Message Batches of at most BatchSize requests, each request reserved against
-// the budget first; results are collected by a later run.
-func (r *run) submitBatches(ctx context.Context, model string, todo []*row) error {
+// the budget first; results are collected by a later run. Each batch upload (~30 MB of the uplink) waits while a
+// guest watches.
+func (r *run) submitBatches(ctx context.Context, model llm.Model, todo []*row) error {
 	for start := 0; start < len(todo) && ctx.Err() == nil; start += r.opt.BatchSize {
+		if r.guestsWatching(ctx) {
+			r.count("judge_deferred", len(todo)-start)
+			return nil
+		}
 		chunk := todo[start:min(start+r.opt.BatchSize, len(todo))]
 		var reqs []llm.BatchRequest
 		var ids []int64
@@ -297,7 +307,7 @@ func (r *run) submitBatches(ctx context.Context, model string, todo []*row) erro
 				r.env.Log.Warn("judge request", "event", "judge_failed", "item", it.Title.Key, "err", err)
 				continue
 			}
-			id, err := r.reserve(ctx, it.Title.Key, setID(it.Cands), model, "batch", r.reservation(model, tokens, true))
+			id, err := r.reserve(ctx, it.Title.Key, setID(it.Cands), model.ID, "batch", r.reservation(model.ID, tokens, true))
 			if err != nil {
 				r.budgetHit(err)
 				break
@@ -321,7 +331,7 @@ func (r *run) submitBatches(ctx context.Context, model string, todo []*row) erro
 			return err
 		}
 		r.count("batch_requests", len(reqs))
-		r.env.Log.Info("batch submitted", "event", "batch_submitted", "batch", b.ID, "requests", len(reqs), "model", model)
+		r.env.Log.Info("batch submitted", "event", "batch_submitted", "batch", b.ID, "requests", len(reqs), "model", model.ID)
 	}
 	return nil
 }
@@ -508,35 +518,41 @@ func (r *run) budgetHit(err error) {
 	}
 }
 
-// model resolves an alias like "haiku:latest" once a day, keeping yesterday's answer if the Models API is down.
-func (r *run) model(ctx context.Context) (string, error) {
-	family, ok := strings.CutSuffix(r.opt.Model, ":latest")
+// model is the dated policy's choice at this run (env.LLM); a "family:latest" alias resolves once a day, keeping the
+// last answer if the Models API is down.
+func (r *run) model(ctx context.Context) (llm.Model, error) {
+	alias, err := r.env.LLM.Model(r.env.Now())
+	if err != nil {
+		return llm.Model{}, err
+	}
+	family, ok := strings.CutSuffix(alias, ":latest")
 	if !ok {
-		return r.opt.Model, nil
+		return llm.Model{ID: alias}, nil
 	}
 	var cached struct {
-		Alias, Model string
-		At           time.Time
+		Alias string
+		Model llm.Model
+		At    time.Time
 	}
-	found, err := r.env.Store.GetJSON(ctx, name, "model", &cached)
+	found, err := r.env.Store.GetJSON(ctx, name, "judge_model", &cached)
 	if err != nil {
-		return "", err
+		return llm.Model{}, err
 	}
-	found = found && cached.Alias == r.opt.Model
+	found = found && cached.Alias == alias
 	if found && r.env.Now().Sub(cached.At) < 24*time.Hour {
 		return cached.Model, nil
 	}
 	m, err := r.llm.Latest(ctx, family)
 	if err != nil {
 		if found {
-			r.env.Log.Warn("model list failed; keeping the last answer", "event", "model_resolve_failed", "model", cached.Model, "err", err)
+			r.env.Log.Warn("model list failed; keeping the last answer", "event", "model_resolve_failed", "model", cached.Model.ID, "err", err)
 			return cached.Model, nil
 		}
-		return "", err
+		return llm.Model{}, err
 	}
 	if m != cached.Model {
-		r.env.Log.Info("model resolved", "event", "model_resolved", "alias", r.opt.Model, "model", m)
+		r.env.Log.Info("model resolved", "event", "model_resolved", "alias", alias, "model", m.ID, "low_effort", m.LowEffort)
 	}
-	cached.Alias, cached.Model, cached.At = r.opt.Model, m, r.env.Now()
-	return m, r.env.Store.PutJSON(ctx, name, "model", cached)
+	cached.Alias, cached.Model, cached.At = alias, m, r.env.Now()
+	return m, r.env.Store.PutJSON(ctx, name, "judge_model", cached)
 }

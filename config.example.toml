@@ -96,23 +96,36 @@ ignore  = ["@eaDir", "#recycle", "#snapshot", "_archive", "_assets"] # never wat
 partial_suffixes = [".part", ".!qB"] # in-progress files (and dot files): keep a folder busy, never trigger on their own
 
 # The most artistic poster for every movie, show and season, on Jellyfin and Plex; replaces posters/posters.py.
-# Candidates: the owner's poster (pre-rename backup), TMDB (direct) and fanart.tv. Judge: Claude on the owner's own
-# Anthropic key, one vision call per title; a backlog goes through Message Batches (half price). Secrets are files in
-# secrets_dir: tmdb_read_token (or tmdb_api_key), fanart_api_key (optional), anthropic_api_key.
+# Candidates: the owner's poster (from a Plex DB backup and the export taken with it), TMDB and fanart.tv (the shared
+# clients). Judge: Claude on the owner's own Anthropic key (secrets_dir/anthropic_api_key), the model chosen by
+# [[llm.policy]], one vision call per title; a backlog goes through Message Batches (half price). Off until enabled:
+# even with dry_run, judging the backlog spends (about $5.50 with Sonnet 5.5, measured on the 12-title pilot).
 [stages.posters]
+enabled            = false
 every              = "6h"
 dry_run            = true            # judge only; review posters_items, then set false to upload
-model              = "haiku:latest"  # the newest model whose id contains "haiku", checked daily
-budget_usd         = 5               # all judge calls ever; a hard stop
-max_tokens         = 400
+budget_usd         = 12              # all judge calls ever; a hard stop
+max_tokens         = 1024            # thinking included
 batch_min          = 25              # fewer titles to judge than this: the normal API
 batch_size         = 200
 secrets_dir        = "/run/secrets"
 cache_dir          = "/state/posters" # thumbnails
+# One export: items.json and posters/ from export_customizations.py, and the Plex DB backup taken with them. Pointing
+# these at a newer export (before dry_run = false) merges it in: its uploads and picks win, its defaults never do.
 owner_items        = "/volume1/PlexMediaServer/backups/customizations/items.json"
 owner_posters      = "/volume1/PlexMediaServer/backups/customizations/posters"
-owner_backup_db    = "/volume1/PlexMediaServer/backups/pre-rename-20261005T0328Z/com.plexapp.plugins.library.db" # read once
+owner_backup_db    = "/volume1/PlexMediaServer/backups/pre-rename-20261005T0328Z/com.plexapp.plugins.library.db"
 plex_movie_section = 4
 plex_tv_section    = 2
 sink_index_every   = "24h"           # one item listing per app per day maps titles to the apps' ids
 mark               = "poster-curator 2026-10" # EXIF ImageDescription on every uploaded image
+
+# Which Claude model the stages that call one use, by date: the first rule whose `until` is still in the future wins
+# (`until` is exclusive; no `until` = for good). "<family>:latest" is the newest model whose id contains <family>,
+# looked up daily in the Models API, so a new model is used the day it ships. This is the default when no rule is set.
+[[llm.policy]]
+model = "sonnet:latest"
+until = 2026-11-05T08:00:00Z # 00:00 PST
+
+[[llm.policy]]
+model = "haiku:latest"

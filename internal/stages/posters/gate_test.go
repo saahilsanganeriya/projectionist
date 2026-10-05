@@ -7,8 +7,9 @@
 //	 POSTERS_GATE_DIR=… go test -tags gate -run TestPilotGate -v ./internal/stages/posters)
 //
 // Secrets come only from the GATE_* variables the command sets for its own process (never an ambient
-// ANTHROPIC_API_KEY) and reach the stage through Stage.Secret; nothing is written to disk. POSTERS_GATE_API and
-// POSTERS_GATE_MODEL point the judge at another Messages-compatible endpoint.
+// ANTHROPIC_API_KEY). The Anthropic key reaches the stage through Stage.Secret; the shared TMDB and fanart.tv
+// clients read files, so those two are written 0600 into the test's temp dir, which is removed when it ends. The
+// judge follows the default policy; POSTERS_GATE_MODEL (an id or "family:latest") replaces it.
 package posters
 
 import (
@@ -24,9 +25,12 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"projectionist/internal/fake"
+	"projectionist/internal/fanart"
+	"projectionist/internal/llm"
 	"projectionist/internal/obs"
 	"projectionist/internal/stage"
 	"projectionist/internal/store"
+	"projectionist/internal/tmdb"
 )
 
 var pilotKeys = []string{"movie:tmdb-422", "movie:tmdb-389", "movie:tmdb-147", "movie:tmdb-20453", "movie:tmdb-1351923",
@@ -44,13 +48,6 @@ func TestPilotGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	api, model := os.Getenv("POSTERS_GATE_API"), os.Getenv("POSTERS_GATE_MODEL")
-	if api == "" {
-		api = "https://api.anthropic.com"
-	}
-	if model == "" {
-		model = "haiku:latest"
-	}
 	opts := fmt.Sprintf(`movies_root = %q
 tv_root = %q
 only = [%s]
@@ -59,19 +56,28 @@ cache_dir = %q
 owner_items = %q
 owner_posters = %q
 owner_backup_db = %q
-anthropic_api = %q
-model = %q
 budget_usd = 0.10
 `, filepath.Join(dir, "lib/Movies"), filepath.Join(dir, "lib/TV"), `"`+strings.Join(pilotKeys, `", "`)+`"`,
 		filepath.Join(dir, "cache"), filepath.Join(dir, "backup/items.json"), filepath.Join(dir, "backup/posters"),
-		filepath.Join(dir, "backup/plex-backup-extract.db"), api, model)
+		filepath.Join(dir, "backup/plex-backup-extract.db"))
 	env := fake.NewEnv(t, nil).Env // fake Plex and Jellyfin: nobody watching, and dry-run uploads nothing
 	env.Log, env.Store = obs.NewLogger(os.Stderr, "text", "info").With("stage", name), st
 	env.Now = func() time.Time { return time.Now().UTC() }
 	env.Options = func(v any) error { return decodeTOML(opts, v) }
-	secrets := map[string]string{"tmdb_read_token": "GATE_TMDB", "fanart_api_key": "GATE_FANART", "anthropic_api_key": "GATE_ANTHROPIC"}
+	secretFile := func(name, envVar string) string {
+		path := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(path, []byte(os.Getenv(envVar)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	env.TMDB = tmdb.New(tmdb.Options{ReadTokenFile: secretFile("tmdb_read_token", "GATE_TMDB")}, st)
+	env.Fanart = fanart.New(fanart.Options{APIKeyFile: secretFile("fanart_api_key", "GATE_FANART")}, st)
+	if m := os.Getenv("POSTERS_GATE_MODEL"); m != "" {
+		env.LLM = llm.Policy{{Model: m}}
+	}
 	s := Stage{Secret: func(n string) (string, error) {
-		if v := os.Getenv(secrets[n]); v != "" {
+		if v := os.Getenv("GATE_ANTHROPIC"); n == "anthropic_api_key" && v != "" {
 			return v, nil
 		}
 		return "", os.ErrNotExist
@@ -93,7 +99,10 @@ budget_usd = 0.10
 		"Aftersun": "movie:tmdb-965150", "2 Fast 2 Furious": "movie:tmdb-584", "Seinfeld": "show:tmdb-1400",
 		"Adolescence": "show:tmdb-249042", "Abbott Elementary - Season 2": "season:tmdb-125935:2", "1899 - Season 1": "season:tmdb-90669:1"}
 	for _, p := range pilot {
-		python[pyKey[p.Title]] = strings.Replace(p.Choice, "backup:", "owner:", 1)
+		python[pyKey[p.Title]] = p.Choice
+		if f, ok := strings.CutPrefix(p.Choice, "backup:"); ok {
+			python[pyKey[p.Title]] = "owner:" + filepath.Join(dir, "backup/posters", f)
+		}
 	}
 	for _, k := range pilotKeys {
 		var cands, verdict string
@@ -120,10 +129,25 @@ budget_usd = 0.10
 		t.Logf("%-22s rule=%-8s ours=[%s] python=[%s] %s | %s", k, v.Rule, label(v.Choice), label(python[k]), same, v.Reason)
 	}
 	var calls, in, out int
-	var cost float64
-	st.DB().QueryRow(`SELECT count(*), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0), coalesce(sum(cost_usd),0)
-		FROM posters_calls WHERE at >= ? AND state != 'pending'`, started).Scan(&calls, &in, &out, &cost)
-	t.Logf("this run: %d calls, %d input + %d output tokens, $%.5f", calls, in, out, cost)
+	var cost, held float64
+	var model string
+	st.DB().QueryRow(`SELECT count(*), coalesce(sum(input_tokens),0), coalesce(sum(output_tokens),0), coalesce(sum(cost_usd),0),
+		coalesce(max(model), '') FROM posters_calls WHERE at >= ? AND state != 'pending'`, started).Scan(&calls, &in, &out, &cost, &model)
+	rows, _ := st.DB().Query(`SELECT item, input_tokens, output_tokens, cost_usd, llm_ms, state FROM posters_calls WHERE at >= ? ORDER BY id`, started)
+	for rows.Next() {
+		var item, state string
+		var i, o, ms int
+		var c float64
+		rows.Scan(&item, &i, &o, &c, &ms, &state)
+		t.Logf("call %-22s %s in=%d out=%d $%.5f %d ms", item, state, i, o, c, ms)
+	}
+	rows.Close()
+	st.DB().QueryRow(`SELECT coalesce(sum(reserved_usd), 0) FROM posters_calls`).Scan(&held)
+	t.Logf("this run: model %s, %d calls, %d input + %d output tokens, $%.5f (still held: $%.5f)", model, calls, in, out, cost, held)
+	if calls > 0 {
+		t.Logf("per judged title: %.0f input + %.0f output tokens, $%.6f now, $%.6f in a batch", float64(in)/float64(calls),
+			float64(out)/float64(calls), cost/float64(calls), cost/float64(calls)/2)
+	}
 }
 
 func decodeTOML(text string, v any) error {
