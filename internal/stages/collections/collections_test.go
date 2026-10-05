@@ -196,7 +196,10 @@ func serveJellyfin(h *fake.Harness, a *app, posters map[string]string, ids ...in
 		h.Jellyfin.HandleFunc("POST", "/Items/"+c.ID+"/Images/Primary", func(w http.ResponseWriter, r *http.Request) {
 			raw, _ := io.ReadAll(r.Body)
 			img, err := base64.StdEncoding.DecodeString(string(raw))
-			if err != nil || refused(w, "poster "+c.Title) {
+			if refused(w, "poster "+c.Title) {
+				return
+			}
+			if err != nil {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
