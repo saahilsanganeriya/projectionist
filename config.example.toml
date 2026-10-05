@@ -110,6 +110,31 @@ work_dir     = "/volume1/media/.projectionist/remote4k" # same share as the libr
 status_file  = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
 list_timeout = "5s" # an app slower than this leaves its half of the list empty for that run
 
+# Watch state (played, play count, resume position, rating) kept the same in Plex and Jellyfin from projectionist's
+# own record: Plex's webhook and the Jellyfin Webhook plugin push plays to /hooks/{plex,jellyfin} (a Jellyfin push
+# carries no rating: ratings come from Plex and Letterboxd); the history that lived only inside the apps is imported
+# once (newest Plex DB backup copy, Jellyfin played/resumable/rated items). The listings and the imports wait while
+# anyone but the owner is watching; the writes do not.
+[stages.jfsync]
+every          = "5m"
+apply          = true # false: plan only (no app writes); plan_file lists what would be written
+# plan_file    = "/volume1/PlexMediaServer/projectionist-test/jfsync/plan.tsv"
+movies_section = 4
+tv_section     = 2
+# One item listing per app per day (the sources rule) maps app ids to the library's {tmdb-N} identity. It runs after
+# the run's writes (Plex's in pages of 1,000); a failed one alerts and is tried again a day later, the old listing staying in
+# use. A play of an item added since the last listing waits for the next one. Only an app never listed retries sooner.
+address_every  = "24h"
+list_timeout   = "30m" # per request; 2026-10-05 on the loaded NAS, mid Jellyfin first scan: Jellyfin 4m56s-9m04s, Plex 4m55s-5m41s
+# Mount read-only; the newest *.db is read once per person. Take a fresh copy (backup_plex_db.sh) just before the
+# first run: plays after the copy and before the webhook is registered are not recorded.
+plex_backups   = "/volume1/PlexMediaServer/backups"
+webhook_url    = "http://127.0.0.1:8097/hooks/plex" # registered on the owner's plex.tv account; "" = leave it alone
+users = [
+  { name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" },
+  { name = "roger",  plex = "roger",             jellyfin = "roger" },
+]
+
 # Keeps "<dir>/.details/<video>.txt" true for every video in the scheme, from ffprobe and the rename logs;
 # replaces rename/write_details_files.py. Bounds are per run; probed and scanned files are cached.
 [stages.details]
