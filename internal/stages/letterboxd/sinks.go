@@ -195,6 +195,7 @@ type plexListing struct {
 	TotalSize int `json:"totalSize"`
 	Metadata  []struct {
 		RatingKey  string  `json:"ratingKey"`
+		PlexGUID   string  `json:"guid"` // the string "plex://movie/..."; without its own field Go's case-insensitive keys pour it into Guid
 		Type       string  `json:"type"`
 		Title      string  `json:"title"`
 		ViewCount  int     `json:"viewCount"`

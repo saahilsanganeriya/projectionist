@@ -114,7 +114,8 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 		var md []map[string]any
 		for _, k := range sortedKeys(a.plex) {
 			f := a.plex[k]
-			md = append(md, map[string]any{"ratingKey": k, "viewCount": f.views, "userRating": f.rating,
+			// Real Plex sends both "guid" (a string) and "Guid" (a list); Go's case-insensitive keys must not mix them.
+			md = append(md, map[string]any{"ratingKey": k, "guid": "plex://movie/" + k, "viewCount": f.views, "userRating": f.rating,
 				"Guid": []map[string]string{{"id": "imdb://tt0"}, {"id": fmt.Sprintf("tmdb://%d", f.tmdb)}}})
 		}
 		reply(w, map[string]any{"totalSize": len(md), "Metadata": md})
@@ -487,7 +488,7 @@ func TestPlexWatchlistMirror(t *testing.T) {
 			if strings.HasPrefix(k, "show") {
 				kind, id = "show", strings.TrimPrefix(k, "show")
 			}
-			md = append(md, map[string]any{"ratingKey": k, "type": kind, "Guid": []map[string]string{{"id": "tmdb://" + id}}})
+			md = append(md, map[string]any{"ratingKey": k, "type": kind, "guid": "plex://" + kind + "/" + k, "Guid": []map[string]string{{"id": "tmdb://" + id}}})
 		}
 		json.NewEncoder(rw).Encode(map[string]any{"MediaContainer": map[string]any{"totalSize": len(md), "Metadata": md}})
 	})
