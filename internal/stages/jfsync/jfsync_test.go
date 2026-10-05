@@ -28,6 +28,7 @@ const (
 	alien  = movies + "Alien (1979) {tmdb-348}/Alien (1979) {tmdb-348} - 2160p.mkv" // not in Jellyfin yet
 	clerks = movies + "Clerks (1994) {tmdb-2292}/Clerks (1994) {tmdb-2292}.mkv"
 	dune   = movies + "Dune (2021) {tmdb-438631}/Dune (2021) {tmdb-438631}.mkv"
+	fargo  = movies + "Fargo (1996) {tmdb-275}/Fargo (1996) {tmdb-275}.mkv"
 	wire   = "/lib/TV/The Wire (2002) {tmdb-1438}/Season 01/The Wire (2002) - S01E01-E02 - The Target.mkv"
 )
 
@@ -76,10 +77,10 @@ func (w *writes) since(n int) []string {
 	return append([]string(nil), w.calls[n:]...)
 }
 
-// newHarness: Plex holds Heat (re-created after the backup: ratingKey 13, was 10), Ran, Alien, Clerks, Dune and both
-// episodes of a two-episode Wire file; Jellyfin holds all but Alien, the Wire file as one item. History: saahil
-// watched Heat (twice), Alien, Clerks, Dune in Plex and is 30 min into Ran in Jellyfin; roger watched Wire E02 in
-// Plex and Ran in Jellyfin.
+// newHarness: Plex holds Heat (re-created after the backup: ratingKey 13, was 10), Ran, Alien, Clerks, Dune, Fargo
+// and both episodes of a two-episode Wire file; Jellyfin holds all but Alien, the Wire file as one item. History:
+// saahil watched Heat (twice), Alien, Clerks, Dune, Fargo in Plex, is 30 min into Ran in Jellyfin and 20 min into a
+// rewatch of Clerks there; roger watched Wire E02 in Plex and Ran in Jellyfin.
 func newHarness(t *testing.T, jellyfinStatus int) (h *fake.Harness, w *writes, options, plan string) {
 	h = fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "mid"})
 	dir := t.TempDir()
@@ -90,6 +91,7 @@ func newHarness(t *testing.T, jellyfinStatus int) (h *fake.Harness, w *writes, o
 	writeBackup(t, filepath.Join(dir, "backups", "pre-y.db"), [][]any{
 		{"saahilsanganeriya", 10, 0, heat, 2, 0, T1}, {"saahilsanganeriya", 12, 0, alien, 1, 0, T1},
 		{"saahilsanganeriya", 14, 0, clerks, 1, 0, T1}, {"saahilsanganeriya", 15, 0, dune, 1, 0, T1},
+		{"saahilsanganeriya", 16, 0, fargo, 1, 0, T1},
 		{"roger", 21, 2, wire, 1, 0, T2},
 	})
 	plan = filepath.Join(dir, "plan.tsv")
@@ -105,7 +107,7 @@ users = [{ name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" }, {
 	}
 	h.Plex.Handle("GET", "/accounts", 200, `{"MediaContainer":{"Account":[{"id":1,"name":"saahilsanganeriya"},{"id":578,"name":"roger"}]}}`)
 	h.Plex.Handle("GET", "/library/sections/4/all", 200, `{"MediaContainer":{"Metadata":[`+part("13", 0, heat)+","+
-		part("11", 0, ran)+","+part("12", 0, alien)+","+part("14", 0, clerks)+","+part("15", 0, dune)+`]}}`)
+		part("11", 0, ran)+","+part("12", 0, alien)+","+part("14", 0, clerks)+","+part("15", 0, dune)+","+part("16", 0, fargo)+`]}}`)
 	h.Plex.Handle("GET", "/library/sections/2/all", 200, `{"MediaContainer":{"Metadata":[`+part("20", 1, wire)+","+part("21", 2, wire)+`]}}`)
 	h.Plex.Handle("GET", "/api/v2/user/webhooks", 200, `<webhooks><webhook url="http://tautulli:8181/hook"/></webhooks>`)
 	h.Plex.Handle("POST", "/api/v2/user/webhooks", 201, ``)
@@ -128,17 +130,19 @@ users = [{ name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" }, {
 		q := r.URL.Query()
 		switch {
 		case q.Get("userId") == "u1" && q.Get("filters") == "IsResumable":
-			rw.Write([]byte(`{"Items":[{"Id":"b1","Path":"` + ran + `","UserData":{"PlaybackPositionTicks":18000000000,"LastPlayedDate":"2025-01-01T00:00:00.0000000Z"}}]}`))
+			rw.Write([]byte(`{"Items":[{"Id":"b1","Path":"` + ran + `","UserData":{"PlaybackPositionTicks":18000000000,"LastPlayedDate":"2025-01-01T00:00:00.0000000Z"}},` +
+				`{"Id":"c1","Path":"` + clerks + `","UserData":{"PlaybackPositionTicks":12000000000,"LastPlayedDate":"2025-03-01T00:00:00Z"}}]}`))
 		case q.Get("userId") == "u2" && q.Get("isPlayed") == "true":
 			rw.Write([]byte(`{"Items":[{"Id":"b1","Path":"` + ran + `","UserData":{"Played":true,"PlayCount":1,"LastPlayedDate":"2025-02-01T00:00:00Z"}}]}`))
 		case q.Get("userId") != "":
 			rw.Write([]byte(`{"Items":[]}`))
 		default:
 			rw.Write([]byte(`{"Items":[{"Id":"a1","Path":"` + heat + `"},{"Id":"b1","Path":"` + ran + `"},{"Id":"c1","Path":"` +
-				clerks + `"},{"Id":"d1","Path":"` + dune + `"},{"Id":"e1","Path":"` + wire + `"},{"Id":"x1","Path":"/lib/Home Videos/x.mkv"}]}`))
+				clerks + `"},{"Id":"d1","Path":"` + dune + `"},{"Id":"e1","Path":"` + wire + `"},{"Id":"f1","Path":"` + fargo +
+				`"},{"Id":"x1","Path":"/lib/Home Videos/x.mkv"}]}`))
 		}
 	})
-	for _, id := range []string{"a1", "b1", "c1", "d1", "e1"} {
+	for _, id := range []string{"a1", "b1", "c1", "d1", "e1", "f1"} {
 		h.Jellyfin.HandleFunc("POST", "/UserItems/"+id+"/UserData", func(rw http.ResponseWriter, r *http.Request) {
 			body, _ := json.Marshal(json.RawMessage(mustRead(r)))
 			w.add(r.URL.Path + "?" + r.URL.RawQuery + " " + string(body))
@@ -178,7 +182,9 @@ func plexHook(t *testing.T, h *fake.Harness, payload string) {
 }
 
 // Catches: a dry run that writes; a state written back to the app it came from (Heat's re-created Plex item would
-// be scrobbled again, adding a play); a friend's write sent with the owner's token; an existing plex.tv webhook
+// be scrobbled again, adding a play); Jellyfin's "not played" on a part-watched item unmarking a Plex play, or the
+// Plex history not counted as held (Clerks would be unscrobbled or scrobbled again); a friend's write sent with the
+// owner's token; an existing plex.tv webhook
 // dropped when ours is added; a rerun that writes again; a pushed play not reaching the other app; and a pushed
 // play not counted as held by the app that pushed it (Plex would be scrobbled again, adding a play).
 func TestRunTwoWay(t *testing.T) {
@@ -188,10 +194,11 @@ func TestRunTwoWay(t *testing.T) {
 	if len(w.since(0)) != 0 || len(h.Plex.Calls("POST", "/api/v2/user/webhooks")) != 0 {
 		t.Fatalf("dry run wrote: %v", w.since(0))
 	}
-	if raw, _ := os.ReadFile(plan); strings.Count(string(raw), "\n") != 7 { // header + 6 planned writes
+	if raw, _ := os.ReadFile(plan); strings.Count(string(raw), "\n") != 8 { // header + 7 planned writes
 		t.Fatalf("plan:\n%s", raw)
 	}
-	if rep.Counts["pending.jellyfin.saahil"] != 1 || rep.Counts["jellyfin_from_plex.saahil"] != 3 || rep.Counts["plex_from_jellyfin.roger"] != 1 {
+	if rep.Counts["pending.jellyfin.saahil"] != 1 || rep.Counts["jellyfin_from_plex.saahil"] != 3 ||
+		rep.Counts["plex_from_jellyfin.saahil"] != 2 || rep.Counts["plex_from_jellyfin.roger"] != 1 {
 		t.Fatalf("counts %v", rep.Counts)
 	}
 
@@ -202,13 +209,14 @@ func TestRunTwoWay(t *testing.T) {
 		`/UserItems/a1/UserData?userId=u1 {"LastPlayedDate":"2024-08-09T00:00:00Z","PlayCount":2,"PlaybackPositionTicks":0,"Played":true}`,
 		`/UserItems/e1/UserData?userId=u2 {"LastPlayedDate":"2024-09-01T00:00:00Z","PlayCount":1,"PlaybackPositionTicks":0,"Played":true}`,
 		"owner /:/progress?identifier=com.plexapp.plugins.library&key=11&time=1800000&state=stopped",
+		"owner /:/progress?identifier=com.plexapp.plugins.library&key=14&time=1200000&state=stopped", // Clerks stays watched
 		"friend /:/scrobble?identifier=com.plexapp.plugins.library&key=11",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing write %s in\n%s", want, got)
 		}
 	}
-	if n := len(w.since(0)); n != 6 || strings.Contains(got, "key=13") {
+	if n := len(w.since(0)); n != 7 || strings.Contains(got, "key=13") || strings.Contains(got, "scrobble?identifier=com.plexapp.plugins.library&key=14") {
 		t.Errorf("%d writes:\n%s", n, got)
 	}
 	both := url.Values{"urls[]": {"http://tautulli:8181/hook", "http://127.0.0.1:8097/hooks/plex"}}

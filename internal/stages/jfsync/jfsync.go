@@ -181,16 +181,12 @@ func pick(states map[watch.Key]watch.State, person string, items []string, cover
 	return best, found
 }
 
-// view is the part of a state an app holds: Plex keeps no settable play count, and an app's rating is never
-// cleared (Jellyfin's API cannot), so a state without a rating keeps the app's.
+// view is the part of a state an app holds: Plex keeps no play count it would let anyone set.
 func view(app string, want, have watch.State) (w, h watch.State) {
 	w = watch.State{Played: want.Played, Plays: want.Plays, PositionMs: want.PositionMs, Rating: want.Rating}
 	h = watch.State{Played: have.Played, Plays: have.Plays, PositionMs: have.PositionMs, Rating: have.Rating}
 	if app == plexApp {
 		w.Plays, h.Plays = 0, 0
-	}
-	if w.Rating == nil {
-		w.Rating = h.Rating
 	}
 	return w, h
 }
