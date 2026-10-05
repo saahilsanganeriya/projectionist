@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"projectionist/internal/lbpace"
 )
 
 // errChallenged is Cloudflare refusing a page (403/429/503, "Just a moment..."). Deep /films/ pages and /json/
@@ -27,17 +29,15 @@ var errChallenged = errors.New("letterboxd: challenged")
 // errBudget means this run spent its request budget; the work resumes next run.
 var errBudget = errors.New("letterboxd: request budget spent")
 
-// fetcher is the only way the stage talks to Letterboxd: one request per interval across letterboxd.com and
-// boxd.it, a browser User-Agent with a contact note, redirects returned rather than followed, a per-run budget.
+// fetcher is the only way the stage talks to Letterboxd: every request waits on the process-wide limiter
+// (lbpace: one request per 2 s across letterboxd.com, boxd.it and every stage), a browser User-Agent with a contact
+// note, redirects returned rather than followed, a per-run budget.
 type fetcher struct {
-	http     *http.Client
-	ua       string
-	interval time.Duration
-	budget   int
-	now      func() time.Time
-	sleep    func(context.Context, time.Duration) error
-	last     time.Time
-	fetches  int
+	http    *http.Client
+	ua      string
+	pace    *lbpace.Limiter
+	budget  int
+	fetches int
 }
 
 type page struct {
@@ -50,12 +50,10 @@ func (f *fetcher) get(ctx context.Context, url string, hdr map[string]string) (p
 	if f.fetches >= f.budget {
 		return page{}, errBudget
 	}
-	if wait := f.interval - f.now().Sub(f.last); !f.last.IsZero() && wait > 0 {
-		if err := f.sleep(ctx, wait); err != nil {
-			return page{}, err
-		}
+	if err := f.pace.Wait(ctx); err != nil {
+		return page{}, err
 	}
-	f.last, f.fetches = f.now(), f.fetches+1
+	f.fetches++
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return page{}, err
@@ -183,6 +181,7 @@ var (
 	gridRating = regexp.MustCompile(`class="rating[^"]*\brated-(\d+)"`)
 	nameYear   = regexp.MustCompile(`^(.*) \((\d{4})\)$`)
 	nextPage   = regexp.MustCompile(`<a class="next" href="[^"]*/page/(\d+)/"`)
+	numEntries = regexp.MustCompile(`data-num-entries="(\d+)"`)
 )
 
 // parseGrid returns the films on one grid page and whether an older page follows.
@@ -208,6 +207,17 @@ func parseGrid(body []byte) (films []gridFilm, hasNext bool) {
 	return films, nextPage.Match(body)
 }
 
+// statedCount is the size of the whole list as a watchlist page states it (every page of it, page 1 included);
+// ok is false when the page states none.
+func statedCount(body []byte) (n int, ok bool) {
+	m := numEntries.FindSubmatch(body)
+	if m == nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(string(m[1]))
+	return n, err == nil
+}
+
 func splitNameYear(s string) (string, int) {
 	if m := nameYear.FindStringSubmatch(s); m != nil {
 		y, _ := strconv.Atoi(m[2])
@@ -223,7 +233,9 @@ var (
 	bodyKind = regexp.MustCompile(`<body[^>]*\bdata-tmdb-type="([a-z]+)"`)
 )
 
-// parseFilmPage reads the TMDB id and type ("movie" or "tv") from the page's <body>; 0 when the page names none.
+// parseFilmPage reads the TMDB id and type ("movie" or "tv") from the page's <body>. A real film page always names
+// the type, with an empty id when TMDB has no entry (TV miniseries: data-tmdb-type="movie" data-tmdb-id=""); kind is
+// "" only for a page that is not a film page.
 func parseFilmPage(body []byte) (tmdb int, kind string) {
 	if m := bodyTMDB.FindSubmatch(body); m != nil {
 		tmdb, _ = strconv.Atoi(string(m[1]))

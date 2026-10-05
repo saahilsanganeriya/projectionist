@@ -715,10 +715,11 @@ type jfItem struct {
 	Path        string            `json:"Path"`
 	ProviderIDs map[string]string `json:"ProviderIds"`
 	UserData    struct {
-		PlayCount      int      `json:"PlayCount"`
-		Played         bool     `json:"Played"`
-		LastPlayedDate string   `json:"LastPlayedDate"`
-		Rating         *float64 `json:"Rating"`
+		PlayCount        int      `json:"PlayCount"`
+		Played           bool     `json:"Played"`
+		PlayedPercentage float64  `json:"PlayedPercentage"` // of the resume point; absent (0) without one
+		LastPlayedDate   string   `json:"LastPlayedDate"`
+		Rating           *float64 `json:"Rating"`
 	} `json:"UserData"`
 }
 
@@ -782,12 +783,13 @@ func (r *run) jellyfinSnapshot(ctx context.Context, force bool) (sinkMeta, map[i
 	if m.UserID == "" {
 		return m, nil, false, fmt.Errorf("jellyfin: no user %q", r.opt.JellyfinUser)
 	}
-	fresh := map[int]have{}
+	fresh, finished := map[int]have{}, map[int]bool{}
 	if err := r.jfPages(ctx, b, "userId="+m.UserID+"&IncludeItemTypes=Movie&Recursive=true&Fields=Path,ProviderIds&EnableImages=false&EnableUserData=true", func(it jfItem) {
 		id := jfTMDB(it.Path, it.ProviderIDs)
 		if id == 0 {
 			return
 		}
+		finished[id] = it.UserData.PlayedPercentage >= creditsFrom
 		h := have{Item: it.ID, Plays: it.UserData.PlayCount, Played: it.UserData.Played}
 		if it.UserData.Rating != nil {
 			h.Rating = int(*it.UserData.Rating + 0.5)
@@ -799,6 +801,7 @@ func (r *run) jellyfinSnapshot(ctx context.Context, force bool) (sinkMeta, map[i
 	}); err != nil {
 		return m, nil, false, err
 	}
+	r.jfFinished = finished
 	m.Collection = ""
 	if r.opt.Collection != "" {
 		if err := r.call(ctx, b, func() (err error) { m.Collection, err = r.jfCollectionID(ctx, m.UserID); return err }); err != nil {
@@ -835,13 +838,19 @@ func (r *run) jfCollectionID(ctx context.Context, userID string) (string, error)
 }
 
 // jfUserData is Jellyfin's UpdateUserItemDataDto: absent (nil) fields are left as they are, so a write here
-// never touches favourites, likes or resume points.
+// never touches favourites or likes, and a resume point only as creditsFrom says.
 type jfUserData struct {
-	Played         *bool    `json:"Played,omitempty"`
-	PlayCount      *int     `json:"PlayCount,omitempty"`
-	LastPlayedDate *string  `json:"LastPlayedDate,omitempty"`
-	Rating         *float64 `json:"Rating,omitempty"`
+	Played                *bool    `json:"Played,omitempty"`
+	PlayCount             *int     `json:"PlayCount,omitempty"`
+	PlaybackPositionTicks *int64   `json:"PlaybackPositionTicks,omitempty"`
+	LastPlayedDate        *string  `json:"LastPlayedDate,omitempty"`
+	Rating                *float64 `json:"Rating,omitempty"`
 }
+
+// creditsFrom is the resume point, in percent, from which a film marked watched also leaves Continue Watching: he
+// stopped in the end credits (the owner's call). Marking Played alone keeps the point, where Jellyfin's own Mark
+// Played clears it; an earlier one may be a rewatch in progress, so it stays.
+const creditsFrom = 85.0
 
 func (r *run) syncJellyfin(ctx context.Context, wants []want, scope map[int]bool) error {
 	const app = "jellyfin"
@@ -860,6 +869,10 @@ func (r *run) syncJellyfin(ctx context.Context, wants []want, scope map[int]bool
 		if u.Played {
 			played := true
 			body.Played = &played
+			if r.jfFinished[u.TMDB] {
+				var start int64
+				body.PlaybackPositionTicks = &start
+			}
 		}
 		if u.Plays > u.FromPlays {
 			body.PlayCount = &u.Plays

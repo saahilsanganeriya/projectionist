@@ -102,16 +102,16 @@ qbittorrent_url       = "http://127.0.0.1:8080" # 403 counts as up: the WebUI an
 # Letterboxd → Plex + Jellyfin for the owner: watched, play counts, last-played (Jellyfin), star ratings, and his
 # watchlist as a "Watchlist" collection promoted to Plex Home. Letterboxd is the truth; nothing is ever unwatched.
 [stages.letterboxd]
-every          = "30m"                    # the RSS feed is read every run; grid pages once per pages_every
+every          = "30m"                    # the RSS feed is read every run; grid pages once per pages_every. Letterboxd is paced
+                                          # at one request per 2 s for the whole process, shared with the lists stage
 user           = "saahilsan"
-interval       = "2s"                     # between two Letterboxd requests (letterboxd.com and boxd.it together); 2s is the floor
 max_fetches    = 400                      # Letterboxd requests per run; the first backfill resumes over a few runs
 pages_every    = "24h"                    # watchlist + watched-films grid crawl
 export_dir     = "/volume1/docker/projectionist/data/letterboxd" # unzipped account exports; the newest folder wins
 movies_dir     = "/volume1/media/Movies"
 missing_file   = "/volume1/media/_watchlist-missing.txt" # watchlist films not on the NAS; "" = none
 sink_refresh   = "24h"                    # re-read what Plex (one paged listing) and plex.tv hold this often; Plex also before writes, once a day per film
-jellyfin_refresh = "0s"                   # 0 = re-read Jellyfin every run (15-30 s), so films its first scan indexes are picked up within one run; "24h" once the scan is done
+jellyfin_refresh = "24h"                  # re-read what Jellyfin holds this often (15-30 s a read); also before writing, once a day per film
 plex_section   = 4
 jellyfin_user  = "saahil"
 collection     = "Watchlist"              # "" = no Watchlist collection

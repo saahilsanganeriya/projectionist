@@ -2,15 +2,18 @@
 // last-played date, his star ratings, and his watchlist as a "Watchlist" collection promoted to Plex Home.
 //
 // Letterboxd is the truth; Plex and Jellyfin are sinks. Inputs, all public and fetched politely (one request per
-// 2 s, every answer that can be cached is): the RSS feed (every run), the watchlist and watched-films grid pages
-// (daily), the film pages (TMDB id, cached forever), and the account export unzipped on the NAS (the backfill).
-// Films join the library on the TMDB id in the folder names. Per app the stage keeps a snapshot of what the app
-// holds (Plex: one paged listing, re-read daily and before a run that writes to it, at most once a day per film;
-// Jellyfin: the same, every jellyfin_refresh, whose default 0 re-reads it every run while its first library scan
-// adds films) and updates it after each write, so a rerun writes nothing. Watched in an app is its own mark (a
-// Jellyfin play count rises when playback starts). A film whose writes fail in 3 runs in a row is parked, and the
-// owner told once. Diary viewings count once each, by the viewing id that the feed guid and the export's boxd.it
-// code both carry; an entry he deletes is dropped, and he is told, since a view already written stays.
+// 2 s for the whole process, shared with every stage through lbpace; every answer that can be cached is): the RSS
+// feed (every run), the watchlist and watched-films grid pages (daily), the film pages (TMDB id, cached forever),
+// and the account export unzipped on the NAS (the backfill). An answer the stage cannot read as Letterboxd's (a
+// watchlist page not stating its size, or a crawl whose films do not add up to it; a film page naming no TMDB type;
+// a boxd.it answer without a Location) is a challenge, backed off and never cached, so new markup cannot shrink the
+// watchlist or mark a film unresolvable. Films join the library on the TMDB id in the folder names. Per app the
+// stage keeps a snapshot of what the app holds (one paged listing, re-read every sink_refresh or jellyfin_refresh,
+// both daily, and before a run that writes to it, at most once a day per film) and updates it after each write, so
+// a rerun writes nothing. Watched in an app is its own mark (a Jellyfin play count rises when playback starts). A
+// film whose writes fail in 3 runs in a row is parked, and the owner told once. Diary viewings count once each, by
+// the viewing id that the feed guid and the export's boxd.it code both carry; an entry he deletes is dropped, and
+// he is told, since a view already written stays.
 //
 // Never: unwatch, lower a play count, clear a rating, or remove anything this stage did not add. Plex takes no
 // last-played date (a scrobble stamps "now"). Reviews are not synced: a Plex review is a community post whose
@@ -19,7 +22,6 @@
 package letterboxd
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -31,6 +33,7 @@ import (
 	"sync"
 	"time"
 
+	"projectionist/internal/lbpace"
 	"projectionist/internal/library"
 	"projectionist/internal/stage"
 	"projectionist/internal/store"
@@ -43,14 +46,13 @@ type Options struct {
 	LetterboxdURL string        `toml:"letterboxd_url"`
 	BoxdURL       string        `toml:"boxd_url"`
 	UserAgent     string        `toml:"user_agent"`
-	Interval      time.Duration `toml:"interval"`    // between two Letterboxd requests; at least minInterval
 	MaxFetches    int           `toml:"max_fetches"` // Letterboxd requests per run; the backfill resumes next run
 	PagesEvery    time.Duration `toml:"pages_every"` // watchlist + watched grid crawl
 	ExportDir     string        `toml:"export_dir"`  // holds letterboxd-<user>-<date>-utc/ folders; newest wins
 	MoviesDir     string        `toml:"movies_dir"`
 	MissingFile   string        `toml:"missing_file"`     // watchlist films not on the NAS; "" = none
 	SinkRefresh   time.Duration `toml:"sink_refresh"`     // re-read what Plex and plex.tv hold this often (Plex also before writing)
-	JFRefresh     time.Duration `toml:"jellyfin_refresh"` // 0 = every run, so films Jellyfin indexes are picked up within one run
+	JFRefresh     time.Duration `toml:"jellyfin_refresh"` // re-read what Jellyfin holds this often (also before writing)
 
 	PlexSection   int    `toml:"plex_section"`
 	JellyfinUser  string `toml:"jellyfin_user"`
@@ -69,13 +71,13 @@ func defaults() Options {
 		LetterboxdURL: "https://letterboxd.com",
 		BoxdURL:       "https://boxd.it",
 		UserAgent:     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36 (projectionist; personal sync of one member's own public diary)",
-		Interval:      minInterval,
 		MaxFetches:    400,
 		PagesEvery:    24 * time.Hour,
 		ExportDir:     "/volume1/docker/projectionist/data/letterboxd",
 		MoviesDir:     "/volume1/media/Movies",
 		MissingFile:   "/volume1/media/_watchlist-missing.txt",
 		SinkRefresh:   24 * time.Hour,
+		JFRefresh:     24 * time.Hour,
 		PlexSection:   4,
 		JellyfinUser:  "saahil",
 		Collection:    "Watchlist",
@@ -110,14 +112,42 @@ INSERT INTO letterboxd_entry(id, slug, tmdb, title, year, watched, rating, logge
 DELETE FROM letterboxd_entry WHERE id GLOB 'letterboxd-*';
 `
 
-// minInterval is the politeness floor: never more than one Letterboxd request per 2 s.
-const minInterval = 2 * time.Second
+// addedColumns are the columns added to a table after state DBs held it: CREATE TABLE IF NOT EXISTS leaves an
+// older table as it is, so each is added, then filled, when missing. A Plex row's watched mark is a view; any other
+// app's row is corrected by its next read, which any write planned from the row forces first.
+var addedColumns = []struct{ table, column, def, fill string }{
+	{"letterboxd_sink", "played", "INTEGER NOT NULL DEFAULT 0", "UPDATE letterboxd_sink SET played = (app = 'plex' AND plays > 0)"},
+	{"letterboxd_entry", "rated_at", "TEXT NOT NULL DEFAULT ''", "UPDATE letterboxd_entry SET rated_at = logged_at"},
+}
 
-var errTooFast = errors.New("letterboxd: interval below the 2 s politeness floor")
+func migrate(ctx context.Context, db *sql.DB) error {
+	for _, c := range addedColumns {
+		var n int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info(?) WHERE name = ?`, c.table, c.column).Scan(&n); err != nil {
+			return err
+		}
+		if n > 0 {
+			continue
+		}
+		tx, err := db.BeginTx(ctx, nil) // added and filled together: a column left unfilled would never be filled
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE "+c.table+" ADD COLUMN "+c.column+" "+c.def+"; "+c.fill); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("add %s.%s: %w", c.table, c.column, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-// Stage is registered as letterboxd.Stage{}; tests set sleep so nothing waits on the wall clock.
+// Stage is registered as letterboxd.Stage{}; tests set sleep and pace so nothing waits on the wall clock.
 type Stage struct {
 	sleep func(context.Context, time.Duration) error
+	pace  *lbpace.Limiter // nil = lbpace.Shared
 }
 
 func (Stage) Name() string { return name }
@@ -132,6 +162,10 @@ type run struct {
 	mu    sync.Mutex
 	rep   *stage.Report
 	fails map[string]map[int]bool // app → films with a write that failed or went unconfirmed this run
+	// jfFinished is the films whose resume point this run's Jellyfin read puts in the end credits. A watched mark is
+	// only ever written after a read in the same run (planned re-reads before any write; settle defers the mark
+	// otherwise), so this is never older than the mark it goes with. Only the Jellyfin goroutine touches it.
+	jfFinished map[int]bool
 }
 
 func (r *run) count(kind string, n int) {
@@ -148,21 +182,28 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if err := env.Options(&opt); err != nil {
 		return err
 	}
-	if opt.Interval < minInterval {
-		return fmt.Errorf("%w: %v", errTooFast, opt.Interval)
-	}
-	if _, err := env.Store.DB().ExecContext(ctx, schema+foldFeedIDs); err != nil {
+	db := env.Store.DB()
+	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return err
 	}
-	sleep := s.sleep
+	if err := migrate(ctx, db); err != nil {
+		return err
+	}
+	if _, err := db.ExecContext(ctx, foldFeedIDs); err != nil {
+		return err
+	}
+	sleep, pace := s.sleep, s.pace
 	if sleep == nil {
 		sleep = realSleep
 	}
-	r := &run{env: env, opt: opt, db: env.Store.DB(), until: env.Now().Add(opt.RunBudget), sleep: sleep, rep: rep, fails: map[string]map[int]bool{}, fetch: &fetcher{
+	if pace == nil {
+		pace = lbpace.Shared
+	}
+	r := &run{env: env, opt: opt, db: db, until: env.Now().Add(opt.RunBudget), sleep: sleep, rep: rep, fails: map[string]map[int]bool{}, fetch: &fetcher{
 		http: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}},
-		ua: opt.UserAgent, interval: opt.Interval, budget: opt.MaxFetches, now: env.Now, sleep: sleep,
+		ua: opt.UserAgent, pace: pace, budget: opt.MaxFetches,
 	}}
 
 	if err := r.ingest(ctx); err != nil {
@@ -422,16 +463,20 @@ type crawlState struct {
 	Next    int        `json:"next"` // next page; 0 = idle
 	Started time.Time  `json:"started"`
 	Done    time.Time  `json:"done"`
-	Films   []gridFilm `json:"films,omitempty"` // watchlist only: pages read so far
+	Stated  int        `json:"stated,omitempty"` // watchlist only: the size page 1 stated
+	Films   []gridFilm `json:"films,omitempty"`  // watchlist only: pages read so far
 }
 
 // crawl reads /<user>/<kind>/ page by page, at most once per PagesEvery, resuming where an earlier run stopped
-// that day (a crawl older than PagesEvery starts over, so page 1, the newest films, is read daily even when
-// Cloudflare blocks the deeper pages). "films" pages record watched films and their current ratings; a complete
-// "watchlist" crawl replaces the watchlist snapshot (an incomplete one never does, so a blocked page cannot
-// shrink the watchlist). A page that lists no films without saying the list is empty is backed off as a
-// challenge: an interstitial answered with 200, a redirect or new markup must not end a crawl, and so empty both
-// Watchlist collections.
+// that day (a crawl older than PagesEvery starts over, so page 1, the newest films, is read daily).
+//
+// A complete "watchlist" crawl replaces the watchlist snapshot, which decides both Watchlist collections, so every
+// page must state the size page 1 stated (data-num-entries), and the crawl completes only when its films add up to
+// it. A page that states none (an interstitial answered with 200, a redirect's body, new markup), another size (he
+// edited the list mid-crawl, shifting films across pages) or a last page that leaves the count short (a pagination
+// link it cannot read) is backed off as a challenge, and the crawl starts over at page 1. "films" pages only add (watched films, current ratings), so a page listing no films is the
+// one refusal there; and since Cloudflare refuses every anonymous /films/page/N/ past 1 (403 since 2026-10-05, as
+// for lists), the films crawl ends that day at the first refused page past 1, logged once, instead of backing off.
 func (r *run) crawl(ctx context.Context, kind string) error {
 	key := "crawl." + kind
 	var c crawlState
@@ -452,8 +497,29 @@ func (r *run) crawl(ctx context.Context, kind string) error {
 		}
 		p, err := r.fetch.get(ctx, url, map[string]string{"Accept": "text/html"})
 		films, hasNext := parseGrid(p.body)
-		if err == nil && len(films) == 0 && !bytes.Contains(p.body, []byte(`data-num-entries="0"`)) {
-			err = fmt.Errorf("%w: GET %s: HTTP %d lists no films and does not say the list is empty", errChallenged, url, p.status)
+		stated, states := statedCount(p.body)
+		if c.Next == 1 {
+			c.Stated = stated
+		}
+		switch {
+		case err != nil:
+		case kind == "films" && len(films) == 0:
+			err = fmt.Errorf("%w: GET %s: HTTP %d lists no films", errChallenged, url, p.status)
+		case kind == "watchlist" && !states:
+			err = fmt.Errorf("%w: GET %s: HTTP %d does not state data-num-entries", errChallenged, url, p.status)
+		case kind == "watchlist" && (stated != c.Stated || !hasNext && distinctFilms(c.Films, films) != stated):
+			err = fmt.Errorf("%w: GET %s: states %d films, page 1 stated %d, the pages so far list %d", errChallenged, url,
+				stated, c.Stated, distinctFilms(c.Films, films))
+			c = crawlState{Next: 1, Started: c.Started, Done: c.Done}
+		}
+		if kind == "films" && c.Next > 1 && errors.Is(err, errChallenged) {
+			r.env.Log.Warn("letterboxd refuses the deeper films pages; this crawl ends here until tomorrow", "event", "letterboxd_films_partial",
+				"pages", c.Next-1, "err", err)
+			r.count("films_partial", 1)
+			if err := r.env.Store.PutJSON(ctx, name, key, crawlState{Done: now}); err != nil {
+				return storeErr{err}
+			}
+			return nil
 		}
 		if err != nil {
 			if perr := r.env.Store.PutJSON(ctx, name, key, c); perr != nil {
@@ -484,6 +550,17 @@ func (r *run) crawl(ctx context.Context, kind string) error {
 			return nil
 		}
 	}
+}
+
+// distinctFilms counts the films in a crawl's pages (one shifted across a page boundary is listed twice).
+func distinctFilms(pages ...[]gridFilm) int {
+	slugs := map[string]bool{}
+	for _, films := range pages {
+		for _, g := range films {
+			slugs[g.Slug] = true
+		}
+	}
+	return len(slugs)
 }
 
 func (r *run) recordGrid(ctx context.Context, kind string, films []gridFilm) error {
@@ -521,7 +598,11 @@ func (r *run) resolve(ctx context.Context, f facts) (learned bool, err error) {
 				if err != nil && p.status != http.StatusNotFound {
 					return err
 				}
-				slug = slugOf(p.header.Get("Location")) // "" when the code is not a film: cached as such
+				loc := p.header.Get("Location")
+				if loc == "" && p.status != http.StatusNotFound {
+					return fmt.Errorf("%w: boxd.it/%s: HTTP %d without a Location", errChallenged, lid, p.status)
+				}
+				slug = slugOf(loc) // "" when there is no such code (404) or it is not a film: cached as such
 				if _, err := r.db.ExecContext(ctx, `INSERT OR REPLACE INTO letterboxd_lid(lid, slug) VALUES (?, ?)`, lid, slug); err != nil {
 					return storeErr{err}
 				}
@@ -547,7 +628,9 @@ func (r *run) resolve(ctx context.Context, f facts) (learned bool, err error) {
 	return learned, err
 }
 
-// filmPage reads one film page, following one slug rename (Letterboxd 301s an old slug to the new one).
+// filmPage reads one film page, following one slug rename (Letterboxd 301s an old slug to the new one). A 404, a
+// page naming its TMDB type and a second rename are answers; anything else is a challenge, asked again later and
+// never cached.
 func (r *run) filmPage(ctx context.Context, slug string) (int, string, error) {
 	url := fmt.Sprintf("%s/film/%s/", r.opt.LetterboxdURL, slug)
 	for hop := 0; hop < 2; hop++ {
@@ -558,16 +641,14 @@ func (r *run) filmPage(ctx context.Context, slug string) (int, string, error) {
 		if err != nil {
 			return 0, "", err
 		}
-		if p.status/100 == 3 {
-			next := slugOf(p.header.Get("Location"))
-			if next == "" {
-				return 0, "", nil
-			}
+		if next := slugOf(p.header.Get("Location")); p.status/100 == 3 && next != "" {
 			url = fmt.Sprintf("%s/film/%s/", r.opt.LetterboxdURL, next)
 			continue
 		}
-		tmdb, kind := parseFilmPage(p.body)
-		return tmdb, kind, nil
+		if tmdb, kind := parseFilmPage(p.body); kind != "" {
+			return tmdb, kind, nil
+		}
+		return 0, "", fmt.Errorf("%w: GET %s: HTTP %d names no data-tmdb-type", errChallenged, url, p.status)
 	}
 	return 0, "", nil
 }

@@ -3,7 +3,6 @@ package letterboxd
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	"projectionist/internal/fake"
+	"projectionist/internal/lbpace"
 	"projectionist/internal/stage"
 )
 
@@ -63,7 +63,7 @@ func newLetterboxd(t *testing.T) *fakeLetterboxd {
 			w.Header().Set("ETag", `"v1"`)
 			w.Write(fixture(t, files[r.URL.Path]))
 		case r.URL.Path == "/saahilsan/watchlist/page/2/": // the last page: Digger, which he has watched since adding it
-			io.WriteString(w, `<ul class="grid"><li class="griditem"> <div data-item-name="Digger (2026)" data-item-slug="digger-2026"></div> </li></ul>`+
+			io.WriteString(w, `<div class="cols-2 js-watchlist-content" data-num-entries="3"><ul class="grid"><li class="griditem"> <div data-item-name="Digger (2026)" data-item-slug="digger-2026"></div> </li></ul></div>`+
 				`<div class="paginate-nextprev"><span class="next">Older</span></div>`)
 		case strings.HasPrefix(r.URL.Path, "/boxd/") && lids[strings.TrimPrefix(r.URL.Path, "/boxd/")] != "":
 			http.Redirect(w, r, "https://letterboxd.com/film/"+lids[strings.TrimPrefix(r.URL.Path, "/boxd/")]+"/", http.StatusFound)
@@ -134,6 +134,8 @@ type jfFilm struct {
 	played, favourite bool
 	rating            *float64
 	last              string
+	pct               float64 // resume point, percent of the runtime
+	ticks             int64   // resume point
 }
 
 type apps struct {
@@ -253,7 +255,8 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 	jf.Handle("GET", "/Users", 200, `[{"Id":"u2","Name":"roger"},{"Id":"u1","Name":"saahil"}]`)
 	item := func(id string, f *jfFilm) map[string]any {
 		return map[string]any{"Id": id, "Name": id, "Path": fmt.Sprintf("/m/Film (2000) {tmdb-%d}/Film (2000) {tmdb-%d}.mkv", f.tmdb, f.tmdb),
-			"UserData": map[string]any{"PlayCount": f.plays, "Played": f.played, "IsFavorite": f.favourite, "Rating": f.rating, "LastPlayedDate": f.last}}
+			"UserData": map[string]any{"PlayCount": f.plays, "Played": f.played, "IsFavorite": f.favourite, "Rating": f.rating, "LastPlayedDate": f.last,
+				"PlayedPercentage": f.pct, "PlaybackPositionTicks": f.ticks}}
 	}
 	jf.HandleFunc("GET", "/Items", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
@@ -298,6 +301,9 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 			if body.LastPlayedDate != nil {
 				f.last = *body.LastPlayedDate
 			}
+			if body.PlaybackPositionTicks != nil {
+				f.ticks = *body.PlaybackPositionTicks
+			}
 		})
 	}
 	jf.HandleFunc("POST", "/Collections", func(w http.ResponseWriter, r *http.Request) {
@@ -337,12 +343,34 @@ func writeExport(t *testing.T, dir string) {
 	}
 }
 
+// paceClock is the shared Letterboxd limiter's clock in tests: a wait moves it on by exactly the wait.
+type paceClock struct {
+	mu    sync.Mutex
+	now   time.Time
+	waits []time.Duration
+}
+
+func (c *paceClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *paceClock) Sleep(_ context.Context, d time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+	c.waits = append(c.waits, d)
+	return nil
+}
+
 type world struct {
 	h       *fake.Harness
 	lb      *fakeLetterboxd
 	apps    *apps
 	st      Stage
-	sleeps  []time.Duration
+	sleeps  []time.Duration // app retry waits
+	pace    *paceClock      // Letterboxd waits
 	missing string
 	opts    string
 }
@@ -359,7 +387,9 @@ func newWorld(t *testing.T) *world {
 	w.missing = filepath.Join(root, "_watchlist-missing.txt")
 	w.opts = fmt.Sprintf("letterboxd_url = %q\nboxd_url = %q\nexport_dir = %q\nmovies_dir = %q\nmissing_file = %q\n",
 		w.lb.URL, w.lb.URL+"/boxd", filepath.Join(root, "export"), movies, w.missing)
-	w.st = Stage{sleep: func(_ context.Context, d time.Duration) error { w.sleeps = append(w.sleeps, d); return nil }}
+	w.pace = &paceClock{now: w.h.Now}
+	w.st = Stage{sleep: func(_ context.Context, d time.Duration) error { w.sleeps = append(w.sleeps, d); return nil },
+		pace: lbpace.New(w.pace.Now, w.pace.Sleep)}
 	w.h.Env.Loc, _ = time.LoadLocation("America/Los_Angeles")
 	return w
 }
@@ -390,10 +420,10 @@ func writes(h *fake.Harness) int {
 // Catches, end to end against a fake Letterboxd and stateful fake Plex/Jellyfin: a dry run that writes, a wrong
 // diff count in any category, a play count lowered or a viewing counted twice (export + feed), a Jellyfin write
 // that resets favourites, a Plex play count set without scrobbles, the Watchlist collection not created or not on
-// Home, Letterboxd hit faster than one request per interval or for pages it has cached, a second run (or a run
-// after the daily re-read) writing anything, the snapshot read in a run that then writes being stored with an
-// older time (so Plex is paged again next run), Jellyfin not re-read every run, and the collection put back on
-// his Home after he took it off.
+// Home, a Letterboxd request that does not wait its 2 s on the shared limiter, or one for a page it has cached, a
+// second run (or a run after the daily re-read) writing anything, the snapshot read in a run that then writes
+// being stored with an older time (so the app is paged again next run), and the collection put back on his Home
+// after he took it off.
 func TestRunEndToEnd(t *testing.T) {
 	w := newWorld(t)
 	dry := w.run(t, "dry_run = true\n")
@@ -410,10 +440,10 @@ func TestRunEndToEnd(t *testing.T) {
 		}
 	}
 	fetches := w.lb.total()
-	if len(w.sleeps) != fetches-1 {
-		t.Errorf("%d Letterboxd requests but %d waits", fetches, len(w.sleeps))
+	if len(w.pace.waits) != fetches-1 {
+		t.Errorf("%d Letterboxd requests but %d waits", fetches, len(w.pace.waits))
 	}
-	for _, d := range w.sleeps {
+	for _, d := range w.pace.waits {
 		if d != 2*time.Second {
 			t.Errorf("waited %v between Letterboxd requests, want 2s", d)
 		}
@@ -453,11 +483,11 @@ func TestRunEndToEnd(t *testing.T) {
 		t.Errorf("missing file = %q", text)
 	}
 
-	w.h.Now = w.h.Now.Add(time.Minute) // Plex was read by the run that wrote; nothing to do, so no re-read
+	w.h.Now = w.h.Now.Add(time.Minute) // both apps were read by the run that wrote; nothing to do, so no re-read
 	before, hits := writes(w.h), w.lb.total()
 	again := w.run(t, "")
-	if again.Counts["plex.snapshot"] != 0 || again.Counts["jellyfin.snapshot"] != 1 {
-		t.Errorf("want Plex not re-read and Jellyfin re-read: %v", again.Counts)
+	if again.Counts["plex.snapshot"] != 0 || again.Counts["jellyfin.snapshot"] != 0 {
+		t.Errorf("want neither app re-read: %v", again.Counts)
 	}
 	if n := writes(w.h) - before; n != 0 {
 		t.Errorf("second run made %d writes (counts %v)", n, again.Counts)
@@ -499,14 +529,8 @@ func TestRunSurvivesBlocksAndFailures(t *testing.T) {
 	if w.apps.plex["10"].views != 1 {
 		t.Errorf("views changed despite failures: %d", w.apps.plex["10"].views)
 	}
-	var retries []time.Duration
-	for _, d := range w.sleeps {
-		if d != 2*time.Second {
-			retries = append(retries, d)
-		}
-	}
-	if sort.Slice(retries, func(i, j int) bool { return retries[i] < retries[j] }); len(retries) == 0 || retries[len(retries)-1] != 4*time.Second {
-		t.Errorf("no 2 s / 4 s retry backoff: %v", retries)
+	if !slices.Contains(w.sleeps, 2*time.Second) || !slices.Contains(w.sleeps, 4*time.Second) {
+		t.Errorf("no 2 s / 4 s retry backoff: %v", w.sleeps)
 	}
 
 	w.apps.failScrobble = false
@@ -649,15 +673,6 @@ func TestWatchedInPlexThenLogged(t *testing.T) {
 	before := writes(w.h)
 	if again := w.run(t, ""); writes(w.h) != before || again.Counts["plex.snapshot"] != 0 {
 		t.Errorf("the run after made %d writes (counts %v)", writes(w.h)-before, again.Counts)
-	}
-}
-
-// Catches: a config that would ask Letterboxd for more than one page per 2 s being run instead of refused.
-func TestRefusesFasterThanPolite(t *testing.T) {
-	w := newWorld(t)
-	w.h.SetOptions(w.opts + "interval = \"1s\"\n")
-	if err := w.st.Run(context.Background(), w.h.Env, &stage.Report{}); !errors.Is(err, errTooFast) || w.lb.total() != 0 {
-		t.Errorf("err = %v after %d Letterboxd requests; want errTooFast before any", err, w.lb.total())
 	}
 }
 
@@ -899,11 +914,141 @@ func TestDeletedDiaryEntryIsRetracted(t *testing.T) {
 		t.Errorf("alerts = %q, want one, naming The Ring only (counts %v)", rep.Alerts, rep.Counts)
 	}
 	w.apps.mu.Lock()
-	w.apps.jf["j30"] = ring // Jellyfin indexes it
+	w.apps.jf["j30"] = ring // Jellyfin indexes it; its daily read finds it
 	w.apps.mu.Unlock()
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	w.h.Now = w.h.Now.Add(25 * time.Hour)
 	w.run(t, "")
 	if f := w.apps.jf["j30"]; f.plays != 1 || !f.played || w.apps.plex["30"].views != 2 {
 		t.Errorf("after the double log was deleted: Jellyfin %+v, Plex views %d; want 1 play, played, and Plex's 2 views kept", f, w.apps.plex["30"].views)
+	}
+}
+
+// gridEntry is a grid entry cut to the attributes the parser reads.
+func gridEntry(name, slug string) string {
+	return `<li class="griditem"> <div data-item-name="` + name + `" data-item-slug="` + slug + `"></div> </li>`
+}
+
+// Catches a crawl that completes short of the watchlist, so The Ring, on page 2, leaves both Watchlist collections
+// with no alert (live, 95 of the 110 films in his Plex Home row): a page-1 pagination link Letterboxd writes another
+// way (`<a href=… class="next">`, the reviewer's repro on eae8ec1) taken for the last page, and a film he removes
+// between the page 1 and page 2 requests, which shifts The Ring onto page 1 after it was read while the pages read
+// still add up to the size page 2 states.
+func TestWatchlistCrawlCompletesOnlyAtTheStatedCount(t *testing.T) {
+	page := func(stated int, items, next string) string {
+		return fmt.Sprintf(`<div class="cols-2 js-watchlist-content" data-num-entries="%d"><ul class="grid">%s</ul></div>`+
+			`<div class="paginate-nextprev">%s</div>`, stated, items, next)
+	}
+	const next, last = `<a class="next" href="/saahilsan/watchlist/page/2/">Older</a>`, `<span class="next">Older</span>`
+	whw, ring := gridEntry("What Happened Was... (1994)", "what-happened-was"), gridEntry("The Ring (2002)", "the-ring-2002")
+	prime, okja := gridEntry("Primetime (2026)", "primetime-2026"), gridEntry("Okja (2017)", "okja")
+	for _, tc := range []struct{ name, page1, page2, laterPage1, laterPage2 string }{
+		{"pagination link written another way", page(2, whw, next), page(2, ring, last),
+			page(2, whw, `<a href="/saahilsan/watchlist/page/2/" class="next">Older</a>`), page(2, ring, last)},
+		{"a film removed between page 1 and page 2", page(4, whw+prime, next), page(4, ring+okja, last),
+			page(4, whw+prime, next), page(3, okja, last)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorld(t)
+			w.lb.serve("/saahilsan/watchlist/", tc.page1)
+			w.lb.serve("/saahilsan/watchlist/page/2/", tc.page2)
+			w.run(t, "")
+			if !slices.Contains(w.apps.collection, "30") || !slices.Contains(w.apps.jfSet, "j30") {
+				t.Fatalf("setup: Watchlist plex %v, jellyfin %v", w.apps.collection, w.apps.jfSet)
+			}
+			w.lb.serve("/saahilsan/watchlist/", tc.laterPage1)
+			w.lb.serve("/saahilsan/watchlist/page/2/", tc.laterPage2)
+			w.h.Now = w.h.Now.Add(25 * time.Hour) // the daily crawl
+			rep := w.run(t, "")
+			if !slices.Contains(w.apps.collection, "30") || !slices.Contains(w.apps.jfSet, "j30") || rep.Counts["challenged.watchlist"] != 1 {
+				t.Errorf("a crawl short of the watchlist completed: Watchlist plex %v, jellyfin %v (counts %v)", w.apps.collection, w.apps.jfSet, rep.Counts)
+			}
+		})
+	}
+}
+
+// Catches: an answer the stage cannot read cached for good as a negative, so Licorice Pizza is never synced: a 200
+// film page naming no TMDB type (an interstitial, new markup) stored as "not a movie", and a boxd.it answer with no
+// Location stored as "not a film". A real film page always names its type: all 1,021 in the NAS state DB did, the
+// 23 TV miniseries among them as data-tmdb-type="movie" data-tmdb-id="".
+func TestUnreadableAnswersAreNeverCached(t *testing.T) {
+	for _, tc := range []struct{ name, path, body string }{
+		{"film page without data-tmdb-type", "/film/licorice-pizza/", `<html><body class="film"></body></html>`},
+		{"boxd.it answer without a Location", "/boxd/qTKY", `<html><body></body></html>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorld(t)
+			w.lb.serve(tc.path, tc.body)
+			if rep := w.run(t, ""); rep.Counts["challenged.film"] != 1 {
+				t.Fatalf("counts %v: want the answer refused as a challenge", rep.Counts)
+			}
+			w.lb.serve(tc.path, "")              // Letterboxd answers as usual again
+			w.h.Now = w.h.Now.Add(2 * time.Hour) // past the 1 h backoff
+			w.run(t, "")
+			var tmdb int
+			if err := w.h.Env.Store.DB().QueryRow(`SELECT tmdb FROM letterboxd_film WHERE slug='licorice-pizza'`).Scan(&tmdb); err != nil || tmdb != 718032 {
+				t.Errorf("Licorice Pizza once Letterboxd answers = TMDB %d (%v), want 718032", tmdb, err)
+			}
+		})
+	}
+}
+
+// Catches: a state DB made before letterboxd_sink.played and letterboxd_entry.rated_at failing every run with "no
+// such column" (CREATE TABLE IF NOT EXISTS leaves an older table as it is), and the added columns left unfilled: a
+// stored rating with no time (no later run could read it) and a Plex film he has views of taken for unwatched.
+func TestOlderStateDBGainsTheNewColumns(t *testing.T) {
+	w := newWorld(t)
+	db := w.h.Env.Store.DB()
+	if _, err := db.Exec(`CREATE TABLE letterboxd_entry (id TEXT PRIMARY KEY, slug TEXT NOT NULL, tmdb INTEGER NOT NULL,
+	  title TEXT NOT NULL, year INTEGER NOT NULL, watched TEXT NOT NULL, rating INTEGER NOT NULL, logged_at TEXT NOT NULL);
+	CREATE TABLE letterboxd_sink (app TEXT NOT NULL, tmdb INTEGER NOT NULL, item TEXT NOT NULL,
+	  plays INTEGER NOT NULL, rating INTEGER NOT NULL, last TEXT NOT NULL, member INTEGER NOT NULL, added INTEGER NOT NULL,
+	  PRIMARY KEY (app, tmdb));
+	INSERT INTO letterboxd_entry VALUES ('1100000000', 'licorice-pizza', 718032, 'Licorice Pizza', 2021, '2026-01-02', 10, '2026-01-02T06:00:00.000000000Z');
+	INSERT INTO letterboxd_sink VALUES ('plex', 718032, '10', 1, 0, '', 0, 0);`); err != nil {
+		t.Fatal(err)
+	}
+	w.h.Plex.Handle("GET", "/identity", http.StatusServiceUnavailable, "") // Plex is down, so its rows stay as migrated
+	w.run(t, "dry_run = true\n")
+	var ratedAt string
+	var played bool
+	err := db.QueryRow(`SELECT e.rated_at, s.played FROM letterboxd_entry e, letterboxd_sink s
+		WHERE e.id='1100000000' AND s.app='plex' AND s.tmdb=718032`).Scan(&ratedAt, &played)
+	if err != nil || ratedAt != "2026-01-02T06:00:00.000000000Z" || !played {
+		t.Errorf("migrated rows: rated_at %q, Plex played %v (%v); want the logged time, played", ratedAt, played, err)
+	}
+}
+
+// Catches: a film he stopped in the end credits and then logged left in Jellyfin's Continue Watching (Played alone
+// keeps the resume point), and a resume point short of the credits (a rewatch in progress) cleared. 85 % is the
+// owner's line; the two films sit on either side of it.
+func TestJellyfinFinishedInTheCreditsLeavesContinueWatching(t *testing.T) {
+	w := newWorld(t)
+	w.apps.jf["j10"].pct, w.apps.jf["j10"].ticks = 85, 61_000_000_000   // Licorice Pizza, stopped in the credits
+	w.apps.jf["j20"].pct, w.apps.jf["j20"].ticks = 84.9, 52_000_000_000 // Ad Astra, stopped short of them
+	w.run(t, "")
+	if lp, aa := w.apps.jf["j10"], w.apps.jf["j20"]; !lp.played || lp.ticks != 0 || !aa.played || aa.ticks != 52_000_000_000 {
+		t.Errorf("marked watched: Licorice Pizza %+v, Ad Astra %+v; want both played, resume 0 and 52000000000", lp, aa)
+	}
+}
+
+// Catches: the films crawl backing off and retrying a deeper page that Cloudflare always refuses (403 on every
+// anonymous /films/page/N/ past 1 since 2026-10-05), which logs that challenge several times a day, and page 1, the
+// films he watched most recently, not read again the next day.
+func TestFilmsCrawlEndsAtItsRefusedPageOnceADay(t *testing.T) {
+	w := newWorld(t)
+	w.lb.serve("/saahilsan/films/", strings.Replace(string(fixture(t, "films.html")), `<div class="paginate-nextprev paginate-disabled"><span class="next">Older</span></div>`,
+		`<div class="paginate-nextprev"><a class="next" href="/saahilsan/films/page/2/">Older</a></div>`, 1))
+	w.lb.challenge["/saahilsan/films/page/2/"] = true
+	partial := 0
+	for _, d := range []time.Duration{0, 90 * time.Minute, 4 * time.Hour} { // the old backoff retried at 1 h, then 2 h later
+		w.h.Now = w.h.Now.Add(d)
+		partial += w.run(t, "").Counts["films_partial"]
+	}
+	if p1, p2 := w.lb.hits["/saahilsan/films/"], w.lb.hits["/saahilsan/films/page/2/"]; p1 != 1 || p2 != 1 || partial != 1 {
+		t.Errorf("first day: page 1 read %d times, page 2 %d, logged %d; want 1, 1, 1", p1, p2, partial)
+	}
+	w.h.Now = w.h.Now.Add(20 * time.Hour) // the next day
+	if rep := w.run(t, ""); w.lb.hits["/saahilsan/films/"] != 2 || rep.Counts["films_partial"] != 1 || rep.Counts["challenged.films"] != 0 {
+		t.Errorf("next day: page 1 read %d times in all (counts %v); want 2, logged once, no backoff", w.lb.hits["/saahilsan/films/"], rep.Counts)
 	}
 }
