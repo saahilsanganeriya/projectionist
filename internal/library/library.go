@@ -3,8 +3,7 @@
 //	Movies/Title (Year) {tmdb-N}/Title (Year) {tmdb-N}[ - label].ext
 //	TV/Show (Year) {tmdb-N}/Season NN/Show (Year) - SxxEyy[-Eyy][ - Title].ext
 //
-// Movie folders may carry {imdb-ttN} and show folders {tvdb-N} when TMDB had no match. The rename engine leaves the
-// episode title out when TMDB only has "Episode N" or a multi-episode file has no title of its own.
+// Movie folders may carry {imdb-ttN} and show folders {tvdb-N} when TMDB had no match.
 package library
 
 import (
@@ -43,13 +42,8 @@ var (
 	movieFolder = regexp.MustCompile(`^(.+) \((\d{4})\) \{(tmdb|imdb)-([0-9a-z]+)\}$`)
 	showFolder  = regexp.MustCompile(`^(.+) \((\d{4})\) \{(tmdb|tvdb)-(\d+)\}$`)
 	seasonDir   = regexp.MustCompile(`^Season (\d{2,})$`)
-	episodeFile = regexp.MustCompile(`^(.+) \((\d{4})\) - S(\d{2,})E(\d{2,})(?:-E(\d{2,}))?(?: - (.*))?$`)
+	episodeFile = regexp.MustCompile(`^(.+) \((\d{4})\) - S(\d{2,})E(\d{2,})(?:-E(\d{2,}))?(?: - (.*))?$`) // TMDB has no title for some episodes
 )
-
-// IsMovieFolder, IsShowFolder and IsSeasonFolder report whether one path element is in the scheme.
-func IsMovieFolder(name string) bool  { return movieFolder.MatchString(name) }
-func IsShowFolder(name string) bool   { return showFolder.MatchString(name) }
-func IsSeasonFolder(name string) bool { return seasonDir.MatchString(name) }
 
 // ParseMovie reads a path ending in <movie folder>/<file>; ok is false when it is not in the scheme.
 func ParseMovie(path string) (m Movie, ok bool) {
@@ -101,4 +95,36 @@ func ParseEpisode(path string) (e Episode, ok bool) {
 		}
 	}
 	return Episode{Show: sh[1], Year: year, ID: ID{Source: sh[3], Value: sh[4]}, Season: season, Episodes: eps, Title: ef[6], Ext: ext}, true
+}
+
+// Folder is a movie or show folder name read from the scheme ("Title (Year) {tmdb-N}").
+type Folder struct {
+	Title string
+	Year  int
+	ID    ID
+}
+
+// ParseMovieFolder reads a movie folder's name; ok is false when it is not in the scheme.
+func ParseMovieFolder(name string) (f Folder, ok bool) { return parseFolder(movieFolder, name) }
+
+// ParseShowFolder reads a show folder's name; ok is false when it is not in the scheme.
+func ParseShowFolder(name string) (f Folder, ok bool) { return parseFolder(showFolder, name) }
+
+// ParseSeasonFolder reads "Season NN" (00 holds specials); ok is false for any other name.
+func ParseSeasonFolder(name string) (season int, ok bool) {
+	m := seasonDir.FindStringSubmatch(name)
+	if m == nil {
+		return 0, false
+	}
+	season, _ = strconv.Atoi(m[1])
+	return season, true
+}
+
+func parseFolder(re *regexp.Regexp, name string) (Folder, bool) {
+	m := re.FindStringSubmatch(name)
+	if m == nil {
+		return Folder{}, false
+	}
+	year, _ := strconv.Atoi(m[2])
+	return Folder{Title: m[1], Year: year, ID: ID{Source: m[3], Value: m[4]}}, true
 }
