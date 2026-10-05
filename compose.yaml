@@ -16,7 +16,7 @@ services:
       - CHOWN        # new files take the source file's owner
       - DAC_OVERRIDE # write into share folders whatever their owner
       - FOWNER       # chmod/xattr (ACL) on files not owned by root
-      - KILL         # SIGSTOP/SIGCONT an encode while someone else watches
+      - KILL         # stop a timed-out GPU self-test that runs as the Plex user
       - SETUID       # run Plex's transcoder as the Plex user for its GPU self-test
       - SETGID
     security_opt: ["no-new-privileges:true"]
@@ -30,7 +30,9 @@ services:
       # Preferences.xml (token, GPU settings), Plex's log, its codecs and VA driver: read-only.
       - /volume1/PlexMediaServer/AppData/Plex Media Server:/volume1/PlexMediaServer/AppData/Plex Media Server:ro
       - /volume1/@appstore/PlexMediaServer:/volume1/@appstore/PlexMediaServer:ro
-      - /volume1/PlexMediaServer/scripts/gpu_sample.mkv:/samples/gpu_sample.mkv:ro
+      # GPU self-test sample and the old scripts' state files (imported once at cutover): read-only.
+      - /volume1/PlexMediaServer/scripts:/volume1/PlexMediaServer/scripts:ro
+      - /volume1/PlexMediaServer/remote4k:/volume1/PlexMediaServer/remote4k # STATUS.txt the owner reads
     secrets: [jellyfin_key] # /run/secrets/jellyfin_key, read-only
     logging:
       driver: json-file

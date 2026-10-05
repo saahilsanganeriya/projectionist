@@ -29,3 +29,27 @@ device = "/dev/dri/renderD128"
 # [stages.example]
 # every  = "15m"
 # window = "02:00-08:00"
+
+# Keeps Plex and Jellyfin transcoding on the GPU; replaces scripts/gpu_guard.py (DSM task 8).
+[stages.gpu-guard]
+every           = "15m"
+plex_device     = "8086:3185@0000:00:02.0" # Plex's id for the UHD 600 ("Auto" picks an empty device on 1.43)
+plex_log        = "/volume1/PlexMediaServer/AppData/Plex Media Server/Logs/Plex Media Server.log"
+plex_app_data   = "/volume1/PlexMediaServer/AppData/Plex Media Server"
+plex_transcoder = "/volume1/@appstore/PlexMediaServer/Plex Transcoder"
+plex_uid        = 297536 # `id PlexMediaServer` on the NAS
+plex_gid        = 297536
+plex_groups     = [297536, 999, 937] # 937 = videodriver, owner of /dev/dri/renderD128
+sample          = "/volume1/PlexMediaServer/scripts/gpu_sample.mkv"
+self_test_every = "24h"
+legacy_state    = "/volume1/PlexMediaServer/scripts/gpu_guard.state.json" # imported once at cutover
+
+# Small 4K copies of the films in the Plex playlist "Remote 4K"; replaces scripts/remote4k.py (DSM task 9).
+[stages.remote4k]
+every           = "15m"
+playlist        = "Remote 4K"
+label           = "2160p 14Mbps"
+small_kbps      = 20000
+work_dir        = "/volume1/media/.projectionist/remote4k" # same share as the library: publish = one rename
+status_file     = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
+default_section = 4
