@@ -143,21 +143,24 @@ users = [{ name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" }, {
 	}
 
 	h.Jellyfin.Handle("GET", "/Users", 200, `[{"Name":"saahil","Id":"u1"},{"Name":"roger","Id":"u2"}]`)
+	// Like Jellyfin 12.1 on the NAS, the isPlayed / IsResumable filters return nothing; each item's UserData is right.
 	h.Jellyfin.HandleFunc("GET", "/Items", func(rw http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
+		q, data := r.URL.Query(), map[string]string{}
 		switch {
-		case q.Get("userId") == "u1" && q.Get("filters") == "IsResumable":
-			rw.Write([]byte(`{"Items":[{"Id":"b1","Path":"` + ran + `","UserData":{"PlaybackPositionTicks":18000000000,"LastPlayedDate":"2025-01-01T00:00:00.0000000Z"}},` +
-				`{"Id":"c1","Path":"` + clerks + `","UserData":{"PlaybackPositionTicks":12000000000,"LastPlayedDate":"2025-03-01T00:00:00Z"}}]}`))
-		case q.Get("userId") == "u2" && q.Get("isPlayed") == "true":
-			rw.Write([]byte(`{"Items":[{"Id":"b1","Path":"` + ran + `","UserData":{"Played":true,"PlayCount":1,"Rating":7,"LastPlayedDate":"2025-02-01T00:00:00Z"}}]}`))
-		case q.Get("userId") != "":
+		case q.Get("isPlayed") != "" || q.Get("filters") != "":
 			rw.Write([]byte(`{"Items":[]}`))
-		default:
-			rw.Write([]byte(`{"Items":[{"Id":"a1","Path":"` + heat + `"},{"Id":"b1","Path":"` + ran + `"},{"Id":"c1","Path":"` +
-				clerks + `"},{"Id":"d1","Path":"` + dune + `"},{"Id":"e1","Path":"` + wire + `"},{"Id":"f1","Path":"` + fargo +
-				`"},{"Id":"x1","Path":"/lib/Home Videos/x.mkv"}]}`))
+			return
+		case q.Get("userId") == "u1":
+			data["b1"] = `"PlaybackPositionTicks":18000000000,"LastPlayedDate":"2025-01-01T00:00:00.0000000Z"`
+			data["c1"] = `"PlaybackPositionTicks":12000000000,"LastPlayedDate":"2025-03-01T00:00:00Z"`
+		case q.Get("userId") == "u2":
+			data["b1"] = `"Played":true,"PlayCount":1,"Rating":7,"LastPlayedDate":"2025-02-01T00:00:00Z"`
 		}
+		var items []string
+		for _, it := range [][2]string{{"a1", heat}, {"b1", ran}, {"c1", clerks}, {"d1", dune}, {"e1", wire}, {"f1", fargo}, {"x1", "/lib/Home Videos/x.mkv"}} {
+			items = append(items, `{"Id":"`+it[0]+`","Path":"`+it[1]+`","UserData":{`+data[it[0]]+`}}`)
+		}
+		rw.Write([]byte(`{"Items":[` + strings.Join(items, ",") + `]}`))
 	})
 	for _, id := range []string{"a1", "b1", "c1", "d1", "e1", "f1"} {
 		h.Jellyfin.HandleFunc("POST", "/UserItems/"+id+"/UserData", func(rw http.ResponseWriter, r *http.Request) {
