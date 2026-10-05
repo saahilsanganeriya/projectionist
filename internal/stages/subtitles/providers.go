@@ -1,11 +1,12 @@
 package subtitles
 
-// Subtitle providers, called directly (never through Plex): the OpenSubtitles legacy REST API (free, no key), and
-// OpenSubtitles.com and Subdl, each only when its API key file exists. Ranking, the file hash, the release name and the ad
-// stripping are ports of subfetch2.py. Every request goes through a pacer: one request per second per provider,
-// exponential backoff on 429/5xx/network errors, and a circuit breaker that parks the provider for the rest of the
-// run once its download quota is spent, it keeps failing, or it refuses a search, so the remaining titles wait for
-// the next run.
+// Subtitle providers, called directly (never through Plex): the OpenSubtitles legacy REST API, Gestdown (Addic7ed's
+// TV subtitles) and SITEC Subtitles (movies), none of which needs a key, and OpenSubtitles.com and Subdl, each only when
+// its API key file exists. Ranking, the file hash, the release name, the ad stripping and the legacy API's download
+// quota are ports of subfetch2.py v8. Every request goes through its provider's pacer: requests a gap apart (1 s;
+// 2 s for Gestdown and SITEC; 8 min for legacy downloads), exponential backoff on 429/5xx/network errors, and parking
+// for the rest of the run once the provider keeps failing, refuses a search or spends its download quota, so the
+// titles that need it wait for the next run.
 
 import (
 	"archive/zip"
@@ -16,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"math/rand/v2"
 	"net/http"
@@ -35,6 +37,7 @@ type Query struct {
 	Size    int64
 	Hash    string // OpenSubtitles hash, 16 hex digits
 	IMDb    int    // 0 when unknown
+	TVDB    int    // TheTVDB id of the show (from TMDB), 0 when unknown
 	TMDB    string // TMDB id from the folder name, "" when the folder has none
 	Name    string // show name, for the text search of episodes
 	Show    bool   // an episode; its Season is 0 for a special
@@ -51,6 +54,7 @@ type Candidate struct {
 	HashMatch       bool
 	HearingImpaired bool
 	Downloads       int
+	Rating          float64 // OpenSubtitles' SubRating (0-10), SITEC's vote score: rank() adds 100 a point
 	Encoding        string
 	Season, Episode string
 	ours            bool // labelled with this title: its IMDb id (a movie) or its season and episode (an episode)
@@ -63,14 +67,16 @@ type Provider interface {
 	Name() string
 	Search(ctx context.Context, q Query) ([]Candidate, error)
 	Download(ctx context.Context, c Candidate) (string, error) // decoded text
-	pacer() *pacer
+	pacer() *pacer                                             // its searches': a refused search parks it
 }
 
 var (
-	// errParked: the provider is out for the rest of this run (quota spent or persistently failing).
-	errParked = errors.New("provider parked for this run")
+	// errParked: the provider is out for now (quota spent, failing, or refusing), so titles that need it wait.
+	errParked = errors.New("provider parked")
 	errQuota  = errors.New("download quota spent")
 )
+
+func (c Candidate) key() string { return c.provider.Name() + ":" + c.ID }
 
 // ---- ports of subfetch2.py ----
 
@@ -112,7 +118,7 @@ var (
 )
 
 // rank orders candidates: a file-hash match first, then the release group, then source tags in common, then
-// popularity; hearing-impaired copies lose 20000.
+// popularity and rating; hearing-impaired copies lose 20000.
 func rank(c Candidate, release string) int {
 	t := pyLower(c.Release + " " + c.FileName)
 	score := 0
@@ -135,7 +141,7 @@ func rank(c Candidate, release string) int {
 			score += 5000
 		}
 	}
-	return score + min(c.Downloads, 99999)/100
+	return score + min(c.Downloads, 99999)/100 + int(c.Rating*100)
 }
 
 // releaseName is the video's pre-rename file and folder names from its .details note (the rename dropped the release
@@ -166,14 +172,15 @@ func stripAds(txt string) string {
 	return strings.Join(kept, "\n\n") + "\n"
 }
 
-// order ranks candidates best first (a stable sort, so ties keep search order) and drops unusable ones and repeats.
+// order ranks candidates best first (ties keep search order, as subfetch2.py's stable sort does) and drops unusable
+// ones and repeats.
 func order(cands []Candidate, release string) []Candidate {
 	sort.SliceStable(cands, func(i, j int) bool { return rank(cands[i], release) > rank(cands[j], release) })
 	seen := map[string]bool{}
 	out := cands[:0]
 	for _, c := range cands {
-		if key := c.provider.Name() + ":" + c.ID; !c.unusable && !seen[key] {
-			seen[key] = true
+		if !c.unusable && !seen[c.key()] {
+			seen[c.key()] = true
 			out = append(out, c)
 		}
 	}
@@ -183,13 +190,14 @@ func order(cands []Candidate, release string) []Candidate {
 // ---- pacing ----
 
 type pacer struct {
-	mu     sync.Mutex
-	next   time.Time
-	gap    time.Duration
-	parked error
-	failed int // downloads failed in a row
-	now    func() time.Time
-	sleep  func(context.Context, time.Duration) error
+	mu       sync.Mutex
+	next     time.Time
+	gap      time.Duration
+	quota429 bool // a 429 is the download quota, answered at once rather than retried (legacy downloads)
+	parked   error
+	until    time.Time // when parked ends; zero: at the end of the run
+	now      func() time.Time
+	sleep    func(context.Context, time.Duration) error
 }
 
 func realSleep(ctx context.Context, d time.Duration) error {
@@ -206,26 +214,34 @@ func realSleep(ctx context.Context, d time.Duration) error {
 func (p *pacer) park(err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.parked == nil {
+	if p.out() == nil {
 		p.parked = err
 	}
 }
 
-// downloaded notes a download's result. Failures in a row as many as a title's tries are the provider's, not the
-// files' (every legacy link answered 404 once the quota was spent): the provider is parked and true is returned.
-func (p *pacer) downloaded(err error) bool {
+// pause parks the provider until a given time (its download quota is spent).
+func (p *pacer) pause(until time.Time, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err == nil {
-		p.failed = 0
-		return false
+	p.parked, p.until = err, until
+}
+
+// out is why the provider is parked, nil when it is not; p.mu must be held.
+func (p *pacer) out() error {
+	if p.parked != nil && !p.until.IsZero() && !p.now().Before(p.until) {
+		p.parked, p.until = nil, time.Time{}
 	}
-	p.failed++
-	if p.failed >= maxTries && p.parked == nil {
-		p.parked = err
-		return true
+	return p.parked
+}
+
+// parkedErr is out() for callers outside the pacer, wrapped as a pacer refusal.
+func (p *pacer) parkedErr() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err := p.out(); err != nil {
+		return fmt.Errorf("%w: %w", errParked, err)
 	}
-	return false
+	return nil
 }
 
 // do is doH for callers that need no response header.
@@ -234,17 +250,18 @@ func (p *pacer) do(ctx context.Context, hc *http.Client, req func() (*http.Reque
 	return body, err
 }
 
-// doH sends req (rebuilt per attempt) at most once per gap across all workers. 429, 5xx and network errors back off
-// exponentially with jitter (Retry-After wins), six attempts in all; after that the provider is parked. A 2xx
-// response's body and header are returned to the caller, any other status as a *statusError.
+// doH sends req (rebuilt per attempt) at most once per gap across all workers. 429 (unless quota429), 5xx and network
+// errors back off exponentially with jitter (Retry-After wins), six attempts in all (subfetch2.py tries ten); after
+// that the provider is parked. A 2xx response's body and header are returned to the caller, any other status as a
+// *statusError.
 func (p *pacer) doH(ctx context.Context, hc *http.Client, req func() (*http.Request, error)) ([]byte, http.Header, error) {
 	const attempts = 6
 	var last error
 	for attempt := 0; attempt < attempts; attempt++ {
 		p.mu.Lock()
-		if p.parked != nil {
+		if err := p.out(); err != nil {
 			p.mu.Unlock()
-			return nil, nil, fmt.Errorf("%w: %w", errParked, p.parked)
+			return nil, nil, fmt.Errorf("%w: %w", errParked, err)
 		}
 		wait := p.next.Sub(p.now())
 		p.next = p.now().Add(max(wait, 0) + p.gap)
@@ -278,7 +295,7 @@ func (p *pacer) doH(ctx context.Context, hc *http.Client, req func() (*http.Requ
 				last = rerr
 			case resp.StatusCode/100 == 2:
 				return body, resp.Header, nil
-			case resp.StatusCode == 429 || resp.StatusCode/100 == 5:
+			case resp.StatusCode == 429 && !p.quota429 || resp.StatusCode/100 == 5:
 				last = fmt.Errorf("HTTP %d", resp.StatusCode)
 				if s, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && s > 0 {
 					backoff = time.Duration(s) * time.Second
@@ -330,6 +347,7 @@ type legacyResult struct {
 	SubSumCD            flexString
 	SubHearingImpaired  flexString
 	SubDownloadsCnt     flexString
+	SubRating           flexString
 	SubEncoding         flexString
 	SubDownloadLink     flexString
 	SeriesSeason        flexString
@@ -337,18 +355,65 @@ type legacyResult struct {
 	IDMovieImdb         flexString
 }
 
+// The legacy API lets one IP download about 200 subtitles per ~24 h, counting down what is left in a Download-Quota
+// header; past it a 404 page says the IP "exceeded" and denies it for ~24 h, and an IP that keeps trying is firewalled.
+// subfetch2.py v8's limits: one download every dlGap, at most dlPerDay in any 24 h, and nothing (not even a search)
+// for quotaWait once the header is down to quotaFloor or a download is refused. The download times and the resume
+// time are kept in the store, so a restart neither bursts nor tries a spent quota.
+const (
+	dlGap      = 8 * time.Minute
+	dlPerDay   = 180
+	quotaFloor = 10
+	quotaWait  = 24 * time.Hour
+)
+
+// quotaState is the legacy API's download history as kept in the store.
+type quotaState struct {
+	Downloads   []time.Time `json:"downloads"`    // the last 24 h's downloads, oldest first
+	ResumeAfter time.Time   `json:"resume_after"` // no download or search before this
+}
+
 type legacy struct {
 	base      string // .../search/
 	userAgent string
 	hc        *http.Client
-	pace      *pacer
+	pace      *pacer // searches
+	dl        *pacer // downloads: dlGap apart, parked until ResumeAfter
+	mu        sync.Mutex
+	st        quotaState       // guarded by mu, which also runs downloads one at a time (subfetch2.py's DL_LOCK)
+	keep      func(quotaState) // saves st after every download
 }
 
 func (o *legacy) Name() string  { return "opensubtitles" }
 func (o *legacy) pacer() *pacer { return o.pace }
 
-func (o *legacy) get(ctx context.Context, link string) ([]byte, http.Header, error) {
-	return o.pace.doH(ctx, o.hc, func() (*http.Request, error) {
+// restore resumes the downloads a previous run left: the gap after its last download, and its quota wait.
+func (o *legacy) restore(st quotaState) {
+	o.st = st
+	if n := len(st.Downloads); n > 0 {
+		o.dl.next = st.Downloads[n-1].Add(dlGap)
+	}
+	if o.dl.now().Before(st.ResumeAfter) {
+		o.dl.pause(st.ResumeAfter, quotaErr("quota wait in force", st.ResumeAfter))
+	}
+}
+
+func quotaErr(reason string, until time.Time) error {
+	return fmt.Errorf("%w: %s; no downloads before %s", errQuota, reason, until.UTC().Format(time.RFC3339))
+}
+
+// spent stops downloads and searches until `until` and returns the refusal; o.mu must be held.
+func (o *legacy) spent(reason string, until time.Time) error {
+	if until.After(o.st.ResumeAfter) {
+		o.st.ResumeAfter = until
+	}
+	err := quotaErr(reason, o.st.ResumeAfter)
+	o.dl.pause(o.st.ResumeAfter, err)
+	return fmt.Errorf("%w: %w", errParked, err)
+}
+
+func (o *legacy) get(ctx context.Context, p *pacer, link string) ([]byte, http.Header, error) {
+	return p.doH(ctx, o.hc, func() (*http.Request, error) {
 		r, err := http.NewRequest(http.MethodGet, link, nil)
 		if err == nil {
 			r.Header.Set("User-Agent", o.userAgent)
@@ -362,7 +427,7 @@ func (o *legacy) get(ctx context.Context, link string) ([]byte, http.Header, err
 func (o *legacy) search(ctx context.Context, q Query, source string, params ...string) ([]Candidate, error) {
 	params = append(params, "sublanguageid-eng")
 	sort.Strings(params)
-	body, _, err := o.get(ctx, o.base+strings.Join(params, "/"))
+	body, _, err := o.get(ctx, o.pace, o.base+strings.Join(params, "/"))
 	var se *statusError
 	if errors.As(err, &se) && se.code/100 == 3 {
 		return nil, nil // a search the API rewrites (season 0, an unpadded IMDb id) is redirected to host "_": nothing
@@ -380,11 +445,12 @@ func (o *legacy) search(ctx context.Context, q Query, source string, params ...s
 	var out []Candidate
 	for _, r := range res {
 		downloads, _ := strconv.Atoi(string(r.SubDownloadsCnt))
+		rating, _ := strconv.ParseFloat(string(r.SubRating), 64)
 		imdb, _ := strconv.Atoi(string(r.IDMovieImdb))
 		out = append(out, Candidate{
 			Source: source, ID: string(r.IDSubtitleFile), Release: string(r.MovieReleaseName), FileName: string(r.SubFileName),
 			HashMatch: r.MatchedBy == "moviehash", HearingImpaired: r.SubHearingImpaired == "1", Downloads: downloads,
-			Encoding: string(r.SubEncoding), Season: string(r.SeriesSeason), Episode: string(r.SeriesEpisode),
+			Rating: rating, Encoding: string(r.SubEncoding), Season: string(r.SeriesSeason), Episode: string(r.SeriesEpisode),
 			link: string(r.SubDownloadLink), provider: o,
 			unusable: r.SubFormat != "srt" || r.SubSumCD != "" && r.SubSumCD != "1" || r.SubForeignPartsOnly == "1" || r.SubBad == "1",
 			ours:     imdb != 0 && imdb == q.IMDb, // an episode's own test replaces this in Search
@@ -395,7 +461,11 @@ func (o *legacy) search(ctx context.Context, q Query, source string, params ...s
 
 // Search is candidates() of subfetch2.py: file hash, then IMDb id (with season and episode for an episode), then for
 // an episode with nothing beyond hash hits, the show's name. Outside a hash match an episode result must be ours.
+// While downloads are parked there is nothing to search for.
 func (o *legacy) Search(ctx context.Context, q Query) ([]Candidate, error) {
+	if err := o.dl.parkedErr(); err != nil {
+		return nil, err
+	}
 	found, err := o.search(ctx, q, "opensubtitles-hash", fmt.Sprintf("moviebytesize-%d", q.Size), "moviehash-"+q.Hash)
 	if err != nil {
 		return nil, err
@@ -433,22 +503,37 @@ func (o *legacy) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	return kept, nil
 }
 
-// Download fetches the gzip file. The download quota (200 a day, counted down in the download-quota header) parks the
-// provider: after the last download the header allows, or on the API's deny page, which since 2026-10-05 is HTTP 404
-// "IP ... exceeded" (else a 407, or any page instead of gzip). Past the deny page the API threatens a firewall block.
+// Download is fetch() of subfetch2.py v8: one download at a time, dlGap apart, within dlPerDay per 24 h; a refusal
+// (407, 429, the 404 "exceeded" deny page, or a page instead of gzip) or a Download-Quota header at quotaFloor stops
+// downloads for quotaWait (the download that reported the floor is still used).
 func (o *legacy) Download(ctx context.Context, c Candidate) (string, error) {
-	body, h, err := o.get(ctx, c.link)
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	defer func() { o.keep(o.st) }()
+	if err := o.dl.parkedErr(); err != nil {
+		return "", err
+	}
+	day := o.dl.now().Add(-24 * time.Hour)
+	for len(o.st.Downloads) > 0 && !o.st.Downloads[0].After(day) {
+		o.st.Downloads = o.st.Downloads[1:]
+	}
+	if len(o.st.Downloads) >= dlPerDay {
+		return "", o.spent(fmt.Sprintf("%d downloads in 24 h", dlPerDay), o.st.Downloads[0].Add(quotaWait))
+	}
+	body, h, err := o.get(ctx, o.dl, c.link)
 	var se *statusError
-	denied := errors.As(err, &se) && (se.code == 407 || se.code == 404 && bytes.Contains(bytes.ToLower(se.body), []byte("exceeded")))
-	if denied || err == nil && !bytes.HasPrefix(body, []byte{0x1f, 0x8b}) {
-		o.pace.park(errQuota)
-		return "", fmt.Errorf("%w: %w", errParked, errQuota)
+	if errors.As(err, &se) && (se.code == 407 || se.code == 429 || se.code == 404 && bytes.Contains(bytes.ToLower(se.body), []byte("exceeded"))) {
+		return "", o.spent(fmt.Sprintf("download answered HTTP %d", se.code), o.dl.now().Add(quotaWait))
 	}
 	if err != nil {
 		return "", err
 	}
-	if left, err := strconv.Atoi(h.Get("Download-Quota")); err == nil && left <= 1 {
-		o.pace.park(errQuota) // that was the day's last: stop before the deny page
+	if !bytes.HasPrefix(body, []byte{0x1f, 0x8b}) {
+		return "", o.spent("download answered with a page instead of a file", o.dl.now().Add(quotaWait))
+	}
+	o.st.Downloads = append(o.st.Downloads, o.dl.now())
+	if left, err := strconv.Atoi(strings.TrimSpace(h.Get("Download-Quota"))); err == nil && left <= quotaFloor {
+		o.spent(fmt.Sprintf("download-quota header down to %d", left), o.dl.now().Add(quotaWait))
 	}
 	zr, err := gzip.NewReader(bytes.NewReader(body))
 	if err != nil {
@@ -524,13 +609,14 @@ func (o *dotCom) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	var res struct {
 		Data []struct {
 			Attributes struct {
-				Release           string `json:"release"`
-				DownloadCount     int    `json:"download_count"`
-				HearingImpaired   bool   `json:"hearing_impaired"`
-				ForeignPartsOnly  bool   `json:"foreign_parts_only"`
-				MachineTranslated bool   `json:"machine_translated"`
-				AITranslated      bool   `json:"ai_translated"`
-				MoviehashMatch    bool   `json:"moviehash_match"`
+				Release           string  `json:"release"`
+				DownloadCount     int     `json:"download_count"`
+				Ratings           float64 `json:"ratings"`
+				HearingImpaired   bool    `json:"hearing_impaired"`
+				ForeignPartsOnly  bool    `json:"foreign_parts_only"`
+				MachineTranslated bool    `json:"machine_translated"`
+				AITranslated      bool    `json:"ai_translated"`
+				MoviehashMatch    bool    `json:"moviehash_match"`
 				Files             []struct {
 					FileID   int    `json:"file_id"`
 					FileName string `json:"file_name"`
@@ -553,7 +639,7 @@ func (o *dotCom) Search(ctx context.Context, q Query) ([]Candidate, error) {
 		}
 		c := Candidate{
 			Source: "opensubtitles-com", ID: strconv.Itoa(a.Files[0].FileID), Release: a.Release, FileName: a.Files[0].FileName,
-			HashMatch: a.MoviehashMatch, HearingImpaired: a.HearingImpaired, Downloads: a.DownloadCount, provider: o,
+			HashMatch: a.MoviehashMatch, HearingImpaired: a.HearingImpaired, Downloads: a.DownloadCount, Rating: a.Ratings, provider: o,
 			Season: strconv.Itoa(a.Feature.Season), Episode: strconv.Itoa(a.Feature.Episode),
 		}
 		if !q.Show || c.HashMatch || (c.Season == strconv.Itoa(q.Season) && c.Episode == strconv.Itoa(q.Episode)) {
@@ -648,17 +734,26 @@ func (o *subdl) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	return out, nil
 }
 
-// Download fetches the zip and returns its one SRT (a season pack or a multi-CD set is not one sidecar); anything
-// but a zip is the quota (or a block page): park.
+// Download fetches the zip and returns its one SRT; anything but a zip is the quota (or a block page): park.
 func (o *subdl) Download(ctx context.Context, c Candidate) (string, error) {
 	body, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) { return http.NewRequest(http.MethodGet, c.link, nil) })
 	if err != nil {
 		return "", err
 	}
-	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
-	if err != nil {
+	txt, err := zipSRT(body)
+	if errors.Is(err, zip.ErrFormat) {
 		o.pace.park(errQuota)
 		return "", fmt.Errorf("%w: %w", errParked, errQuota)
+	}
+	return txt, err
+}
+
+// zipSRT decodes the one SRT in a zip (a season pack or a multi-CD set is not one sidecar); zip.ErrFormat when body
+// is not a zip.
+func zipSRT(body []byte) (string, error) {
+	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return "", err
 	}
 	var srts []*zip.File
 	for _, f := range zr.File {
@@ -667,7 +762,7 @@ func (o *subdl) Download(ctx context.Context, c Candidate) (string, error) {
 		}
 	}
 	if len(srts) != 1 {
-		return "", fmt.Errorf("subdl zip holds %d SRT files", len(srts))
+		return "", fmt.Errorf("zip holds %d SRT files", len(srts))
 	}
 	rc, err := srts[0].Open()
 	if err != nil {
@@ -681,55 +776,181 @@ func (o *subdl) Download(ctx context.Context, c Candidate) (string, error) {
 	return decodeDownload(raw, ""), nil
 }
 
-// ---- TMDB: the IMDb id OpenSubtitles searches by ----
+// ---- Gestdown: Addic7ed's TV subtitles (api.gestdown.info, no key) ----
 
-type tmdb struct {
-	base      string // .../3
-	tokenFile string // v4 read-access token, sent as a bearer header (never in a URL)
-	hc        *http.Client
-	pace      *pacer
-	mu        sync.Mutex
-	cache     map[string]int
+type gestdown struct {
+	base  string // https://api.gestdown.info
+	hc    *http.Client
+	pace  *pacer
+	mu    sync.Mutex
+	shows map[string]string // "tvdb:N" or "name:..." -> Gestdown's show id, "" when it has none
 }
 
-// imdb returns the IMDb number of a TMDB movie or show ("movie" | "tv"), 0 when TMDB has none. Any other answer, a
-// missing token included, is an error: the caller defers the title rather than search it without the id.
-func (t *tmdb) imdb(ctx context.Context, kind string, id string) (int, error) {
-	key := kind + "/" + id
-	t.mu.Lock()
-	n, ok := t.cache[key]
-	t.mu.Unlock()
-	if ok {
-		return n, nil
-	}
-	token, err := os.ReadFile(t.tokenFile)
-	if err != nil {
-		return 0, err
-	}
-	body, err := t.pace.do(ctx, t.hc, func() (*http.Request, error) {
-		req, err := http.NewRequest(http.MethodGet, t.base+"/"+key+"/external_ids", nil)
-		if err == nil {
-			req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
-			req.Header.Set("Accept", "application/json")
-		}
-		return req, err
-	})
-	var ids struct {
-		IMDb string `json:"imdb_id"`
-	}
+func (o *gestdown) Name() string  { return "gestdown" }
+func (o *gestdown) pacer() *pacer { return o.pace }
+
+func (o *gestdown) get(ctx context.Context, link string) ([]byte, error) {
+	return o.pace.do(ctx, o.hc, func() (*http.Request, error) { return http.NewRequest(http.MethodGet, link, nil) })
+}
+
+// getJSON decodes a 2xx answer into v; a 404 is no results.
+func (o *gestdown) getJSON(ctx context.Context, path string, v any) error {
+	body, err := o.get(ctx, o.base+path)
 	var se *statusError
-	switch {
-	case errors.As(err, &se) && se.code == http.StatusNotFound:
-	case err != nil:
-		return 0, fmt.Errorf("tmdb %s: %w", key, err)
-	default:
-		if err := json.Unmarshal(body, &ids); err != nil {
-			return 0, fmt.Errorf("tmdb %s: %w", key, err)
+	if errors.As(err, &se) && se.code == http.StatusNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(body, v); err != nil {
+		return fmt.Errorf("gestdown %s: %w", path, err)
+	}
+	return nil
+}
+
+// show is Gestdown's id for the show: by TheTVDB id (it has no TMDB lookup), else by an exact name match.
+func (o *gestdown) show(ctx context.Context, q Query) (string, error) {
+	key, path := "name:"+pyLower(q.Name), "/shows/search/"+url.PathEscape(q.Name)
+	if q.TVDB != 0 {
+		key, path = fmt.Sprintf("tvdb:%d", q.TVDB), fmt.Sprintf("/shows/external/tvdb/%d", q.TVDB)
+	}
+	o.mu.Lock()
+	id, ok := o.shows[key]
+	o.mu.Unlock()
+	if ok {
+		return id, nil
+	}
+	var res struct {
+		Shows []struct{ ID, Name string } `json:"shows"`
+	}
+	if err := o.getJSON(ctx, path, &res); err != nil {
+		return "", err
+	}
+	for _, s := range res.Shows {
+		if q.TVDB != 0 || strings.EqualFold(s.Name, q.Name) {
+			id = s.ID
+			break
 		}
 	}
-	n, _ = strconv.Atoi(strings.TrimPrefix(ids.IMDb, "tt"))
-	t.mu.Lock()
-	t.cache[key] = n
-	t.mu.Unlock()
-	return n, nil
+	o.mu.Lock()
+	o.shows[key] = id
+	o.mu.Unlock()
+	return id, nil
+}
+
+// Search lists the episode's complete English subtitles (episodes only: Addic7ed has no films).
+func (o *gestdown) Search(ctx context.Context, q Query) ([]Candidate, error) {
+	if !q.Show {
+		return nil, nil
+	}
+	show, err := o.show(ctx, q)
+	if err != nil || show == "" {
+		return nil, err
+	}
+	var res struct {
+		Subtitles []struct {
+			ID              string `json:"subtitleId"`
+			Version         string `json:"version"`
+			Completed       bool   `json:"completed"`
+			HearingImpaired bool   `json:"hearingImpaired"`
+			DownloadURI     string `json:"downloadUri"`
+			Language        string `json:"language"`
+			DownloadCount   int    `json:"downloadCount"`
+		} `json:"matchingSubtitles"`
+		Episode struct{ Season, Number int } `json:"episode"`
+	}
+	if err := o.getJSON(ctx, fmt.Sprintf("/subtitles/get/%s/%d/%d/English", show, q.Season, q.Episode), &res); err != nil {
+		return nil, err
+	}
+	if res.Episode.Season != q.Season || res.Episode.Number != q.Episode {
+		return nil, nil
+	}
+	var out []Candidate
+	for _, s := range res.Subtitles {
+		if s.Completed && s.Language == "English" { // an incomplete one is a translation still in progress
+			out = append(out, Candidate{Source: "gestdown", ID: s.ID, Release: s.Version, HearingImpaired: s.HearingImpaired,
+				Downloads: s.DownloadCount, Season: strconv.Itoa(q.Season), Episode: strconv.Itoa(q.Episode),
+				link: o.base + s.DownloadURI, provider: o, ours: true})
+		}
+	}
+	return out, nil
+}
+
+// Download fetches the SRT itself.
+func (o *gestdown) Download(ctx context.Context, c Candidate) (string, error) {
+	raw, err := o.get(ctx, c.link)
+	if err != nil {
+		return "", err
+	}
+	return decodeDownload(raw, ""), nil
+}
+
+// ---- SITEC Subtitles: films by IMDb id (subtitles.example.com, no key) ----
+
+var (
+	sitecRowRe    = regexp.MustCompile(`(?s)<tr data-id="\d+">.*?</tr>`)
+	sitecLinkRe   = regexp.MustCompile(`<a href="/subtitles/([^"]+)"><span class="text-muted">subtitle</span>([^<]*)</a>`)
+	sitecRatingRe = regexp.MustCompile(`class="label[^"]*">(-?\d+)<`)
+)
+
+type sitec struct {
+	base string // https://subtitles.example.com
+	hc   *http.Client
+	pace *pacer
+}
+
+func (o *sitec) Name() string  { return "sitec" }
+func (o *sitec) pacer() *pacer { return o.pace }
+
+// Search reads the film's page: one table row per subtitle, of every language.
+func (o *sitec) Search(ctx context.Context, q Query) ([]Candidate, error) {
+	if q.Show || q.IMDb == 0 {
+		return nil, nil
+	}
+	body, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) {
+		return http.NewRequest(http.MethodGet, fmt.Sprintf("%s/movie-imdb/tt%07d", o.base, q.IMDb), nil)
+	})
+	var se *statusError
+	if errors.As(err, &se) && se.code == http.StatusNotFound {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []Candidate
+	for _, row := range sitecRowRe.FindAllString(string(body), -1) {
+		link := sitecLinkRe.FindStringSubmatch(row)
+		if link == nil || !strings.Contains(row, `class="sub-lang">English<`) {
+			continue
+		}
+		c := Candidate{Source: "sitec", ID: link[1], Release: html.UnescapeString(strings.TrimSpace(link[2])),
+			HearingImpaired: strings.Contains(row, `class="hi-subtitle"`), link: o.base + "/subtitle/" + link[1] + ".zip", provider: o}
+		if m := sitecRatingRe.FindStringSubmatch(row); m != nil {
+			c.Rating, _ = strconv.ParseFloat(m[1], 64)
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// Download fetches the zip, sent from the subtitle's own page as a browser would: without that Referer the site
+// answers with a challenge page, which parks the provider.
+func (o *sitec) Download(ctx context.Context, c Candidate) (string, error) {
+	body, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) {
+		r, err := http.NewRequest(http.MethodGet, c.link, nil)
+		if err == nil {
+			r.Header.Set("Referer", o.base+"/subtitles/"+c.ID)
+		}
+		return r, err
+	})
+	var se *statusError
+	if errors.As(err, &se) && se.code == http.StatusForbidden || err == nil && !bytes.HasPrefix(body, []byte("PK")) {
+		o.pace.park(errors.New("sitec answered a challenge page instead of the zip"))
+		return "", o.pace.parkedErr()
+	}
+	if err != nil {
+		return "", err
+	}
+	return zipSRT(body)
 }
