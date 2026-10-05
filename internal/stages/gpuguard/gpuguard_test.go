@@ -107,7 +107,8 @@ func TestJudgeSelfTest(t *testing.T) {
 }
 
 // Catches: settings drift left unrepaired, a repair that drops Jellyfin's other encoding settings, an alert that
-// repeats every 15 min for the same transcode, and a self-test that runs while someone watches or more than daily.
+// repeats every 15 min for the same transcode, a self-test that runs while someone watches or more than daily, and
+// a summary that calls drifted pins intact.
 func TestRunAgainstFakeServers(t *testing.T) {
 	h := fake.NewEnv(t, map[string]string{"HardwareDevicePath": "", "HardwareAcceleratedEncoders": "1"})
 	app := t.TempDir()
@@ -151,8 +152,8 @@ sample = "/samples/gpu_sample.mkv"`)
 	}
 
 	rep := run()
-	if len(rep.Alerts) != 5 { // 2 Plex prefs, Jellyfin drift, CPU transcode, log line
-		t.Fatalf("first run alerts = %d: %q", len(rep.Alerts), rep.Alerts)
+	if len(rep.Alerts) != 5 || rep.Summary != "4 GPU pin(s) had drifted; 1 playing; self-test not due" { // 2 Plex prefs, Jellyfin drift, CPU transcode, log line
+		t.Fatalf("first run alerts = %d: %q; summary %q", len(rep.Alerts), rep.Alerts, rep.Summary)
 	}
 	puts := h.Plex.Calls("PUT", "/:/prefs")
 	if len(puts) != 2 || puts[0].RawQuery != "HardwareDevicePath=8086%3A3185%400000%3A00%3A02.0" || puts[1].RawQuery != "HardwareAcceleratedCodecs=1" {
@@ -172,8 +173,8 @@ sample = "/samples/gpu_sample.mkv"`)
 	}
 
 	h.Plex.Handle("GET", "/status/sessions", 200, `<MediaContainer size="0"></MediaContainer>`)
-	if rep := run(); len(rep.Alerts) != 0 || len(ran) != 2 {
-		t.Fatalf("idle run: alerts=%q self-test commands=%d", rep.Alerts, len(ran))
+	if rep := run(); len(rep.Alerts) != 0 || len(ran) != 2 || rep.Summary != "GPU pins intact; 0 playing; self-test passed" {
+		t.Fatalf("idle run: alerts=%q self-test commands=%d summary=%q", rep.Alerts, len(ran), rep.Summary)
 	}
 	plexCmd, jfCmd := ran[0], ran[1]
 	if plexCmd.Path != "/opt/plex/Plex Transcoder" || plexCmd.SysProcAttr.Credential.Uid != 297536 ||
