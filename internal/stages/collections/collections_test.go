@@ -440,7 +440,8 @@ func TestRefusalsAreSkippedPerCollection(t *testing.T) {
 	}
 }
 
-// Catches: the first run treating the whole library as new, an arrival waiting a day for Plex's cached item list, an
+// Catches: the first run treating the whole library as new, a folder with a dot in its title never seen on disk, an
+// arrival waiting a day for Plex's cached item list, an
 // arrival's join living only in memory, a director TMDB does not know costing the film its franchise join, a TMDB
 // failure that does not stop the run's lookups, a failing film holding later arrivals up for good, an id TMDB does
 // not know being asked again, and an arrival stuck without an alert.
@@ -463,8 +464,9 @@ func TestArrivalsJoinFromTMDB(t *testing.T) {
 	if n := len(h.TMDB.Calls("GET", "/movie/1")); n != 0 {
 		t.Fatalf("the baseline run asked TMDB about a film already on disk %d times", n)
 	}
-	for _, id := range []int{5, 6, 7} {
-		os.MkdirAll(filepath.Join(movies, fmt.Sprintf("Film %d (2000) {tmdb-%d}", id, id)), 0o755)
+	// 5's folder has dots in its title, as 34 real ones do ("Kill Bill - Vol. 1", "E.T.", "M3GAN 2.0").
+	for _, folder := range []string{"Scary Movie 3.5 (2003) {tmdb-5}", "Film 6 (2000) {tmdb-6}", "Film 7 (2000) {tmdb-7}"} {
+		os.MkdirAll(filepath.Join(movies, folder), 0o755)
 	}
 	servePlex(h, px, 1, 2, 3, 4, 5) // Plex has scanned 5: its cached item list (2 h old) must be re-read
 	h.Now = h.Now.Add(2 * time.Hour)

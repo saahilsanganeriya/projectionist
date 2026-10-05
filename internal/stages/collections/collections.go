@@ -248,8 +248,10 @@ func filmsOnDisk(dir string) (map[int]bool, error) {
 		if !e.IsDir() {
 			continue
 		}
-		// ParseMovie reads <folder>/<file>; a file named like its folder makes it parse the folder alone.
-		m, ok := library.ParseMovie(filepath.Join(dir, e.Name(), e.Name()))
+		// ParseMovie reads <folder>/<file>.<ext>; a file named like its folder parses the folder alone. The extension
+		// keeps a dotted title ("Kill Bill - Vol. 1") whole: without it, everything after the last dot would be taken
+		// for one.
+		m, ok := library.ParseMovie(filepath.Join(dir, e.Name(), e.Name()+".mkv"))
 		if !ok || m.ID.Source != "tmdb" {
 			continue
 		}
