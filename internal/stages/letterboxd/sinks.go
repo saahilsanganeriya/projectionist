@@ -157,9 +157,11 @@ func tmdbFromGuids(guids []struct {
 	return 0
 }
 
-// countPlan records the planned (dry run) or about-to-run work per category.
+// countPlan records the planned work per category, and logs each film's planned change.
 func (r *run) countPlan(app string, ups []update, add, remove []int) {
 	for _, u := range ups {
+		r.env.Log.Info("film planned", "event", "film_plan", "app", app, "tmdb", u.TMDB, "item", u.Title,
+			"plays_from", u.FromPlays, "plays_to", u.Plays, "rating", u.Rating, "last", u.Last, "dry_run", r.opt.DryRun)
 		switch {
 		case u.FromPlays == 0 && u.Plays > 0:
 			r.count(app+".watched", 1)
@@ -175,6 +177,9 @@ func (r *run) countPlan(app string, ups []update, add, remove []int) {
 	}
 	r.count(app+".collection_add", len(add))
 	r.count(app+".collection_remove", len(remove))
+	if len(add)+len(remove) > 0 {
+		r.env.Log.Info("collection planned", "event", "collection_plan", "app", app, "add", add, "remove", remove, "dry_run", r.opt.DryRun)
+	}
 }
 
 func (r *run) failed(app, what string, id int, err error) {
