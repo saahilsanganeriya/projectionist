@@ -751,9 +751,9 @@ func TestFailingWritesRereadOncePerDayThenPark(t *testing.T) {
 
 	w.lb.logRing() // The Ring, put in the Watchlist collection by the run before, is watched and logged
 	rep = step(30*time.Minute, "")
-	if f := w.apps.plex["30"]; rep.Counts["plex.snapshot"] != 0 || f.views != 0 || !slices.Contains(w.apps.collection, "30") || f.rating != 8 {
-		t.Errorf("a day of a re-read: Plex read %d times, The Ring %+v in %v; want no read, no scrobble, kept, rated 8 (counts %v)",
-			rep.Counts["plex.snapshot"], f, w.apps.collection, rep.Counts)
+	if f := w.apps.plex["30"]; rep.Counts["plex.snapshot"] != 0 || f.views != 0 || !slices.Contains(w.apps.collection, "30") || f.rating != 8 || len(rep.Alerts) != 0 {
+		t.Errorf("a day of a re-read: Plex read %d times, The Ring %+v in %v, alerts %v; want no read, no scrobble, kept, rated 8, none (counts %v)",
+			rep.Counts["plex.snapshot"], f, w.apps.collection, rep.Alerts, rep.Counts)
 	}
 	if rep = step(30*time.Minute, ""); len(rep.Alerts) != 1 { // the third run with failed ratings
 		t.Errorf("parking alerts = %v, want one", rep.Alerts)
@@ -763,11 +763,36 @@ func TestFailingWritesRereadOncePerDayThenPark(t *testing.T) {
 		t.Errorf("parked films: %d more rate calls, alerts %v (counts %v)", rates()-before, rep.Alerts, rep.Counts)
 	}
 
+	w.apps.mu.Lock()
+	w.apps.plex["21"] = w.apps.plex["20"] // Plex re-indexes Ad Astra under a new ratingKey: worth trying again
+	delete(w.apps.plex, "20")
+	w.apps.mu.Unlock()
 	before = rates()
-	rep = step(25*time.Hour, "") // the daily read: The Ring's deferred writes land; the parked films stay parked
-	if w.apps.plex["30"].views != 1 || slices.Contains(w.apps.collection, "30") || rates() != before {
-		t.Errorf("after the daily read: The Ring views %d, collection %v, %d rate calls (counts %v)",
-			w.apps.plex["30"].views, w.apps.collection, rates()-before, rep.Counts)
+	rep = step(25*time.Hour, "") // the daily read: The Ring's deferred writes land; Licorice Pizza stays parked
+	if w.apps.plex["30"].views != 1 || slices.Contains(w.apps.collection, "30") || rates()-before != 1 || w.apps.plex["21"].rating != 9 {
+		t.Errorf("after the daily read: The Ring views %d, collection %v, %d rate calls, Ad Astra rating %d; want 1, out, 1, 9 (counts %v)",
+			w.apps.plex["30"].views, w.apps.collection, rates()-before, w.apps.plex["21"].rating, rep.Counts)
+	}
+}
+
+// Catches: failures that are not in a row parking a film. Ad Astra's writes fail in two runs, then succeed; when a
+// later rating change fails once, that is one failed run, not a third.
+func TestFailuresParkOnlyInARow(t *testing.T) {
+	w := newWorld(t)
+	w.apps.failRate = map[string]bool{"20": true}
+	w.run(t, "")
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	w.run(t, "") // a forced read, and the second failed run
+	w.apps.failRate = nil
+	w.h.Now = w.h.Now.Add(25 * time.Hour)
+	w.run(t, "") // the daily read: the rating lands
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	w.run(t, "") // nothing left to do for Ad Astra
+	w.apps.failRate = map[string]bool{"20": true}
+	w.lb.editFeed("<letterboxd:memberRating>4.5<", "<letterboxd:memberRating>4.0<") // he re-rates it
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	if rep := w.run(t, ""); len(rep.Alerts) != 0 || rep.Counts["plex.failed"] != 1 {
+		t.Errorf("one failed run after a success parked the film: alerts %v (counts %v)", rep.Alerts, rep.Counts)
 	}
 }
 
