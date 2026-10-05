@@ -52,8 +52,9 @@ type Options struct {
 	PlexWatchlist bool   `toml:"plex_watchlist"` // mirror onto the owner's plex.tv watchlist (visible per his Plex privacy)
 	DiscoverURL   string `toml:"discover_url"`
 
-	DryRun     bool `toml:"dry_run"`     // plan and count, write nothing to the apps or the missing file
-	FirstFilms int  `toml:"first_films"` // per-film writes only for the first N library films in diary order; 0 = all
+	RunBudget  time.Duration `toml:"run_budget"`  // no app call starts later than this into a run; keep it under "every"
+	DryRun     bool          `toml:"dry_run"`     // plan and count, write nothing to the apps or the missing file
+	FirstFilms int           `toml:"first_films"` // per-film writes only for the first N library films in diary order; 0 = all
 }
 
 func defaults() Options {
@@ -73,6 +74,7 @@ func defaults() Options {
 		JellyfinUser:  "saahil",
 		Collection:    "Watchlist",
 		DiscoverURL:   "https://discover.provider.plex.tv",
+		RunBudget:     25 * time.Minute,
 	}
 }
 
@@ -104,6 +106,7 @@ type run struct {
 	opt   Options
 	db    *sql.DB
 	fetch *fetcher
+	until time.Time // run start + run_budget
 	sleep func(context.Context, time.Duration) error
 	mu    sync.Mutex
 	rep   *stage.Report
@@ -133,7 +136,7 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if sleep == nil {
 		sleep = realSleep
 	}
-	r := &run{env: env, opt: opt, db: env.Store.DB(), sleep: sleep, rep: rep, fetch: &fetcher{
+	r := &run{env: env, opt: opt, db: env.Store.DB(), until: env.Now().Add(opt.RunBudget), sleep: sleep, rep: rep, fetch: &fetcher{
 		http: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}},

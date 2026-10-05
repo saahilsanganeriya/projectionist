@@ -32,7 +32,10 @@ type sinkMeta struct {
 	PromotedID string    `json:"promoted_id,omitempty"` // Plex: the collection this stage put on the owner's Home
 }
 
-var errBreakerOpen = errors.New("too many failed calls this run")
+var (
+	errBreakerOpen = errors.New("too many failed calls this run")
+	errOutOfTime   = errors.New("run_budget spent; the rest waits for the next run")
+)
 
 type breaker struct{ fails int }
 
@@ -54,6 +57,13 @@ func (r *run) callOnce(ctx context.Context, b *breaker, idempotent bool, f func(
 			if serr := r.sleep(ctx, time.Second<<attempt); serr != nil {
 				return serr
 			}
+		}
+		// A busy Plex answers a page in a minute (its Butler tasks, on the NAS), and a run waits for every app:
+		// past the budget no call starts, so the next run's feed read and Jellyfin writes are not held back.
+		if !r.env.Now().Before(r.until) {
+			b.fails = 3
+			r.count("out_of_time", 1)
+			return errOutOfTime
 		}
 		if err = f(); err == nil {
 			b.fails = 0

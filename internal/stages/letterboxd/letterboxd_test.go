@@ -652,7 +652,7 @@ func TestListingsReadEveryPage(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode(map[string]any{"Items": items, "TotalRecordCount": n})
 	})
-	r := &run{env: h.Env, opt: defaults(), sleep: func(context.Context, time.Duration) error { return nil }}
+	r := &run{env: h.Env, opt: defaults(), until: h.Now.Add(time.Hour), sleep: func(context.Context, time.Duration) error { return nil }}
 	seen := map[string]int{}
 	if err := r.plexPages(context.Background(), &breaker{}, "", func(it plexItem) { seen["plex "+it.RatingKey]++ }); err != nil {
 		t.Fatal(err)
@@ -667,5 +667,24 @@ func TestListingsReadEveryPage(t *testing.T) {
 	}
 	if len(seen) != 2*n {
 		t.Errorf("listed %d distinct items, want %d", len(seen), 2*n)
+	}
+}
+
+// Catches: a Plex that answers each call in a minute (its maintenance tasks, as on the NAS) holding the run open
+// past its budget, which would hold back the next run's feed read and Jellyfin writes.
+func TestSlowPlexEndsItsPartOfTheRun(t *testing.T) {
+	w := newWorld(t)
+	var mu sync.Mutex
+	now := w.h.Now
+	w.h.Env.Now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	w.h.Plex.HandleFunc("GET", "/identity", func(rw http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		now = now.Add(26 * time.Minute) // past the 25 min budget before the first listing page
+		mu.Unlock()
+		json.NewEncoder(rw).Encode(map[string]any{"MediaContainer": map[string]any{"machineIdentifier": "m1"}})
+	})
+	rep := w.run(t, "")
+	if n := len(w.h.Plex.Calls("GET", "/library/sections/4/all")); n != 0 || rep.Counts["out_of_time"] == 0 || rep.Counts["sink_errors"] == 0 {
+		t.Errorf("%d Plex listing calls after the budget (counts %v)", n, rep.Counts)
 	}
 }

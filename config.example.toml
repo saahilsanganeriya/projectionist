@@ -71,5 +71,6 @@ plex_section   = 4
 jellyfin_user  = "saahil"
 collection     = "Watchlist"              # "" = no Watchlist collection
 plex_watchlist = false                    # also mirror onto his plex.tv watchlist (his Plex friends can see it)
+run_budget     = "25m"                    # no Plex/Jellyfin/plex.tv call starts later than this into a run; keep it under every
 dry_run        = false                    # plan and count only
 first_films    = 0                        # per-film writes only for the first N library films in diary order; 0 = all
