@@ -99,10 +99,20 @@ func (s *Store) FinishRun(ctx context.Context, id int64, at time.Time, outcome, 
 
 // LastRun is the stage's most recent run; ok is false when it never ran.
 func (s *Store) LastRun(ctx context.Context, stage string) (run Run, ok bool, err error) {
+	return s.lastRun(ctx, stage, "")
+}
+
+// LastFinishedRun is the stage's most recent run that finished with an outcome: not one the process stopped in, nor
+// one recorded "interrupted" (stage.Interrupted).
+func (s *Store) LastFinishedRun(ctx context.Context, stage string) (run Run, ok bool, err error) {
+	return s.lastRun(ctx, stage, ` AND finished_at IS NOT NULL AND outcome != 'interrupted'`)
+}
+
+func (s *Store) lastRun(ctx context.Context, stage, where string) (run Run, ok bool, err error) {
 	var started string
 	var finished, outcome, summary sql.NullString
-	err = s.db.QueryRowContext(ctx, `SELECT id, started_at, finished_at, outcome, summary FROM runs WHERE stage=? ORDER BY id DESC LIMIT 1`, stage).
-		Scan(&run.ID, &started, &finished, &outcome, &summary)
+	err = s.db.QueryRowContext(ctx, `SELECT id, started_at, finished_at, outcome, summary FROM runs WHERE stage=?`+where+
+		` ORDER BY id DESC LIMIT 1`, stage).Scan(&run.ID, &started, &finished, &outcome, &summary)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Run{}, false, nil
 	}
