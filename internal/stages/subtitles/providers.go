@@ -82,6 +82,17 @@ func (c Candidate) key() string { return c.provider.Name() + ":" + c.ID }
 // metered providers ration their downloads (OpenSubtitles: 180 a day per IP), so they come last.
 func metered(p Provider) bool { return p.Name() == "opensubtitles" || p.Name() == "opensubtitles-com" }
 
+// parked is why p would refuse a search now (wrapping errParked), nil when it would not; the legacy API also refuses
+// while its downloads wait out the quota.
+func parked(p Provider) error {
+	if l, ok := p.(*legacy); ok {
+		if err := l.dl.parkedErr(); err != nil {
+			return err
+		}
+	}
+	return p.pacer().parkedErr()
+}
+
 // ---- ports of subfetch2.py ----
 
 // openSubtitlesHash is oshash(): the file size plus the sums of the 64-bit little-endian words of the first and the

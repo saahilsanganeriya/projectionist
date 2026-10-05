@@ -2,29 +2,32 @@
 // scripts/subfetch2.py, made cheap-first). It is a reconciler: each run walks the library and, for each video still
 // lacking an English sidecar, does only the missing step, and reads the video only where nothing cheaper will do.
 //
-//	embedded English text track       -> extracted with ffmpeg
+//	embedded English text track       -> skipped: the players show it, so nothing is fetched and nothing read
 //	else candidates from the providers (Gestdown, SITEC, Subdl with a key; OpenSubtitles legacy and .com last), best
 //	first, skipping any already rejected for this file:
 //	  release-matched                  -> written WITHOUT reading the video once cheapCheck passes: an OpenSubtitles
 //	                                      file-hash match, or a subtitle naming the file's original release group
 //	  otherwise                        -> the alignment queue
-//	the queue, while nobody but the owner watches, at most align_per_day titles in any 24 h, best first:
+//	the queue, while nobody but the owner watches, at most align_per_day titles in any 24 h, best first, each
+//	candidate downloaded only once the one before it failed:
 //	  English PGS/VobSub track         -> cue starts fitted to its caption starts (that stream alone demuxed); one
 //	                                      that does not fit is rescued if alass's alignment to the speech does
 //	  else                             -> alass aligns the candidate to the speech in the audio
 //	accepted                           -> <video>.en.srt, else .eng.srt: created O_EXCL, never overwritten
 //
 // OpenSubtitles is searched only once no other provider's release-matched subtitle passed, and only its hash match is
-// used, unless no other provider has any candidate. A queued title waits until it is aligned: nothing is written
-// unverified. The duration and frame rate cheapCheck needs come from the probe cache, else the .details note (ffprobe
-// runs only for a video that has neither); the original release name from that note, else the rename logs. Three
-// titles at a time look for a release match; the queue aligns one at a time. While anyone but the owner is watching
-// no title starts, and every running ffmpeg/alass is stopped. Every attempt is an event, each verdict with the bytes
-// read from the video; a title that got no subtitle is tried again after retry_after, then after 2, 4 and 8 times it,
-// and a queued title is searched again for a release match on the same schedule. A title is recorded only once TMDB
-// and every provider answered (and alass ran, where it is needed); else it is deferred, not recorded, and an alert
-// names the cause (a spent download quota is routine and only logged). Each run also refreshes sub_stats.py's TSV
-// over the whole library. Jellyfin hears of each new sidecar through a queue kept in the store; Plex watches the disk.
+// used, unless no other provider has any candidate; while it is out it holds back only a title no other provider has a
+// candidate for. A queued title waits until it is aligned: nothing is written unverified. The duration, frame rate and
+// tracks come from the probe cache, else the .details note (ffprobe runs only for a video that has neither); the
+// original release name from that note, else the rename logs. Three titles at a time look for a release match; the
+// queue aligns one at a time, and an alignment counts against align_per_day only once it is about to read the video.
+// While anyone but the owner is watching no title starts, and every running ffmpeg/alass is stopped. Every attempt is
+// an event, each verdict with the bytes read from the video; a title that got no subtitle is tried again after
+// retry_after, then after 2, 4 and 8 times it, and a queued title is searched again for a release match on the same
+// schedule. A title is recorded only once TMDB and every provider it needs answered (and alass ran, where it is
+// needed); else it is deferred, not recorded, and an alert names the cause (a spent download quota is routine and only
+// logged). Each run also refreshes sub_stats.py's TSV over the whole library. Jellyfin hears of each new sidecar
+// through a queue kept in the store; Plex watches the disk.
 package subtitles
 
 import (
@@ -62,6 +65,9 @@ const (
 	maxTries   = 4    // candidates downloaded per title, on each route
 	alassAgree = 0.75 // alass: share of cues that must sit within 0.5 s of the median shift (6 of 8 chunks in align)
 	rescueMax  = 300  // ms: a rescued subtitle's median distance to the captions (the gate's bar)
+	// A release match cheapCheck refused waits this long in http_cache for its alignment, so it is downloaded once.
+	keptFor = 90 * 24 * time.Hour
+	keptAs  = "subtitles:"
 )
 
 type Options struct {
@@ -172,6 +178,9 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 		return err
 	}
 	if _, err := env.Store.DB().ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	if err := env.Store.CachePrune(ctx, keptAs, env.Now().Add(-keptFor)); err != nil {
 		return err
 	}
 	r, err := s.newRun(ctx, env, opt, rep)
@@ -531,6 +540,10 @@ func (r *run) plan(ctx context.Context, titles []*title) ([]*title, error) {
 			}
 			continue
 		}
+		if t.englishText { // the players show it: nothing to fetch and nothing to read
+			r.count("embedded_text")
+			continue
+		}
 		due = append(due, t)
 	}
 	sort.SliceStable(due, func(i, j int) bool { // non-English audio first, then titles with an image reference
@@ -545,7 +558,7 @@ func (r *run) plan(ctx context.Context, titles []*title) ([]*title, error) {
 	return due, nil
 }
 
-// describe learns what the cheap route needs without opening the video: the duration, frame rate and streams from the
+// describe learns what the cheap route needs without opening the video: the duration, frame rate and tracks from the
 // probe cache, else from the .details note, else (a video neither describes) from ffprobe; the original release names
 // from the note, else the rename logs. False when the video could not be described (logged and counted).
 func (r *run) describe(ctx context.Context, t *title) bool {
@@ -588,7 +601,7 @@ func (r *run) describe(ctx context.Context, t *title) bool {
 	return true
 }
 
-// probe reads the video's streams (from the cache, else with ffprobe): the extraction and the queue need their indexes.
+// probe reads the video's streams (from the cache, else with ffprobe): the queue needs their indexes.
 func (r *run) probe(ctx context.Context, t *title) error {
 	if t.probed {
 		return nil
@@ -610,7 +623,7 @@ func (t *title) useInfo(info probe.Info) {
 	if info.Video != nil {
 		t.fps = info.Video.FPS
 	}
-	t.englishAudio, t.englishImage, t.englishText = hasEnglishAudio(info), len(imageTracks(info)) > 0, textTrack(info) != nil
+	t.englishAudio, t.englishImage, t.englishText = hasEnglishAudio(info), len(imageTracks(info)) > 0, hasEnglishText(info)
 }
 
 func hasEnglishAudio(info probe.Info) bool {
@@ -632,19 +645,14 @@ func imageTracks(info probe.Info) []probe.Subtitle {
 	return out
 }
 
-// textTrack is the embedded English text track worth extracting: not forced, not commentary, full rather than SDH
-// when both exist.
-func textTrack(info probe.Info) *probe.Subtitle {
-	var best *probe.Subtitle
-	for i, s := range info.Subtitles {
-		if !s.Text || !english(s.Language) || s.Forced || strings.Contains(strings.ToLower(s.Title), "comment") {
-			continue
-		}
-		if best == nil || best.HearingImpaired && !s.HearingImpaired {
-			best = &info.Subtitles[i]
+// hasEnglishText tells whether the video carries an English text track the players show: not forced, not commentary.
+func hasEnglishText(info probe.Info) bool {
+	for _, s := range info.Subtitles {
+		if s.Text && english(s.Language) && !s.Forced && !strings.Contains(strings.ToLower(s.Title), "comment") {
+			return true
 		}
 	}
-	return best
+	return false
 }
 
 // ---- one title ----
@@ -693,8 +701,7 @@ func (r *run) record(ctx context.Context, t *title, o outcome) {
 		o.fields = map[string]any{}
 	}
 	if o.wrote {
-		provider, _ := o.fields["provider"].(string)
-		r.count("provider_hits_" + cmp.Or(provider, "embedded"))
+		r.count(fmt.Sprint("provider_hits_", o.fields["provider"]))
 	}
 	o.fields["video_bytes"], o.fields["ffprobe"] = t.read, t.ffprobed
 	r.event(ctx, t.path, o)
@@ -725,23 +732,9 @@ func (r *run) record(ctx context.Context, t *title, o outcome) {
 }
 
 // fetch is the cheap route: the providers' candidates, any release-matched one written once cheapCheck passes, and
-// otherwise the candidates an alignment may try ("queued"). The video is read only to extract an embedded English
-// text track, or for OpenSubtitles' file hash (128 KiB).
+// otherwise the candidates an alignment may try ("queued"). The video is read only for OpenSubtitles' file hash
+// (128 KiB), and only when OpenSubtitles is about to be searched.
 func (r *run) fetch(ctx context.Context, t *title) outcome {
-	if t.englishText {
-		if err := r.probe(ctx, t); err != nil {
-			return outcome{result: "error", detail: err.Error()}
-		}
-		if tr := textTrack(t.info); tr != nil {
-			data, err := r.cmd(ctx, t, r.env.FFmpeg.FFmpegPath(), "-nostdin", "-hide_banner", "-loglevel", "error", "-i", t.path,
-				"-map", fmt.Sprintf("0:%d", tr.Index), "-c:s", "srt", "-f", "srt", "-")
-			if err == nil && sane(cues(string(data)), t.info.Duration) {
-				return r.write(ctx, t, data, "extracted", map[string]any{"stream": tr.Index, "codec": tr.Codec})
-			}
-			r.env.Log.Info("embedded track not usable", "event", "extract_rejected", "item", t.path, "stream", tr.Index, "err", err)
-		}
-	}
-
 	q, err := r.query(t)
 	if err != nil {
 		return outcome{result: "error", detail: err.Error()}
@@ -769,24 +762,32 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	}
 	// A title is recorded only once every provider has answered its search and let its candidates be tried; while one
 	// is out (an outage, the day's quota, a refusal earlier in the run) the title waits for the next run, which skips
-	// the candidates already rejected for this file. A title a provider refuses (a status no retry changes, or an
-	// answer that is not one) is recorded with the refusal once every other provider answered, so a refusal of that
-	// title alone cannot hold up every run.
-	incomplete, refusal, found, tried := false, "", 0, 0
+	// the candidates already rejected for this file. A metered provider that is out holds back only a title no cheaper
+	// provider has a candidate for: beside theirs it would add no more than a hash match, and neither route may wait on
+	// its quota. A title a provider refuses (a status no retry changes, or an answer that is not one) is recorded with
+	// the refusal once every other provider answered, so a refusal of that title alone cannot hold up every run.
+	out, meteredOut, refusal, found, tried := false, false, "", 0, 0
 	var pool []Candidate
+	missing := func(p Provider) { // p could not search or serve this title
+		out, meteredOut = out || !metered(p), meteredOut || metered(p)
+	}
 	for _, last := range []bool{false, true} { // the metered providers only when nothing cheaper was written
 		var cands []Candidate
 		for _, p := range r.providers {
 			if metered(p) != last {
 				continue
 			}
-			if last && q.Hash == "" {
+			err := parked(p) // a parked provider costs no request and no hash read
+			if err == nil && last && q.Hash == "" {
 				if q.Hash, _, err = openSubtitlesHash(t.path); err != nil {
 					return outcome{result: "error", detail: err.Error()}
 				}
 				t.read += 2 * min(q.Size, 65536) // the first and the last 64 KiB
 			}
-			got, err := p.Search(ctx, q)
+			var got []Candidate
+			if err == nil {
+				got, err = p.Search(ctx, q)
+			}
 			switch {
 			case err == nil:
 				cands = append(cands, got...)
@@ -794,7 +795,7 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 			case ctx.Err() != nil:
 				return outcome{result: "deferred"}
 			case errors.Is(err, errParked):
-				incomplete = true
+				missing(p)
 			default:
 				p.pacer().park(err)
 				refusal = p.Name() + " search: " + err.Error()
@@ -811,10 +812,10 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 			if rejected[c.key()] == "" && tried < maxTries && t.releaseMatched(c) {
 				tried++
 				attempt := map[string]any{"provider": c.Source, "candidate": c.Release + " " + c.FileName, "id": c.key(), "file": t.key}
-				txt, err := c.provider.Download(ctx, c)
+				txt, err := r.download(ctx, c)
 				switch {
 				case errors.Is(err, errParked):
-					incomplete = true
+					missing(c.provider)
 					r.alertParked(c.provider, t.path, err)
 					continue
 				case ctx.Err() != nil:
@@ -823,11 +824,13 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 					r.event(ctx, t.path, outcome{result: "download_failed", detail: err.Error(), fields: attempt})
 					continue
 				}
-				txt = stripAds(txt)
 				why := cheapCheck(cues(txt), t.durLo, t.durHi, t.fps, subFPS(c))
 				if why == "" {
 					attempt["reference"] = "release"
 					return r.write(ctx, t, []byte(txt), "release_matched", attempt)
+				}
+				if err := r.env.Store.CachePut(ctx, keptAs+c.key(), []byte(txt), r.env.Now()); err != nil {
+					r.env.Log.Warn("refused release match not kept: its alignment downloads it again", "event", "store_error", "item", t.path, "err", err)
 				}
 				r.event(ctx, t.path, outcome{result: "rejected_cheap", detail: why, fields: attempt})
 			}
@@ -837,7 +840,7 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 		}
 	}
 	switch {
-	case incomplete: // a provider that was out never searched this title: it waits, whatever another refused
+	case out || meteredOut && len(pool) == 0: // a provider that was out might have had what this title needs
 		return outcome{result: "deferred", detail: "a provider was out"}
 	case refusal != "":
 		return outcome{result: "error", detail: refusal}
@@ -852,6 +855,19 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	}
 	return outcome{result: "queued", detail: fmt.Sprintf("%d candidate(s)", len(pool)), pool: pool,
 		fields: map[string]any{"group": t.origin.group, "candidates": best}}
+}
+
+// download is c's text with OpenSubtitles' ads stripped: from the store when the cheap route downloaded it before (a
+// release match cheapCheck refused), else from its provider.
+func (r *run) download(ctx context.Context, c Candidate) (string, error) {
+	if body, ok, err := r.env.Store.CacheGet(ctx, keptAs+c.key(), r.env.Now().Add(-keptFor)); err == nil && ok {
+		return string(body), nil
+	}
+	txt, err := c.provider.Download(ctx, c)
+	if err != nil {
+		return "", err
+	}
+	return stripAds(txt), nil
 }
 
 // rejected are the candidates (provider:id) rejected for this very file before: "aligned" when an alignment or the
@@ -939,6 +955,10 @@ func (r *run) workQueue(ctx context.Context, lacking []*title) error {
 		if err := r.env.Viewers.WaitIdle(ctx); err != nil || !r.describe(ctx, t) {
 			continue
 		}
+		if why := r.alassOut(); why != "" && !t.englishImage { // it would need alass: it waits, with no search or cap spent
+			r.record(ctx, t, outcome{result: "deferred", detail: why})
+			continue
+		}
 		r.mu.Lock()
 		pool, fresh := r.pools[p]
 		r.mu.Unlock()
@@ -968,66 +988,51 @@ func (r *run) alignments(ctx context.Context) ([]time.Time, error) {
 	return slices.DeleteFunc(starts, func(s time.Time) bool { return !s.After(day) }), nil
 }
 
-// align is the queue's work on one title: its candidates downloaded first (a refused download costs no read), then
-// the reference read from the video (one alignment of the day's cap), each candidate fitted to it, and one the
-// captions reject given to alass (the rescue).
+// align is the queue's work on one title: its candidates downloaded one at a time, best first, each only once the one
+// before it failed (an OpenSubtitles download is quota); the reference read from the video once the first arrives (a
+// refused download costs no read); each fitted to it, and one the captions reject given to alass (the rescue).
 func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
-	type download struct {
-		c       Candidate
-		txt     string
-		attempt map[string]any
-	}
-	var got []download
+	var ref *reference
+	defer func() {
+		if ref != nil {
+			ref.cleanup()
+		}
+	}()
 	incomplete := false
 	for _, c := range pool[:min(len(pool), maxTries)] {
 		attempt := map[string]any{"provider": c.Source, "candidate": c.Release + " " + c.FileName, "id": c.key(), "file": t.key}
-		txt, err := c.provider.Download(ctx, c)
+		txt, err := r.download(ctx, c)
 		switch {
 		case errors.Is(err, errParked):
 			incomplete = true
 			r.alertParked(c.provider, t.path, err)
+			continue
 		case ctx.Err() != nil:
 			return outcome{result: "deferred"}
 		case err != nil:
 			r.event(ctx, t.path, outcome{result: "download_failed", detail: err.Error(), fields: attempt})
-		default:
-			got = append(got, download{c, stripAds(txt), attempt})
+			continue
 		}
-	}
-	tried := fmt.Sprintf("%d tried", min(len(pool), maxTries))
-	switch {
-	case len(got) == 0 && incomplete:
-		return outcome{result: "deferred", detail: "a provider was out"}
-	case len(got) == 0:
-		return outcome{result: "no_aligned_candidate", detail: tried}
-	}
-	if err := r.probe(ctx, t); err != nil {
-		return outcome{result: "error", detail: err.Error()}
-	}
-	starts, err := r.alignments(ctx)
-	if err == nil {
-		err = r.env.Store.PutJSON(ctx, name, "alignments", append(starts, r.env.Now()))
-	}
-	if err != nil {
-		return outcome{result: "deferred", detail: err.Error()}
-	}
-	ref, err := r.reference(ctx, t)
-	if err != nil {
-		return outcome{result: "error", detail: err.Error()}
-	}
-	defer ref.cleanup()
-	if ref.label == "" {
-		if ref.deferred {
-			return outcome{result: "deferred", detail: ref.why}
+		if ref == nil {
+			if err := r.probe(ctx, t); err != nil {
+				return outcome{result: "error", detail: err.Error()}
+			}
+			got, err := r.reference(ctx, t)
+			if err != nil {
+				return outcome{result: "error", detail: err.Error()}
+			}
+			ref = &got
+			if ref.label == "" {
+				if ref.deferred {
+					return outcome{result: "deferred", detail: ref.why}
+				}
+				return outcome{result: "no_reference", detail: ref.why}
+			}
 		}
-		return outcome{result: "no_reference", detail: ref.why}
-	}
-	for _, d := range got {
-		attempt := d.attempt
-		attempt["reference"], attempt["cues"] = ref.label, len(cues(d.txt))
-		out, result, ok := r.fit(ctx, &ref, d.txt, attempt)
+		attempt["reference"], attempt["cues"] = ref.label, len(cues(txt))
+		out, result, ok := r.fit(ctx, ref, txt, attempt)
 		if !ok && ref.label == "pgs" {
-			out, result, ok = r.rescue(ctx, t, &ref, d.txt, attempt)
+			out, result, ok = r.rescue(ctx, t, ref, txt, attempt)
 		}
 		if ctx.Err() != nil {
 			return outcome{result: "deferred"}
@@ -1049,7 +1054,7 @@ func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 	if incomplete {
 		return outcome{result: "deferred", detail: "a provider was out"}
 	}
-	return outcome{result: "no_aligned_candidate", detail: tried}
+	return outcome{result: "no_aligned_candidate", detail: fmt.Sprintf("%d tried", min(len(pool), maxTries))}
 }
 
 // summarise is the run's report: what was written by which route, what waits in the queue, and the cap used.
@@ -1070,9 +1075,10 @@ func (r *run) summarise(ctx context.Context, lacking, due int) {
 		}
 	}
 	slices.Sort(hits)
-	r.rep.Summary = fmt.Sprintf("%d sidecar(s) written: %d release-matched, %d aligned, %d extracted; %d queued, %d waiting in the queue; "+
-		"alignments %d of %d in 24 h; provider hits %s; %d title(s) lacked one, %d were due", r.written, c["written_release_matched"],
-		c["written_aligned"], c["extracted"], c["queued"], waiting, len(starts), r.opt.AlignPerDay, cmp.Or(strings.Join(hits, " "), "none"), lacking, due)
+	r.rep.Summary = fmt.Sprintf("%d sidecar(s) written: %d release-matched, %d aligned; %d queued, %d waiting in the queue; "+
+		"alignments %d of %d in 24 h; provider hits %s; %d title(s) lacked a sidecar, %d of them carry an English text track, %d were due",
+		r.written, c["written_release_matched"], c["written_aligned"], c["queued"], waiting, len(starts), r.opt.AlignPerDay,
+		cmp.Or(strings.Join(hits, " "), "none"), lacking, c["embedded_text"], due)
 }
 
 // reference is the timing a candidate must line up with: an English image track's caption starts, else alass's
@@ -1096,7 +1102,30 @@ func (ref *reference) cleanup() {
 }
 
 func (r *run) reference(ctx context.Context, t *title) (reference, error) {
-	for _, s := range imageTracks(t.info) {
+	images := imageTracks(t.info)
+	hearable := func() (reference, bool) {
+		if len(t.info.Audio) == 0 {
+			return reference{why: "no usable image track and no audio"}, false
+		}
+		if why := r.alassOut(); why != "" {
+			return reference{why: why, deferred: true}, false
+		}
+		return reference{}, true
+	}
+	if len(images) == 0 { // alass is the only reference: a title it cannot serve costs no read and no cap
+		if ref, ok := hearable(); !ok {
+			return ref, nil
+		}
+	}
+	// The video is read from here on: one of the day's align_per_day, kept in the store before the read.
+	starts, err := r.alignments(ctx)
+	if err == nil {
+		err = r.env.Store.PutJSON(ctx, name, "alignments", append(starts, r.env.Now()))
+	}
+	if err != nil {
+		return reference{why: err.Error(), deferred: true}, nil
+	}
+	for _, s := range images {
 		out, err := r.cmd(ctx, t, r.env.FFmpeg.FFmpegPath(), "-nostdin", "-hide_banner", "-loglevel", "error", "-i", t.path,
 			"-map", fmt.Sprintf("0:%d", s.Index), "-c", "copy", "-f", "framecrc", "-")
 		if err != nil {
@@ -1109,18 +1138,8 @@ func (r *run) reference(ctx context.Context, t *title) (reference, error) {
 			return reference{label: "pgs", bits: bits, starts: starts}, nil
 		}
 	}
-	if len(t.info.Audio) == 0 {
-		return reference{why: "no usable image track and no audio"}, nil
-	}
-	if !fileExists(r.opt.Alass) {
-		r.alertOnce("alass", "alass not found at %s: titles without an English image track wait for it", r.opt.Alass)
-		return reference{why: "alass missing", deferred: true}, nil
-	}
-	r.mu.Lock()
-	down := r.alassDown
-	r.mu.Unlock()
-	if down {
-		return reference{why: "alass failed on another title this run", deferred: true}, nil
+	if ref, ok := hearable(); !ok {
+		return ref, nil
 	}
 	ref := reference{label: "alass"}
 	if err := r.hear(ctx, t, &ref); err != nil {
@@ -1137,6 +1156,21 @@ func (r *run) reference(ctx context.Context, t *title) (reference, error) {
 		return reference{why: "alass could not read the audio: " + err.Error()}, nil
 	}
 	return ref, nil
+}
+
+// alassOut is why alass cannot run now ("" when it can): missing (alerted once), or it failed on a title this run.
+func (r *run) alassOut() string {
+	r.mu.Lock()
+	down := r.alassDown
+	r.mu.Unlock()
+	switch {
+	case !fileExists(r.opt.Alass):
+		r.alertOnce("alass", "alass not found at %s: titles without an English image track wait for it", r.opt.Alass)
+		return "alass missing"
+	case down:
+		return "alass failed on another title this run"
+	}
+	return ""
 }
 
 // hear has alass find the speech in the default audio track, decoded once per title and reused per candidate: "_"

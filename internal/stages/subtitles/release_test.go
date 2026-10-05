@@ -7,8 +7,10 @@ import (
 )
 
 // Catches a subtitle written unaligned that was not made for this release: another group, a group's name read from a
-// codec or a "-DL" suffix, a source, resolution, service or edition the file's release contradicts, another episode,
-// a subtitle labelled with another title, or an OpenSubtitles candidate trusted without its file-hash match. Also a
+// codec or a "-DL" suffix, a source, resolution, service or edition the file's release contradicts (a named cut such
+// as Final Cut, Ultimate Cut, Special Edition or Redux is an edition), another episode (S03E06 or 3x06),
+// a subtitle labelled with another title, a word in trailing parentheses that names no resolution or source taken for
+// a group, or an OpenSubtitles candidate trusted without its file-hash match. Also a
 // real match missed: Addic7ed's lists of the releases a subtitle fits, a re-encoder's group in its trailing
 // parentheses, a SITEB bracket tag, and the group taken from the folder when the file name lacks one. Release texts are
 // Gestdown's and the library's own (2026-10-05).
@@ -34,12 +36,25 @@ func TestReleaseMatched(t *testing.T) {
 		{"group, but another resolution", []string{"Show.S01E01.1080p.HDTV.x264-KILLERS.mkv"}, false, false, Candidate{Release: "720p.HDTV-KILLERS"}, false},
 		{"group, but another service", []string{"Show.S01E01.1080p.AMZN.WEB-DL.x264-KiNGS.mkv"}, false, false, Candidate{Release: "NF.WEB-DL-KiNGS"}, false},
 		{"group, but another episode", []string{got}, false, false, Candidate{Release: "Show.S03E06.WEB-DL-NTb"}, false},
+		{"group, but another episode as 3x06", []string{got}, false, false, Candidate{Release: "Show.3x06.WEB-DL-NTb"}, false},
 		{"the file's name is another episode", []string{"Show.S01E02.1080p.WEB-DL-NTb.mkv"}, false, false, Candidate{Release: "WEB-DL-NTb"}, false},
 		{"labelled with another title", []string{got}, false, true, Candidate{Release: "WEB-DL-NTb"}, false},
 		{"edition missing", []string{"Lord.of.War.2005.Unrated.1080p.BluRay.x264-GRP.mkv"}, true, false,
 			Candidate{Release: "Lord.of.War.2005.1080p.BluRay.x264-GRP"}, false},
 		{"edition named", []string{"Lord.of.War.2005.Unrated.1080p.BluRay.x264-GRP.mkv"}, true, false,
 			Candidate{Release: "Lord.of.War.2005.UNRATED.1080p.BluRay.x264-GRP"}, true},
+		{"the Final Cut, a theatrical subtitle", []string{"Blade.Runner.1982.The.Final.Cut.1080p.BluRay.x264-GRP.mkv"}, true, false,
+			Candidate{Release: "Blade.Runner.1982.1080p.BluRay.x264-GRP"}, false},
+		{"the Final Cut on both", []string{"Blade.Runner.1982.The.Final.Cut.1080p.BluRay.x264-GRP.mkv"}, true, false,
+			Candidate{Release: "Blade.Runner.1982.Final.Cut.1080p.BluRay.x264-GRP"}, true},
+		{"Redux, a theatrical subtitle", []string{"Apocalypse.Now.1979.Redux.1080p.BluRay.x264-GRP.mkv"}, true, false,
+			Candidate{Release: "Apocalypse.Now.1979.1080p.BluRay.x264-GRP"}, false},
+		{"Special Edition, a theatrical subtitle", []string{"Close.Encounters.1977.Special.Edition.1080p.BluRay.x264-GRP.mkv"}, true, false,
+			Candidate{Release: "Close.Encounters.1977.1080p.BluRay.x264-GRP"}, false},
+		{"Ultimate Cut, a theatrical subtitle", []string{"Watchmen.2009.Ultimate.Cut.1080p.BluRay.x264-GRP.mkv"}, true, false,
+			Candidate{Release: "Watchmen.2009.1080p.BluRay.x264-GRP"}, false},
+		{"Director's Cut on both", []string{"Daredevil.2003.Director's.Cut.1080p.BluRay.x264-GRP.mkv"}, true, false,
+			Candidate{Release: "Daredevil.2003.Directors.Cut.1080p.BluRay.x264-GRP"}, true},
 		{"re-encoder in parentheses", []string{"Show (2005) - S01E01 - Pilot (1080p BluRay x265 Silence).mkv"}, false, false,
 			Candidate{Release: "BluRay.Silence"}, true},
 		{"re-encoder, scene subtitle", []string{"Show (2005) - S01E01 - Pilot (1080p BluRay x265 Silence).mkv"}, false, false,
@@ -47,6 +62,8 @@ func TestReleaseMatched(t *testing.T) {
 		{"a codec is no group", []string{"Shinya.Shokudo.S01E01.720p.x264.mkv"}, false, false, Candidate{Release: "x264"}, false},
 		{"-DL is no group", []string{"Show.S01E01.1080p.WEB-DL.mkv"}, false, false, Candidate{Release: "WEB-DL"}, false},
 		{"a year in parentheses is no group", []string{"Gangs of Wasseypur Part 2 (2012).mkv"}, true, false, Candidate{Release: "Gangs.2012"}, false},
+		{"a word in parentheses is no group", []string{"Wings of Desire (Criterion).mkv"}, true, false,
+			Candidate{Release: "Wings.of.Desire.1987.Criterion.1080p.BluRay.x264-AMIABLE"}, false},
 		{"SITEB bracket", []string{"Heat (1995) [1080p] [BluRay] [SITEB.MX].mp4"}, true, false, Candidate{Release: "Heat.1995.1080p.BluRay.x264-[SITEB.LT]"}, true},
 		{"a source in parentheses is no group", []string{"Episode 1.mkv", "Season 1 (BluRay)"}, false, false, Candidate{Release: "BluRay"}, false},
 		{"group from the folder", []string{"Episode 1.mkv", "Show.S01.1080p.BluRay.x264-ROVERS[siteatv]"}, false, false, Candidate{Release: "BluRay.ROVERS"}, true},

@@ -84,15 +84,16 @@ var (
 		"stan": {"service", "stan"},
 	}
 	editionTokens = map[string]string{"extended": "extended", "unrated": "unrated", "uncut": "uncut", "theatrical": "theatrical",
-		"imax": "imax", "dc": "dc", "directors": "dc", "director": "dc"}
-	sxeRe = regexp.MustCompile(`\bs(\d{1,2})e(\d{1,3})`)
+		"imax": "imax", "dc": "dc", "directors": "dc", "director": "dc", "redux": "redux"}
+	sxeRe = regexp.MustCompile(`\bs(\d{1,2})e(\d{1,3})|\b(\d{1,2})x(\d{2,3})\b`) // S01E02, 1x02
 )
 
 func parseRelease(text string) release {
 	low := pyLower(text)
 	r := release{tokens: map[string]bool{}}
 	var editions []string
-	for _, tok := range tokenRe.FindAllString(low, -1) {
+	toks := tokenRe.FindAllString(low, -1)
+	for i, tok := range toks {
 		r.tokens[tok] = true
 		if c, ok := tokenClasses[tok]; ok {
 			switch c[0] {
@@ -104,15 +105,19 @@ func parseRelease(text string) release {
 				r.service = c[1]
 			}
 		}
-		if e, ok := editionTokens[tok]; ok && !slices.Contains(editions, e) {
+		e, ok := editionTokens[tok]
+		if !ok && (tok == "cut" || tok == "edition") && i > 0 && toks[i-1] != "s" && editionTokens[toks[i-1]] == "" {
+			e, ok = toks[i-1], true // Final Cut, Special Edition, Ultimate Cut, Rogue Cut: any named cut is an edition
+		}
+		if ok && !slices.Contains(editions, e) {
 			editions = append(editions, e)
 		}
 	}
 	slices.Sort(editions)
 	r.editions = strings.Join(editions, " ")
 	if m := sxeRe.FindStringSubmatch(low); m != nil {
-		s, _ := strconv.Atoi(m[1])
-		e, _ := strconv.Atoi(m[2])
+		s, _ := strconv.Atoi(m[1] + m[3])
+		e, _ := strconv.Atoi(m[2] + m[4])
 		r.sxe = sxe(s, e)
 	}
 	return r

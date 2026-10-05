@@ -29,7 +29,7 @@ import (
 // fixture is a small library on disk, fake ffprobe/ffmpeg/alass, and fake OpenSubtitles and TMDB servers:
 //
 //	Ran     Japanese audio, English PGS track          -> a candidate 2.5 s late, fitted to the captions
-//	Heat    English audio, embedded English subrip     -> extracted
+//	Heat    English audio, embedded English subrip     -> skipped: the players show it
 //	Clerks  English audio, no subtitle tracks          -> a candidate aligned by alass (+1 s)
 //	Dune    already has Dune.en.srt                    -> untouched, never probed
 //	Show    English audio, nothing anywhere            -> no_candidates
@@ -45,6 +45,7 @@ type fixture struct {
 	requests []string
 	quota    bool   // downloads answer 429: the day's quota is spent
 	dead     bool   // every download link answers a plain 404, and Ran's IMDb search finds four subtitles
+	four     bool   // Ran's IMDb search finds four subtitles, the first on time
 	cut      bool   // Ran's candidate does not fit its captions (another cut) until alass aligns it
 	hashIMDb string // when set, Ran's file hash finds a subtitle labelled with this IMDb id
 	hashText string // that subtitle (default: another film's timing)
@@ -90,14 +91,13 @@ func newFixture(t *testing.T) *fixture {
 	put("Clerks.json", probeJSON(`{"index":1,"codec_type":"audio","codec_name":"aac",`+eng+`}`))
 	put("Show.json", probeJSON(`{"index":1,"codec_type":"audio","codec_name":"aac",`+eng+`}`))
 	put("ran.framecrc", framecrc(f.ts))
-	put("heat.srt", srt(f.ts, 0))
 	put("realign.srt", srt(f.ts, 1))
 	put("speech.srt", srt(f.ts, 1))
 	f.h.Script(t, "ffprobe", `echo "$*" >> "`+ff+`/ffprobe.calls"
 for n in Ran Heat Clerks Show; do case "$*" in *"/$n "*) cat "`+ff+`/$n.json"; exit 0;; esac; done; exit 1
 `)
 	f.h.Script(t, "ffmpeg", `echo "$*" >> "`+ff+`/helper.calls"
-case "$*" in *framecrc*) cat "`+ff+`/ran.framecrc";; *"-f srt"*) cat "`+ff+`/heat.srt";; *) exit 1;; esac
+case "$*" in *framecrc*) cat "`+ff+`/ran.framecrc";; *) exit 1;; esac
 `)
 	// alass's real CLI: <reference> <incorrect> <output> [--index <audio stream>]; it exits 1 on any other flag.
 	f.h.Script(t, "alass", `echo "$*" >> "`+ff+`/helper.calls"
@@ -121,7 +121,7 @@ cp "`+ff+`/realign.srt" "$3" 2>/dev/null || cp "$2" "$3"; echo "info: 'reference
 				`","SubDownloadLink":"` + osSrv.URL + `/dl/hash.gz"}]`))
 		case r.URL.Path == "/dl/hash.gz":
 			w.Write(gz(cmp.Or(f.hashText, srt(otherTimes(), 0))))
-		case strings.Contains(r.URL.Path, "imdbid-0089881") && f.dead:
+		case strings.Contains(r.URL.Path, "imdbid-0089881") && (f.dead || f.four):
 			w.Write([]byte(strings.ReplaceAll(cand("ran", "Ran")+cand("ran2", "Ran")+cand("ran3", "Ran")+cand("ran4", "Ran"), "][", ",")))
 		case strings.HasPrefix(r.URL.Path, "/dl/") && f.dead:
 			http.NotFound(w, r)
@@ -186,14 +186,16 @@ func (f *fixture) requestCount() int {
 	return len(f.requests)
 }
 
-// Catches, end to end: a sidecar not written for each route (PGS fit, extraction, alass), the PGS fit not landing on
-// the captions or the ad block kept, an existing sidecar touched or its video probed, titles with English audio
+// Catches, end to end: a sidecar not written for each route (PGS fit, alass), the PGS fit not landing on the captions
+// or the ad block kept, a title with an embedded English text track searched for or its track extracted (ffmpeg reads
+// the whole file), an existing sidecar touched or its video probed, titles with English audio
 // served before the foreign one, Jellyfin not told (the first sidecar at once, the rest at the run's end), a rerun
 // repeating any search, a title without candidates searched again before retry_after or a second miss not doubling
 // the wait, and the API's redirect followed (OpenSubtitles parked, an alert).
 func TestRunWritesSidecarsAndReconciles(t *testing.T) {
 	f := newFixture(t)
-	if rep := f.run(t); len(rep.Alerts) > 0 {
+	rep := f.run(t)
+	if len(rep.Alerts) > 0 {
 		t.Fatalf("alerts: %v", rep.Alerts)
 	}
 	got := cues(f.sidecar(t, ran))
@@ -202,10 +204,17 @@ func TestRunWritesSidecarsAndReconciles(t *testing.T) {
 			t.Fatalf("Ran: %d cues (want %d, the ad block stripped), cue %d starts %.3f s off its caption", len(got), len(f.ts), i, d)
 		}
 	}
-	if f.sidecar(t, heat) != srt(f.ts, 0) || f.sidecar(t, clerks) != srt(f.ts, 1) {
-		t.Error("Heat's embedded track not extracted as is, or Clerks' alass alignment not written")
+	if f.sidecar(t, clerks) != srt(f.ts, 1) {
+		t.Error("Clerks' alass alignment not written")
 	}
 	calls, _ := os.ReadFile(filepath.Join(f.h.Env.FFmpeg.Dir, "ffprobe.calls"))
+	helpers, _ := os.ReadFile(filepath.Join(f.h.Env.FFmpeg.Dir, "helper.calls"))
+	_, err := os.Stat(strings.TrimSuffix(f.path(heat), ".mkv") + ".en.srt")
+	searched := len(f.h.TMDB.Calls("GET", "/movie/949")) > 0
+	if err == nil || strings.Contains(string(helpers), "Heat") || searched || f.outcomes()[f.path(heat)] != "" || rep.Counts["embedded_text"] != 1 {
+		t.Errorf("Heat (embedded English text): sidecar %v, a helper ran on it %v, searched %v, recorded %q, counted %d; want none, no, no, nothing, 1",
+			err == nil, strings.Contains(string(helpers), "Heat"), searched, f.outcomes()[f.path(heat)], rep.Counts["embedded_text"])
+	}
 	if b, _ := os.ReadFile(strings.TrimSuffix(f.path(dune), ".mkv") + ".en.srt"); string(b) != "theirs" || strings.Contains(string(calls), "Dune") {
 		t.Error("Dune's existing sidecar changed, or Dune probed")
 	}
@@ -224,8 +233,8 @@ func TestRunWritesSidecarsAndReconciles(t *testing.T) {
 	for _, c := range pushes {
 		told = append(told, c.Body...)
 	}
-	if len(pushes) != 2 || bytes.Count(pushes[0].Body, []byte(`"Created"`)) != 1 || bytes.Count(told, []byte(`"Created"`)) != 3 {
-		t.Errorf("Jellyfin told %s; want the first sidecar at once and the other two at the end", told)
+	if len(pushes) != 2 || bytes.Count(pushes[0].Body, []byte(`"Created"`)) != 1 || bytes.Count(told, []byte(`"Created"`)) != 2 {
+		t.Errorf("Jellyfin told %s; want the first sidecar at once and the other at the end", told)
 	}
 	// Show's misses: none again at once, then after 1 week, then 2 weeks (not 1) after its second miss.
 	for i, step := range []struct {
@@ -271,15 +280,17 @@ func (f *fixture) outcomes() map[string]string {
 // subfetch2.py's own recorded resume time (its last 24 h of downloads carried over); a candidate already rejected for
 // the file downloaded again when its title is due again; a refused
 // search deferring its own title too (one title's refusal would hold up every run), or recording it while another
-// provider is out for the quota; and dead download links (plain 404s) parking OpenSubtitles with an alert instead of
-// moving on as subfetch2.py does.
+// provider is out for the quota; OpenSubtitles out (its quota) holding back a title Gestdown has candidates for, in the
+// cheap pass or in the queue, or reading its file hash although it will not search; an alignment downloading a
+// candidate before the one ahead of it failed (an OpenSubtitles download is quota); and dead download links (plain
+// 404s) parking OpenSubtitles with an alert instead of moving on as subfetch2.py does.
 func TestRunProviderTrouble(t *testing.T) {
 	gone := httptest.NewServer(http.NotFoundHandler())
 	gone.Close()
 	outage := newFixture(t)
 	outage.st.openSubtitles = gone.URL + "/search/"
-	if rep := outage.run(t); len(rep.Alerts) != 1 || len(outage.outcomes()) != 1 || outage.outcomes()[outage.path(heat)] != "extracted" {
-		t.Errorf("outage: alerts %q, recorded %v; want one alert, only Heat's extraction", rep.Alerts, outage.outcomes())
+	if rep := outage.run(t); len(rep.Alerts) != 1 || len(outage.outcomes()) != 0 {
+		t.Errorf("outage: alerts %q, recorded %v; want one alert, nothing recorded", rep.Alerts, outage.outcomes())
 	}
 
 	noTMDB := newFixture(t)
@@ -321,7 +332,7 @@ func TestRunProviderTrouble(t *testing.T) {
 	refused := newFixture(t)
 	refused.st.openSubtitles = refuses.URL + "/search/"
 	rep := refused.run(t)
-	if got := refused.outcomes(); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "HTTP 403") || len(got) != 2 || got[refused.path(ran)] != "error" {
+	if got := refused.outcomes(); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "HTTP 403") || len(got) != 1 || got[refused.path(ran)] != "error" {
 		t.Errorf("searches refused: alerts %q, recorded %v; want one alert, Ran recorded, Clerks and Show deferred", rep.Alerts, got)
 	}
 
@@ -334,8 +345,8 @@ func TestRunProviderTrouble(t *testing.T) {
 	os.Rename(filepath.Join(old, "quota.csv"), filepath.Join(legacy.dir, "quota.csv"))
 	os.Rename(filepath.Join(old, "downloads.csv"), filepath.Join(legacy.dir, "downloads.csv"))
 	var st quotaState
-	if legacy.run(t); legacy.requestCount() != 0 || len(legacy.outcomes()) != 1 {
-		t.Errorf("legacy quota wait: %d OpenSubtitles requests, recorded %v; want none, only Heat's extraction", legacy.requestCount(), legacy.outcomes())
+	if legacy.run(t); legacy.requestCount() != 0 || len(legacy.outcomes()) != 0 {
+		t.Errorf("legacy quota wait: %d OpenSubtitles requests, recorded %v; want none, nothing recorded", legacy.requestCount(), legacy.outcomes())
 	}
 	if legacy.h.Env.Store.GetJSON(context.Background(), name, "opensubtitles_quota", &st); len(st.Downloads) != 1 {
 		t.Errorf("imported %d of subfetch2.py's downloads; want the 1 within 24 h", len(st.Downloads))
@@ -346,8 +357,33 @@ func TestRunProviderTrouble(t *testing.T) {
 	os.WriteFile(filepath.Join(both.dir, "opensubtitles_api_key"), []byte("bad\n"), 0o600)
 	both.st.openSubtitlesCom = refuses.URL
 	both.options(`providers = ["opensubtitles", "opensubtitles-com"]`)
-	if both.run(t); len(both.outcomes()) != 1 {
-		t.Errorf("quota plus a refusal recorded %v; want only Heat's extraction (the rest wait for OpenSubtitles)", both.outcomes())
+	if both.run(t); len(both.outcomes()) != 0 {
+		t.Errorf("quota plus a refusal recorded %v; want nothing (every title waits for OpenSubtitles)", both.outcomes())
+	}
+
+	// OpenSubtitles waits out its quota; Gestdown has two candidates for Show, none naming its release. Show is queued
+	// with no hash read, and a later run's queue aligns it while OpenSubtitles still waits; Ran and Clerks, which only
+	// OpenSubtitles could serve, wait for it.
+	parked := newFixture(t)
+	parked.gestdownNTb(t)
+	parked.h.Env.Store.PutJSON(context.Background(), name, "opensubtitles_quota", quotaState{ResumeAfter: parked.h.Now.Add(24 * time.Hour)})
+	parked.options(`providers = ["opensubtitles", "gestdown"]` + "\nalign_per_day = 0")
+	parked.run(t)
+	queued := parked.verdict(show, "queued")
+	parked.options(`providers = ["opensubtitles", "gestdown"]` + "\nalign_per_day = 20")
+	parked.h.Now = parked.h.Now.Add(time.Hour)
+	parked.run(t)
+	if o := parked.outcomes(); queued["video_bytes"] != 0.0 || o[parked.path(show)] != "retimed" || o[parked.path(ran)] != "" || o[parked.path(clerks)] != "" ||
+		parked.requestCount() != 0 {
+		t.Errorf("OpenSubtitles waiting: Show queued with %v bytes read, recorded %v, %d OpenSubtitles requests; want 0, Show aligned, Ran and Clerks waiting, none",
+			queued["video_bytes"], o, parked.requestCount())
+	}
+
+	four := newFixture(t) // the alignment's first download fits: the other three are never downloaded
+	four.four = true
+	four.run(t)
+	if n := strings.Count(strings.Join(four.requests, " "), "/dl/ran"); n != 1 || four.outcomes()[four.path(ran)] != "retimed" {
+		t.Errorf("four candidates, the first fits: %d downloaded, Ran %q; want 1, aligned", n, four.outcomes()[four.path(ran)])
 	}
 
 	dead := newFixture(t)
@@ -418,14 +454,15 @@ func TestRunEpisodeFromGestdown(t *testing.T) {
 }
 
 // Catches a missing or broken alass parking titles for a week, or failing quietly: missing, every title that needs it
-// waits in the queue; failing, the title it failed on is recorded (it may be that title's audio) and the titles behind it wait;
-// one alert either way.
+// waits in the queue, spending neither a download nor one of the day's alignments; failing, the title it failed on is
+// recorded (it may be that title's audio) and the titles behind it wait; one alert either way.
 func TestRunWhenAlassBreaks(t *testing.T) {
 	missing := newFixture(t)
 	os.Remove(filepath.Join(missing.h.Env.FFmpeg.Dir, "alass"))
 	if rep := missing.run(t); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "alass not found") || missing.outcomes()[missing.path(clerks)] != "queued" ||
-		missing.queued()[0] != missing.path(clerks) {
-		t.Errorf("alass missing: alerts %q, recorded %v, queue %v; want one alert and Clerks still queued", rep.Alerts, missing.outcomes(), missing.queued())
+		missing.queued()[0] != missing.path(clerks) || rep.Counts["cap_used"] != 1 || strings.Contains(strings.Join(missing.requests, " "), "/dl/clerks") {
+		t.Errorf("alass missing: alerts %q, recorded %v, queue %v, %d alignments, Clerks downloaded %v; want one alert, Clerks still queued, only Ran's, no",
+			rep.Alerts, missing.outcomes(), missing.queued(), rep.Counts["cap_used"], strings.Contains(strings.Join(missing.requests, " "), "/dl/clerks"))
 	}
 	broken := newFixture(t)
 	alass := broken.h.Script(t, "alass", "exit 1\n")
@@ -434,10 +471,12 @@ func TestRunWhenAlassBreaks(t *testing.T) {
 	}
 	r := &run{env: broken.h.Env, opt: Options{Alass: alass}, rep: &stage.Report{}, alerted: map[string]bool{}}
 	next := &title{path: broken.path(clerks), info: probe.Info{Audio: []probe.Audio{{Index: 1}}}}
+	before, _ := r.alignments(context.Background())
 	first, _ := r.reference(context.Background(), next)
 	second, _ := r.reference(context.Background(), next)
-	if first.deferred || !second.deferred {
-		t.Errorf("deferred %v, then %v; want the title after alass failed deferred", first.deferred, second.deferred)
+	if after, _ := r.alignments(context.Background()); first.deferred || !second.deferred || len(after)-len(before) != 1 {
+		t.Errorf("deferred %v, then %v, %d alignments counted; want the title after alass failed deferred, costing none", first.deferred,
+			second.deferred, len(after)-len(before))
 	}
 }
 
@@ -542,8 +581,8 @@ func TestRunStoppedAfterAWrite(t *testing.T) {
 		w.WriteHeader(500)
 	})
 	f.st.Run(ctx, f.h.Env, &stage.Report{})
-	if o := f.outcomes()[f.path(heat)]; o != "extracted" {
-		t.Errorf("Heat's sidecar, written as the run stopped, recorded as %q", o)
+	if o := f.outcomes()[f.path(ran)]; o != "retimed" {
+		t.Errorf("Ran's sidecar, written as the run stopped, recorded as %q", o)
 	}
 	n := len(f.h.Jellyfin.Calls("POST", "/Library/Media/Updated"))
 	f.h.Jellyfin.Handle("POST", "/Library/Media/Updated", 204, "")
@@ -552,8 +591,8 @@ func TestRunStoppedAfterAWrite(t *testing.T) {
 	for _, c := range f.h.Jellyfin.Calls("POST", "/Library/Media/Updated")[n:] {
 		told = append(told, c.Body...)
 	}
-	if !bytes.Contains(told, []byte(filepath.Base(strings.TrimSuffix(heat, ".mkv"))+".en.srt")) {
-		t.Errorf("the next run told Jellyfin %s; want Heat's sidecar too", told)
+	if !bytes.Contains(told, []byte(filepath.Base(strings.TrimSuffix(ran, ".mkv"))+".en.srt")) {
+		t.Errorf("the next run told Jellyfin %s; want Ran's sidecar too", told)
 	}
 }
 
@@ -627,20 +666,20 @@ func TestAlassFit(t *testing.T) {
 	}
 }
 
-// note writes the .details note of rel: its original name and the duration a Container line gives.
-func (f *fixture) note(rel, original, duration string) {
+// note writes the .details note of rel: its original name, its subtitle tracks and the duration a Container line gives.
+func (f *fixture) note(rel, original, subs, duration string) {
 	dir := filepath.Join(filepath.Dir(f.path(rel)), ".details")
 	os.MkdirAll(dir, 0o755)
 	os.WriteFile(filepath.Join(dir, filepath.Base(rel)+".txt"), []byte("Title:           x\nOriginal name:   "+original+"\nOriginal folder: x\n"+
-		"Video:           x264 (AVC) · 8-bit · SDR · 23.976 fps · 5.0 Mb/s\nAudio:           eng AAC 5.1\nSubtitles:       none\n"+
+		"Video:           x264 (AVC) · 8-bit · SDR · 23.976 fps · 5.0 Mb/s\nAudio:           eng AAC 5.1\nSubtitles:       "+subs+"\n"+
 		"Container:       matroska · 1.00 GB · "+duration+" · 0 chapters\n"), 0o644)
 }
 
 // gestdownNTb has Gestdown serve Show's episode two subtitles: CtrlHD's, popular and 3 s late, and NTb's, on time; TMDB
-// gives the show its TheTVDB and IMDb ids.
-func (f *fixture) gestdownNTb(t *testing.T) {
+// gives the show its TheTVDB and IMDb ids. It returns the requests per path.
+func (f *fixture) gestdownNTb(t *testing.T) func(string) int {
 	f.h.TMDB.Handle("GET", "/tv/1", 200, `{"id":1,"external_ids":{"tvdb_id":81189,"imdb_id":"tt0000001"}}`)
-	gd, _ := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+	gd, calls := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
 		switch r.URL.Path {
 		case "/shows/external/tvdb/81189":
 			w.Write([]byte(`{"shows":[{"id":"s"}]}`))
@@ -654,6 +693,7 @@ func (f *fixture) gestdownNTb(t *testing.T) {
 		}
 	})
 	f.st.gestdownAPI = gd.URL
+	return calls
 }
 
 // verdict is the fields of the title's last event with the given status.
@@ -671,7 +711,8 @@ func (f *fixture) verdict(rel, status string) map[string]any {
 // order); an OpenSubtitles hash match labelled with the film is written reading only the hash's 2 x 64 KiB (the whole
 // 4 KiB file twice here). Also a hash match labelled with another film, or a release match the note says cannot fit
 // (8 % short), written instead of queued untouched; OpenSubtitles' other candidates queued beside a cheaper provider's;
-// and a release match that failed cheapCheck dropped from the alignment, or tested cheaply again.
+// a release match that failed cheapCheck dropped from the alignment, tested cheaply again, or downloaded again by it;
+// and a title whose note names an embedded English text track probed or opened.
 func TestRunReleaseMatchedReadsNoVideo(t *testing.T) {
 	for _, c := range []struct {
 		why                  string
@@ -682,16 +723,20 @@ func TestRunReleaseMatchedReadsNoVideo(t *testing.T) {
 		{"cannot fit, another film", "0h 50m", "1234567", map[string]string{show: "queued", ran: "queued", clerks: "queued"}},
 	} {
 		f := newFixture(t)
-		f.gestdownNTb(t)
+		gestdown := f.gestdownNTb(t)
 		f.options(`providers = ["opensubtitles", "gestdown"]` + "\nalign_per_day = 0")
-		f.note(show, "Show.S01E01.1080p.WEB-DL.DD5.1.H.264-NTb.mkv", c.showLength)
-		f.note(ran, "Ran.1985.1080p.BluRay.x264-GRP.mkv", "0h 45m")
-		f.note(clerks, "Clerks.1994.DVDRip.XviD-GRP.avi", "0h 45m")
+		f.note(show, "Show.S01E01.1080p.WEB-DL.DD5.1.H.264-NTb.mkv", "none", c.showLength)
+		f.note(ran, "Ran.1985.1080p.BluRay.x264-GRP.mkv", "none", "0h 45m")
+		f.note(clerks, "Clerks.1994.DVDRip.XviD-GRP.avi", "none", "0h 45m")
+		f.note(heat, "Heat.1995.1080p.BluRay.x264-GRP.mkv", "eng subrip", "0h 45m")
 		f.hashIMDb, f.hashText = c.hashIMDb, srt(f.ts, 0)
 		f.run(t)
 		ff := f.h.Env.FFmpeg.Dir
 		probed, _ := os.ReadFile(filepath.Join(ff, "ffprobe.calls"))
 		helpers, _ := os.ReadFile(filepath.Join(ff, "helper.calls"))
+		if strings.Contains(string(probed)+string(helpers), "Heat") || f.outcomes()[f.path(heat)] != "" {
+			t.Errorf("%s: Heat, whose note names an English text track, probed or opened, or recorded %q", c.why, f.outcomes()[f.path(heat)])
+		}
 		for rel, want := range c.want {
 			fields := f.verdict(rel, want)
 			_, err := os.Stat(strings.TrimSuffix(f.path(rel), ".mkv") + ".en.srt")
@@ -719,9 +764,9 @@ func TestRunReleaseMatchedReadsNoVideo(t *testing.T) {
 		f.run(t)
 		var cheap int
 		f.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM events WHERE item=? AND status='rejected_cheap'`, f.path(show)).Scan(&cheap)
-		if f.verdict(show, "queued")["detail"] != "2 candidate(s)" || f.verdict(show, "retimed")["id"] != "gestdown:n" || cheap != 1 {
-			t.Errorf("%s: Show queued with %v, aligned %v, tested cheaply %d times; want Gestdown's 2, NTb's aligned, once", c.why,
-				f.verdict(show, "queued")["detail"], f.verdict(show, "retimed")["id"], cheap)
+		if f.verdict(show, "queued")["detail"] != "2 candidate(s)" || f.verdict(show, "retimed")["id"] != "gestdown:n" || cheap != 1 || gestdown("/dl/n") != 1 {
+			t.Errorf("%s: Show queued with %v, aligned %v, tested cheaply %d times, NTb's downloaded %d times; want Gestdown's 2, NTb's aligned, once, once",
+				c.why, f.verdict(show, "queued")["detail"], f.verdict(show, "retimed")["id"], cheap, gestdown("/dl/n"))
 		}
 	}
 }
