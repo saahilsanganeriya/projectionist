@@ -222,7 +222,7 @@ func (f facts) wants() (wants []want, missing []missingFilm, unresolved, other i
 	for _, e := range f.entries {
 		viewings[e.ID] = viewing{e.Slug, e.Watched}
 		a := get(e.Slug)
-		rate(a, e.Rating, e.LoggedAt)
+		rate(a, e.Rating, e.RatedAt)
 		name(a, e.Title, e.Year)
 	}
 	for _, v := range viewings {
@@ -325,20 +325,22 @@ func diaryScope(wants []want, n int) map[int]bool {
 type have struct {
 	Item   string // Plex ratingKey, Jellyfin item id, or plex.tv metadata id
 	Plays  int
+	Played bool   // the app shows it watched: a Plex view; Jellyfin's own flag, set past 90 % (its count rises at the start)
 	Rating int    // 1..10; 0 = unrated
 	Last   string // last played (YYYY-MM-DD, config time zone); "" = never or unknown
 	Member bool   // in the Watchlist collection / on the plex.tv watchlist
 	Added  bool   // put there by this stage, so this stage may take it out again
 }
 
-// update is the writes one film needs in one app. Play counts and last-played dates only ever rise, and a
-// rating is only ever set: nothing here can unwatch a film or clear a rating.
+// update is the writes one film needs in one app. Play counts and last-played dates only ever rise, a film is only
+// ever marked watched, and a rating is only ever set: nothing here can unwatch a film or clear a rating.
 type update struct {
 	TMDB      int
 	Item      string
 	Title     string
 	FromPlays int
 	Plays     int    // target play count; equal to FromPlays when the count is right
+	Played    bool   // mark it watched (a Plex scrobble does; Jellyfin keeps the mark apart from its count)
 	Rating    int    // target rating; 0 = leave it
 	Last      string // target last-played date; "" = leave it
 }
@@ -357,14 +359,14 @@ func planFilms(wants []want, haves map[int]have, scope map[int]bool, setsLast bo
 			}
 			continue
 		}
-		u := update{TMDB: w.TMDB, Item: h.Item, Title: w.Title, FromPlays: h.Plays, Plays: max(h.Plays, w.Plays)}
+		u := update{TMDB: w.TMDB, Item: h.Item, Title: w.Title, FromPlays: h.Plays, Plays: max(h.Plays, w.Plays), Played: w.Watched && !h.Played}
 		if w.Rating > 0 && w.Rating != h.Rating {
 			u.Rating = w.Rating
 		}
 		if setsLast && w.Last > h.Last {
 			u.Last = w.Last
 		}
-		if u.Plays != u.FromPlays || u.Rating != 0 || u.Last != "" {
+		if u.Plays != u.FromPlays || u.Played || u.Rating != 0 || u.Last != "" {
 			ups = append(ups, u)
 		}
 	}
@@ -387,13 +389,14 @@ func planMembers(desired map[int]bool, haves map[int]have) (add, remove []int) {
 	return add, remove
 }
 
-// unwatchedWatchlist is the films on the Letterboxd watchlist watched neither there nor in the app. inApp (an
-// app's own collection) keeps only films the app lists; the plex.tv watchlist takes any film.
+// unwatchedWatchlist is the films on the Letterboxd watchlist watched neither there nor in the app (a film he only
+// started in Jellyfin has a play count there, and is still unwatched). inApp (an app's own collection) keeps only
+// films the app lists; the plex.tv watchlist takes any film.
 func unwatchedWatchlist(wants []want, haves map[int]have, inApp bool) map[int]bool {
 	out := map[int]bool{}
 	for _, w := range wants {
 		h := haves[w.TMDB]
-		if w.Watchlist && !w.Watched && h.Plays == 0 && (!inApp || h.Item != "") {
+		if w.Watchlist && !w.Watched && !h.Played && (!inApp || h.Item != "") {
 			out[w.TMDB] = true
 		}
 	}

@@ -118,6 +118,7 @@ type rssEntry struct {
 	Watched  string // YYYY-MM-DD
 	Rating   int    // half stars, 1..10; 0 = unrated
 	LoggedAt time.Time
+	RatedAt  time.Time // stored entries only: LoggedAt, or the first feed read that found the rating changed
 }
 
 func parseRSS(body []byte) ([]rssEntry, error) {

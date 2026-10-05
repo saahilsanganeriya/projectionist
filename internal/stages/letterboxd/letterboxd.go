@@ -6,9 +6,11 @@
 // (daily), the film pages (TMDB id, cached forever), and the account export unzipped on the NAS (the backfill).
 // Films join the library on the TMDB id in the folder names. Per app the stage keeps a snapshot of what the app
 // holds (Plex: one paged listing, re-read daily and before a run that writes to it, at most once a day per film;
-// Jellyfin: every run, while it is still indexing) and updates it after each write, so a rerun writes nothing. A
-// film whose writes fail in 3 runs in a row is parked, and the owner told once. Diary viewings count once each, by
-// the viewing id that the feed guid and the export's boxd.it code both carry.
+// Jellyfin: the same, every jellyfin_refresh, whose default 0 re-reads it every run while its first library scan
+// adds films) and updates it after each write, so a rerun writes nothing. Watched in an app is its own mark (a
+// Jellyfin play count rises when playback starts). A film whose writes fail in 3 runs in a row is parked, and the
+// owner told once. Diary viewings count once each, by the viewing id that the feed guid and the export's boxd.it
+// code both carry; an entry he deletes is dropped, and he is told, since a view already written stays.
 //
 // Never: unwatch, lower a play count, clear a rating, or remove anything this stage did not add. Plex takes no
 // last-played date (a scrobble stamps "now"). Reviews are not synced: a Plex review is a community post whose
@@ -17,6 +19,7 @@
 package letterboxd
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -85,11 +88,12 @@ const schema = `
 CREATE TABLE IF NOT EXISTS letterboxd_lid (lid TEXT PRIMARY KEY, slug TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS letterboxd_film (slug TEXT PRIMARY KEY, tmdb INTEGER NOT NULL, kind TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS letterboxd_entry (id TEXT PRIMARY KEY, slug TEXT NOT NULL, tmdb INTEGER NOT NULL,
-  title TEXT NOT NULL, year INTEGER NOT NULL, watched TEXT NOT NULL, rating INTEGER NOT NULL, logged_at TEXT NOT NULL);
+  title TEXT NOT NULL, year INTEGER NOT NULL, watched TEXT NOT NULL, rating INTEGER NOT NULL, logged_at TEXT NOT NULL,
+  rated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS letterboxd_seen (slug TEXT PRIMARY KEY, rating INTEGER NOT NULL, seen_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS letterboxd_sink (app TEXT NOT NULL, tmdb INTEGER NOT NULL, item TEXT NOT NULL,
-  plays INTEGER NOT NULL, rating INTEGER NOT NULL, last TEXT NOT NULL, member INTEGER NOT NULL, added INTEGER NOT NULL,
-  PRIMARY KEY (app, tmdb));
+  plays INTEGER NOT NULL, played INTEGER NOT NULL, rating INTEGER NOT NULL, last TEXT NOT NULL, member INTEGER NOT NULL,
+  added INTEGER NOT NULL, PRIMARY KEY (app, tmdb));
 CREATE TABLE IF NOT EXISTS letterboxd_retry (app TEXT NOT NULL, tmdb INTEGER NOT NULL, item TEXT NOT NULL,
   reread_at TEXT NOT NULL, tries INTEGER NOT NULL, PRIMARY KEY (app, tmdb));
 `
@@ -97,11 +101,11 @@ CREATE TABLE IF NOT EXISTS letterboxd_retry (app TEXT NOT NULL, tmdb INTEGER NOT
 // foldFeedIDs re-keys feed rows stored under the whole guid onto the viewing id. Where one viewing was stored
 // twice (as watch, then as review), the most recently logged row stays.
 const foldFeedIDs = `
-INSERT INTO letterboxd_entry(id, slug, tmdb, title, year, watched, rating, logged_at)
-  SELECT substr(id, length(rtrim(id, '0123456789')) + 1), slug, tmdb, title, year, watched, rating, logged_at
+INSERT INTO letterboxd_entry(id, slug, tmdb, title, year, watched, rating, logged_at, rated_at)
+  SELECT substr(id, length(rtrim(id, '0123456789')) + 1), slug, tmdb, title, year, watched, rating, logged_at, rated_at
   FROM letterboxd_entry WHERE id GLOB 'letterboxd-*'
   ON CONFLICT(id) DO UPDATE SET slug=excluded.slug, tmdb=excluded.tmdb, title=excluded.title, year=excluded.year,
-    watched=excluded.watched, rating=excluded.rating, logged_at=excluded.logged_at
+    watched=excluded.watched, rating=excluded.rating, logged_at=excluded.logged_at, rated_at=excluded.rated_at
   WHERE excluded.logged_at >= letterboxd_entry.logged_at;
 DELETE FROM letterboxd_entry WHERE id GLOB 'letterboxd-*';
 `
@@ -340,14 +344,18 @@ func (r *run) readFeed(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// A rating's time decides which source's rating is his latest (see wants): an entry's is when it was logged,
+	// until a read finds the rating changed, which can only be after a films grid page showed the old one.
+	now := r.env.Now().Format(store.TimeFormat)
 	for _, e := range entries {
 		if e.Slug == "" {
 			continue
 		}
-		res, err := r.db.ExecContext(ctx, `INSERT INTO letterboxd_entry(id, slug, tmdb, title, year, watched, rating, logged_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET watched=excluded.watched, rating=excluded.rating
+		res, err := r.db.ExecContext(ctx, `INSERT INTO letterboxd_entry(id, slug, tmdb, title, year, watched, rating, logged_at, rated_at)
+			VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8) ON CONFLICT(id) DO UPDATE SET watched=excluded.watched, rating=excluded.rating,
+			rated_at=CASE WHEN rating != excluded.rating THEN ?9 ELSE rated_at END
 			WHERE watched != excluded.watched OR rating != excluded.rating`,
-			e.ID, e.Slug, e.TMDB, e.Title, e.Year, e.Watched, e.Rating, e.LoggedAt.Format(store.TimeFormat))
+			e.ID, e.Slug, e.TMDB, e.Title, e.Year, e.Watched, e.Rating, e.LoggedAt.Format(store.TimeFormat), now)
 		if err != nil {
 			return storeErr{err}
 		}
@@ -360,7 +368,53 @@ func (r *run) readFeed(ctx context.Context) error {
 			}
 		}
 	}
+	if err := r.retract(ctx, entries); err != nil {
+		return err
+	}
 	return r.env.Store.PutJSON(ctx, name, "rss", feedCache{ETag: p.header.Get("ETag"), LastModified: p.header.Get("Last-Modified"), ReadAt: c.ReadAt})
+}
+
+// retract drops the stored diary entries he has deleted on Letterboxd. The feed holds his latest 50 entries in the
+// order he logged them (then his lists), so a stored entry logged after the oldest of them and missing from it was
+// deleted; an older one has only fallen off the end. A view a run already wrote for it stays: play counts are
+// never lowered, so he is told.
+func (r *run) retract(ctx context.Context, entries []rssEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	inFeed, oldest := map[string]bool{}, entries[0].LoggedAt
+	for _, e := range entries {
+		inFeed[e.ID] = true
+		if e.LoggedAt.Before(oldest) {
+			oldest = e.LoggedAt
+		}
+	}
+	var gone []rssEntry
+	err := query(ctx, r.db, `SELECT id, title, watched FROM letterboxd_entry WHERE logged_at > ?`, func(rows *sql.Rows) error {
+		var e rssEntry
+		err := rows.Scan(&e.ID, &e.Title, &e.Watched)
+		if !inFeed[e.ID] {
+			gone = append(gone, e)
+		}
+		return err
+	}, oldest.Format(store.TimeFormat))
+	if err != nil {
+		return storeErr{err}
+	}
+	var names []string
+	for _, e := range gone {
+		if _, err := r.db.ExecContext(ctx, `DELETE FROM letterboxd_entry WHERE id=?`, e.ID); err != nil {
+			return storeErr{err}
+		}
+		r.env.Log.Info("diary entry deleted on Letterboxd", "event", "rss_retracted", "id", e.ID, "item", e.Title, "watched", e.Watched)
+		names = append(names, fmt.Sprintf("%s (watched %s)", e.Title, e.Watched))
+	}
+	if len(names) > 0 {
+		r.count("rss_retracted", len(names))
+		r.rep.Alert("Letterboxd diary entries deleted: %s. Plex and Jellyfin play counts are never lowered: a view a run already wrote for one stays until you change it by hand",
+			strings.Join(names, ", "))
+	}
+	return nil
 }
 
 type crawlState struct {
@@ -374,7 +428,9 @@ type crawlState struct {
 // that day (a crawl older than PagesEvery starts over, so page 1, the newest films, is read daily even when
 // Cloudflare blocks the deeper pages). "films" pages record watched films and their current ratings; a complete
 // "watchlist" crawl replaces the watchlist snapshot (an incomplete one never does, so a blocked page cannot
-// shrink the watchlist).
+// shrink the watchlist). A page that lists no films without saying the list is empty is backed off as a
+// challenge: an interstitial answered with 200, a redirect or new markup must not end a crawl, and so empty both
+// Watchlist collections.
 func (r *run) crawl(ctx context.Context, kind string) error {
 	key := "crawl." + kind
 	var c crawlState
@@ -394,13 +450,16 @@ func (r *run) crawl(ctx context.Context, kind string) error {
 			url += fmt.Sprintf("page/%d/", c.Next)
 		}
 		p, err := r.fetch.get(ctx, url, map[string]string{"Accept": "text/html"})
+		films, hasNext := parseGrid(p.body)
+		if err == nil && len(films) == 0 && !bytes.Contains(p.body, []byte(`data-num-entries="0"`)) {
+			err = fmt.Errorf("%w: GET %s: HTTP %d lists no films and does not say the list is empty", errChallenged, url, p.status)
+		}
 		if err != nil {
 			if perr := r.env.Store.PutJSON(ctx, name, key, c); perr != nil {
 				return storeErr{perr}
 			}
 			return err
 		}
-		films, hasNext := parseGrid(p.body)
 		if err := r.recordGrid(ctx, kind, films); err != nil {
 			return err
 		}
@@ -562,13 +621,16 @@ func (r *run) loadFacts(ctx context.Context) (facts, error) {
 		})
 	}
 	if err == nil {
-		err = query(ctx, r.db, `SELECT id, slug, tmdb, title, year, watched, rating, logged_at FROM letterboxd_entry ORDER BY id`, func(rows *sql.Rows) error {
+		err = query(ctx, r.db, `SELECT id, slug, tmdb, title, year, watched, rating, logged_at, rated_at FROM letterboxd_entry ORDER BY id`, func(rows *sql.Rows) error {
 			var e rssEntry
-			var at string
-			if err := rows.Scan(&e.ID, &e.Slug, &e.TMDB, &e.Title, &e.Year, &e.Watched, &e.Rating, &at); err != nil {
+			var logged, rated string
+			if err := rows.Scan(&e.ID, &e.Slug, &e.TMDB, &e.Title, &e.Year, &e.Watched, &e.Rating, &logged, &rated); err != nil {
 				return err
 			}
-			e.LoggedAt, err = time.Parse(store.TimeFormat, at)
+			e.LoggedAt, err = time.Parse(store.TimeFormat, logged)
+			if err == nil {
+				e.RatedAt, err = time.Parse(store.TimeFormat, rated)
+			}
 			f.entries = append(f.entries, e)
 			return err
 		})

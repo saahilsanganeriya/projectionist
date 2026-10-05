@@ -1,9 +1,12 @@
 package letterboxd
 
 import (
+	"context"
 	"reflect"
 	"testing"
 	"time"
+
+	"projectionist/internal/stage"
 )
 
 var exportAt = time.Date(2026, 2, 1, 14, 47, 0, 0, time.UTC)
@@ -26,7 +29,7 @@ func baseFacts() facts {
 		},
 		entries: []rssEntry{
 			// the export's cPajUH viewing, its date corrected since the export, and a re-rating after the export
-			{ID: "1174964695", Slug: "ad-astra-2019", Watched: "2026-01-21", Rating: 9, LoggedAt: exportAt.Add(48 * time.Hour)},
+			{ID: "1174964695", Slug: "ad-astra-2019", Watched: "2026-01-21", Rating: 9, RatedAt: exportAt.Add(48 * time.Hour)},
 		},
 		// a duplicate slug on the same TMDB film with an older rating: it must not beat the export's newer one, though
 		// its slug sorts last
@@ -92,9 +95,9 @@ func TestPlanFilms(t *testing.T) {
 		{TMDB: 5, InLibrary: true, Watched: true, Plays: 1, First: "2026-12-01"}, // the 5th in diary order: out of scope
 	}
 	haves := map[int]have{
-		1: {Item: "a", Plays: 1},
-		2: {Item: "b", Plays: 5, Rating: 4, Last: "2026-10-03"}, // watched more in the app, rated there, no LB rating
-		3: {Item: "c", Plays: 1, Rating: 6},
+		1: {Item: "a", Plays: 1, Played: true},
+		2: {Item: "b", Plays: 5, Played: true, Rating: 4, Last: "2026-10-03"}, // watched more in the app, rated there, no LB rating
+		3: {Item: "c", Plays: 1, Played: true, Rating: 6},
 		5: {Item: "e"},
 	}
 	scope := diaryScope(wants, 4)
@@ -124,7 +127,7 @@ func TestPlanMembers(t *testing.T) {
 	haves := map[int]have{
 		1: {Item: "a"},
 		2: {Item: "b", Member: true, Added: true},
-		3: {Item: "c", Plays: 1},
+		3: {Item: "c", Plays: 1, Played: true},
 		9: {Item: "z", Member: true}, // the owner's own
 	}
 	desired := unwatchedWatchlist(wants, haves, true)
@@ -134,5 +137,21 @@ func TestPlanMembers(t *testing.T) {
 	}
 	if online := unwatchedWatchlist(wants, haves, false); !online[4] || !online[5] || len(online) != 3 {
 		t.Errorf("plex.tv desired = %v", online)
+	}
+}
+
+// Catches: a snapshot read before he last watched (jellyfin_refresh > 0, or a film that already forced its read
+// today) used to send a last-played date or a watched mark, which can lower Jellyfin's date; only a rating, which
+// Letterboxd owns, may go out from it.
+func TestStalePlanSendsOnlyRatings(t *testing.T) {
+	r := &run{rep: &stage.Report{}}
+	p := sinkPlan{ups: []update{
+		{TMDB: 1, Item: "a", FromPlays: 1, Plays: 2, Played: true, Rating: 8, Last: "2026-10-04"},
+		{TMDB: 2, Item: "b", FromPlays: 1, Plays: 1, Played: true, Last: "2026-10-04"},
+	}, add: []int{3}}
+	got, err := r.settle(context.Background(), "jellyfin", p, map[int]have{}, map[int]retry{}, true)
+	want := sinkPlan{ups: []update{{TMDB: 1, Item: "a", FromPlays: 1, Plays: 1, Rating: 8}}}
+	if err != nil || !reflect.DeepEqual(got, want) || r.rep.Counts["jellyfin.deferred"] != 3 {
+		t.Errorf("stale plan = %+v (err %v, counts %v), want %+v", got, err, r.rep.Counts, want)
 	}
 }

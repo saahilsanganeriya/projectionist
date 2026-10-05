@@ -92,21 +92,21 @@ var errUnconfirmed = errors.New("sent, outcome unknown")
 
 func (r *run) loadHaves(ctx context.Context, app string) (map[int]have, error) {
 	out := map[int]have{}
-	err := query(ctx, r.db, `SELECT tmdb, item, plays, rating, last, member, added FROM letterboxd_sink WHERE app=?`, func(rows *sql.Rows) error {
+	err := query(ctx, r.db, `SELECT tmdb, item, plays, played, rating, last, member, added FROM letterboxd_sink WHERE app=?`, func(rows *sql.Rows) error {
 		var id int
 		var h have
-		err := rows.Scan(&id, &h.Item, &h.Plays, &h.Rating, &h.Last, &h.Member, &h.Added)
+		err := rows.Scan(&id, &h.Item, &h.Plays, &h.Played, &h.Rating, &h.Last, &h.Member, &h.Added)
 		out[id] = h
 		return err
 	}, app)
 	return out, err
 }
 
-const putSink = `INSERT OR REPLACE INTO letterboxd_sink(app, tmdb, item, plays, rating, last, member, added) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+const putSink = `INSERT OR REPLACE INTO letterboxd_sink(app, tmdb, item, plays, played, rating, last, member, added) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // saveHave stores one film's row and keeps haves, the in-memory copy of the rows, in step.
 func (r *run) saveHave(ctx context.Context, app string, haves map[int]have, id int, h have) error {
-	if _, err := r.db.ExecContext(ctx, putSink, app, id, h.Item, h.Plays, h.Rating, h.Last, h.Member, h.Added); err != nil {
+	if _, err := r.db.ExecContext(ctx, putSink, app, id, h.Item, h.Plays, h.Played, h.Rating, h.Last, h.Member, h.Added); err != nil {
 		return storeErr{err}
 	}
 	haves[id] = h
@@ -129,7 +129,7 @@ func (r *run) replaceSnapshot(ctx context.Context, app string, fresh map[int]hav
 		return err
 	}
 	put := func(id int, h have) error {
-		_, err := tx.ExecContext(ctx, putSink, app, id, h.Item, h.Plays, h.Rating, h.Last, h.Member, h.Added)
+		_, err := tx.ExecContext(ctx, putSink, app, id, h.Item, h.Plays, h.Played, h.Rating, h.Last, h.Member, h.Added)
 		return err
 	}
 	for id, h := range fresh {
@@ -309,7 +309,8 @@ func (r *run) saveRetry(ctx context.Context, app string, id int, t retry) error 
 
 // settle applies the failure records to a plan: a film with nothing left to do starts any later count afresh, and
 // a parked film is left out. stale means every film with work forced a read within rereadEvery, so none was made
-// now: play counts and memberships wait for the next read, and only a rating, safe to send twice, is written.
+// now: play counts, watched marks, last-played dates and memberships wait for the next read (he may have watched
+// since, and a date from the older read would lower the app's), and only a rating, which Letterboxd owns, is sent.
 func (r *run) settle(ctx context.Context, app string, p sinkPlan, haves map[int]have, retries map[int]retry, stale bool) (sinkPlan, error) {
 	work := p.films()
 	for _, id := range sortedKeys(retries) {
@@ -337,10 +338,11 @@ func (r *run) settle(ctx context.Context, app string, p sinkPlan, haves map[int]
 		if parked[u.TMDB] {
 			continue
 		}
-		if stale && u.Plays != u.FromPlays {
-			deferred[u.TMDB], u.Plays = true, u.FromPlays
+		if stale && (u.Plays != u.FromPlays || u.Played || u.Last != "") {
+			deferred[u.TMDB] = true
+			u.Plays, u.Played, u.Last = u.FromPlays, false, ""
 		}
-		if u.Plays != u.FromPlays || u.Rating != 0 || u.Last != "" {
+		if u.Plays != u.FromPlays || u.Played || u.Rating != 0 || u.Last != "" {
 			out.ups = append(out.ups, u)
 		}
 	}
@@ -415,9 +417,9 @@ func tmdbFromGuids(guids []struct {
 func (r *run) countPlan(app string, p sinkPlan) {
 	for _, u := range p.ups {
 		r.env.Log.Info("film planned", "event", "film_plan", "app", app, "tmdb", u.TMDB, "item", u.Title,
-			"plays_from", u.FromPlays, "plays_to", u.Plays, "rating", u.Rating, "last", u.Last, "dry_run", r.opt.DryRun)
+			"plays_from", u.FromPlays, "plays_to", u.Plays, "mark_played", u.Played, "rating", u.Rating, "last", u.Last, "dry_run", r.opt.DryRun)
 		switch {
-		case u.FromPlays == 0 && u.Plays > 0:
+		case u.Played: // not watched in the app yet
 			r.count(app+".watched", 1)
 		case u.Plays > u.FromPlays:
 			r.count(app+".plays", 1)
@@ -514,7 +516,7 @@ func (r *run) plexSnapshot(ctx context.Context, force bool) (sinkMeta, map[int]h
 	fresh, byKey := map[int]have{}, map[string]int{}
 	if err := r.plexPages(ctx, b, "", func(it plexItem) {
 		if id := tmdbFromGuids(it.Guid); id > 0 {
-			fresh[id] = have{Item: it.RatingKey, Plays: it.ViewCount, Rating: int(it.UserRating + 0.5)}
+			fresh[id] = have{Item: it.RatingKey, Plays: it.ViewCount, Played: it.ViewCount > 0, Rating: int(it.UserRating + 0.5)}
 			byKey[it.RatingKey] = id
 		}
 	}); err != nil {
@@ -587,7 +589,7 @@ func (r *run) syncPlex(ctx context.Context, wants []want, scope map[int]bool) er
 				r.failed(app, "scrobble", err, u.TMDB)
 				break
 			}
-			h.Plays++
+			h.Plays, h.Played = h.Plays+1, true
 			if err := r.saveHave(ctx, app, haves, u.TMDB, h); err != nil {
 				return err
 			}
@@ -786,10 +788,7 @@ func (r *run) jellyfinSnapshot(ctx context.Context, force bool) (sinkMeta, map[i
 		if id == 0 {
 			return
 		}
-		h := have{Item: it.ID, Plays: it.UserData.PlayCount}
-		if it.UserData.Played {
-			h.Plays = max(h.Plays, 1)
-		}
+		h := have{Item: it.ID, Plays: it.UserData.PlayCount, Played: it.UserData.Played}
 		if it.UserData.Rating != nil {
 			h.Rating = int(*it.UserData.Rating + 0.5)
 		}
@@ -858,9 +857,12 @@ func (r *run) syncJellyfin(ctx context.Context, wants []want, scope map[int]bool
 	for _, u := range p.ups {
 		h := haves[u.TMDB]
 		var body jfUserData
-		if u.Plays > u.FromPlays {
+		if u.Played {
 			played := true
-			body.Played, body.PlayCount = &played, &u.Plays
+			body.Played = &played
+		}
+		if u.Plays > u.FromPlays {
+			body.PlayCount = &u.Plays
 		}
 		if u.Rating != 0 {
 			rating := float64(u.Rating)
@@ -881,7 +883,7 @@ func (r *run) syncJellyfin(ctx context.Context, wants []want, scope map[int]bool
 			}
 			continue
 		}
-		h.Plays = u.Plays
+		h.Plays, h.Played = u.Plays, h.Played || u.Played
 		if u.Rating != 0 {
 			h.Rating = u.Rating
 		}

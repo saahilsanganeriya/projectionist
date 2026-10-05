@@ -28,8 +28,9 @@ type fakeLetterboxd struct {
 	*httptest.Server
 	mu        sync.Mutex
 	hits      map[string]int
-	challenge map[string]bool // paths answered with Cloudflare's 403
-	feed      []byte          // the RSS body, served with ETag etag
+	challenge map[string]bool   // paths answered with Cloudflare's 403
+	pages     map[string]string // paths answered 200 with this body instead of their usual page
+	feed      []byte            // the RSS body, served with ETag etag
 	etag      string
 }
 
@@ -37,11 +38,11 @@ func newLetterboxd(t *testing.T) *fakeLetterboxd {
 	lids := map[string]string{"qTKY": "licorice-pizza", "aAst": "ad-astra-2019", "okja1": "okja"}
 	tmdb := map[string]int{"the-ring-2002": 565, "what-happened-was": 18, "okja": 387426, "primetime-2026": 999001, "licorice-pizza": 718032}
 	files := map[string]string{"/saahilsan/watchlist/": "watchlist.html", "/saahilsan/films/": "films.html"}
-	lb := &fakeLetterboxd{hits: map[string]int{}, challenge: map[string]bool{}, feed: fixture(t, "rss.xml"), etag: `"v1"`}
+	lb := &fakeLetterboxd{hits: map[string]int{}, challenge: map[string]bool{}, pages: map[string]string{}, feed: fixture(t, "rss.xml"), etag: `"v1"`}
 	lb.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lb.mu.Lock()
 		lb.hits[r.URL.Path]++
-		blocked := lb.challenge[r.URL.Path]
+		blocked, override := lb.challenge[r.URL.Path], lb.pages[r.URL.Path]
 		feed, etag := lb.feed, lb.etag
 		lb.mu.Unlock()
 		if !strings.Contains(r.Header.Get("User-Agent"), "Mozilla/5.0") {
@@ -51,6 +52,8 @@ func newLetterboxd(t *testing.T) *fakeLetterboxd {
 		switch slug := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/film/"), "/"); {
 		case blocked:
 			http.Error(w, "<title>Just a moment...</title>", http.StatusForbidden)
+		case override != "":
+			io.WriteString(w, override)
 		case r.URL.Path == "/saahilsan/rss/" && r.Header.Get("If-None-Match") == etag:
 			w.WriteHeader(http.StatusNotModified)
 		case r.URL.Path == "/saahilsan/rss/":
@@ -59,8 +62,9 @@ func newLetterboxd(t *testing.T) *fakeLetterboxd {
 		case files[r.URL.Path] != "":
 			w.Header().Set("ETag", `"v1"`)
 			w.Write(fixture(t, files[r.URL.Path]))
-		case r.URL.Path == "/saahilsan/watchlist/page/2/":
-			io.WriteString(w, `<ul class="grid"></ul><div class="paginate-nextprev"><span class="next">Older</span></div>`)
+		case r.URL.Path == "/saahilsan/watchlist/page/2/": // the last page: Digger, which he has watched since adding it
+			io.WriteString(w, `<ul class="grid"><li class="griditem"> <div data-item-name="Digger (2026)" data-item-slug="digger-2026"></div> </li></ul>`+
+				`<div class="paginate-nextprev"><span class="next">Older</span></div>`)
 		case strings.HasPrefix(r.URL.Path, "/boxd/") && lids[strings.TrimPrefix(r.URL.Path, "/boxd/")] != "":
 			http.Redirect(w, r, "https://letterboxd.com/film/"+lids[strings.TrimPrefix(r.URL.Path, "/boxd/")]+"/", http.StatusFound)
 		case tmdb[slug] != 0:
@@ -73,17 +77,32 @@ func newLetterboxd(t *testing.T) *fakeLetterboxd {
 	return lb
 }
 
-// logRing puts a new diary entry for The Ring (TMDB 565, watched 2026-10-04, ★★★★) at the top of the feed.
-func (lb *fakeLetterboxd) logRing() {
+// ringItem is a diary entry for The Ring (TMDB 565, watched 2026-10-04, ★★★★).
+const ringItem = `<item> <title>The Ring, 2002</title> <link>https://letterboxd.com/saahilsan/film/the-ring-2002/</link>` +
+	` <guid isPermaLink="false">letterboxd-watch-1530000000</guid> <pubDate>Mon, 5 Oct 2026 19:00:00 +1300</pubDate>` +
+	` <letterboxd:watchedDate>2026-10-04</letterboxd:watchedDate> <letterboxd:rewatch>No</letterboxd:rewatch>` +
+	` <letterboxd:filmTitle>The Ring</letterboxd:filmTitle> <letterboxd:filmYear>2002</letterboxd:filmYear>` +
+	` <letterboxd:memberRating>4.0</letterboxd:memberRating> <tmdb:movieId>565</tmdb:movieId> </item>`
+
+// logRing puts ringItem at the top of the feed.
+func (lb *fakeLetterboxd) logRing() { lb.editFeed("<channel>", "<channel>"+ringItem) }
+
+// dropItem takes the item with this guid out of the feed, as a deleted entry, or one older than the feed's last 50.
+func (lb *fakeLetterboxd) dropItem(guid string) {
 	lb.mu.Lock()
 	defer lb.mu.Unlock()
-	item := `<item> <title>The Ring, 2002</title> <link>https://letterboxd.com/saahilsan/film/the-ring-2002/</link>` +
-		` <guid isPermaLink="false">letterboxd-watch-1530000000</guid> <pubDate>Mon, 5 Oct 2026 19:00:00 +1300</pubDate>` +
-		` <letterboxd:watchedDate>2026-10-04</letterboxd:watchedDate> <letterboxd:rewatch>No</letterboxd:rewatch>` +
-		` <letterboxd:filmTitle>The Ring</letterboxd:filmTitle> <letterboxd:filmYear>2002</letterboxd:filmYear>` +
-		` <letterboxd:memberRating>4.0</letterboxd:memberRating> <tmdb:movieId>565</tmdb:movieId> </item>`
-	lb.feed = []byte(strings.Replace(string(lb.feed), "<channel>", "<channel>"+item, 1))
+	s := string(lb.feed)
+	i := strings.Index(s, ">"+guid+"<")
+	start, end := strings.LastIndex(s[:i], "<item>"), i+strings.Index(s[i:], "</item>")+len("</item>")
+	lb.feed = []byte(s[:start] + s[end:])
 	lb.etag += "+"
+}
+
+// serve answers path with 200 and body from now on.
+func (lb *fakeLetterboxd) serve(path, body string) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	lb.pages[path] = body
 }
 
 // editFeed changes the served feed as an edit on Letterboxd would, with a new ETag.
@@ -803,5 +822,88 @@ func TestPlexTVInsideRunBudget(t *testing.T) {
 	rep := w.run(t, fmt.Sprintf("plex_watchlist = true\ndiscover_url = %q\nrun_budget = \"0s\"\n", w.h.Plex.URL))
 	if n := len(w.h.Plex.Calls("GET", "/library/sections/watchlist/all")); n != 0 || rep.Counts["out_of_time"] == 0 {
 		t.Errorf("%d plex.tv listing calls with the run budget spent (counts %v)", n, rep.Counts)
+	}
+}
+
+// Catches: a film Letterboxd says he watched left unplayed in Jellyfin because its play count already matches the
+// diary (Jellyfin counts a play when playback starts, and marks it played only past 90 %), and a watchlist film he
+// only sampled in Jellyfin left out of its Watchlist collection while it is in Plex's.
+func TestJellyfinStartedIsNotWatched(t *testing.T) {
+	w := newWorld(t)
+	w.apps.jf["j30"].plays = 1 // he started The Ring in Jellyfin and stopped before the end
+	w.run(t, "")
+	if !slices.Contains(w.apps.collection, "30") || !slices.Contains(w.apps.jfSet, "j30") {
+		t.Errorf("a sampled watchlist film: Watchlist collections plex %v, jellyfin %v; want The Ring in both", w.apps.collection, w.apps.jfSet)
+	}
+	w.lb.logRing() // ...then watched it in a cinema and logged it
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	rep := w.run(t, "")
+	if f := w.apps.jf["j30"]; !f.played || f.plays != 1 || slices.Contains(w.apps.jfSet, "j30") {
+		t.Errorf("Letterboxd says watched: Jellyfin The Ring %+v, in its Watchlist %v; want played, 1 play, out (counts %v)", f, w.apps.jfSet, rep.Counts)
+	}
+}
+
+// Catches: a watchlist page that answers 200 but lists no films (an interstitial, a redirect's body, new markup)
+// taken for the end of a complete crawl, which empties both Watchlist collections and the missing-films file; and
+// a watchlist he really emptied, which the page states as data-num-entries="0", never synced.
+func TestEmptyWatchlistPageIsRefused(t *testing.T) {
+	w := newWorld(t)
+	w.run(t, "")
+	before, _ := os.ReadFile(w.missing)
+	w.lb.serve("/saahilsan/watchlist/", `<html><head><title>Just a moment...</title></head><body></body></html>`)
+	w.h.Now = w.h.Now.Add(25 * time.Hour) // the daily crawl
+	rep := w.run(t, "")
+	text, _ := os.ReadFile(w.missing)
+	if !slices.Contains(w.apps.collection, "30") || !slices.Contains(w.apps.jfSet, "j30") || string(text) != string(before) || rep.Counts["challenged.watchlist"] != 1 {
+		t.Errorf("a page listing no films ended the crawl: Watchlist plex %v, jellyfin %v, missing file %q (counts %v)", w.apps.collection, w.apps.jfSet, text, rep.Counts)
+	}
+	w.lb.serve("/saahilsan/watchlist/", `<div class="cols-2 js-watchlist-content" data-num-entries="0"></div>`) // he empties it
+	w.h.Now = w.h.Now.Add(25 * time.Hour)
+	w.run(t, "")
+	if text, _ := os.ReadFile(w.missing); slices.Contains(w.apps.collection, "30") || slices.Contains(w.apps.jfSet, "j30") || !strings.Contains(string(text), "(0)") {
+		t.Errorf("an emptied watchlist not synced: Watchlist plex %v, jellyfin %v, missing file %q", w.apps.collection, w.apps.jfSet, text)
+	}
+}
+
+// Catches: a rating he edits on a diary entry losing to the films grid's earlier sight of his old rating, because
+// the entry's rating kept the time it was logged instead of the time it changed.
+func TestEditedRatingBeatsOlderGridRating(t *testing.T) {
+	w := newWorld(t)
+	w.run(t, "")                                                                    // the films grid shows Digger at ★★★★ (seen now); the feed logged it at ★★★★ on 2 Oct
+	w.lb.editFeed("<letterboxd:memberRating>4.0<", "<letterboxd:memberRating>3.5<") // he edits that entry to ★★★½
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	rep := w.run(t, "")
+	if p, j := w.apps.plex["40"].rating, w.apps.jf["j40"].rating; p != 7 || *j != 7 {
+		t.Errorf("edited diary rating: Plex %d, Jellyfin %v; want 7 and 7 (counts %v)", p, *j, rep.Counts)
+	}
+}
+
+// Catches: a diary entry he deleted (a double log) still counted, so Jellyfin, which had not indexed the film when
+// it was logged, is later given the deleted viewing as a play; the owner not told that Plex, which counted it,
+// keeps it (counts are never lowered); and an entry that only fell off the bottom of the feed taken for deleted.
+func TestDeletedDiaryEntryIsRetracted(t *testing.T) {
+	w := newWorld(t)
+	w.lb.logRing()
+	w.lb.editFeed("<channel>", "<channel>"+strings.Replace(ringItem, "letterboxd-watch-1530000000", "letterboxd-watch-1530000001", 1)) // logged twice by mistake
+	w.apps.mu.Lock()
+	ring := w.apps.jf["j30"]
+	delete(w.apps.jf, "j30") // Jellyfin has not indexed The Ring yet
+	w.apps.mu.Unlock()
+	w.run(t, "")
+
+	w.lb.dropItem("letterboxd-watch-1530000001")  // he deletes the double log...
+	w.lb.dropItem("letterboxd-review-1208848714") // ...and Ad Astra, the oldest entry, falls off the bottom of the feed
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	rep := w.run(t, "")
+	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "The Ring") || strings.Contains(rep.Alerts[0], "Ad Astra") {
+		t.Errorf("alerts = %q, want one, naming The Ring only (counts %v)", rep.Alerts, rep.Counts)
+	}
+	w.apps.mu.Lock()
+	w.apps.jf["j30"] = ring // Jellyfin indexes it
+	w.apps.mu.Unlock()
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	w.run(t, "")
+	if f := w.apps.jf["j30"]; f.plays != 1 || !f.played || w.apps.plex["30"].views != 2 {
+		t.Errorf("after the double log was deleted: Jellyfin %+v, Plex views %d; want 1 play, played, and Plex's 2 views kept", f, w.apps.plex["30"].views)
 	}
 }
