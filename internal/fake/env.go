@@ -10,10 +10,12 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"projectionist/internal/config"
+	"projectionist/internal/fanart"
 	"projectionist/internal/obs"
 	"projectionist/internal/probe"
 	"projectionist/internal/stage"
 	"projectionist/internal/store"
+	"projectionist/internal/tmdb"
 	"projectionist/internal/viewers"
 )
 
@@ -22,11 +24,14 @@ type Harness struct {
 	Env       *stage.Env
 	Plex      *Server
 	Jellyfin  *Server
+	TMDB      *Server // routes are TMDB paths without /3, e.g. "/movie/949"
+	Fanart    *Server // e.g. "/movies/949", "/tv/81189"
 	PrefsPath string
 	Now       time.Time // what Env.Now returns; tests may move it
 }
 
-// NewEnv builds the harness. Plex answers no sessions and Jellyfin none until a test registers other routes.
+// NewEnv builds the harness. Plex answers no sessions and Jellyfin none until a test registers other routes; TMDB
+// and fanart.tv answer 404 to everything until then.
 func NewEnv(t testing.TB, prefs map[string]string) *Harness {
 	h := &Harness{Now: time.Date(2026, 10, 5, 6, 0, 0, 0, time.UTC)}
 	px, pc, prefsPath := Plex(t, prefs)
@@ -44,9 +49,13 @@ func NewEnv(t testing.TB, prefs map[string]string) *Harness {
 		t.Fatal(err)
 	}
 	log := obs.NewLogger(io.Discard, "text", "error")
-	h.Plex, h.Jellyfin, h.PrefsPath = px, jf, prefsPath
+	tm, tmToken := TMDB(t)
+	fa, faKey := Fanart(t)
+	h.Plex, h.Jellyfin, h.TMDB, h.Fanart, h.PrefsPath = px, jf, tm, fa, prefsPath
 	h.Env = &stage.Env{
 		Log: log, Store: st, Plex: pc, Jellyfin: jc, Probe: prober, FFmpeg: ff, Loc: time.UTC,
+		TMDB:   tmdb.New(tmdb.Options{ReadTokenFile: tmToken, BaseURL: tm.URL, Rate: 1e6}, st), // no throttle sleeps in tests
+		Fanart: fanart.New(fanart.Options{APIKeyFile: faKey, BaseURL: fa.URL}, st),
 		Viewers: &viewers.Gate{Plex: pc, Jellyfin: jc, Owners: map[string]bool{"saahilsanganeriya": true, "saahil": true},
 			Poll: 5 * time.Millisecond, Log: log},
 		Now:     func() time.Time { return h.Now },
