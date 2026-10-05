@@ -262,32 +262,34 @@ func TestChangingFoldersWaitOneRun(t *testing.T) {
 	}
 }
 
-// Catches: ffprobe run on uncached videos while a guest watches (heavy work must wait), and a partial pass saved as
-// the baseline, first run or later, which would make the next full pass alert on problems that were there all along.
+// Catches: ffprobe run on uncached videos while a guest watches (heavy work must wait), cached videos left unjudged
+// meanwhile, and a partial pass saved as the baseline, first run or later, which would make the next full pass alert
+// on problems that were there all along.
 func TestProbesWaitForGuests(t *testing.T) {
 	h := fake.NewEnv(t, nil)
 	root := t.TempDir()
 	h.SetOptions(`root = "` + root + `"`)
 	calls := fakeProbe(t, h)
 	put(t, root, "Movies/Amelie (2001) {tmdb-194}/Featurettes/Screen Tests.mkv", "corrupt") // never cached: it fails
+	put(t, root, "Movies/Amelie (2001) {tmdb-194}/Amelie (2001) {tmdb-194}.mkv", "film")
 	os.Mkdir(filepath.Join(root, "TV"), 0o755)
 	sessions := map[bool]string{
 		false: `<MediaContainer size="0"></MediaContainer>`,
 		true:  `<MediaContainer size="1"><Video type="movie" title="Heat"><User title="guest-user"/></Video></MediaContainer>`,
 	}
-	for i, watching := range []bool{true, false, true, false} {
-		h.Plex.Handle("GET", "/status/sessions", 200, sessions[watching])
+	runs := []struct {
+		watching                          bool
+		probesSoFar, deferred, unreadable int
+	}{{true, 0, 2, 0}, {false, 2, 0, 1}, {true, 2, 1, 0}, {false, 3, 0, 1}}
+	for i, r := range runs {
+		h.Plex.Handle("GET", "/status/sessions", 200, sessions[r.watching])
 		rep := run(t, h)
 		probed, _ := os.ReadFile(calls)
-		wantProbes, wantUnreadable, wantDeferred := (i+1)/2, 1, 0
-		if watching {
-			wantUnreadable, wantDeferred = 0, 1
+		if n := strings.Count(string(probed), "\n"); n != r.probesSoFar {
+			t.Fatalf("run %d (guest watching: %v): ffprobe ran %d times so far, want %d", i+1, r.watching, n, r.probesSoFar)
 		}
-		if n := strings.Count(string(probed), "\n"); n != wantProbes {
-			t.Fatalf("run %d (guest watching: %v): ffprobe ran %d times, want %d", i+1, watching, n, wantProbes)
-		}
-		if rep.Counts[unreadable] != wantUnreadable || rep.Counts["not_probed"] != wantDeferred || len(rep.Alerts) != 0 {
-			t.Fatalf("run %d (guest watching: %v): counts = %v, alerts = %v", i+1, watching, rep.Counts, rep.Alerts)
+		if rep.Counts[unreadable] != r.unreadable || rep.Counts["not_probed"] != r.deferred || len(rep.Alerts) != 0 {
+			t.Fatalf("run %d (guest watching: %v): counts = %v, alerts = %v", i+1, r.watching, rep.Counts, rep.Alerts)
 		}
 	}
 }
