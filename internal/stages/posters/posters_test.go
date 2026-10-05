@@ -118,6 +118,7 @@ type world struct {
 	h          *fake.Harness
 	lib        string // Movies/, TV/
 	backup     string // the owner's export: items.json, posters/, plex.db
+	cache      string // the stage's cache_dir
 	opts       string // the stage's options
 	api        *httptest.Server
 	mu         sync.Mutex
@@ -147,7 +148,7 @@ func (w *world) set(f func()) {
 func newWorld(t *testing.T, opts string) *world {
 	w := &world{h: fake.NewEnv(t, nil), batches: map[string][]llm.BatchRequest{}}
 	lib, backup := t.TempDir(), t.TempDir()
-	w.lib, w.backup = lib, backup
+	w.lib, w.backup, w.cache = lib, backup, t.TempDir()
 	for _, d := range []string{"Movies/Alpha (2001) {tmdb-1}", "Movies/Beta (2002) {tmdb-2}", "TV/Gamma (2003) {tmdb-3}/Season 01"} {
 		os.MkdirAll(filepath.Join(lib, d), 0o755)
 	}
@@ -252,7 +253,7 @@ owner_posters = %q
 owner_backup_db = %q
 anthropic_api = %q
 tmdb_images = %q
-`, filepath.Join(lib, "Movies"), filepath.Join(lib, "TV"), t.TempDir(), filepath.Join(backup, "items.json"),
+`, filepath.Join(lib, "Movies"), filepath.Join(lib, "TV"), w.cache, filepath.Join(backup, "items.json"),
 		filepath.Join(backup, "posters"), filepath.Join(backup, "plex.db"), w.api.URL, w.api.URL+"/t/p") + opts
 	w.h.SetOptions(w.opts)
 
@@ -853,14 +854,28 @@ func TestExampleConfig(t *testing.T) {
 	}
 }
 
-// Catches: a missing TMDB key logged as one warning per title (3,000 of them) while the run reports success, instead
-// of failing the run, which /health shows.
-func TestMissingKeyStopsRun(t *testing.T) {
-	w := newWorld(t, "dry_run = true\n")
-	w.h.Env.TMDB = tmdb.New(tmdb.Options{ReadTokenFile: filepath.Join(t.TempDir(), "absent"), BaseURL: w.h.TMDB.URL}, nil)
-	err := Stage{}.Run(context.Background(), w.h.Env, &stage.Report{})
-	if !errors.Is(err, tmdb.ErrNoCredentials) {
-		t.Fatalf("run with no TMDB key: %v, want tmdb.ErrNoCredentials", err)
+// Catches: what fails every title alike logged as one warning per title (3,000 of them) while the run reports
+// success, instead of failing the run, which /health shows: a missing TMDB key; a thumbnail cache that cannot be
+// written, which was also alerted as each owner poster being unreadable, once, and then never again.
+func TestWhatFailsEveryTitleStopsRun(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		fail func(w *world)
+		want error
+	}{
+		{"no TMDB key", func(w *world) {
+			w.h.Env.TMDB = tmdb.New(tmdb.Options{ReadTokenFile: filepath.Join(t.TempDir(), "absent"), BaseURL: w.h.TMDB.URL}, nil)
+		}, tmdb.ErrNoCredentials},
+		{"thumbnail cache unwritable", func(w *world) {
+			os.WriteFile(filepath.Join(w.cache, "thumbs"), nil, 0o644) // a file where its directory goes, even for root
+		}, errThumbCache},
+	} {
+		w := newWorld(t, "dry_run = true\n")
+		c.fail(w)
+		var rep stage.Report
+		if err := (Stage{}).Run(context.Background(), w.h.Env, &rep); !errors.Is(err, c.want) || len(rep.Alerts) != 0 {
+			t.Errorf("%s: run error %v, alerts %v; want %v and no alert", c.name, err, rep.Alerts, c.want)
+		}
 	}
 }
 

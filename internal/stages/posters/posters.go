@@ -308,7 +308,8 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 			stale = append(stale, it)
 		}
 	}
-	// A missing TMDB or fanart.tv key fails every title alike: the run stops on the first one.
+	// A missing TMDB or fanart.tv key, or a thumbnail cache that cannot be written, fails every title alike: the run
+	// stops on the first one.
 	gctx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
 	parallel(gctx, opt.FetchWorkers, stale, func(it *row) {
@@ -317,7 +318,7 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 			return
 		}
 		if err := r.gather(gctx, it); err != nil {
-			if errors.Is(err, tmdb.ErrNoCredentials) || errors.Is(err, fanart.ErrNoKey) {
+			if errors.Is(err, tmdb.ErrNoCredentials) || errors.Is(err, fanart.ErrNoKey) || errors.Is(err, errThumbCache) {
 				stop(err)
 			}
 			env.Log.Warn("candidates", "event", "gather_failed", "item", it.Title.Key, "err", err)

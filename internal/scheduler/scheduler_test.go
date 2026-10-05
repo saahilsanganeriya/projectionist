@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -67,7 +68,8 @@ func (f fakeStage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) e
 
 // Catches: outcomes mis-recorded — alerts raised before an error lost, a panic killing the service instead of
 // failing the run, a run a shutdown cut off (context canceled, or a child process killed with it) recorded as an
-// error, or the store not reflecting what /health shows.
+// error, alerts a cut-off run raised dropped with it (some are raised once, behind a stored marker, so a restart
+// lost them for good), or the store not reflecting what /health shows.
 func TestRunOnceOutcomes(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "s.db"))
 	if err != nil {
@@ -97,6 +99,10 @@ func TestRunOnceOutcomes(t *testing.T) {
 			return errors.New("ffmpeg: signal: killed")
 		}, stage.Interrupted, true},
 		{"ok though shut down", func(context.Context, *stage.Env, *stage.Report) error { return nil }, stage.OK, true},
+		{"alert then shutdown", func(ctx context.Context, _ *stage.Env, rep *stage.Report) error {
+			rep.Alert("Happiest Season's poster is unreadable")
+			return ctx.Err()
+		}, stage.Alert, true},
 	}
 	for _, c := range cases {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -116,8 +122,11 @@ func TestRunOnceOutcomes(t *testing.T) {
 		if run.Outcome != string(c.want) || run.FinishedAt.IsZero() {
 			t.Errorf("%s: stored run %+v", c.name, run)
 		}
-		if c.name == "alert then error" && len(rep.Alerts) != 1 {
-			t.Errorf("alert raised before the error was lost: %v", rep.Alerts)
+		if strings.HasPrefix(c.name, "alert then") && len(rep.Alerts) != 1 {
+			t.Errorf("%s: alert raised before it was lost: %v", c.name, rep.Alerts)
+		}
+		if s := r.Snapshot()["fake"]; c.want != stage.Interrupted && (s.Outcome != string(c.want) || len(s.Alerts) != len(rep.Alerts)) {
+			t.Errorf("%s: /health shows outcome %q alerts %v, want %s and the run's %d", c.name, s.Outcome, s.Alerts, c.want, len(rep.Alerts))
 		}
 	}
 }

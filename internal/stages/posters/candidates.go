@@ -94,6 +94,9 @@ func (r *run) gather(ctx context.Context, it *row) error {
 	if p, ok := r.owners[t.Key]; ok {
 		owner := Candidate{URL: "owner:" + p.File, Thumb: "owner:" + p.File, Source: srcOwner, Owner: p.State}
 		if err := r.withThumb(ctx, &owner); err != nil {
+			if errors.Is(err, errThumbCache) {
+				return err // not the file's fault: it stops the run
+			}
 			return r.ownerUnreadable(ctx, t, p, err)
 		}
 		if p.State == ownerUpload || p.State == ownerPick {
@@ -288,6 +291,10 @@ func (r *run) fanartPosters(ctx context.Context, t Title, info tmdbTitle) ([]Can
 
 // ---- images ----
 
+// errThumbCache is a thumbnail the cache cannot store (its directory not writable, the disk full): it fails every
+// title alike.
+var errThumbCache = errors.New("thumbnail cache")
+
 // withThumb makes sure c's thumbnail is cached and fills in its size and hash.
 func (r *run) withThumb(ctx context.Context, c *Candidate) error {
 	thumb, err := r.thumb(ctx, *c)
@@ -326,7 +333,7 @@ func (r *run) thumb(ctx context.Context, c Candidate) ([]byte, error) {
 		return nil, err
 	}
 	if err := writeAtomic(path, buf.Bytes()); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", errThumbCache, err)
 	}
 	return buf.Bytes(), nil
 }

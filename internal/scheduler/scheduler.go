@@ -94,8 +94,13 @@ func (r *Runner) RunOnce(ctx context.Context, st stage.Stage) (rep stage.Report,
 
 	finished := r.Now()
 	outcome = rep.Outcome(err)
-	if err != nil && ctx.Err() != nil { // whatever it failed with (context canceled, a killed ffmpeg), a shutdown did it
+	// Whatever it failed with (context canceled, a killed ffmpeg), a shutdown did it.
+	interrupted := err != nil && ctx.Err() != nil
+	if interrupted {
 		outcome = stage.Interrupted
+		if len(rep.Alerts) > 0 { // some alerts are raised once (a stored "told" marker): they reach /health now or never
+			outcome = stage.Alert
+		}
 	}
 	for _, a := range rep.Alerts {
 		log.Warn(a, "event", "alert")
@@ -115,7 +120,7 @@ func (r *Runner) RunOnce(ctx context.Context, st stage.Stage) (rep stage.Report,
 		r.Metrics.Add("projectionist_stage_items_total", float64(v), "stage", name, "kind", k)
 	}
 	switch {
-	case outcome == stage.Interrupted:
+	case interrupted:
 		log.Info("run interrupted", append(attrs, "err", err)...)
 	case err != nil:
 		log.Error("run failed", append(attrs, "err", err)...)

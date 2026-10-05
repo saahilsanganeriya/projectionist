@@ -84,8 +84,9 @@ const (
 	OK    Outcome = "ok"
 	Alert Outcome = "alert"
 	Error Outcome = "error"
-	// Interrupted is a run a shutdown or restart cut off (its context was cancelled): no verdict on the stage, which
-	// resumes on its next run, so /health keeps showing the last finished run's outcome.
+	// Interrupted is a run a shutdown or restart cut off (its context was cancelled) before it raised an alert: no
+	// verdict on the stage, which resumes on its next run, so /health keeps showing the last finished run's outcome.
+	// A cut-off run that raised alerts is recorded Alert.
 	Interrupted Outcome = "interrupted"
 )
 
