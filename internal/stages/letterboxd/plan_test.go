@@ -26,7 +26,8 @@ func baseFacts() facts {
 			// the same viewing as the export's v3 (one day, both sources) and a re-rating after the export
 			{ID: "e1", Slug: "ad-astra-2019", Watched: "2026-01-20", Rating: 9, LoggedAt: exportAt.Add(48 * time.Hour)},
 		},
-		seen:    map[string]seenFilm{},
+		// an older grid observation, read after the export: it must not beat the export's newer rating
+		seen:    map[string]seenFilm{"licorice-pizza": {Rating: 8, At: time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)}},
 		lidSlug: map[string]string{"lp": "licorice-pizza", "aa": "ad-astra-2019", "tv": "chernobyl", "ring": "the-ring-2002", "okja": "okja"},
 		films: map[string]filmFacts{"licorice-pizza": {718032, "movie"}, "ad-astra-2019": {419704, "movie"},
 			"chernobyl": {87108, "tv"}, "the-ring-2002": {565, "movie"}, "okja": {387426, "movie"}},
