@@ -21,8 +21,8 @@ import (
 // sinkState is one sink's progress toward the desired picks. A failed write is retried on a later run with
 // backoff and never fails the run.
 type sinkState struct {
-	ID           string    `json:"id,omitempty"`         // Plex collection ratingKey / Jellyfin BoxSet id
-	PosterDay    string    `json:"poster_day,omitempty"` // the day whose poster was last uploaded
+	ID           string    `json:"id,omitempty"`        // Plex collection ratingKey / Jellyfin BoxSet id
+	PosterOf     string    `json:"poster_of,omitempty"` // posterKey of the last uploaded poster
 	Fails        int       `json:"fails,omitempty"`
 	RetryAt      time.Time `json:"retry_at,omitzero"`
 	FailingSince time.Time `json:"failing_since,omitzero"`
@@ -72,6 +72,19 @@ func diff(want, have []string) (add, remove []string) {
 	return add, remove
 }
 
+// posterKey names what a poster shows: the date and the picks' thumbnails, so a watched pick's removal redraws it.
+func posterKey(day string, picks []pick) string {
+	return fmt.Sprint(day, tmdbIDs(picks))
+}
+
+func tmdbIDs(picks []pick) []int {
+	ids := make([]int, len(picks))
+	for i, p := range picks {
+		ids[i] = p.TMDB
+	}
+	return ids
+}
+
 func summary(picks []pick) string {
 	lines := make([]string, len(picks))
 	for i, p := range picks {
@@ -81,6 +94,10 @@ func summary(picks []pick) string {
 }
 
 // ---- Plex ----
+
+// plexLean keeps a section listing to the fields this stage reads. Items' Media elements are what make Plex slow: a
+// 5-film collection's /children took 108 s at load 20, the same members listed this way 0.18 s (2026-10-05).
+const plexLean = "excludeFields=summary,tagline&excludeElements=Media,Genre,Country,Director,Writer,Role,Collection,Producer,Label,Image"
 
 // plexMap lists the Movies section once, in pages that each fit the client's timeout (a full listing takes
 // ~18 s on this NAS, longer during a scan), with only the fields it needs.
@@ -99,9 +116,8 @@ func plexMap(ctx context.Context, px *plex.Client, section int) (idMap, error) {
 				} `json:"Guid"`
 			} `json:"Metadata"`
 		}
-		path := fmt.Sprintf("/library/sections/%d/all?type=1&includeGuids=1&excludeFields=summary,tagline"+
-			"&excludeElements=Media,Genre,Country,Director,Writer,Role,Collection,Producer,Label,Image"+
-			"&X-Plex-Container-Start=%d&X-Plex-Container-Size=%d", section, start, page)
+		path := fmt.Sprintf("/library/sections/%d/all?type=1&includeGuids=1&%s&X-Plex-Container-Start=%d&X-Plex-Container-Size=%d",
+			section, plexLean, start, page)
 		if err := px.GetJSON(ctx, path, &mc); err != nil {
 			return idMap{}, err
 		}
@@ -124,7 +140,7 @@ func plexMap(ctx context.Context, px *plex.Client, section int) (idMap, error) {
 }
 
 // plexWatched reports which picks his Plex account has played: one small read of the picks' items.
-func plexWatched(ctx context.Context, px *plex.Client, m idMap, picks []pick) (map[int]bool, error) {
+func plexWatched(ctx context.Context, px *plex.Client, section int, m idMap, picks []pick) (map[int]bool, error) {
 	byRK := map[string]int{}
 	for _, p := range picks {
 		if rk := m.Items[p.TMDB]; rk != "" {
@@ -140,7 +156,8 @@ func plexWatched(ctx context.Context, px *plex.Client, m idMap, picks []pick) (m
 			ViewCount int    `json:"viewCount"`
 		} `json:"Metadata"`
 	}
-	if err := px.GetJSON(ctx, "/library/metadata/"+strings.Join(sortedKeys(byRK), ","), &mc); err != nil {
+	path := fmt.Sprintf("/library/sections/%d/all?type=1&id=%s&%s", section, strings.Join(sortedKeys(byRK), ","), plexLean)
+	if err := px.GetJSON(ctx, path, &mc); err != nil {
 		return nil, err
 	}
 	out := map[int]bool{}
@@ -180,31 +197,57 @@ func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarg
 		return errors.New("plex: no ratingKey map yet")
 	}
 	want := m.desired(picks)
-	id, current, err := findPlexCollection(ctx, px, t, s.ID)
-	if err != nil {
-		return err
-	}
-	if id == "" {
-		if len(want) == 0 {
-			return nil
-		}
-		if err := px.Do(ctx, "POST", fmt.Sprintf("/library/collections?type=1&smart=0&sectionId=%d&title=%s&uri=%s",
-			t.Section, url.QueryEscape(t.Title), t.uri(want))); err != nil {
+	c, ok := rememberedPlexCollection(ctx, px, t, s.ID)
+	if !ok {
+		titled, err := plexCollections(ctx, px, t)
+		if err != nil {
 			return err
 		}
-		if id, current, err = findPlexCollection(ctx, px, t, ""); err != nil || id == "" {
-			return errors.Join(errors.New("plex: created collection not found"), err)
+		if i := slices.IndexFunc(titled, plexColl.owned); i >= 0 {
+			c = titled[i]
+		} else {
+			if len(want) == 0 {
+				return nil
+			}
+			if len(titled) > 0 {
+				log.Info("a collection with our title is not ours; making our own", "event", "plex_collection_foreign", "title", t.Title)
+			}
+			if err := px.Do(ctx, "POST", fmt.Sprintf("/library/collections?type=1&smart=0&sectionId=%d&title=%s&uri=%s",
+				t.Section, url.QueryEscape(t.Title), t.uri(want))); err != nil {
+				return err
+			}
+			after, err := plexCollections(ctx, px, t) // the create's answer is not read: ours is the one that is new
+			if err != nil {
+				return err
+			}
+			j := slices.IndexFunc(after, func(a plexColl) bool {
+				return !slices.ContainsFunc(titled, func(b plexColl) bool { return b.RatingKey == a.RatingKey })
+			})
+			if j < 0 {
+				return errors.New("plex: created collection not found")
+			}
+			c, s.PosterOf = after[j], ""
+			log.Info("collection created", "event", "plex_write", "action", "create", "id", c.RatingKey, "items", len(want))
 		}
-		s.PosterDay = ""
-		log.Info("collection created", "event", "plex_write", "action", "create", "id", id, "items", len(want))
 	}
+	id := c.RatingKey
 	s.ID = id
+	if !c.owned() { // labelled right after the create, so a run that lost its state still knows the collection
+		q := fmt.Sprintf("/library/sections/%d/all?type=18&id=%s&label.locked=1", t.Section, id)
+		for i, l := range append(c.labels(), marker) {
+			q += fmt.Sprintf("&label[%d].tag.tag=%s", i, url.QueryEscape(l))
+		}
+		if err := px.Do(ctx, "PUT", q); err != nil {
+			return err
+		}
+		log.Info("collection labelled", "event", "plex_write", "action", "label", "id", id, "label", marker)
+	}
 	var children struct {
 		Metadata []struct {
 			RatingKey string `json:"ratingKey"`
 		} `json:"Metadata"`
 	}
-	if err := px.GetJSON(ctx, "/library/collections/"+id+"/children", &children); err != nil {
+	if err := px.GetJSON(ctx, fmt.Sprintf("/library/sections/%d/all?type=1&collection=%d&%s", t.Section, c.Index, plexLean), &children); err != nil {
 		return err
 	}
 	var have []string
@@ -224,14 +267,14 @@ func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarg
 		}
 		log.Info("collection item removed", "event", "plex_write", "action", "remove", "id", id, "item", rk)
 	}
-	if text := summary(picks); text != current {
+	if text := summary(picks); text != c.Summary {
 		if err := px.Do(ctx, "PUT", fmt.Sprintf("/library/sections/%d/all?type=18&id=%s&summary.value=%s&summary.locked=1",
 			t.Section, id, url.QueryEscape(text))); err != nil {
 			return err
 		}
 		log.Info("collection summary set", "event", "plex_write", "action", "summary", "id", id)
 	}
-	if s.PosterDay != day && len(picks) > 0 {
+	if key := posterKey(day, picks); s.PosterOf != key && len(picks) > 0 {
 		img, err := poster()
 		if err != nil {
 			return err
@@ -239,53 +282,91 @@ func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarg
 		if err := px.Send(ctx, "POST", "/library/metadata/"+id+"/posters", "image/jpeg", img); err != nil {
 			return err
 		}
-		s.PosterDay = day
+		s.PosterOf = key
 		log.Info("collection poster uploaded", "event", "plex_write", "action", "poster", "id", id, "bytes", len(img))
 	}
 	return promotePlexHub(ctx, log, px, t.Section, id)
 }
 
-// findPlexCollection returns the collection's ratingKey and summary: the remembered key if it still names our
-// collection, else one found by title, else "" (a crash after the create finds it here instead of making two).
-func findPlexCollection(ctx context.Context, px *plex.Client, t plexTarget, remembered string) (id, summary string, err error) {
-	type coll struct {
-		RatingKey string `json:"ratingKey"`
-		Type      string `json:"type"`
-		Title     string `json:"title"`
-		Summary   string `json:"summary"`
+// marker labels (Plex) or tags (Jellyfin) the collection this stage owns. A collection with the same title and no
+// marker is his: it is never edited.
+const marker = "projectionist"
+
+type plexColl struct {
+	RatingKey string `json:"ratingKey"`
+	Index     int    `json:"index"` // the collection's tag id, which a section listing filters on
+	Type      string `json:"type"`
+	Title     string `json:"title"`
+	Summary   string `json:"summary"`
+	Label     []struct {
+		Tag string `json:"tag"`
+	} `json:"Label"`
+}
+
+func (c plexColl) labels() []string {
+	var out []string
+	for _, l := range c.Label {
+		out = append(out, l.Tag)
 	}
+	return out
+}
+
+// owned matches the label as Plex does, ignoring case: Plex answered "Projectionist" for the "projectionist" it was sent.
+func (c plexColl) owned() bool {
+	return slices.ContainsFunc(c.labels(), func(l string) bool { return strings.EqualFold(l, marker) })
+}
+
+// rememberedPlexCollection is the collection this stage made, if it is still a collection with our title. A
+// deleted one answers 404; the title search after it surfaces a real outage.
+func rememberedPlexCollection(ctx context.Context, px *plex.Client, t plexTarget, id string) (plexColl, bool) {
 	var mc struct {
-		Metadata []coll `json:"Metadata"`
+		Metadata []plexColl `json:"Metadata"`
 	}
-	if remembered != "" { // a deleted collection answers 404: fall through to the search, which surfaces an outage
-		err := px.GetJSON(ctx, "/library/metadata/"+remembered, &mc)
-		if err == nil && len(mc.Metadata) == 1 && mc.Metadata[0].Type == "collection" && mc.Metadata[0].Title == t.Title {
-			return remembered, mc.Metadata[0].Summary, nil
+	if id == "" || px.GetJSON(ctx, "/library/metadata/"+id, &mc) != nil || len(mc.Metadata) != 1 {
+		return plexColl{}, false
+	}
+	c := mc.Metadata[0]
+	return c, c.Type == "collection" && c.Title == t.Title
+}
+
+// plexCollections lists the section's collections with our title, labels included.
+func plexCollections(ctx context.Context, px *plex.Client, t plexTarget) ([]plexColl, error) {
+	var list struct {
+		Metadata []plexColl `json:"Metadata"`
+	}
+	if err := px.GetJSON(ctx, fmt.Sprintf("/library/sections/%d/collections", t.Section), &list); err != nil {
+		return nil, err
+	}
+	var out []plexColl
+	for _, c := range list.Metadata {
+		if c.Title != t.Title {
+			continue
 		}
-	}
-	mc.Metadata = nil
-	if err := px.GetJSON(ctx, fmt.Sprintf("/library/sections/%d/collections", t.Section), &mc); err != nil {
-		return "", "", err
-	}
-	for _, c := range mc.Metadata {
-		if c.Title == t.Title {
-			return c.RatingKey, c.Summary, nil
+		var full struct {
+			Metadata []plexColl `json:"Metadata"`
 		}
+		if err := px.GetJSON(ctx, "/library/metadata/"+c.RatingKey, &full); err != nil {
+			return nil, err
+		}
+		out = append(out, full.Metadata...)
 	}
-	return "", "", nil
+	return out, nil
 }
 
 type plexHub struct {
-	Identifier        string `json:"identifier"`
-	PromotedToOwnHome bool   `json:"promotedToOwnHome"`
+	Identifier            string `json:"identifier"`
+	PromotedToOwnHome     bool   `json:"promotedToOwnHome"`
+	PromotedToSharedHome  bool   `json:"promotedToSharedHome"`
+	PromotedToRecommended bool   `json:"promotedToRecommended"`
 }
 
-// promotePlexHub shows the collection on his own Home (not his friends') and moves it to the top of the Movies
-// section's hub order.
+// promotePlexHub shows the collection on his own Home only (not his friends' Home, not the library's Recommended
+// tab, where shared users would read reasons quoting his ratings) and moves it to the top of the Movies section's
+// hub order.
 func promotePlexHub(ctx context.Context, log *slog.Logger, px *plex.Client, section int, id string) error {
 	base := fmt.Sprintf("/hubs/sections/%d/manage", section)
 	ident := fmt.Sprintf("custom.collection.%d.%s", section, id)
-	const vis = "promotedToRecommended=1&promotedToOwnHome=1&promotedToSharedHome=0"
+	const vis = "promotedToRecommended=0&promotedToOwnHome=1&promotedToSharedHome=0"
 	var mc struct {
 		Hub []plexHub `json:"Hub"`
 	}
@@ -299,7 +380,7 @@ func promotePlexHub(ctx context.Context, log *slog.Logger, px *plex.Client, sect
 			return err
 		}
 		log.Info("home row promoted", "event", "plex_write", "action", "promote", "hub", ident)
-	case !mc.Hub[at].PromotedToOwnHome:
+	case mc.Hub[at] != plexHub{Identifier: ident, PromotedToOwnHome: true}:
 		if err := px.Do(ctx, "PUT", base+"/"+ident+"?"+vis); err != nil {
 			return err
 		}
@@ -322,6 +403,7 @@ type jfItem struct {
 	Name        string            `json:"Name"`
 	Type        string            `json:"Type"`
 	ProviderIDs map[string]string `json:"ProviderIds"`
+	Tags        []string          `json:"Tags"`
 	UserData    struct {
 		Played bool `json:"Played"`
 	} `json:"UserData"`
@@ -411,7 +493,7 @@ func syncJellyfin(ctx context.Context, log *slog.Logger, jf *jellyfin.Client, ti
 		if created.ID == "" {
 			return errors.New("jellyfin: collection create returned no id")
 		}
-		id, s.PosterDay = created.ID, ""
+		id, s.PosterOf = created.ID, ""
 		log.Info("collection created", "event", "jellyfin_write", "action", "create", "id", id, "items", len(want))
 	}
 	s.ID = id
@@ -440,14 +522,19 @@ func syncJellyfin(ctx context.Context, log *slog.Logger, jf *jellyfin.Client, ti
 	if err := jf.GetJSON(ctx, "/Items/"+id+"?userId="+m.UserID, &item); err != nil {
 		return err
 	}
-	if text := summary(picks); item["Overview"] != text {
+	tags, _ := item["Tags"].([]any)
+	tagged := slices.Contains(tags, any(marker))
+	if text := summary(picks); item["Overview"] != text || !tagged {
 		item["Overview"] = text
+		if !tagged {
+			item["Tags"] = append(tags, marker)
+		}
 		if err := jf.PostJSON(ctx, "/Items/"+id, item, nil); err != nil {
 			return err
 		}
-		log.Info("collection overview set", "event", "jellyfin_write", "action", "overview", "id", id)
+		log.Info("collection overview set", "event", "jellyfin_write", "action", "overview", "id", id, "tag_added", !tagged)
 	}
-	if s.PosterDay != day && len(picks) > 0 {
+	if key := posterKey(day, picks); s.PosterOf != key && len(picks) > 0 {
 		img, err := poster()
 		if err != nil {
 			return err
@@ -456,12 +543,14 @@ func syncJellyfin(ctx context.Context, log *slog.Logger, jf *jellyfin.Client, ti
 		if err := jf.PostBody(ctx, "/Items/"+id+"/Images/Primary", "image/jpeg", body); err != nil {
 			return err
 		}
-		s.PosterDay = day
+		s.PosterOf = key
 		log.Info("collection poster uploaded", "event", "jellyfin_write", "action", "poster", "id", id, "bytes", len(img))
 	}
 	return nil
 }
 
+// findBoxSet returns the BoxSet this stage made: the remembered one if it still is a BoxSet with our title, else one
+// with our title and our tag.
 func findBoxSet(ctx context.Context, jf *jellyfin.Client, title, remembered string) (string, error) {
 	var res jfItems
 	if remembered != "" {
@@ -475,11 +564,11 @@ func findBoxSet(ctx context.Context, jf *jellyfin.Client, title, remembered stri
 		}
 	}
 	res.Items = nil
-	if err := jf.GetJSON(ctx, "/Items?IncludeItemTypes=BoxSet&Recursive=true&EnableImages=false&SearchTerm="+url.QueryEscape(title), &res); err != nil {
+	if err := jf.GetJSON(ctx, "/Items?IncludeItemTypes=BoxSet&Recursive=true&EnableImages=false&Fields=Tags&SearchTerm="+url.QueryEscape(title), &res); err != nil {
 		return "", err
 	}
 	for _, it := range res.Items {
-		if it.Name == title {
+		if it.Name == title && slices.Contains(it.Tags, marker) {
 			return it.ID, nil
 		}
 	}

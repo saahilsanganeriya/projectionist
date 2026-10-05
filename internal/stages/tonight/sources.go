@@ -285,6 +285,7 @@ func filmKey(title string, year int) string {
 type film struct {
 	TMDB          int      `json:"tmdb"`
 	Title         string   `json:"title"`
+	TMDBTitle     string   `json:"tmdb_title,omitempty"` // the title Letterboxd shows ("Se7en" where the folder says "Seven")
 	OriginalTitle string   `json:"original_title,omitempty"`
 	Year          int      `json:"year"`
 	Directors     []string `json:"directors,omitempty"`
@@ -475,7 +476,7 @@ func (tc tmdbClient) movie(ctx context.Context, id int) (film, error) {
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&m); err != nil {
 		return film{}, fmt.Errorf("tmdb movie %d: %w", id, err)
 	}
-	f := film{TMDB: id, OriginalTitle: m.OriginalTitle, Runtime: m.Runtime, Language: m.Language,
+	f := film{TMDB: id, TMDBTitle: m.Title, OriginalTitle: m.OriginalTitle, Runtime: m.Runtime, Language: m.Language,
 		Overview: firstSentence(m.Overview, 140), PosterPath: m.PosterPath, Vote: m.Vote, Votes: m.Votes}
 	if m.OriginalTitle == m.Title {
 		f.OriginalTitle = ""
@@ -528,13 +529,13 @@ func newWatched(export []entry, rss map[string]entry) watchedSets {
 	return w
 }
 
-// seen reports whether a library film appears in his history. Title+year matching tries the folder title and
-// TMDB's original title, one year either side (festival vs release years differ).
+// seen reports whether a library film appears in his history. Title+year matching tries the folder title, TMDB's
+// title and TMDB's original title, one year either side (festival vs release years differ).
 func (w watchedSets) seen(f film) bool {
 	if w.IDs[f.TMDB] != "" {
 		return true
 	}
-	for _, t := range []string{f.Title, f.OriginalTitle} {
+	for _, t := range []string{f.Title, f.TMDBTitle, f.OriginalTitle} {
 		if t == "" {
 			continue
 		}

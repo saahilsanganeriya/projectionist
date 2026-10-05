@@ -7,180 +7,68 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-	"github.com/anthropics/anthropic-sdk-go/option"
+	"projectionist/internal/llm"
 )
 
-// ---- Anthropic Messages API: model aliases, the cost cap, one pick call (+ one retry) ----
+// ---- the pick call: model aliases, the daily cap, one answer (+ one retry) ----
 
-// errOverBudget refuses a call whose worst-case cost would take the day's spend past the cap.
+// errOverBudget refuses a call when it and its one retry, at their worst, would take the day's spend past the cap.
 var errOverBudget = errors.New("tonight: the call would exceed the daily AI budget")
 
-// price is USD per million tokens. A 5-minute cache write costs 1.25 × In.
-type price struct {
-	In        float64 `toml:"input"`
-	Out       float64 `toml:"output"`
-	CacheRead float64 `toml:"cache_read"`
-}
+// retryExtra bounds the violations message a retry appends, in tokens.
+const retryExtra = 300
 
-// familyPrices are Anthropic's first-party rates for the current generation of each family (2026-09). An alias
-// resolving to a model whose price differs needs the price override in the stage's config.
-var familyPrices = map[string]price{
-	"opus":   {In: 4, Out: 20, CacheRead: 0.20},
-	"sonnet": {In: 2, Out: 10, CacheRead: 0.20},
-	"haiku":  {In: 1, Out: 5, CacheRead: 0.10},
-}
-
-func priceFor(model string, override price) (price, error) {
-	if override.In > 0 {
-		return override, nil
+// bound is a request's cost before it is sent. Its one cache breakpoint ends the system prompt, so the prefix is
+// billed as a cache write (or a read, when read is set) and every later token as plain input; all of max_tokens
+// is counted as output.
+func bound(p llm.Price, total, prefix, maxTokens int, read bool) float64 {
+	u := llm.Usage{InputTokens: total - prefix, OutputTokens: maxTokens}
+	if read {
+		u.CacheReadInputTokens = prefix
+	} else {
+		u.CacheCreationInputTokens = prefix
 	}
-	for fam, p := range familyPrices {
-		if strings.Contains(model, fam) {
-			return p, nil
-		}
+	return p.Cost(u, false)
+}
+
+// newAI reads the key file on every request; the key never reaches a log or an error.
+func newAI(base, keyFile string, timeout time.Duration) *llm.Client {
+	if base == "" {
+		base = "https://api.anthropic.com"
 	}
-	return price{}, fmt.Errorf("tonight: no price for model %q; set [stages.tonight.price]", model)
+	return &llm.Client{API: base, HTTP: &http.Client{Timeout: timeout}, Key: func() (string, error) {
+		raw, err := os.ReadFile(keyFile)
+		return string(raw), err
+	}}
 }
 
-type usage struct{ Input, CacheWrite, CacheRead, Output int64 }
-
-func (u usage) add(v usage) usage {
-	return usage{u.Input + v.Input, u.CacheWrite + v.CacheWrite, u.CacheRead + v.CacheRead, u.Output + v.Output}
-}
-
-func (p price) cost(u usage) float64 {
-	return (float64(u.Input)*p.In + float64(u.CacheWrite)*1.25*p.In + float64(u.CacheRead)*p.CacheRead +
-		float64(u.Output)*p.Out) / 1e6
-}
-
-// worstCase bounds a request before it is sent: cached tokens at the read price, every other input token at
-// the cache-write price, and all of max_tokens as output.
-func (p price) worstCase(inputTokens, cachedTokens, maxTokens int64) float64 {
-	return p.cost(usage{CacheWrite: inputTokens - cachedTokens, CacheRead: cachedTokens, Output: maxTokens})
-}
-
-// newestModel resolves a family alias ("sonnet") to the most recently released model id containing it.
-func newestModel(models []anthropic.ModelInfo, family string) string {
-	var best anthropic.ModelInfo
-	for _, m := range models {
-		if strings.Contains(m.ID, family) && m.CreatedAt.After(best.CreatedAt) {
-			best = m
-		}
-	}
-	return best.ID
-}
-
-type ai struct {
-	client anthropic.Client
-}
-
-// newAI reads the key once per run from its file; it never reaches a log or an error.
-func newAI(base, keyFile string, timeout time.Duration) (*ai, error) {
-	raw, err := os.ReadFile(keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("tonight: AI key: %w", err)
-	}
-	key := strings.TrimSpace(string(raw))
-	if key == "" {
-		return nil, errors.New("tonight: AI key file is empty")
-	}
-	opts := []option.RequestOption{
-		option.WithoutEnvironmentDefaults(), // no ANTHROPIC_* env var may redirect or re-key the call
-		option.WithHTTPClient(&http.Client{Timeout: timeout}),
-		option.WithAPIKey(key),
-		option.WithMaxRetries(2), // 408/409/429/5xx and connection errors, with the SDK's jittered backoff
-	}
-	if base != "" {
-		opts = append(opts, option.WithBaseURL(base))
-	}
-	return &ai{client: anthropic.NewClient(opts...)}, nil
-}
-
-// resolve maps "<family>:latest" to the newest model of that family via GET /v1/models; other names are ids.
-func (a *ai) resolve(ctx context.Context, name string) (string, error) {
+// resolve maps "<family>:latest" to the newest model of that family; other names are model ids.
+func resolve(ctx context.Context, a *llm.Client, name string) (string, error) {
 	family, ok := strings.CutSuffix(name, ":latest")
 	if !ok {
 		return name, nil
 	}
-	var models []anthropic.ModelInfo
-	pager := a.client.Models.ListAutoPaging(ctx, anthropic.ModelListParams{})
-	for pager.Next() {
-		models = append(models, pager.Current())
-	}
-	if err := pager.Err(); err != nil {
-		return "", fmt.Errorf("tonight: list models: %w", err)
-	}
-	id := newestModel(models, family)
-	if id == "" {
-		return "", fmt.Errorf("tonight: no model matches %q", name)
-	}
-	return id, nil
+	return a.Latest(ctx, family)
 }
 
-// request is one pick conversation. The taste block is the stable prefix and carries the cache breakpoint.
-type request struct {
-	Model     string
-	Effort    string
-	MaxTokens int64
-	Taste     string
-	Messages  []anthropic.MessageParam
-}
-
-func (r request) system() []anthropic.TextBlockParam {
-	return []anthropic.TextBlockParam{
-		{Text: instructions},
-		{Text: r.Taste, CacheControl: anthropic.NewCacheControlEphemeralParam()},
+// pickRequest is one pick conversation. The taste block is the stable prefix and carries the cache breakpoint.
+func pickRequest(model string, opt Options, taste string, msgs []llm.Message) llm.CachedRequest {
+	return llm.CachedRequest{
+		Model: model, MaxTokens: opt.MaxTokens, Messages: msgs,
+		System: []llm.SystemBlock{
+			{Type: "text", Text: instructions},
+			{Type: "text", Text: taste, CacheControl: &llm.CacheControl{Type: "ephemeral"}},
+		},
+		OutputConfig: &llm.OutputConfig{Effort: opt.Effort, Format: &llm.Format{Type: "json_schema", Schema: picksSchema}},
 	}
 }
 
-func (r request) outputConfig() anthropic.OutputConfigParam {
-	return anthropic.OutputConfigParam{
-		Effort: anthropic.OutputConfigEffort(r.Effort),
-		Format: anthropic.JSONOutputFormatParam{Schema: picksSchema},
-	}
-}
-
-func (a *ai) countTokens(ctx context.Context, r request) (int64, error) {
-	n, err := a.client.Messages.CountTokens(ctx, anthropic.MessageCountTokensParams{
-		Model: anthropic.Model(r.Model), Messages: r.Messages, OutputConfig: r.outputConfig(),
-		System: anthropic.MessageCountTokensParamsSystemUnion{OfTextBlockArray: r.system()},
-	})
-	if err != nil {
-		return 0, fmt.Errorf("tonight: count tokens: %w", err)
-	}
-	return n.InputTokens, nil
-}
-
-// reply is the model's answer: its text, the message to replay on a retry, and what it cost in tokens.
-type reply struct {
-	Text  string
-	Param anthropic.MessageParam
-	Usage usage
-	Stop  string
-}
-
-func (a *ai) send(ctx context.Context, r request) (reply, error) {
-	msg, err := a.client.Messages.New(ctx, anthropic.MessageNewParams{
-		Model: anthropic.Model(r.Model), MaxTokens: r.MaxTokens, System: r.system(), Messages: r.Messages,
-		OutputConfig: r.outputConfig(),
-	})
-	if err != nil {
-		return reply{}, fmt.Errorf("tonight: messages: %w", err)
-	}
-	var text strings.Builder
-	for _, b := range msg.Content {
-		if t, ok := b.AsAny().(anthropic.TextBlock); ok {
-			text.WriteString(t.Text)
-		}
-	}
-	u := msg.Usage
-	return reply{Text: text.String(), Param: msg.ToParam(), Stop: string(msg.StopReason),
-		Usage: usage{Input: u.InputTokens, CacheWrite: u.CacheCreationInputTokens, CacheRead: u.CacheReadInputTokens,
-			Output: u.OutputTokens}}, nil
+func userMessage(text string) llm.Message {
+	return llm.Message{Role: "user", Content: []llm.Block{llm.Text(text)}}
 }
 
 // ---- prompt ----
@@ -196,28 +84,13 @@ Rules:
   short one and a long one when the list has them. Avoid several picks from one genre, decade or country.
 - Each reason is one line of at most 160 characters. It names a specific film he rated 4 stars or more, or a
   director whose films he rated highly, and says what tonight's film shares with it. No spoilers.
+- The reason field holds only that finished sentence: no notes, checks or corrections.
 - Answer with JSON only, in the given schema.`
 
-var picksSchema = map[string]any{
-	"type": "object",
-	"properties": map[string]any{
-		"picks": map[string]any{
-			"type": "array",
-			"items": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"id":     map[string]any{"type": "integer"},
-					"title":  map[string]any{"type": "string"},
-					"reason": map[string]any{"type": "string"},
-				},
-				"required":             []string{"id", "title", "reason"},
-				"additionalProperties": false,
-			},
-		},
-	},
-	"required":             []string{"picks"},
-	"additionalProperties": false,
-}
+var picksSchema = json.RawMessage(`{"type":"object","additionalProperties":false,"required":["picks"],
+"properties":{"picks":{"type":"array","items":{"type":"object","additionalProperties":false,
+"required":["id","title","reason"],
+"properties":{"id":{"type":"integer"},"title":{"type":"string"},"reason":{"type":"string"}}}}}}`)
 
 type answer struct {
 	Picks []struct {
@@ -226,6 +99,10 @@ type answer struct {
 		Reason string `json:"reason"`
 	} `json:"picks"`
 }
+
+// gluedNote is a note the model sometimes appends to a reason's last sentence with no space ("...of Moonlight.Quiet
+// and slow.Hmm.", "...package.12"). Two lowercase letters before the stop keep initials ("L.A.", "E.T.") intact.
+var gluedNote = regexp.MustCompile(`(\p{Ll}{2}[.!?])(?:\p{Lu}|\d)`)
 
 // validate keeps the answer's picks that name an unseen film once, and lists every violation for the retry.
 func validate(text string, unseen map[int]candidate, want int) (picks []pick, violations []string) {
@@ -245,7 +122,11 @@ func validate(text string, unseen map[int]candidate, want int) (picks []pick, vi
 			violations = append(violations, fmt.Sprintf("pick %d: id %d has no reason", i+1, p.ID))
 		default:
 			seen[p.ID] = true
-			picks = append(picks, pick{TMDB: p.ID, Title: c.Title, Year: c.Year, Reason: oneLine(p.Reason, 200),
+			reason := p.Reason
+			if m := gluedNote.FindStringSubmatchIndex(reason); m != nil {
+				reason = reason[:m[3]]
+			}
+			picks = append(picks, pick{TMDB: p.ID, Title: c.Title, Year: c.Year, Reason: oneLine(reason, 200),
 				PosterPath: c.PosterPath})
 		}
 	}

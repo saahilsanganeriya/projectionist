@@ -23,8 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anthropics/anthropic-sdk-go"
-
+	"projectionist/internal/llm"
 	"projectionist/internal/stage"
 )
 
@@ -33,9 +32,8 @@ const name = "tonight"
 type Options struct {
 	Model          string        `toml:"model"`  // "sonnet:latest" (newest Sonnet, resolved daily) or an exact model id
 	Effort         string        `toml:"effort"` // low, medium, high
-	MaxTokens      int64         `toml:"max_tokens"`
+	MaxTokens      int           `toml:"max_tokens"`
 	DailyCapUSD    float64       `toml:"daily_cap_usd"`
-	Price          price         `toml:"price"` // only for a model the built-in family prices do not cover
 	APIKeyFile     string        `toml:"api_key_file"`
 	APIBase        string        `toml:"api_base"` // "" = https://api.anthropic.com
 	Picks          int           `toml:"picks"`
@@ -57,7 +55,7 @@ type Options struct {
 
 func defaults() Options {
 	return Options{
-		Model: "sonnet:latest", Effort: "medium", MaxTokens: 3000, DailyCapUSD: 0.15,
+		Model: "sonnet:latest", Effort: "medium", MaxTokens: 1000, DailyCapUSD: 0.15,
 		APIKeyFile: "/run/secrets/anthropic_api_key", Picks: 5, PickAfter: "05:00", MaxCandidates: 400,
 		Section: 4, Collection: "Tonight", MoviesDir: "/volume1/media/Movies",
 		LetterboxdDir: "/volume1/docker/projectionist/data/letterboxd",
@@ -290,7 +288,9 @@ func reconcile(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 			}
 		}
 	}
-	read("plex", func(c context.Context) (map[int]bool, error) { return plexWatched(c, env.Plex, pm, st.Picks) })
+	read("plex", func(c context.Context) (map[int]bool, error) {
+		return plexWatched(c, env.Plex, opt.Section, pm, st.Picks)
+	})
 	read("jellyfin", func(c context.Context) (map[int]bool, error) { return jellyfinWatched(c, env.Jellyfin, jm, st.Picks) })
 	kept := st.Picks[:0]
 	for _, p := range st.Picks {
@@ -309,9 +309,9 @@ func reconcile(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 	st.Picks = kept
 }
 
-// pickFilms makes the day's one AI call (plus at most one retry) inside the daily cap. Spend is reserved at
-// the call's worst case before it is sent and settled to the real usage after, so a crash mid-call can only
-// over-count.
+// pickFilms makes the day's one AI call, plus at most one retry, inside the daily cap. Each call's worst case is
+// reserved before it is sent and settled to the billed usage after; a call whose answer was lost after it may have
+// run keeps its reservation, because it may have been billed.
 func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, st *state, day string, rss rssCache,
 	pm, jm idMap, save func() error) error {
 	export, err := readExport(opt.LetterboxdDir)
@@ -347,12 +347,9 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 		return fmt.Errorf("only %d unseen films", len(cands))
 	}
 
-	a, err := newAI(opt.APIBase, opt.APIKeyFile, 3*time.Minute)
-	if err != nil {
-		return err
-	}
+	a := newAI(opt.APIBase, opt.APIKeyFile, 3*time.Minute)
 	if st.Resolved.Alias != opt.Model || env.Now().Sub(st.Resolved.At) >= 24*time.Hour {
-		id, err := a.resolve(ctx, opt.Model)
+		id, err := resolve(ctx, a, opt.Model)
 		if err != nil && st.Resolved.Alias != opt.Model {
 			return err
 		}
@@ -364,31 +361,42 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 		}
 	}
 	model := st.Resolved.ID
-	p, err := priceFor(model, opt.Price)
+	p := llm.PriceOf(model)
+	if p.Assumed {
+		env.Log.Warn("no list price for the model; budgeting at twice its family's", "event", "tonight_price_assumed", "model", model)
+	}
+
+	// Size the candidate list so the call AND its retry fit what is left of today's budget. The retry re-sends the
+	// call plus the answer (at most max_tokens) and the violations, and reads back the taste block the call cached
+	// seconds earlier. fixed counts the request without candidate lines: the cached prefix plus a short tail.
+	taste := tasteText(hist, 400)
+	request := func(n int) llm.CachedRequest {
+		return pickRequest(model, opt, taste, []llm.Message{userMessage(prompt(day, cands[:n], opt.Picks))})
+	}
+	fixed, err := a.CountTokens(ctx, request(0))
 	if err != nil {
 		return err
 	}
-
-	// Size the candidate list so the call's worst case fits what is left of today's budget.
-	req := request{Model: model, Effort: opt.Effort, MaxTokens: opt.MaxTokens, Taste: tasteText(hist, 400)}
+	pair := func(total int) float64 {
+		return bound(p, total, fixed, opt.MaxTokens, false) + bound(p, total+opt.MaxTokens+retryExtra, fixed, opt.MaxTokens, true)
+	}
+	left := opt.DailyCapUSD - st.Spend[day]
 	n := min(opt.MaxCandidates, len(cands))
-	var tokens int64
+	var req llm.CachedRequest
+	var total int
 	for i := 0; ; i++ {
-		req.Messages = []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock(prompt(day, cands[:n], opt.Picks)))}
-		if tokens, err = a.countTokens(ctx, req); err != nil {
+		req = request(n)
+		if total, err = a.CountTokens(ctx, req); err != nil {
 			return err
 		}
-		left := opt.DailyCapUSD - st.Spend[day]
-		worst := p.worstCase(tokens, 0, req.MaxTokens)
-		if worst <= left {
+		if pair(total) <= left {
 			break
 		}
-		// input grows at most linearly with n (the taste block is fixed), so scaling n undershoots: 1-2 rounds
-		in, out := p.worstCase(tokens, 0, 0), p.worstCase(0, 0, req.MaxTokens)
-		next := int(float64(n) * (left - out) / in * 0.95)
+		// the cost grows linearly with the candidate lines, so one rescale nearly always lands
+		next := int(float64(n) * (left - pair(fixed)) / (pair(total) - pair(fixed)) * 0.95)
 		if i == 3 || next < 4*opt.Picks {
-			return fmt.Errorf("%w: worst case $%.4f, $%.4f left of $%.2f (%d input tokens, %d candidates)",
-				errOverBudget, worst, left, opt.DailyCapUSD, tokens, n)
+			return fmt.Errorf("%w: the call and its retry may cost $%.4f, $%.4f left of $%.2f (%d input tokens, %d candidates)",
+				errOverBudget, pair(total), left, opt.DailyCapUSD, total, n)
 		}
 		n = next
 	}
@@ -397,47 +405,58 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 		unseen[c.TMDB] = c
 	}
 
-	call := func(attempt int, cached int64) (reply, error) {
-		worst := p.worstCase(tokens, cached, req.MaxTokens)
-		st.Spend[day] += worst
+	call := func(attempt int, reserve float64) (llm.Response, error) {
+		st.Spend[day] += reserve
 		if err := save(); err != nil {
-			return reply{}, err
+			return llm.Response{}, err
 		}
-		r, err := a.send(ctx, req)
-		st.Spend[day] -= worst
-		if err == nil {
-			st.Spend[day] += p.cost(r.Usage)
+		r, err := a.MessagesCached(ctx, req)
+		switch {
+		case err == nil:
+			st.Spend[day] += p.Cost(r.Usage, false) - reserve
+		case errors.Is(err, llm.ErrUnknownOutcome):
+			env.Log.Warn("ai answer lost; counting the call as billed", "event", "tonight_ai_unknown_outcome", "attempt", attempt,
+				"reserved_usd", fmt.Sprintf("%.5f", reserve))
+		default: // refused by the API, or never sent
+			st.Spend[day] -= reserve
 		}
 		if serr := save(); serr != nil {
-			return reply{}, serr
+			return llm.Response{}, serr
 		}
 		if err != nil {
-			return reply{}, err
+			return llm.Response{}, err
 		}
-		env.Log.Info("ai call", "event", "tonight_ai_call", "attempt", attempt, "model", model, "candidates", n,
-			"input_tokens", r.Usage.Input, "cache_write_tokens", r.Usage.CacheWrite, "cache_read_tokens", r.Usage.CacheRead,
-			"output_tokens", r.Usage.Output, "stop", r.Stop, "cost_usd", fmt.Sprintf("%.5f", p.cost(r.Usage)),
+		u := r.Usage
+		env.Log.Info("ai call", "event", "tonight_ai_call", "attempt", attempt, "model", model, "candidates", n, "unseen", len(cands),
+			"input_tokens", u.InputTokens, "cache_write_tokens", u.CacheCreationInputTokens, "cache_read_tokens", u.CacheReadInputTokens,
+			"output_tokens", u.OutputTokens, "stop", r.StopReason, "cost_usd", fmt.Sprintf("%.5f", p.Cost(u, false)),
 			"spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]))
+		if st.Spend[day] > opt.DailyCapUSD { // only a retry that missed the cache it was bounded on gets here
+			env.Log.Warn("over the daily AI cap", "event", "tonight_over_cap", "spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]))
+		}
+		env.Log.Debug("ai answer", "event", "tonight_ai_answer", "attempt", attempt, "text", r.Text())
 		rep.Count("ai_calls", 1)
 		return r, nil
 	}
-	r, err := call(1, 0)
+	r, err := call(1, bound(p, total, fixed, opt.MaxTokens, false))
 	if err != nil {
 		return err
 	}
-	picks, violations := validate(r.Text, unseen, opt.Picks)
+	picks, violations := validate(r.Text(), unseen, opt.Picks)
 	if len(violations) > 0 {
 		env.Log.Warn("picks need a retry", "event", "tonight_picks_invalid", "violations", strings.Join(violations, "; "))
-		req.Messages = append(req.Messages, r.Param, anthropic.NewUserMessage(anthropic.NewTextBlock(
-			"Fix these problems and answer again with all "+fmt.Sprint(opt.Picks)+" picks:\n- "+strings.Join(violations, "\n- "))))
-		cached := r.Usage.CacheWrite + r.Usage.CacheRead // the taste block, read back at 0.1× on the retry
-		if tokens, err = a.countTokens(ctx, req); err != nil {
+		// The answer goes back as text alone: thinking blocks are bound to their conversation and may be left out.
+		req.Messages = append(req.Messages, llm.Message{Role: "assistant", Content: []llm.Block{llm.Text(r.Text())}},
+			userMessage("Fix these problems and answer again with all "+fmt.Sprint(opt.Picks)+" picks:\n- "+strings.Join(violations, "\n- ")))
+		prefix := r.Usage.CacheCreationInputTokens + r.Usage.CacheReadInputTokens
+		if total, err = a.CountTokens(ctx, req); err != nil {
 			env.Log.Warn("retry not sized; keeping the valid picks", "event", "tonight_retry_skipped", "err", err)
-		} else if st.Spend[day]+p.worstCase(tokens, cached, req.MaxTokens) > opt.DailyCapUSD {
-			env.Log.Warn("no budget left for the retry; keeping the valid picks", "event", "tonight_retry_skipped")
-		} else if r2, err := call(2, cached); err != nil {
+		} else if b := bound(p, total, prefix, opt.MaxTokens, true); st.Spend[day]+b > opt.DailyCapUSD {
+			env.Log.Warn("no budget left for the retry; keeping the valid picks", "event", "tonight_retry_skipped",
+				"retry_bound_usd", fmt.Sprintf("%.5f", b), "spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]))
+		} else if r2, err := call(2, b); err != nil {
 			env.Log.Warn("retry failed; keeping the valid picks", "event", "tonight_retry_error", "err", err)
-		} else if picks2, v2 := validate(r2.Text, unseen, opt.Picks); len(picks2) > len(picks) {
+		} else if picks2, v2 := validate(r2.Text(), unseen, opt.Picks); len(picks2) > len(picks) {
 			picks = picks2
 			if len(v2) > 0 {
 				env.Log.Warn("dropped invalid picks after the retry", "event", "tonight_picks_dropped", "violations", strings.Join(v2, "; "))
