@@ -198,6 +198,12 @@ func TestRunNewArrivalsThenUndo(t *testing.T) {
 		}
 	}
 	unchanged("second run")
+	// Library changes for the health stage's Plex upkeep: 5 moves and 1 junk archive. The 3 clutter archives (@eaDir,
+	// .DS_Store) are pruned, not counted: Plex indexes no clutter.
+	changes := func() int { n, _ := l.h.Env.Store.LibraryChanges(context.Background()); return n }
+	if n := changes(); n != 6 {
+		t.Fatalf("library changes counted %d; want 6", n)
+	}
 
 	l.setOptions(`mode = "undo"`)
 	if rep := l.run(t); len(rep.Alerts) > 0 {
@@ -217,6 +223,9 @@ func TestRunNewArrivalsThenUndo(t *testing.T) {
 	}
 	if lexists(filepath.Join(l.root, "Movies/Heat (1995) {tmdb-949}")) {
 		t.Error("the scheme folder is still there after undo")
+	}
+	if n := changes(); n != 6+9 { // undo puts back all 9, clutter included
+		t.Fatalf("library changes counted %d after undo; want 15", n)
 	}
 	unchanged("second undo run")
 

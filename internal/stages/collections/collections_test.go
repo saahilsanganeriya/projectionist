@@ -379,10 +379,16 @@ func TestRunMakesBothAppsMatchThenStops(t *testing.T) {
 		}
 		return len(h.Plex.Calls("GET", "/library/collections/901/children")), jfBox0, jfBox1
 	}
+	// Library changes for the health stage's Plex upkeep: Plex's members (Scary Movie's 2, Nolan's 102) and the sort
+	// title it set; Jellyfin's writes are not Plex's.
+	changes := func() int { n, _ := h.Env.Store.LibraryChanges(context.Background()); return n }
+	if n := changes(); n != 2+1+1 {
+		t.Errorf("library changes counted %d; want 4", n)
+	}
 	before := px.writes + jf.writes
 	runOnce(t, h)
-	if after := px.writes + jf.writes; after != before {
-		t.Errorf("second run sent %d writes; want none", after-before)
+	if after := px.writes + jf.writes; after != before || changes() != 4 {
+		t.Errorf("second run sent %d writes, library changes now %d; want none", after-before, changes())
 	}
 	plex900 := len(h.Plex.Calls("GET", "/library/collections/900/children"))
 	if plex901, jfBox0, jfBox1 := memberReads(); plex900 != 1 || jfBox0 != 1 || plex901 != 0 || jfBox1 != 0 {
@@ -408,6 +414,9 @@ func TestDryAndOnlyRunsKeepNoState(t *testing.T) {
 	rep := runOnce(t, h)
 	if n := px.writes + jf.writes; n != 0 {
 		t.Fatalf("dry run sent %d writes", n)
+	}
+	if n, _ := h.Env.Store.LibraryChanges(context.Background()); n != 0 {
+		t.Fatalf("dry run counted %d library changes for the health stage's Plex upkeep", n)
 	}
 	want := map[string]int{"plex_create": 2, "plex_create_members": 4, "jellyfin_create": 2, "jellyfin_create_members": 4,
 		"plex_sort": 2, "jellyfin_sort": 2, "jellyfin_poster": 1}

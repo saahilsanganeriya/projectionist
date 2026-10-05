@@ -39,6 +39,10 @@ CREATE TABLE IF NOT EXISTS events (
   fields TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_item ON events(stage, item, id);
+CREATE TABLE IF NOT EXISTS library_changes (
+  stage TEXT PRIMARY KEY,
+  n     INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS http_cache (
   key        TEXT PRIMARY KEY,
   body       BLOB NOT NULL,
@@ -167,4 +171,19 @@ func (s *Store) LastEvent(ctx context.Context, stage, item string) (status strin
 		return "", nil, false, err
 	}
 	return status, fields, true, nil
+}
+
+// AddLibraryChanges counts n changes a stage made that Plex's database records (moves, notes, collection edits). The
+// totals only grow: the health stage keeps the sum it saw at Plex's last database optimize and optimizes again after
+// a big batch. One statement, so stages running at once never lose a count.
+func (s *Store) AddLibraryChanges(ctx context.Context, stage string, n int) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO library_changes(stage, n) VALUES (?, ?)
+		ON CONFLICT(stage) DO UPDATE SET n = n + excluded.n`, stage, n)
+	return err
+}
+
+// LibraryChanges is the sum of every stage's AddLibraryChanges.
+func (s *Store) LibraryChanges(ctx context.Context) (n int, err error) {
+	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(n), 0) FROM library_changes`).Scan(&n)
+	return n, err
 }

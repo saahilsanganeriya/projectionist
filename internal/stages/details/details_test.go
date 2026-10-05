@@ -276,6 +276,9 @@ cat "`+fixture+`"
 	if rep.Counts["probed"] != 1 || rep.Counts["written"] != 1 || note(extra) == "" || len(rep.Alerts) != 0 || probes() != 5 || !again.ModTime().Equal(heatNote.ModTime()) {
 		t.Fatalf("run 2: counts %v alerts %v probes %d (only Making Of is new; Broken waits for its retry time)", rep.Counts, rep.Alerts, probes())
 	}
+	if n, _ := h.Env.Store.LibraryChanges(context.Background()); n != 4+1 { // each note written, for the health stage's Plex upkeep
+		t.Fatalf("library changes counted %d; want the 5 notes written", n)
+	}
 
 	h.Now = h.Now.Add(25 * time.Hour)
 	os.WriteFile(heat, []byte("video, re-muxed"), 0o644)
