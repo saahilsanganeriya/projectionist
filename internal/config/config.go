@@ -3,7 +3,6 @@ package config
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -110,16 +109,6 @@ func (c *Config) StageOptions(name string, v any) error {
 		return fmt.Errorf("stages.%s: %w", name, err)
 	}
 	return nil
-}
-
-// Undecoded lists keys nothing read (typos). Call after every stage has decoded its options.
-func (c *Config) Undecoded() []string {
-	var keys []string
-	for _, k := range c.md.Undecoded() {
-		keys = append(keys, k.String())
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 // Window is a daily time-of-day range; the zero value means "any time".

@@ -19,7 +19,7 @@ type Gate struct {
 	Plex     *plex.Client
 	Jellyfin *jellyfin.Client
 	Owners   map[string]bool
-	Poll     time.Duration // how often WaitIdle and Watch re-check
+	Poll     time.Duration // how often WaitIdle re-checks
 	Log      *slog.Logger
 }
 
@@ -64,25 +64,6 @@ func (g *Gate) WaitIdle(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(g.Poll):
-		}
-	}
-}
-
-// Watch calls onChange(busy) whenever the busy state flips (starting from "not busy"), until ctx ends.
-// Use it to SIGSTOP/SIGCONT a long-running process; an error reading sessions counts as busy.
-func (g *Gate) Watch(ctx context.Context, onChange func(busy bool)) {
-	busy := false
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(g.Poll):
-		}
-		n, err := g.Count(ctx)
-		if now := err != nil || n > 0; now != busy {
-			busy = now
-			g.Log.Info("viewer state changed", "event", "viewer_change", "busy", busy, "others", n, "err", err)
-			onChange(busy)
 		}
 	}
 }

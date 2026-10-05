@@ -7,8 +7,7 @@ import (
 	"time"
 )
 
-// Catches: stage tables not reaching the scheduler or the stage (durations as strings, per-stage options,
-// typo detection) — the contract parallel stage builders rely on.
+// Catches: stage tables not reaching the scheduler or the stage (durations as strings, per-stage options) — the contract parallel stage builders rely on.
 func TestStageTablesDecode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "c.toml")
 	os.WriteFile(path, []byte(`
@@ -20,7 +19,6 @@ threshold = 7
 [stages.beta]
 enabled = false
 every = "1h"
-tpyo = 1
 `), 0o600)
 	cfg, err := Load(path)
 	if err != nil {
@@ -42,9 +40,6 @@ tpyo = 1
 	}
 	if missing, _ := cfg.Schedule("gamma"); missing.Enabled {
 		t.Fatal("a stage with no table must be disabled")
-	}
-	if got := cfg.Undecoded(); len(got) != 1 || got[0] != "stages.beta.tpyo" {
-		t.Fatalf("undecoded = %v", got)
 	}
 }
 

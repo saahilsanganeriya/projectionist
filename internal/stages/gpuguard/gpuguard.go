@@ -119,7 +119,6 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 		selfTest(ctx, env, opt, run, rep)
 		st.LastSelfTest = float64(now.UnixNano()) / 1e9
 	}
-	rep.Count("playing", playing)
 	return env.Store.PutJSON(context.WithoutCancel(ctx), "gpu-guard", "state", st)
 }
 

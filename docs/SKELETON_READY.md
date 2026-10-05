@@ -44,7 +44,7 @@ raised before the error are kept.
 | `internal/config` | TOML loader; `Schedule(name)`, `StageOptions(name, &v)`, `ParseWindow` |
 | `internal/store` | SQLite (WAL): `StartRun/FinishRun/LastRun`, `GetJSON/PutJSON(stage, key)`, `AddEvent/LastEvent(stage, item)`, `DB()` for your own tables. Name them `<stage>_*` and create them with `CREATE TABLE IF NOT EXISTS` |
 | `internal/scheduler` | per-stage cadence + window, `Runner.RunOnce` (also used by `projectionist run <stage>`) |
-| `internal/viewers` | the pause rule: `Gate.Count`, `Gate.WaitIdle(ctx)` before moving files, `Gate.Watch(ctx, func(busy bool))` to SIGSTOP/SIGCONT a long process. Owners never block; an error counts as busy |
+| `internal/viewers` | the pause rule: `Gate.Count`, `Gate.WaitIdle(ctx)` before moving files; poll `Gate.Count` every `Gate.Poll` to SIGSTOP/SIGCONT a long process (see remote4k). Owners never block; an error counts as busy |
 | `internal/plex` | `Prefs()` / `ReadPrefs(path)` (file, no API), `Sessions`, `GetJSON` (unwraps MediaContainer), `Do(method, path)`. Token read from Preferences.xml on every request and sent as a header. Use the API only where no file source exists |
 | `internal/jellyfin` | `GetJSON`, `PostJSON`, `Sessions(activeWithin)`, `MediaUpdated(paths...)`. Key read from a file on every request |
 | `internal/probe` | `Prober.Probe(ctx, path) (Info, error)`: ffprobe JSON → codec, profile, bit depth, HDR10/HLG/Dolby Vision + dv_profile, size, fps, bitrate, audio and subtitle tracks, duration. Cached in `probe_cache` keyed by (path, size, mtime_ns). `Parse(raw)` is pure, for tests |
