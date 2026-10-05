@@ -203,7 +203,8 @@ func row(t *testing.T, env *stage.Env, path string) (status, errText string) {
 // (or not putting the newest file first), an unchanged note rewritten or an unchanged file re-probed, an
 // unreadable or video-less file not listed, alerted twice or re-probed before its retry time, the original name
 // lost across two moves, another version's sidecar listed, a stale temp file blocking a write, a note left stale
-// when its text changes (a new sidecar) or when someone edits it, an SDR file probed for frames or a file under
+// when its text changes (a new sidecar) or when someone edits it, correct notes rewritten after the note state is
+// lost, an SDR file probed for frames or a file under
 // 20 Mb/s peak-scanned, stale rows kept for deleted files, and a paths_file run processing other videos or
 // deleting their rows.
 func TestRunReconciles(t *testing.T) {
@@ -290,6 +291,11 @@ cat "`+fixture+`"
 	}
 	if strings.Contains(string(log), "-show_frames") || strings.Contains(string(log), "packet=") {
 		t.Fatal("an SDR file was frame-probed, or a 15.7 Mb/s file peak-scanned")
+	}
+
+	h.Env.Store.DB().Exec(`UPDATE details_files SET note_sha = ''`) // state lost; the notes on disk are still right
+	if rep = runOnce(t, h.Env); rep.Counts["written"] != 0 {
+		t.Fatalf("lost note state rewrote %d correct notes", rep.Counts["written"])
 	}
 
 	paths := filepath.Join(t.TempDir(), "paths.txt")
