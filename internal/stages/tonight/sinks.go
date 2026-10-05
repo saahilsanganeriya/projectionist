@@ -336,7 +336,7 @@ func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarg
 		s.PosterOf = day
 		log.Info("collection poster uploaded", "event", "plex_write", "action", "poster", "id", id, "bytes", len(img))
 	}
-	return promotePlexHub(ctx, log, px, t.Section, id)
+	return promotePlexHub(ctx, log, px, t.Section, id, len(add)+len(remove) > 0)
 }
 
 // marker labels (Plex) or tags (Jellyfin) the collection this stage owns. A collection with the same title and no
@@ -413,8 +413,10 @@ type plexHub struct {
 
 // promotePlexHub shows the collection on his own Home only (not his friends' Home, not the library's Recommended
 // tab, where shared users would read reasons quoting his ratings) and moves it to the top of the Movies section's
-// hub order.
-func promotePlexHub(ctx context.Context, log *slog.Logger, px *plex.Client, section int, id string) error {
+// hub order. Plex caches each Home hub answer and keeps it when a collection's members change (2026-10-05: one
+// /hubs/promoted query listed the old picks 27 minutes after the edit); a manage call on the hub drops it, so
+// membersChanged sends the flags again.
+func promotePlexHub(ctx context.Context, log *slog.Logger, px *plex.Client, section int, id string, membersChanged bool) error {
 	base := fmt.Sprintf("/hubs/sections/%d/manage", section)
 	ident := fmt.Sprintf("custom.collection.%d.%s", section, id)
 	const vis = "promotedToRecommended=0&promotedToOwnHome=1&promotedToSharedHome=0"
@@ -431,11 +433,11 @@ func promotePlexHub(ctx context.Context, log *slog.Logger, px *plex.Client, sect
 			return err
 		}
 		log.Info("home row promoted", "event", "plex_write", "action", "promote", "hub", ident)
-	case mc.Hub[at] != plexHub{Identifier: ident, PromotedToOwnHome: true}:
+	case mc.Hub[at] != plexHub{Identifier: ident, PromotedToOwnHome: true} || membersChanged:
 		if err := px.Do(ctx, "PUT", base+"/"+ident+"?"+vis); err != nil {
 			return err
 		}
-		log.Info("home row promoted", "event", "plex_write", "action", "promote", "hub", ident)
+		log.Info("home row promoted", "event", "plex_write", "action", "promote", "hub", ident, "members_changed", membersChanged)
 	}
 	if at == 0 {
 		return nil

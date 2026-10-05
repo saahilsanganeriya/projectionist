@@ -453,6 +453,7 @@ type plexFake struct {
 	summary string
 	labeled bool
 	hubs    []plexHub
+	home    []string // the members his Home row lists: Plex's cached hub, refreshed only by a manage call on it
 	posters [][]byte
 
 	dropCreate   bool   // POST /library/collections makes the collection, then hangs up: its answer is lost
@@ -586,6 +587,7 @@ func newPlexFake(srv *fake.Server) *plexFake {
 		defer p.mu.Unlock()
 		if q := r.URL.Query(); q.Get("metadataItemId") == "900" {
 			p.hubs = append(p.hubs, hubFlags("custom.collection.4.900", q))
+			p.home = slices.Clone(p.coll)
 		}
 	})
 	srv.HandleFunc("PUT", "/hubs/sections/4/manage/custom.collection.4.900", func(rw http.ResponseWriter, r *http.Request) {
@@ -593,6 +595,7 @@ func newPlexFake(srv *fake.Server) *plexFake {
 		defer p.mu.Unlock()
 		if i := slices.IndexFunc(p.hubs, func(h plexHub) bool { return h.Identifier == "custom.collection.4.900" }); i >= 0 {
 			p.hubs[i] = hubFlags(p.hubs[i].Identifier, r.URL.Query())
+			p.home = slices.Clone(p.coll)
 		}
 	})
 	srv.HandleFunc("PUT", "/hubs/sections/4/manage/custom.collection.4.900/move", func(rw http.ResponseWriter, r *http.Request) {
@@ -620,6 +623,12 @@ func (p *plexFake) members() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return slices.Sorted(slices.Values(p.coll))
+}
+
+func (p *plexFake) homeRow() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Sorted(slices.Values(p.home))
 }
 
 // ---- fake Jellyfin: user "saahil", the films above, and the BoxSet the stage makes ----
@@ -725,7 +734,7 @@ func (j *jfFake) members() []string {
 // Catches, across four runs at the gate's real token sizes: a watched film offered (export, feed, Plex, Jellyfin);
 // a pick outside the unseen set kept instead of retried; the taste block sent uncached or to an unresolved alias; a
 // second AI call on the same day; a watched pick left in the
-// row, or a poster uploaded for its removal; yesterday's picks repeated or kept; the row shown on a friend's Home or the Recommended tab, or left
+// row (in Plex's cached Home hub too), or a poster uploaded for its removal; yesterday's picks repeated or kept; the row shown on a friend's Home or the Recommended tab, or left
 // there by an earlier build; his own "Tonight" collection or BoxSet adopted and edited; the key reaching a log.
 func TestRunAcrossDays(t *testing.T) {
 	w := newWorld(t, "", 0)
@@ -830,6 +839,9 @@ func TestRunAcrossDays(t *testing.T) {
 	if got := w.plex.members(); !slices.Equal(got, []string{rk(389), rk(655)}) || strings.Contains(w.plex.summary, "Seven Samurai") {
 		t.Fatalf("run 3: plex %v, summary %q", got, w.plex.summary)
 	}
+	if got := w.plex.homeRow(); !slices.Equal(got, []string{rk(389), rk(655)}) {
+		t.Fatalf("run 3: his Home row lists %v: Plex's cached hub was not refreshed after the members changed", got)
+	}
 	if got := w.jf.members(); !slices.Equal(got, []string{jfID(389), jfID(655)}) || w.ai.calls() != 2 {
 		t.Fatalf("run 3: jellyfin %v, AI calls %d", got, w.ai.calls())
 	}
@@ -851,6 +863,9 @@ func TestRunAcrossDays(t *testing.T) {
 	}
 	if got := w.plex.members(); !slices.Equal(got, []string{rk(949), rk(1398), rk(18148)}) || len(w.plex.posters) != 2 {
 		t.Fatalf("run 4: plex %v, posters %d", got, len(w.plex.posters))
+	}
+	if got := w.plex.homeRow(); !slices.Equal(got, []string{rk(949), rk(1398), rk(18148)}) {
+		t.Fatalf("run 4: his Home row lists %v: Plex's cached hub was not refreshed after the members changed", got)
 	}
 	for _, k := range w.ai.keys {
 		if k != "sk-test-SECRET-key" {
