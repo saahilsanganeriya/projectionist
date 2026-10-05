@@ -368,14 +368,14 @@ func (o *legacy) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	}
 	s, e := fmt.Sprintf("season-%d", q.Season), fmt.Sprintf("episode-%d", q.Episode)
 	if q.IMDb != 0 {
-		more, err := o.search(ctx, "opensubtitles-imdb", e, fmt.Sprintf("imdbid-%07d", q.IMDb), s)
+		more, err := o.search(ctx, "opensubtitles-imdb", fmt.Sprintf("imdbid-%07d", q.IMDb), s, e)
 		if err != nil {
 			return nil, err
 		}
 		found = append(found, more...)
 	}
 	if len(found) == hashHits {
-		more, err := o.search(ctx, "opensubtitles-query", e, "query-"+pyQuote(pyLower(q.Name)), s)
+		more, err := o.search(ctx, "opensubtitles-query", "query-"+pyQuote(pyLower(q.Name)), s, e)
 		if err != nil {
 			return nil, err
 		}
