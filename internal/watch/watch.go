@@ -136,6 +136,11 @@ func ItemsForPath(path string, episode int) []string {
 	return nil
 }
 
+// Execer is a *sql.DB or a *sql.Tx.
+type Execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 func Open(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, schema)
 	return err
@@ -143,7 +148,7 @@ func Open(ctx context.Context, db *sql.DB) error {
 
 // Add appends e unless the identical event is already recorded, so an import that runs again adds nothing (a
 // repeated Finished would count a second play).
-func Add(ctx context.Context, db *sql.DB, e Event) error {
+func Add(ctx context.Context, db Execer, e Event) error {
 	_, err := db.ExecContext(ctx, `INSERT INTO watch_events
 		(person, item, ref, source, at, kind, played, plays, position_ms, rating) SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10
 		WHERE NOT EXISTS (SELECT 1 FROM watch_events WHERE person = ?1 AND item = ?2 AND at = ?5 AND ref = ?3 AND
@@ -158,7 +163,7 @@ func Unresolved(ctx context.Context, db *sql.DB) ([]Event, error) {
 }
 
 // Resolve gives an unresolved event its items; a ref holding several (a multi-episode file) is copied per item.
-func Resolve(ctx context.Context, db *sql.DB, e Event, items []string) error {
+func Resolve(ctx context.Context, db Execer, e Event, items []string) error {
 	if _, err := db.ExecContext(ctx, `UPDATE watch_events SET item = ? WHERE id = ?`, items[0], e.ID); err != nil {
 		return err
 	}

@@ -173,7 +173,7 @@ func (s *syncer) listJellyfin(ctx context.Context, a *addresses) error {
 
 // Hooks receives Plex's webhook (registered by the stage on the owner's plex.tv account) and the Jellyfin Webhook
 // plugin's "Generic" destination with "Send All Properties" (UserDataSaved). A handler only records the event; the
-// next run resolves and propagates it.
+// next run resolves it, folds it into what its app holds, and propagates it.
 func (Stage) Hooks(env *stage.Env) map[string]http.Handler {
 	opt := defaults()
 	if err := env.Options(&opt); err != nil {
@@ -222,7 +222,7 @@ func hook(env *stage.Env, opt Options, parse parser) http.Handler {
 			env.Log.Log(r.Context(), level, "watch event dropped", "event", "watch_event_dropped", "hook", r.URL.Path,
 				"reason", drop.reason)
 		} else {
-			if err := record(r.Context(), env.Store.DB(), e); err != nil {
+			if err := watch.Add(r.Context(), env.Store.DB(), e); err != nil {
 				env.Log.Error("watch event not recorded", "event", "store_error", "ref", e.Ref, "err", err)
 				http.Error(w, "store", http.StatusInternalServerError)
 				return
@@ -231,15 +231,6 @@ func hook(env *stage.Env, opt Options, parse parser) http.Handler {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-}
-
-// record keeps an event an app pushed, and folds it into what that app item holds (so it is never sent back).
-func record(ctx context.Context, db *sql.DB, e watch.Event) error {
-	if err := watch.Add(ctx, db, e); err != nil {
-		return err
-	}
-	app, id, _ := strings.Cut(e.Ref, ":")
-	return applySink(ctx, db, app, e.Person, id, e)
 }
 
 // parsePlex maps the account by its id where names knows it: the payload's title is not always the account's name
@@ -467,7 +458,7 @@ func history(played bool, plays int, positionMs int64, rating *float64) watch.Ev
 
 // migrate records a migrated row once per item it holds, and folds it into what the app item holds.
 func (s *syncer) migrate(ctx context.Context, e watch.Event, items []string) (int, error) {
-	app, id, _ := strings.Cut(e.Ref, ":")
+	app, _, _ := strings.Cut(e.Ref, ":")
 	if len(items) == 0 {
 		s.rep.Count("outside_scheme."+app, 1)
 		return 0, nil
@@ -479,7 +470,7 @@ func (s *syncer) migrate(ctx context.Context, e watch.Event, items []string) (in
 		}
 	}
 	s.rep.Count("imported."+app, len(items))
-	return len(items), applySink(ctx, s.env.Store.DB(), app, e.Person, id, e)
+	return len(items), applySink(ctx, s.env.Store.DB(), app, e.Person, items, e)
 }
 
 type backupRow struct {

@@ -9,10 +9,11 @@
 // The apps are sinks. They supply only the events they push, a one-time migration of the history that existed
 // only inside them, and addressing: one listing per app per day maps each app item id to the library identity
 // read from its file path. A run is a reconciler: it folds the events into each person's state per item and writes
-// to an app only what the record knows and the app is not believed to hold (jfsync_sink: everything the app pushed
-// or was given). A state an app wrote is never written back to that app. Failed writes are retried on later runs
-// with backoff and never fail the run. A listing is refreshed after the writes, so it never delays them; an item
-// added since the last listing waits for the next one.
+// to an app each field the record knows and the app is not believed to hold. What an app holds (jfsync_sink) is
+// everything it pushed, was migrated from it, or was given, kept per person and library item, so an item the app
+// re-creates under a new id still holds it. Failed writes are retried on later runs with backoff and never fail the
+// run. A listing is refreshed after the writes, so it never delays them; an item added since it waits for the next
+// one.
 package jfsync
 
 import (
@@ -101,7 +102,7 @@ type syncer struct {
 	rep    *stage.Report
 	tokens map[string]string // Plex account id → that friend's server token; memory only, never logged
 	plan   []string
-	readAt time.Time       // when this run read the record
+	readAt time.Time       // when this run read the record: a push recorded later is not in its view
 	ready  map[string]bool // "app/person": that person's history in the app is imported, so writes may go
 }
 
@@ -132,10 +133,10 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if err := s.backfillJellyfin(ctx, addrs[jellyfinApp]); err != nil {
 		return err
 	}
+	s.readAt = env.Now()
 	if err := s.resolve(ctx, addrs); err != nil {
 		return err
 	}
-	s.readAt = env.Now()
 	states, err := watch.States(ctx, env.Store.DB())
 	if err != nil {
 		return err
@@ -159,7 +160,9 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	return nil
 }
 
-// resolve maps events that arrived with only an app's id (webhooks) to items, once that id is addressed.
+// resolve maps events that arrived with only an app's id (webhooks) to items, once that id is addressed, and folds
+// each into what its app holds. Both commit together: a push in the record but not in what its app holds would be
+// written back to that app, and a repeated Plex scrobble adds a view nobody can remove.
 func (s *syncer) resolve(ctx context.Context, addrs map[string]*addresses) error {
 	db := s.env.Store.DB()
 	events, err := watch.Unresolved(ctx, db)
@@ -176,32 +179,39 @@ func (s *syncer) resolve(ctx context.Context, addrs map[string]*addresses) error
 			s.rep.Count("unresolved", 1)
 			continue
 		}
-		if err := watch.Resolve(ctx, db, e, items); err != nil {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		err = watch.Resolve(ctx, tx, e, items)
+		if err == nil {
+			err = applySink(ctx, tx, app, e.Person, items, e)
+		}
+		if err == nil {
+			err = tx.Commit()
+		}
+		if err != nil {
+			tx.Rollback()
 			return err
 		}
 	}
 	return nil
 }
 
-// origin is the app (or other source family) behind a watch source: "plex-webhook" → "plex".
-func origin(source string) string {
-	family, _, _ := strings.Cut(source, "-")
-	return family
-}
-
-// pick is the state an app item should hold: the newest among the items it holds (all of a multi-episode file's
-// episodes normally share one). It marks those items as having a home in the app.
-func pick(states map[watch.Key]watch.State, person string, items []string, covered map[watch.Key]bool) (watch.State, bool) {
+// pick is the state an app item should hold, and its item: the newest among the items it holds (all of a
+// multi-episode file's episodes normally share one). It marks those items as having a home in the app.
+func pick(states map[watch.Key]watch.State, person string, items []string, covered map[watch.Key]bool) (watch.State, watch.Key, bool) {
 	var best watch.State
+	var bestKey watch.Key
 	found := false
 	for _, it := range items {
 		k := watch.Key{Person: person, Item: it}
 		covered[k] = true
 		if st, ok := states[k]; ok && (!found || st.At.After(best.At)) {
-			best, found = st, true
+			best, bestKey, found = st, k, true
 		}
 	}
-	return best, found
+	return best, bestKey, found
 }
 
 // view is what want knows and an app can hold, beside the same part of have. A field the record does not know is
@@ -250,19 +260,12 @@ func (s *syncer) reconcile(ctx context.Context, app string, addr *addresses, sta
 			continue
 		}
 		for _, id := range ids {
-			want, ok := pick(states, u.Name, addr.Targets[id], covered)
+			items := addr.Targets[id]
+			want, k, ok := pick(states, u.Name, items, covered)
 			if !ok {
 				continue
 			}
-			row := have[sinkKey{u.Name, id}]
-			pushed := origin(want.Source) == app
-			raced := pushed && row.raced(want.At)
-			if pushed && !raced {
-				continue // the app holds what it pushed
-			}
-			if raced {
-				row.State = watch.State{} // it holds our write or its own push, and which is unknown
-			}
+			row := have[k]
 			w, h := view(app, want, row.State)
 			if w.Same(h) {
 				continue
@@ -271,16 +274,15 @@ func (s *syncer) reconcile(ctx context.Context, app string, addr *addresses, sta
 				s.rep.Count("deferred."+app, 1)
 				continue
 			}
-			kind := fmt.Sprintf("%s_from_%s.%s", app, origin(want.Source), u.Name)
-			s.rep.Count(kind, 1)
-			s.plan = append(s.plan, strings.Join([]string{app, u.Name, strings.Join(addr.Targets[id], ","), id,
+			s.rep.Count("to_"+app+"."+u.Name, 1)
+			s.plan = append(s.plan, strings.Join([]string{app, u.Name, strings.Join(items, ","), id,
 				want.Source, describe(h), describe(w)}, "\t"))
 			if !s.opt.Apply {
 				continue
 			}
 			held, err := s.write(ctx, app, userID, id, w, row.State, want.PlayedAt)
 			if !held.Same(row.State) {
-				if err := wroteSink(ctx, db, app, u.Name, id, held, s.readAt, s.env.Now()); err != nil {
+				if err := wroteSink(ctx, db, app, u.Name, items, held, s.readAt, s.env.Now()); err != nil {
 					return err
 				}
 			}
@@ -289,7 +291,7 @@ func (s *syncer) reconcile(ctx context.Context, app string, addr *addresses, sta
 				s.rep.Count("write_failed."+app, 1)
 				s.env.Log.Warn("write failed", "event", "sink_write_failed", "app", app, "person", u.Name, "item", id,
 					"attempt", row.Failures+1, "err", err)
-				if err := failSink(ctx, db, app, u.Name, id, row.Failures+1, now); err != nil {
+				if err := failSink(ctx, db, app, u.Name, items, row.Failures+1, now); err != nil {
 					return err
 				}
 				if stopped = failures >= maxFailRun; stopped {
@@ -301,8 +303,8 @@ func (s *syncer) reconcile(ctx context.Context, app string, addr *addresses, sta
 			s.env.Log.Info("watch state written", "event", "sink_write", "app", app, "person", u.Name, "item", id,
 				"from", want.Source, "state", describe(w))
 		}
-		for k, st := range states {
-			if k.Person == u.Name && !covered[k] && origin(st.Source) != app {
+		for k := range states {
+			if k.Person == u.Name && !covered[k] { // not in the app's listing yet
 				s.rep.Count("pending."+app+"."+u.Name, 1)
 			}
 		}
@@ -420,9 +422,7 @@ func summary(counts map[string]int) string {
 	return strings.Join(parts, " ")
 }
 
-// ---- jfsync_sink: what each app item is believed to hold ----
-
-type sinkKey struct{ Person, Item string }
+// ---- jfsync_sink: what each app is believed to hold, per person and library item ----
 
 type sinkRow struct {
 	watch.State
@@ -442,72 +442,93 @@ func openTables(ctx context.Context, env *stage.Env) error {
 		return err
 	}
 	_, err := env.Store.DB().ExecContext(ctx, `CREATE TABLE IF NOT EXISTS jfsync_sink (
-		app TEXT NOT NULL, person TEXT NOT NULL, app_item TEXT NOT NULL,
+		app TEXT NOT NULL, person TEXT NOT NULL, item TEXT NOT NULL,
 		played INTEGER NOT NULL DEFAULT 0, plays INTEGER NOT NULL DEFAULT 0, position_ms INTEGER NOT NULL DEFAULT 0,
 		rating REAL, knows_play INTEGER NOT NULL DEFAULT 0, knows_position INTEGER NOT NULL DEFAULT 0,
 		failures INTEGER NOT NULL DEFAULT 0, retry_at TEXT NOT NULL DEFAULT '',
 		read_at TEXT NOT NULL DEFAULT '', written_at TEXT NOT NULL DEFAULT '',
-		PRIMARY KEY (app, person, app_item))`)
+		PRIMARY KEY (app, person, item))`)
 	return err
 }
 
-const sinkColumns = `played, plays, position_ms, rating, knows_play, knows_position`
+const (
+	stateColumns = `played, plays, position_ms, rating, knows_play, knows_position`
+	sinkColumns  = stateColumns + `, failures, retry_at, read_at, written_at`
+)
 
-func loadSink(ctx context.Context, db *sql.DB, app string) (map[sinkKey]sinkRow, error) {
-	rows, err := db.QueryContext(ctx, `SELECT person, app_item, `+sinkColumns+`, failures, retry_at, read_at, written_at
-		FROM jfsync_sink WHERE app = ?`, app)
+// scanSink scans dest, then sinkColumns.
+func scanSink(scan func(...any) error, dest ...any) (sinkRow, error) {
+	var r sinkRow
+	var times [3]string
+	if err := scan(append(dest, &r.Played, &r.Plays, &r.PositionMs, &r.Rating, &r.KnowsPlay, &r.KnowsPosition,
+		&r.Failures, &times[0], &times[1], &times[2])...); err != nil {
+		return r, err
+	}
+	for i, t := range []*time.Time{&r.RetryAt, &r.ReadAt, &r.WrittenAt} {
+		if times[i] != "" {
+			var err error
+			if *t, err = time.Parse(store.TimeFormat, times[i]); err != nil {
+				return r, err
+			}
+		}
+	}
+	return r, nil
+}
+
+func loadSink(ctx context.Context, db *sql.DB, app string) (map[watch.Key]sinkRow, error) {
+	rows, err := db.QueryContext(ctx, `SELECT person, item, `+sinkColumns+` FROM jfsync_sink WHERE app = ?`, app)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[sinkKey]sinkRow{}
+	out := map[watch.Key]sinkRow{}
 	for rows.Next() {
-		var k sinkKey
-		var r sinkRow
-		times := make([]string, 3)
-		if err := rows.Scan(&k.Person, &k.Item, &r.Played, &r.Plays, &r.PositionMs, &r.Rating, &r.KnowsPlay,
-			&r.KnowsPosition, &r.Failures, &times[0], &times[1], &times[2]); err != nil {
+		var k watch.Key
+		r, err := scanSink(rows.Scan, &k.Person, &k.Item)
+		if err != nil {
 			return nil, err
-		}
-		for i, t := range []*time.Time{&r.RetryAt, &r.ReadAt, &r.WrittenAt} {
-			if times[i] != "" {
-				if *t, err = time.Parse(store.TimeFormat, times[i]); err != nil {
-					return nil, err
-				}
-			}
 		}
 		out[k] = r
 	}
 	return out, rows.Err()
 }
 
-// holdSink records what an app item holds, from what the app pushed or a migration of its history.
-func holdSink(ctx context.Context, db *sql.DB, app, person, item string, st watch.State) error {
-	_, err := db.ExecContext(ctx, `INSERT INTO jfsync_sink(app, person, app_item, `+sinkColumns+`) VALUES (?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(app, person, app_item) DO UPDATE SET played=excluded.played, plays=excluded.plays,
+// holdSink records what an app holds for an item.
+func holdSink(ctx context.Context, db watch.Execer, app, person, item string, st watch.State) error {
+	_, err := db.ExecContext(ctx, `INSERT INTO jfsync_sink(app, person, item, `+stateColumns+`) VALUES (?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(app, person, item) DO UPDATE SET played=excluded.played, plays=excluded.plays,
 		position_ms=excluded.position_ms, rating=excluded.rating, knows_play=excluded.knows_play,
 		knows_position=excluded.knows_position`,
 		app, person, item, st.Played, st.Plays, st.PositionMs, st.Rating, st.KnowsPlay, st.KnowsPosition)
 	return err
 }
 
-// wroteSink records what this stage's write put into an app item; it clears the item's backoff.
-func wroteSink(ctx context.Context, db *sql.DB, app, person, item string, st watch.State, readAt, writtenAt time.Time) error {
-	if err := holdSink(ctx, db, app, person, item, st); err != nil {
-		return err
+// wroteSink records what this stage's write to an app item put into each item it holds; it clears their backoff.
+func wroteSink(ctx context.Context, db *sql.DB, app, person string, items []string, st watch.State, readAt, writtenAt time.Time) error {
+	for _, it := range items {
+		if err := holdSink(ctx, db, app, person, it, st); err != nil {
+			return err
+		}
+		if _, err := db.ExecContext(ctx, `UPDATE jfsync_sink SET failures=0, retry_at='', read_at=?, written_at=?
+			WHERE app=? AND person=? AND item=?`, readAt.UTC().Format(store.TimeFormat),
+			writtenAt.UTC().Format(store.TimeFormat), app, person, it); err != nil {
+			return err
+		}
 	}
-	_, err := db.ExecContext(ctx, `UPDATE jfsync_sink SET failures=0, retry_at='', read_at=?, written_at=?
-		WHERE app=? AND person=? AND app_item=?`,
-		readAt.UTC().Format(store.TimeFormat), writtenAt.UTC().Format(store.TimeFormat), app, person, item)
-	return err
+	return nil
 }
 
-// failSink backs the item off: 5 min after the first failure, doubling up to a day.
-func failSink(ctx context.Context, db *sql.DB, app, person, item string, failures int, now time.Time) error {
-	_, err := db.ExecContext(ctx, `INSERT INTO jfsync_sink(app, person, app_item, failures, retry_at) VALUES (?,?,?,?,?)
-		ON CONFLICT(app, person, app_item) DO UPDATE SET failures=excluded.failures, retry_at=excluded.retry_at`,
-		app, person, item, failures, now.Add(backoff(firstBackoff, failures, maxBackoff)).UTC().Format(store.TimeFormat))
-	return err
+// failSink backs the items off: 5 min after the first failure, doubling up to a day.
+func failSink(ctx context.Context, db *sql.DB, app, person string, items []string, failures int, now time.Time) error {
+	retry := now.Add(backoff(firstBackoff, failures, maxBackoff)).UTC().Format(store.TimeFormat)
+	for _, it := range items {
+		if _, err := db.ExecContext(ctx, `INSERT INTO jfsync_sink(app, person, item, failures, retry_at) VALUES (?,?,?,?,?)
+			ON CONFLICT(app, person, item) DO UPDATE SET failures=excluded.failures, retry_at=excluded.retry_at`,
+			app, person, it, failures, retry); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // backoff is first after one failure, doubling per further failure, never more than ceiling.
@@ -518,13 +539,28 @@ func backoff(first time.Duration, failures int, ceiling time.Duration) time.Dura
 	return min(first<<(failures-1), ceiling)
 }
 
-// applySink folds an event an app pushed (or a migrated row of its history) into what that app item holds.
-func applySink(ctx context.Context, db *sql.DB, app, person, item string, e watch.Event) error {
-	var st watch.State
-	err := db.QueryRowContext(ctx, `SELECT `+sinkColumns+` FROM jfsync_sink WHERE app = ? AND person = ? AND app_item = ?`,
-		app, person, item).Scan(&st.Played, &st.Plays, &st.PositionMs, &st.Rating, &st.KnowsPlay, &st.KnowsPosition)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
+// querier is a *sql.DB or a *sql.Tx.
+type querier interface {
+	watch.Execer
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// applySink folds an event an app pushed (or a migrated row of its history) into what that app holds for each item.
+// A push that may have crossed this stage's write leaves the item unknown, so the next run writes it in full.
+func applySink(ctx context.Context, q querier, app, person string, items []string, e watch.Event) error {
+	for _, it := range items {
+		r, err := scanSink(q.QueryRowContext(ctx, `SELECT `+sinkColumns+` FROM jfsync_sink
+			WHERE app = ? AND person = ? AND item = ?`, app, person, it).Scan)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		st := r.State.Apply(e)
+		if r.raced(e.At) {
+			st = watch.State{}
+		}
+		if err := holdSink(ctx, q, app, person, it, st); err != nil {
+			return err
+		}
 	}
-	return holdSink(ctx, db, app, person, item, st.Apply(e))
+	return nil
 }

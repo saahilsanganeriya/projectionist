@@ -220,7 +220,9 @@ func plexPlay(event, account, key, extra string) string {
 
 // Catches: a dry run that writes; a state written back to the app it came from (Heat's re-created Plex item would
 // be scrobbled again, adding a play); the Plex history not counted as held (Clerks would be scrobbled again); a
-// friend's write sent with the owner's token; an existing plex.tv webhook dropped when ours is added; a rerun that
+// field an app never held left out because the newest change came from that app (Clerks' Plex play never reaching
+// Jellyfin, where he stopped a rewatch); what Plex holds lost when it re-creates an item under a new id (a Jellyfin
+// stop on Heat would scrobble 13, a view Plex's API cannot remove); a friend's write sent with the owner's token; an existing plex.tv webhook dropped when ours is added; a rerun that
 // writes again; a pushed play not reaching the other app, or not counted as held by the app that pushed it; the
 // owner's pushed play lost because its payload names him by his plex.tv title; a state that knows only a resume
 // point sent to Jellyfin as played=false, playcount=0 (it would unmark a play there); a Plex listing that reads only
@@ -233,8 +235,8 @@ func TestRunTwoWay(t *testing.T) {
 	if len(w.since(0)) != 0 || len(h.Plex.Calls("POST", "/api/v2/user/webhooks")) != 0 {
 		t.Fatalf("dry run wrote: %v", w.since(0))
 	}
-	if rep.Counts["pending.jellyfin.saahil"] != 1 || rep.Counts["jellyfin_from_plex.saahil"] != 3 || rep.Counts["jellyfin_from_plex.roger"] != 1 ||
-		rep.Counts["plex_from_jellyfin.saahil"] != 2 || rep.Counts["plex_from_jellyfin.roger"] != 1 || len(rep.Alerts) != 0 {
+	if rep.Counts["pending.jellyfin.saahil"] != 1 || rep.Counts["to_jellyfin.saahil"] != 4 || rep.Counts["to_jellyfin.roger"] != 1 ||
+		rep.Counts["to_plex.saahil"] != 2 || rep.Counts["to_plex.roger"] != 1 || len(rep.Alerts) != 0 {
 		t.Fatalf("plan: counts %v alerts %v", rep.Counts, rep.Alerts)
 	}
 
@@ -244,6 +246,7 @@ func TestRunTwoWay(t *testing.T) {
 	for _, want := range []string{
 		`/UserItems/a1/UserData?userId=u1 {"LastPlayedDate":"2024-08-09T00:00:00Z","PlayCount":2,"PlaybackPositionTicks":0,"Played":true}`,
 		`/UserItems/e1/UserData?userId=u2 {"LastPlayedDate":"2024-09-01T00:00:00Z","PlayCount":1,"PlaybackPositionTicks":0,"Played":true}`,
+		`/UserItems/c1/UserData?userId=u1 {"LastPlayedDate":"2025-03-01T00:00:00Z","PlayCount":1,"Played":true}`,
 		"owner /:/progress?identifier=com.plexapp.plugins.library&key=11&time=1800000&state=stopped",
 		"owner /:/progress?identifier=com.plexapp.plugins.library&key=14&time=1200000&state=stopped", // Clerks stays watched
 		"friend /:/scrobble?identifier=com.plexapp.plugins.library&key=11",
@@ -253,7 +256,7 @@ func TestRunTwoWay(t *testing.T) {
 			t.Errorf("missing write %s in\n%s", want, got)
 		}
 	}
-	if n := len(w.since(0)); n != 8 || strings.Contains(got, "key=13") || strings.Contains(got, "scrobble?identifier=com.plexapp.plugins.library&key=14") {
+	if n := len(w.since(0)); n != 9 || strings.Contains(got, "key=13") || strings.Contains(got, "scrobble?identifier=com.plexapp.plugins.library&key=14") {
 		t.Errorf("%d writes:\n%s", n, got)
 	}
 	both := url.Values{"urls[]": {"http://tautulli:8181/hook", "http://127.0.0.1:8097/hooks/plex"}}
@@ -276,13 +279,16 @@ func TestRunTwoWay(t *testing.T) {
 		t.Fatalf("after the Plex play and roger's stop:\n%s", got)
 	}
 
-	// A rewatch stopped 10 min in on Jellyfin: Plex already holds the play (it pushed it), so only the position goes.
+	// Rewatches stopped 10 min in on Jellyfin: Plex holds both plays (Ran's it pushed; Heat's from the backup, under
+	// the ratingKey Plex has since replaced), so only the positions go.
 	h.Now = h.Now.Add(10 * time.Minute)
-	code := push(h, jellyfinApp, `{"NotificationType":"UserDataSaved","NotificationUsername":"saahil","ItemId":"b1","ItemType":"Movie","SaveReason":"PlaybackFinished","Played":true,"PlayCount":1,"PlaybackPositionTicks":6000000000}`)
+	for _, id := range []string{"b1", "a1"} {
+		push(h, jellyfinApp, `{"NotificationType":"UserDataSaved","NotificationUsername":"saahil","ItemId":"`+id+`","ItemType":"Movie","SaveReason":"PlaybackFinished","Played":true,"PlayCount":1,"PlaybackPositionTicks":6000000000}`)
+	}
 	run(t, h)
-	if got := w.since(done + 2); code != http.StatusNoContent || len(got) != 1 ||
-		got[0] != "owner /:/progress?identifier=com.plexapp.plugins.library&key=11&time=600000&state=stopped" {
-		t.Fatalf("after the Jellyfin rewatch (hook %d): %v", code, got)
+	if got := strings.Join(w.since(done+2), "\n"); got != "owner /:/progress?identifier=com.plexapp.plugins.library&key=11&time=600000&state=stopped\n"+
+		"owner /:/progress?identifier=com.plexapp.plugins.library&key=13&time=600000&state=stopped" {
+		t.Fatalf("after the Jellyfin rewatches:\n%s", got)
 	}
 
 	done = len(w.since(0))
@@ -341,8 +347,9 @@ func TestPlexAccountConfig(t *testing.T) {
 	} {
 		h.SetOptions(strings.Replace(options, `plex = "roger"`, "plex = "+c.plex, 1))
 		rep := run(t, h)
-		if rep.Counts["imported.plex"] != c.imported || rep.Counts["plex_from_jellyfin.roger"] != c.writes ||
-			!strings.Contains(strings.Join(rep.Alerts, "|"), c.alert) {
+		alerts := strings.Join(rep.Alerts, "|")
+		if rep.Counts["imported.plex"] != c.imported || rep.Counts["to_plex.roger"] != c.writes ||
+			!strings.Contains(alerts, c.alert) || (c.alert == "") != (alerts == "") {
 			t.Errorf("plex = %s: counts %v alerts %q", c.plex, rep.Counts, rep.Alerts)
 		}
 	}
@@ -358,12 +365,12 @@ func TestWriteFailuresBackOff(t *testing.T) {
 	w.status["/:/rate"] = 500
 	count := func(calls []string, s string) int { return strings.Count(strings.Join(calls, "\n"), s) }
 	rep := run(t, h)
-	if calls := w.since(0); count(calls, "/UserItems/") != maxFailRun || rep.Counts["deferred.jellyfin"] != 1 ||
+	if calls := w.since(0); count(calls, "/UserItems/") != maxFailRun || rep.Counts["deferred.jellyfin"] != 2 ||
 		count(calls, "friend /:/") != 2 {
 		t.Fatalf("first run: %v, counts %v", calls, rep.Counts)
 	}
 	seen := len(w.since(0))
-	if run(t, h); count(w.since(seen), "/UserItems/") != 1 || count(w.since(seen), "friend") != 0 { // only the item never tried
+	if run(t, h); count(w.since(seen), "/UserItems/") != 2 || count(w.since(seen), "friend") != 0 { // only the items never tried
 		t.Fatalf("second run retried early: %v", w.since(seen))
 	}
 	seen = len(w.since(0))
@@ -454,6 +461,27 @@ func TestJellyfinImportResumes(t *testing.T) {
 	}
 	if run(t, h); len(h.Jellyfin.Calls("GET", "/UserItems/a1/UserData")) != 2 { // saahil's before the cancel, roger's
 		t.Errorf("the cancelled import restarted")
+	}
+}
+
+// Catches: a push resolved into the record but not folded into what its app holds (a crash or a failed write
+// between the two): the next run would write Plex's own scrobble back to Plex, a second view nobody can remove.
+func TestResolveCommitsWithTheSink(t *testing.T) {
+	h, w, _, _ := newHarness(t)
+	run(t, h)
+	db := h.Env.Store.DB()
+	if _, err := db.Exec(`CREATE TRIGGER gone BEFORE INSERT ON jfsync_sink BEGIN SELECT RAISE(ABORT, 'disk gone'); END`); err != nil {
+		t.Fatal(err)
+	}
+	push(h, plexApp, plexPlay("media.scrobble", "roger", "15", ""))
+	if err := (Stage{}).Run(context.Background(), h.Env, &stage.Report{}); err == nil || !strings.Contains(err.Error(), "disk gone") {
+		t.Fatalf("run with a failing sink write returned %v", err)
+	}
+	db.Exec(`DROP TRIGGER gone`)
+	done := len(w.since(0))
+	run(t, h)
+	if got := strings.Join(w.since(done), "\n"); strings.Contains(got, "scrobble") || !strings.Contains(got, "/UserItems/d1/UserData?userId=u2") {
+		t.Fatalf("after the failed resolve:\n%s", got)
 	}
 }
 
