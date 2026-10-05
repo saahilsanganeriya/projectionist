@@ -487,11 +487,22 @@ func TestImportsWaitForTheirSource(t *testing.T) {
 }
 
 // Catches: Plex's stop after a finish overwriting the finish with a resume point near the end; a removed rating
-// (-1) recorded as a rating; plays of unmapped accounts or of the Home Videos section recorded; a part-way
+// (-1) recorded as a rating; a Jellyfin push taken as a rating (the plugin sends 0 for an unrated item, and a
+// favourite toggle saves with the reason a like does, carrying the old rating); plays of unmapped accounts or of the Home Videos section recorded; a part-way
 // Jellyfin stop recorded as a whole state (its played=false would unmark a play made in Plex) while an explicit
 // "mark unplayed" is lost; Jellyfin's progress saves flooding the record; the echo of this stage's own write
 // recorded (its played=true would mark every episode of a multi-episode file); a dashed item GUID never matching
 // the API's id; and a drop that does not say why.
+// pluginPayload is the Jellyfin Webhook plugin's UserDataSaved body ("Send All Properties": GetBaseDataObject,
+// AddBaseItemData, AddUserItemData in its DataObjectHelpers.cs) for an unrated film stopped 10 min in; %s: SaveReason.
+const pluginPayload = `{"ServerId":"f1e2d3c4b5a697881726354453627181","ServerName":"NAS","ServerVersion":"10.11.0",
+"ServerUrl":"localhost:8096","NotificationType":"UserDataSaved","Timestamp":"2026-10-05T01:00:00.0000000-07:00",
+"UtcTimestamp":"2026-10-05T08:00:00.0000000Z","Name":"Fargo","Overview":"","Tagline":"","ItemId":"0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d",
+"ItemType":"Movie","RunTimeTicks":58800000000,"RunTime":"01:38:00","Year":1996,"PremiereDate":"1996-03-08","Genres":"Crime, Drama",
+"Likes":false,"Rating":0,"PlaybackPositionTicks":6000000000,"PlaybackPosition":"00:10:00","PlayCount":0,"Favorite":true,
+"Played":false,"AudioStreamIndex":-1,"SubtitleStreamIndex":-1,"SaveReason":"%s","NotificationUsername":"saahil",
+"UserId":"9f8e7d6c-5b4a-3928-1706-f5e4d3c2b1a0"}`
+
 func TestParseHooks(t *testing.T) {
 	opt := defaults()
 	opt.Users = []User{{Name: "saahil", Plex: "saahilsanganeriya", Jellyfin: "saahil"}}
@@ -515,6 +526,8 @@ func TestParseHooks(t *testing.T) {
 		{"marked unplayed", "jellyfin", jf("TogglePlayed", `,"Played":false`), "state 0 <nil> jellyfin:abcd"},
 		{"progress save", "jellyfin", jf("PlaybackProgress", ""), "dropped: save reason PlaybackProgress"},
 		{"our own write echoed", "jellyfin", jf("UpdateUserData", `,"Played":true`), "dropped: save reason UpdateUserData"},
+		{"plugin: part-way stop, unrated", "jellyfin", fmt.Sprintf(pluginPayload, "PlaybackFinished"), "stopped 600000 <nil> jellyfin:0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d"},
+		{"plugin: favourite toggled", "jellyfin", fmt.Sprintf(pluginPayload, "UpdateUserRating"), "dropped: save reason UpdateUserRating"},
 	}
 	for _, c := range cases {
 		parse := parseJellyfin
@@ -524,9 +537,12 @@ func TestParseHooks(t *testing.T) {
 			}
 		}
 		e, drop, err := parse(hookRequest(c.hook, c.payload), opt, time.Unix(0, 0))
-		got := "dropped: " + drop.reason
+		got, rating := "dropped: "+drop.reason, "<nil>"
+		if e.Rating != nil {
+			rating = fmt.Sprint(*e.Rating)
+		}
 		if drop.reason == "" {
-			got = fmt.Sprintf("%s %d %v %s", e.Kind, e.PositionMs, e.Rating, e.Ref)
+			got = fmt.Sprintf("%s %d %s %s", e.Kind, e.PositionMs, rating, e.Ref)
 		}
 		if err != nil || !strings.HasPrefix(got, c.want) {
 			t.Errorf("%s: got %q (err %v), want %q", c.name, got, err, c.want)

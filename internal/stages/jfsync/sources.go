@@ -321,20 +321,22 @@ func parsePlex(r *http.Request, opt Options, now time.Time, names map[string]str
 	return e, dropped{}, nil
 }
 
+// parseJellyfin takes no rating from a push: the plugin sends `Rating: userItemData.Rating ?? 0`, so an unrated
+// item reads as 0, and Jellyfin's own ratings are Likes (10 or 1) saved with the same reason as a favourite toggle,
+// which carries whatever rating the item had. Ratings come from Plex and Letterboxd.
 func parseJellyfin(r *http.Request, opt Options, now time.Time) (watch.Event, dropped, error) {
 	var p struct {
 		NotificationType, NotificationUsername, ItemID, ItemType, SaveReason string
 		Played                                                               bool
 		PlayCount                                                            int
 		PlaybackPositionTicks                                                int64
-		Rating                                                               *float64
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&p); err != nil {
 		return watch.Event{}, dropped{}, fmt.Errorf("jellyfin webhook: %w", err)
 	}
 	id := strings.ToLower(strings.ReplaceAll(p.ItemID, "-", "")) // the plugin may send dashed GUIDs; the API never does
 	e := watch.Event{Ref: jellyfinApp + ":" + id, Source: "jellyfin-webhook", At: now,
-		Played: p.Played, Plays: p.PlayCount, PositionMs: p.PlaybackPositionTicks / 10_000, Rating: p.Rating}
+		Played: p.Played, Plays: p.PlayCount, PositionMs: p.PlaybackPositionTicks / 10_000}
 	switch p.SaveReason {
 	case "PlaybackFinished": // a stop: completed (played, position reset) or part-way (played untouched)
 		switch {
@@ -347,11 +349,10 @@ func parseJellyfin(r *http.Request, opt Options, now time.Time) (watch.Event, dr
 		}
 	case "TogglePlayed": // marked played or unplayed
 		e.Kind = watch.Snapshot
-	case "UpdateUserRating":
-		e.Kind = watch.Rated
 	default:
 		// UpdateUserData is an API write, this stage's own above all: its echo of a multi-episode item would mark
 		// every episode of the file. PlaybackStart; PlaybackProgress arrives every few seconds, the stop carries it.
+		// UpdateUserRating: a like or a favourite (see above).
 		return watch.Event{}, dropped{"save reason " + p.SaveReason, true}, nil
 	}
 	var mapped bool
