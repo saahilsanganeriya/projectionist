@@ -595,7 +595,8 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if err != nil {
 		return err
 	}
-	s := newScan(root, env.Now().Add(-opt.Settle))
+	started := env.Now()
+	s := newScan(root, started.Add(-opt.Settle))
 	for _, lib := range []string{"Movies", "TV"} {
 		if err := s.library(ctx, lib); err != nil {
 			return err
@@ -642,7 +643,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	rep.Count("not_probed", deferred)
 	rep.Count("held", held)
 
-	text := report(env, opt.MaxListed, s, shows, deferred, unsettled+held, prev, hadPrev)
+	text := report(env, started, opt.MaxListed, s, shows, deferred, unsettled+held, prev, hadPrev)
 	if err := writeReport(opt.Report, text); err != nil {
 		return err
 	}
@@ -676,13 +677,15 @@ func firstNew(now, before []string) string {
 }
 
 // report is the owner's short text: a count table against the last run, then up to max examples per category.
-func report(env *stage.Env, maxListed int, s *scan, shows []showCount, deferred, waiting int, prev snapshot, hadPrev bool) string {
+func report(env *stage.Env, started time.Time, maxListed int, s *scan, shows []showCount, deferred, waiting int, prev snapshot, hadPrev bool) string {
 	loc := env.Loc
 	if loc == nil {
 		loc = time.UTC
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "Library audit, %s. Read-only: nothing was moved or deleted.\n", env.Now().In(loc).Format("2006-01-02 15:04 MST"))
+	const stamp = "2006-01-02 15:04 MST"
+	fmt.Fprintf(&b, "Library audit of the files as of %s (written %s). Read-only: nothing was moved or deleted.\n",
+		started.In(loc).Format(stamp), env.Now().In(loc).Format(stamp))
 	fmt.Fprintf(&b, "%d videos in Movies/ and TV/.", len(s.videos))
 	if deferred > 0 {
 		fmt.Fprintf(&b, " %d not probed yet (a guest was watching, or Plex/Jellyfin did not answer): the unreadable and English-subtitle counts are partial.", deferred)
