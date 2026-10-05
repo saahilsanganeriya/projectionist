@@ -38,7 +38,7 @@ type Options struct {
 	Root         string        `toml:"root"`          // holds Movies/ and TV/
 	Report       string        `toml:"report"`        // the one file this stage writes; default <root>/_audit.txt
 	MaxListed    int           `toml:"max_listed"`    // examples per category in the report
-	Settle       time.Duration `toml:"settle"`        // a file modified more recently may still be arriving: not judged
+	Settle       time.Duration `toml:"settle"`        // a file or folder changed more recently may still be moving
 	ProbeWorkers int           `toml:"probe_workers"` // concurrent ffprobes on a cache miss
 	Quiet        []string      `toml:"quiet"`         // categories whose growth never alerts
 }
@@ -72,7 +72,7 @@ var categories = []struct{ key, title string }{
 	{noEnglish, "Episodes without English subtitles"},
 	{movieName, `Movie files not named "<folder name>[ - label].ext"`},
 	{seasonName, `Show subfolders that are not "Season NN" or an extras folder`},
-	{episodeName, `Episode files not named "Show (Year) - SxxEyy[-Eyy] - Title.ext"`},
+	{episodeName, `Episode files not named "Show (Year) - SxxEyy[-Eyy][ - Title].ext"`},
 	{sidecarName, `Subtitles not named "<video>.<lang>[.sdh|.forced].<ext>"`},
 	{extraPlace, "Extras outside an extras folder (Featurettes/ and the like)"},
 	{stray, "Stray files (.nfo, .txt, images, samples)"},
