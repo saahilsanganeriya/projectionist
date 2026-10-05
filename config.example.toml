@@ -63,9 +63,13 @@ apply          = true # false: plan only (no app writes); plan_file lists what w
 # plan_file    = "/volume1/PlexMediaServer/projectionist-test/jfsync/plan.tsv"
 movies_section = 4
 tv_section     = 2
-address_every  = "24h" # one item listing per app per day maps app ids to the library's {tmdb-N} identity
+# One item listing per app per day maps app ids to the library's {tmdb-N} identity. It runs after the run's writes;
+# a failed one backs off (30 min, doubling); a play of an item added since the listing relists sooner (30 min apart).
+address_every  = "24h"
 list_timeout   = "10m" # measured 2026-10-05 on the loaded NAS: Plex 5m41s, Jellyfin 4m56s per refresh
-plex_backups   = "/volume1/PlexMediaServer/backups" # mount read-only; the newest *.db is read once
+# Mount read-only; the newest *.db is read once per person. Take a fresh copy (backup_plex_db.sh) just before the
+# first run: plays after the copy and before the webhook is registered are not recorded.
+plex_backups   = "/volume1/PlexMediaServer/backups"
 webhook_url    = "http://127.0.0.1:8097/hooks/plex" # registered on the owner's plex.tv account; "" = leave it alone
 users = [
   { name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" },
