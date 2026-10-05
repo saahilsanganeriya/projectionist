@@ -301,31 +301,45 @@ func TestSweepThatCannotArchiveAlerts(t *testing.T) {
 	}
 }
 
-// Catches a failed TMDB episode list (an outage, a missing token, 429/5xx after retries) moving episodes that are
-// already in their show's scheme folder out of it, to a yearless "TV/Show/Season 01/Show - S01E04.mkv" with the
-// release tags stripped, where the next run can no longer identify them. Every video of that show without an
-// episode number waits for the next run; its subtitle stays beside it.
-func TestEpisodeListFailureLeavesShowInPlace(t *testing.T) {
-	l := newLibrary(t)
-	filed := "TV/Show (2019) {tmdb-77}/Season 01/Show.S01E04.1080p.WEB-GRP"
-	write(t, filepath.Join(l.root, filed+".mkv"), "ep4")
-	write(t, filepath.Join(l.root, filed+".en.srt"), englishSRT(120))
-	l.h.TMDB.Handle("GET", "/tv/77", 401, "")
-	l.h.TMDB.Handle("GET", "/tv/77/season/1", 401, "")
-	rep := l.run(t)
-	got := strings.Join(tree(t, filepath.Join(l.root, "TV")), "\n")
-	want := strings.Join([]string{
-		"Show (2019) {tmdb-77}/Season 01/Show (2019) - S01E03 - Wait For It.mkv",
-		"Show (2019) {tmdb-77}/Season 01/Show.S01E04.1080p.WEB-GRP.en.srt",
-		"Show (2019) {tmdb-77}/Season 01/Show.S01E04.1080p.WEB-GRP.mkv",
-		"Show.S01.1080p.WEB-GRP/Show.S01E01.1080p.WEB-GRP.mkv",
-		"Show.S01.1080p.WEB-GRP/Show.S01E02.1080p.WEB-GRP.mkv",
-	}, "\n")
-	if got != want || rep.Counts["tmdb_errors"] == 0 {
-		t.Fatalf("TV after a failed episode list (tmdb_errors=%d):\n%s\nwant every episode where it was:\n%s",
-			rep.Counts["tmdb_errors"], got, want)
-	}
-	if review, _ := os.ReadFile(l.review); !strings.Contains(string(review), filed+".mkv\tTMDB unreachable: retried next run") {
-		t.Fatalf("review file does not say why the episode waits:\n%s", review)
+// Catches a TMDB failure (an outage, a missing token, 429/5xx after retries) moving episodes that are already in
+// their show's scheme folder out of it, to a yearless "TV/Show/Season 01/Show - S01E04.mkv" with the release tags
+// stripped, where the next run can no longer identify them: when the episode list fails, and when only the show's
+// details fail, so a file named by the show's original title reads as another show. Every video of that show without
+// an episode number waits for the next run; a subtitle stays beside its video.
+func TestTMDBFailureLeavesShowInPlace(t *testing.T) {
+	for _, c := range []struct {
+		name, file string
+		failing    []string
+	}{
+		{"episode list fails", "Show.S01E04.1080p.WEB-GRP", []string{"/tv/77", "/tv/77/season/1"}},
+		{"show details fail", "Serie.S01E04.1080p.WEB-GRP", []string{"/tv/77"}}, // TMDB's original title for show 77
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			l := newLibrary(t)
+			filed := "TV/Show (2019) {tmdb-77}/Season 01/" + c.file
+			write(t, filepath.Join(l.root, filed+".mkv"), "ep4")
+			write(t, filepath.Join(l.root, filed+".en.srt"), englishSRT(120))
+			for _, p := range c.failing {
+				l.h.TMDB.Handle("GET", p, 401, "")
+			}
+			rep := l.run(t)
+			got := strings.Join(tree(t, filepath.Join(l.root, "TV")), "\n")
+			where := []string{
+				"Show (2019) {tmdb-77}/Season 01/Show (2019) - S01E03 - Wait For It.mkv",
+				"Show (2019) {tmdb-77}/Season 01/" + c.file + ".en.srt",
+				"Show (2019) {tmdb-77}/Season 01/" + c.file + ".mkv",
+				"Show.S01.1080p.WEB-GRP/Show.S01E01.1080p.WEB-GRP.mkv",
+				"Show.S01.1080p.WEB-GRP/Show.S01E02.1080p.WEB-GRP.mkv",
+			}
+			sort.Strings(where)
+			want := strings.Join(where, "\n")
+			if got != want || rep.Counts["tmdb_errors"] == 0 {
+				t.Fatalf("TV after a TMDB failure (tmdb_errors=%d):\n%s\nwant every episode where it was:\n%s",
+					rep.Counts["tmdb_errors"], got, want)
+			}
+			if review, _ := os.ReadFile(l.review); !strings.Contains(string(review), filed+".mkv\tTMDB unreachable: retried next run") {
+				t.Fatalf("review file does not say why the episode waits:\n%s", review)
+			}
+		})
 	}
 }

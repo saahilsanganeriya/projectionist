@@ -328,7 +328,11 @@ func episodeRows(ctx context.Context, env *stage.Env, id *identifier, lib *libra
 		return err
 	}
 	if n, err := numericID(show.ID); err == nil && show.Original == "" { // the same-show guard reads both names
-		if d, found, err := id.showDetails(ctx, n); err == nil && found {
+		d, found, err := id.showDetails(ctx, n)
+		if err != nil {
+			return err // without the original title, a file named by it would read as another show
+		}
+		if found {
 			show.Original = d.OriginalTitle
 		}
 	}
