@@ -156,10 +156,7 @@ func scan(root string, settled time.Time) (*library, error) {
 				return nil
 			}
 			if d.IsDir() && (d.Name() == "@eaDir" || d.Name() == "#recycle") {
-				if d.Name() == "#recycle" { // a recycle bin is never clutter
-					holds(p + "/x")
-				}
-				return filepath.SkipDir
+				return filepath.SkipDir // a folder holding a recycle bin looks empty here; prune re-checks the disk
 			}
 			info, err := d.Info()
 			if err != nil {
