@@ -55,12 +55,13 @@ sample          = "/volume1/PlexMediaServer/scripts/gpu_sample.mkv"
 self_test_every = "24h"
 legacy_state    = "/volume1/PlexMediaServer/scripts/gpu_guard.state.json" # imported once at cutover
 
-# Small 4K copies of the films in the Plex playlist "Remote 4K"; replaces scripts/remote4k.py (DSM task 9).
+# Small 4K copies of the films listed as "Remote 4K" (Plex playlist, Jellyfin playlist or Jellyfin collection);
+# replaces scripts/remote4k.py (DSM task 9).
 [stages.remote4k]
-every           = "15m"
-playlist        = "Remote 4K"
-label           = "2160p 14Mbps"
-small_kbps      = 20000
-work_dir        = "/volume1/media/.projectionist/remote4k" # same share as the library: publish = one rename
-status_file     = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
-default_section = 4
+every        = "15m"
+playlist     = "Remote 4K"
+label        = "2160p 14Mbps"
+small_kbps   = 20000
+work_dir     = "/volume1/media/.projectionist/remote4k" # same share as the library: publish = one rename
+status_file  = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
+plex_timeout = "5s" # a slower Plex leaves its half of the list empty for that run
