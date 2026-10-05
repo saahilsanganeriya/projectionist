@@ -504,6 +504,9 @@ func (w *watcher) settleQuiet(ctx context.Context) {
 			continue
 		}
 		busy, content, err := w.opt.sigs(unit)
+		if err != nil {
+			w.env.Log.Warn("signature failed", "event", "sig_error", "unit", unit, "err", err)
+		}
 		if err != nil || busy != p.Busy {
 			p.Busy, p.QuietAt = busy, now.Add(w.opt.Quiet)
 			continue
