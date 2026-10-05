@@ -6,6 +6,8 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"slices"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -113,7 +115,13 @@ func TestTrigger(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer st.Close()
-		var busy, night []time.Time
+		var mu sync.Mutex // runs append from the scheduler's goroutines; fake-time sleeps order nothing for -race
+		var busyRuns, nightRuns []time.Time
+		runs := func() (busy, night []time.Time) {
+			mu.Lock()
+			defer mu.Unlock()
+			return slices.Clone(busyRuns), slices.Clone(nightRuns)
+		}
 		release := make(chan struct{})
 		night0200, _ := config.ParseWindow("02:00-08:00")
 		s := &Scheduler{Loc: time.UTC, Runner: &Runner{
@@ -123,7 +131,9 @@ func TestTrigger(t *testing.T) {
 		}}
 		s.Jobs = []Job{
 			{Stage: fakeStage{name: "busy", run: func(ctx context.Context, _ *stage.Env, _ *stage.Report) error {
-				busy = append(busy, time.Now())
+				mu.Lock()
+				busyRuns = append(busyRuns, time.Now())
+				mu.Unlock()
 				select {
 				case <-release:
 				case <-ctx.Done():
@@ -131,7 +141,9 @@ func TestTrigger(t *testing.T) {
 				return nil
 			}}, Every: 24 * time.Hour},
 			{Stage: fakeStage{name: "night", run: func(context.Context, *stage.Env, *stage.Report) error {
-				night = append(night, time.Now())
+				mu.Lock()
+				nightRuns = append(nightRuns, time.Now())
+				mu.Unlock()
 				return nil
 			}}, Every: 48 * time.Hour, Window: night0200},
 		}
@@ -145,23 +157,23 @@ func TestTrigger(t *testing.T) {
 		release <- struct{}{}
 		release <- struct{}{}
 		synctest.Wait()
-		if len(busy) != 2 || !busy[1].Equal(busy[0]) {
+		if busy, _ := runs(); len(busy) != 2 || !busy[1].Equal(busy[0]) {
 			t.Fatalf("three triggers during a run gave runs at %v, want exactly one immediate rerun", busy)
 		}
 		time.Sleep(9 * time.Hour) // night ran at 02:00 (first run); now 09:00, outside its window
 		s.Trigger("busy")
 		s.Trigger("night")
 		synctest.Wait()
-		if len(busy) != 3 || !busy[2].Equal(time.Now()) {
+		if busy, _ := runs(); len(busy) != 3 || !busy[2].Equal(time.Now()) {
 			t.Fatalf("an idle trigger did not run at once: runs %v, now %v", busy, time.Now())
 		}
 		release <- struct{}{}
-		if len(night) != 1 {
+		if _, night := runs(); len(night) != 1 {
 			t.Fatalf("a trigger ran a windowed stage outside its window: %v", night)
 		}
 		time.Sleep(18 * time.Hour) // next day 03:00; the cadence alone would wait for day 3
-		if want := time.Date(2000, 1, 2, 2, 0, 0, 0, time.UTC); len(night) != 2 || !night[1].Equal(want) {
-			t.Fatalf("triggered windowed stage ran at %v, want once more at %v", night, want)
+		if _, night := runs(); len(night) != 2 || !night[1].Equal(time.Date(2000, 1, 2, 2, 0, 0, 0, time.UTC)) {
+			t.Fatalf("triggered windowed stage ran at %v, want once more at 2000-01-02 02:00", night)
 		}
 		if s.Trigger("absent") {
 			t.Error("Trigger of an unscheduled stage reported true")
