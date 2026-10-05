@@ -534,6 +534,11 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 		txt = stripAds(txt)
 		attempt["cues"] = len(cues(txt))
 		out, result, ok := r.fit(ctx, ref, txt, attempt)
+		if !ok && c.Source == "opensubtitles-hash" && c.ours {
+			// made for this very file and labelled with its title; the timing cannot tell (a laugh track fools speech)
+			out, result, ok = txt, "kept", true
+			attempt["reference"] = "hash-trusted"
+		}
 		if !ok {
 			r.event(ctx, t.path, outcome{result: "rejected_misaligned", fields: attempt})
 			continue

@@ -51,6 +51,7 @@ type Candidate struct {
 	Downloads       int
 	Encoding        string
 	Season, Episode string
+	ours            bool // labelled with this title: its IMDb id (a movie) or its season and episode (an episode)
 	unusable        bool // not SRT, foreign parts only or marked bad: counted by the search logic, never tried
 	link            string
 	provider        Provider
@@ -303,6 +304,7 @@ type legacyResult struct {
 	SubDownloadLink     flexString
 	SeriesSeason        flexString
 	SeriesEpisode       flexString
+	IDMovieImdb         flexString
 }
 
 type legacy struct {
@@ -326,7 +328,7 @@ func (o *legacy) get(ctx context.Context, link string) ([]byte, error) {
 }
 
 // search runs one query; the API wants its path parameters in alphabetical order.
-func (o *legacy) search(ctx context.Context, source string, params ...string) ([]Candidate, error) {
+func (o *legacy) search(ctx context.Context, q Query, source string, params ...string) ([]Candidate, error) {
 	params = append(params, "sublanguageid-eng")
 	sort.Strings(params)
 	body, err := o.get(ctx, o.base+strings.Join(params, "/"))
@@ -343,12 +345,14 @@ func (o *legacy) search(ctx context.Context, source string, params ...string) ([
 	var out []Candidate
 	for _, r := range res {
 		downloads, _ := strconv.Atoi(string(r.SubDownloadsCnt))
+		imdb, _ := strconv.Atoi(string(r.IDMovieImdb))
 		out = append(out, Candidate{
 			Source: source, ID: string(r.IDSubtitleFile), Release: string(r.MovieReleaseName), FileName: string(r.SubFileName),
 			HashMatch: r.MatchedBy == "moviehash", HearingImpaired: r.SubHearingImpaired == "1", Downloads: downloads,
 			Encoding: string(r.SubEncoding), Season: string(r.SeriesSeason), Episode: string(r.SeriesEpisode),
 			link: string(r.SubDownloadLink), provider: o,
 			unusable: r.SubFormat != "srt" || r.SubSumCD != "" && r.SubSumCD != "1" || r.SubForeignPartsOnly == "1" || r.SubBad == "1",
+			ours:     imdb != 0 && imdb == q.IMDb, // an episode's own test replaces this in Search
 		})
 	}
 	return out, nil
@@ -357,28 +361,28 @@ func (o *legacy) search(ctx context.Context, source string, params ...string) ([
 // Search is candidates() of subfetch2.py: file hash, then IMDb id (with season and episode for an episode), then for
 // an episode with nothing beyond hash hits, the show's name. Outside a hash match an episode result must be ours.
 func (o *legacy) Search(ctx context.Context, q Query) ([]Candidate, error) {
-	found, err := o.search(ctx, "opensubtitles-hash", fmt.Sprintf("moviebytesize-%d", q.Size), "moviehash-"+q.Hash)
+	found, err := o.search(ctx, q, "opensubtitles-hash", fmt.Sprintf("moviebytesize-%d", q.Size), "moviehash-"+q.Hash)
 	if err != nil {
 		return nil, err
 	}
 	hashHits := len(found)
 	if q.Season == 0 {
 		if q.IMDb != 0 {
-			more, err := o.search(ctx, "opensubtitles-imdb", fmt.Sprintf("imdbid-%07d", q.IMDb))
+			more, err := o.search(ctx, q, "opensubtitles-imdb", fmt.Sprintf("imdbid-%07d", q.IMDb))
 			return append(found, more...), err
 		}
 		return found, nil
 	}
 	s, e := fmt.Sprintf("season-%d", q.Season), fmt.Sprintf("episode-%d", q.Episode)
 	if q.IMDb != 0 {
-		more, err := o.search(ctx, "opensubtitles-imdb", fmt.Sprintf("imdbid-%07d", q.IMDb), s, e)
+		more, err := o.search(ctx, q, "opensubtitles-imdb", fmt.Sprintf("imdbid-%07d", q.IMDb), s, e)
 		if err != nil {
 			return nil, err
 		}
 		found = append(found, more...)
 	}
 	if len(found) == hashHits {
-		more, err := o.search(ctx, "opensubtitles-query", "query-"+pyQuote(pyLower(q.Name)), s, e)
+		more, err := o.search(ctx, q, "opensubtitles-query", "query-"+pyQuote(pyLower(q.Name)), s, e)
 		if err != nil {
 			return nil, err
 		}
@@ -386,7 +390,8 @@ func (o *legacy) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	}
 	kept := found[:0]
 	for _, c := range found {
-		if c.Source == "opensubtitles-hash" || (c.Season == strconv.Itoa(q.Season) && c.Episode == strconv.Itoa(q.Episode)) {
+		c.ours = c.Season == strconv.Itoa(q.Season) && c.Episode == strconv.Itoa(q.Episode)
+		if c.Source == "opensubtitles-hash" || c.ours {
 			kept = append(kept, c)
 		}
 	}

@@ -16,6 +16,15 @@ func captionTimes() []float64 {
 	return ts
 }
 
+// otherTimes are another film's caption starts: they fit no lag of captionTimes.
+func otherTimes() []float64 {
+	other := make([]float64, 60)
+	for i := range other {
+		other[i] = 40 + float64(i)*41 + float64(i*i*11%37)
+	}
+	return other
+}
+
 func framecrc(ts []float64) string {
 	var b strings.Builder
 	b.WriteString("#software: Lavf\n#tb 0: 1/1000\n#media_type 0: subtitle\n")
@@ -81,10 +90,7 @@ func TestAlign(t *testing.T) {
 	for i, x := range ts {
 		stretched[i] = x / (25 / 23.976)
 	}
-	other := make([]float64, len(ts))
-	for i := range other {
-		other[i] = 40 + float64(i)*41 + float64(i*i*11%37)
-	}
+	other := otherTimes()
 	cases := []struct {
 		name          string
 		cand          string

@@ -34,7 +34,9 @@ type fixture struct {
 	ts       []float64
 	mu       sync.Mutex
 	requests []string
-	quota    bool // downloads answer with a page, as OpenSubtitles does once the day's quota is spent
+	quota    bool   // downloads answer with a page, as OpenSubtitles does once the day's quota is spent
+	hashIMDb string // when set, Ran's file hash finds a misaligned subtitle labelled with this IMDb id
+	ranHash  string
 }
 
 func (f *fixture) path(rel string) string { return filepath.Join(f.lib, rel) }
@@ -66,6 +68,7 @@ func newFixture(t *testing.T) *fixture {
 		os.WriteFile(f.path(rel), bytes.Repeat([]byte{byte(i + 1)}, 4096), 0o644)
 	}
 	os.WriteFile(strings.TrimSuffix(f.path(dune), ".mkv")+".en.srt", []byte("theirs"), 0o644)
+	f.ranHash, _, _ = openSubtitlesHash(f.path(ran))
 
 	ff := f.h.Env.FFmpeg.Dir
 	put := func(name, body string) { os.WriteFile(filepath.Join(ff, name), []byte(body), 0o644) }
@@ -107,6 +110,11 @@ cp "`+ff+`/clerks.aligned.srt" "$3"; echo "info: 'reference file FPS/input file 
 			return `[{"IDSubtitleFile":"` + id + `","SubFormat":"srt","MovieReleaseName":"` + release + `","SubDownloadLink":"` + osSrv.URL + `/dl/` + id + `.gz"}]`
 		}
 		switch {
+		case f.hashIMDb != "" && strings.Contains(r.URL.Path, "moviehash-"+f.ranHash):
+			w.Write([]byte(`[{"IDSubtitleFile":"h","MatchedBy":"moviehash","SubFormat":"srt","IDMovieImdb":"` + f.hashIMDb +
+				`","SubDownloadLink":"` + osSrv.URL + `/dl/hash.gz"}]`))
+		case r.URL.Path == "/dl/hash.gz":
+			w.Write(gz(srt(otherTimes(), 0)))
 		case strings.Contains(r.URL.Path, "imdbid-0089881"):
 			w.Write([]byte(cand("ran", "Ran.1985.BluRay")))
 		case strings.Contains(r.URL.Path, "imdbid-0109445"):
@@ -255,6 +263,19 @@ func TestRunProviderTrouble(t *testing.T) {
 	f.mu.Unlock()
 	f.run(t)
 	f.sidecar(t, ran)
+}
+
+// Catches: a file-hash match labelled with this film thrown away because its timing could not be confirmed (the
+// Python keeps it as is: a laugh track fools speech alignment), or one labelled with another film kept.
+func TestRunTrustsOwnHashMatch(t *testing.T) {
+	for imdb, trusted := range map[string]bool{"89881": true, "1234567": false} {
+		f := newFixture(t)
+		f.hashIMDb = imdb
+		f.run(t)
+		if got := f.sidecar(t, ran) == srt(otherTimes(), 0); got != trusted {
+			t.Errorf("hash match labelled tt%s: kept %v, want %v", imdb, got, trusted)
+		}
+	}
 }
 
 // Catches an alass failure (a wrong flag, a broken binary) recorded quietly on every title instead of alerting.
