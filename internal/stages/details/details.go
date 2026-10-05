@@ -105,6 +105,7 @@ type video struct {
 var (
 	schemeFolder = regexp.MustCompile(`^(.+) \((\d{4})\) \{((?:tmdb|tvdb|imdb)-[^}]+)\}$`)
 	videoExt     = map[string]bool{".mkv": true, ".mp4": true, ".avi": true, ".m4v": true, ".mov": true, ".ts": true, ".wmv": true, ".mpg": true, ".webm": true}
+	subtitleExt  = map[string]bool{".srt": true, ".ass": true, ".ssa": true, ".vtt": true, ".sub": true, ".idx": true}
 )
 
 type Stage struct{}
@@ -124,7 +125,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if err != nil {
 		return err
 	}
-	videos, err := walk(opt.Library, opt.Sections)
+	videos, subtitles, err := walk(opt.Library, opt.Sections)
 	if err != nil {
 		return err
 	}
@@ -140,7 +141,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		return err
 	}
 
-	r := &run{env: env, opt: opt, rep: rep, db: db, orig: orig, sidecars: map[string][]string{},
+	r := &run{env: env, opt: opt, rep: rep, db: db, orig: orig, subtitles: subtitles,
 		probes: opt.MaxProbes, peaks: opt.MaxPeakScans, decodes: opt.MaxDecodeChecks, heavyOK: true}
 	seen := map[string]bool{}
 	for _, v := range videos {
@@ -176,12 +177,12 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 }
 
 type run struct {
-	env      *stage.Env
-	opt      Options
-	rep      *stage.Report
-	db       *sql.DB
-	orig     map[string]string
-	sidecars map[string][]string // dir → its file names, listed once per run
+	env       *stage.Env
+	opt       Options
+	rep       *stage.Report
+	db        *sql.DB
+	orig      map[string]string
+	subtitles map[string][]string // dir → the subtitle files in it, from the walk
 
 	probes, peaks, decodes int  // what is left of this run's bounds
 	heavyOK                bool // false once a guest was seen: heavy work waits for a later run
@@ -378,23 +379,11 @@ func (r *run) original(path string) string {
 // sidecarsOf lists the subtitle files beside a video that share its stem, as the suffix after "<stem>."
 // ("en.srt", "en.sdh.srt"), sorted.
 func (r *run) sidecarsOf(path string) []string {
-	dir := filepath.Dir(path)
-	names, ok := r.sidecars[dir]
-	if !ok {
-		entries, _ := os.ReadDir(dir)
-		for _, e := range entries {
-			names = append(names, e.Name())
-		}
-		r.sidecars[dir] = names
-	}
 	prefix := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)) + "."
 	var out []string
-	for _, n := range names {
-		switch strings.ToLower(filepath.Ext(n)) {
-		case ".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx":
-			if strings.HasPrefix(n, prefix) {
-				out = append(out, n[len(prefix):])
-			}
+	for _, n := range r.subtitles[filepath.Dir(path)] {
+		if strings.HasPrefix(n, prefix) {
+			out = append(out, n[len(prefix):])
 		}
 	}
 	sort.Strings(out)
@@ -437,13 +426,15 @@ func loadRows(ctx context.Context, db *sql.DB) (map[string]*fileRow, error) {
 }
 
 // walk lists every video below a scheme folder ("Title (Year) {tmdb-N}") of each section: the main files, season
-// folders and extras alike. Dot and @ entries (.details, @eaDir) are skipped; a file that vanishes mid-walk is too.
-func walk(library string, sections []string) ([]video, error) {
+// folders and extras alike, and the subtitle files by folder. Dot and @ entries (.details, @eaDir) are skipped; a
+// file that vanishes mid-walk is too.
+func walk(library string, sections []string) ([]video, map[string][]string, error) {
 	var out []video
+	subtitles := map[string][]string{}
 	for _, sec := range sections {
 		tops, err := os.ReadDir(filepath.Join(library, sec))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, top := range tops {
 			m := schemeFolder.FindStringSubmatch(top.Name())
@@ -464,7 +455,11 @@ func walk(library string, sections []string) ([]video, error) {
 					}
 					return nil
 				}
-				if d.IsDir() || !videoExt[strings.ToLower(filepath.Ext(p))] {
+				ext := strings.ToLower(filepath.Ext(p))
+				if !d.IsDir() && subtitleExt[ext] {
+					subtitles[filepath.Dir(p)] = append(subtitles[filepath.Dir(p)], d.Name())
+				}
+				if d.IsDir() || !videoExt[ext] {
 					return nil
 				}
 				fi, err := d.Info()
@@ -478,11 +473,11 @@ func walk(library string, sections []string) ([]video, error) {
 				return nil
 			})
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
-	return out, nil
+	return out, subtitles, nil
 }
 
 func only(videos []video, pathsFile string) ([]video, error) {
