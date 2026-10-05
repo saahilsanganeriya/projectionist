@@ -73,6 +73,30 @@ func (c *Client) token() (string, error) {
 	return prefs["PlexOnlineToken"], nil
 }
 
+// ErrNotFound is wrapped by every call Plex answers with 404: the item is gone.
+var ErrNotFound = errors.New("not found")
+
+// StatusError is a call Plex answered with a status other than 2xx. Plex 1.43 answers 400 to a collection write that
+// names a key it does not hold (measured 2026-10-05), so a caller can tell a refused item from a sick server.
+type StatusError struct {
+	Method, Path string
+	Code         int
+}
+
+func (e *StatusError) Error() string {
+	if e.Code == http.StatusNotFound {
+		return fmt.Sprintf("plex %s %s: HTTP 404: %v", e.Method, e.Path, ErrNotFound)
+	}
+	return fmt.Sprintf("plex %s %s: HTTP %d", e.Method, e.Path, e.Code)
+}
+
+func (e *StatusError) Unwrap() error {
+	if e.Code == http.StatusNotFound {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (c *Client) do(ctx context.Context, method, path, accept string) ([]byte, error) {
 	return c.owner(ctx, method, c.base+path, accept, "", nil)
 }
@@ -115,7 +139,7 @@ func (c *Client) send(ctx context.Context, tok, method, rawURL, accept, contentT
 		return nil, fmt.Errorf("plex %s %s: %w", method, path, err)
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("plex %s %s: HTTP %d", method, path, resp.StatusCode)
+		return nil, &StatusError{Method: method, Path: path, Code: resp.StatusCode}
 	}
 	return answer, nil
 }
