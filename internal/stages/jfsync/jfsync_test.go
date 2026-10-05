@@ -700,3 +700,22 @@ func TestParseHooks(t *testing.T) {
 		}
 	}
 }
+
+// Catches: watch state recorded for a person no users entry names (the letterboxd stage's person spelled otherwise)
+// reaching neither app with nothing said, and a person who has an entry alerted about.
+func TestRecordedPersonWithoutUsersEntryAlerts(t *testing.T) {
+	h, _, _, _ := newHarness(t)
+	ctx, db := context.Background(), h.Env.Store.DB()
+	if err := watch.Open(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	for _, person := range []string{"Saahil", "saahil"} {
+		if err := watch.Add(ctx, db, watch.Event{Person: person, Item: "movie/tmdb-11645", Ref: "letterboxd:1", Source: "letterboxd",
+			At: h.Now, Kind: watch.Logged, Plays: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rep := run(t, h); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], `state for "Saahil" (1 items)`) {
+		t.Errorf("alerts %q, want one naming Saahil", rep.Alerts)
+	}
+}

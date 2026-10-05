@@ -163,8 +163,9 @@ type Collection struct {
 }
 
 type ExternalIDs struct {
-	IMDb string `json:"imdb_id"` // "tt0113277"
-	TVDB int    `json:"tvdb_id"` // shows only; fanart.tv keys show art by it
+	IMDb     string `json:"imdb_id"`     // "tt0113277"
+	TVDB     int    `json:"tvdb_id"`     // shows only; fanart.tv keys show art by it
+	Wikidata string `json:"wikidata_id"` // people: "Q356275", which Wikimedia Commons files name in "depicts"
 }
 
 type Season struct {
@@ -271,6 +272,11 @@ func (c *Client) Episodes(ctx context.Context, showID, season int) ([]Episode, e
 // list; none means every language.
 func (c *Client) Images(ctx context.Context, kind Kind, id int, langs ...string) (Images, error) {
 	return c.images(ctx, fmt.Sprintf("/%s/%d/images", kind, id), langs)
+}
+
+// CollectionImages lists a TMDB collection's posters and backdrops (a film's belongs_to_collection names it).
+func (c *Client) CollectionImages(ctx context.Context, id int, langs ...string) (Images, error) {
+	return c.images(ctx, fmt.Sprintf("/collection/%d/images", id), langs)
 }
 
 // SeasonImages lists a season's posters.

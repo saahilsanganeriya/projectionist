@@ -216,6 +216,33 @@ func load(ctx context.Context, db *sql.DB, opt Options) (*desired, error) {
 	return d, rows.Err()
 }
 
+// Posterless is a desired collection the owner gave no poster: an approved one, or one an arrival opened.
+type Posterless struct {
+	Name     string
+	Director bool
+	Sets     []string // the TMDB collections that feed a franchise collection
+	Members  []int    // TMDB ids
+}
+
+// PosterlessCollections is the desired set as this stage builds it (both files, and what arrivals stored) less the
+// owner's collections, whose posters are his. The posters stage gives the rest one.
+func PosterlessCollections(ctx context.Context, db *sql.DB, ownerFile, approvedFile string) ([]Posterless, error) {
+	if _, err := db.ExecContext(ctx, schema); err != nil { // the tables arrivals fill, before this stage's first run
+		return nil, err
+	}
+	d, err := load(ctx, db, Options{OwnerFile: ownerFile, ApprovedFile: approvedFile})
+	if err != nil {
+		return nil, err
+	}
+	var out []Posterless
+	for _, c := range d.list {
+		if c.Poster == "" {
+			out = append(out, Posterless{Name: c.Name, Director: c.Director, Sets: c.Sets, Members: c.Members})
+		}
+	}
+	return out, nil
+}
+
 // ---- arrivals ----
 
 const schema = `
