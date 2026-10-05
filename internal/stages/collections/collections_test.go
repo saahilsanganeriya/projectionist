@@ -110,7 +110,24 @@ func addNew(have, add []string) []string {
 	return have
 }
 
+// read and write wrap a fake handler in the app's lock; write also counts the call.
+func (a *app) read(fn func(w http.ResponseWriter, r *http.Request)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		fn(w, r)
+	}
+}
+
+func (a *app) write(fn func(r *http.Request)) http.HandlerFunc {
+	return a.read(func(_ http.ResponseWriter, r *http.Request) { a.writes++; fn(r) })
+}
+
 func writeJSON(w http.ResponseWriter, v any) { json.NewEncoder(w).Encode(v) }
+
+func plexJSON(w http.ResponseWriter, meta []any) {
+	writeJSON(w, map[string]any{"MediaContainer": map[string]any{"Metadata": meta}})
+}
 
 func moviePath(id int) string {
 	return fmt.Sprintf("/m/Film %d (2000) {tmdb-%d}/Film %d (2000) {tmdb-%d}.mkv", id, id, id, id)
@@ -118,92 +135,70 @@ func moviePath(id int) string {
 
 // servePlex makes h's Plex hold items (ratingKey 100+TMDB id) in section 4 and the collections in a.
 func servePlex(h *fake.Harness, a *app, ids ...int) {
-	var meta []any
+	var items []any
 	for _, id := range ids {
-		meta = append(meta, map[string]any{"ratingKey": fmt.Sprint(100 + id), "Media": []any{map[string]any{"Part": []any{map[string]any{"file": moviePath(id)}}}}})
+		items = append(items, map[string]any{"ratingKey": fmt.Sprint(100 + id), "Media": []any{map[string]any{"Part": []any{map[string]any{"file": moviePath(id)}}}}})
 	}
-	h.Plex.HandleFunc("GET", "/library/sections/4/all", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, map[string]any{"MediaContainer": map[string]any{"Metadata": meta}})
-	})
+	h.Plex.HandleFunc("GET", "/library/sections/4/all", func(w http.ResponseWriter, _ *http.Request) { plexJSON(w, items) })
 	members := func(r *http.Request) []string {
 		_, list, _ := strings.Cut(r.URL.Query().Get("uri"), "/library/metadata/")
 		return strings.Split(list, ",")
 	}
-	var route func(c *coll)
-	route = func(c *coll) {
-		h.Plex.HandleFunc("GET", "/library/collections/"+c.ID+"/children", func(w http.ResponseWriter, _ *http.Request) {
-			a.mu.Lock()
-			defer a.mu.Unlock()
+	route := func(c *coll) {
+		h.Plex.HandleFunc("GET", "/library/collections/"+c.ID+"/children", a.read(func(w http.ResponseWriter, _ *http.Request) {
 			var out []any
 			for _, m := range c.Members {
 				out = append(out, map[string]string{"ratingKey": m})
 			}
-			writeJSON(w, map[string]any{"MediaContainer": map[string]any{"Metadata": out}})
-		})
-		h.Plex.HandleFunc("PUT", "/library/collections/"+c.ID+"/items", func(w http.ResponseWriter, r *http.Request) {
-			a.mu.Lock()
-			defer a.mu.Unlock()
-			c.Members = addNew(c.Members, members(r))
-			a.writes++
-		})
+			plexJSON(w, out)
+		}))
+		h.Plex.HandleFunc("PUT", "/library/collections/"+c.ID+"/items", a.write(func(r *http.Request) { c.Members = addNew(c.Members, members(r)) }))
 	}
 	for _, c := range a.colls {
 		route(c)
 	}
-	h.Plex.HandleFunc("GET", "/library/sections/4/collections", func(w http.ResponseWriter, _ *http.Request) {
-		a.mu.Lock()
-		defer a.mu.Unlock()
+	h.Plex.HandleFunc("GET", "/library/sections/4/collections", a.read(func(w http.ResponseWriter, _ *http.Request) {
 		var out []any
 		for _, c := range a.colls {
 			out = append(out, map[string]string{"ratingKey": c.ID, "title": c.Title, "titleSort": c.Sort})
 		}
-		writeJSON(w, map[string]any{"MediaContainer": map[string]any{"Metadata": out}})
-	})
-	h.Plex.HandleFunc("POST", "/library/collections", func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
-		defer a.mu.Unlock()
+		plexJSON(w, out)
+	}))
+	h.Plex.HandleFunc("POST", "/library/collections", a.write(func(r *http.Request) {
 		route(a.create(fmt.Sprint(900+len(a.colls)), r.URL.Query().Get("title"), members(r)))
-		a.writes++
-	})
-	h.Plex.HandleFunc("PUT", "/library/sections/4/all", func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
-		defer a.mu.Unlock()
+	}))
+	h.Plex.HandleFunc("PUT", "/library/sections/4/all", a.write(func(r *http.Request) {
 		a.find(r.URL.Query().Get("id")).Sort = r.URL.Query().Get("titleSort.value")
-		a.writes++
-	})
+	}))
 }
 
-// serveJellyfin is servePlex for Jellyfin: items "jf<id>", BoxSets in a, posters recorded per collection id.
+// serveJellyfin is servePlex for Jellyfin: items "jf<id>", BoxSets in a, posters recorded per collection title.
 func serveJellyfin(h *fake.Harness, a *app, posters map[string]string, ids ...int) {
-	var route func(c *coll)
-	route = func(c *coll) {
-		h.Jellyfin.HandleFunc("POST", "/Collections/"+c.ID+"/Items", func(w http.ResponseWriter, r *http.Request) {
-			a.mu.Lock()
-			defer a.mu.Unlock()
+	route := func(c *coll) {
+		h.Jellyfin.HandleFunc("POST", "/Collections/"+c.ID+"/Items", a.write(func(r *http.Request) {
 			c.Members = addNew(c.Members, strings.Split(r.URL.Query().Get("ids"), ","))
-			a.writes++
-		})
-		h.Jellyfin.HandleFunc("GET", "/Items/"+c.ID, func(w http.ResponseWriter, _ *http.Request) {
+		}))
+		h.Jellyfin.HandleFunc("GET", "/Items/"+c.ID, a.read(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Query().Get("userId") != "admin" { // as Jellyfin 12.1 answers
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			writeJSON(w, map[string]string{"Id": c.ID, "Name": c.Title, "ForcedSortName": c.Sort, "Other": c.Other})
-		})
-		h.Jellyfin.HandleFunc("POST", "/Items/"+c.ID, func(w http.ResponseWriter, r *http.Request) {
+		}))
+		h.Jellyfin.HandleFunc("POST", "/Items/"+c.ID, a.write(func(r *http.Request) {
 			var body map[string]string
 			json.NewDecoder(r.Body).Decode(&body)
 			c.Sort, c.Other = body["ForcedSortName"], body["Other"]
-			a.writes++
-		})
-		h.Jellyfin.HandleFunc("POST", "/Items/"+c.ID+"/Images/Primary", func(w http.ResponseWriter, r *http.Request) {
+		}))
+		h.Jellyfin.HandleFunc("POST", "/Items/"+c.ID+"/Images/Primary", a.write(func(r *http.Request) {
 			raw, _ := io.ReadAll(r.Body)
 			posters[c.Title] = r.Header.Get("Content-Type") + " " + string(raw)
-			a.writes++
-		})
+		}))
 	}
-	h.Jellyfin.HandleFunc("GET", "/Items", func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
-		defer a.mu.Unlock()
+	h.Jellyfin.Handle("GET", "/Users", 200, `[{"Id":"guest","Policy":{"IsAdministrator":false}},{"Id":"admin","Policy":{"IsAdministrator":true}}]`)
+	h.Jellyfin.HandleFunc("GET", "/Items", a.read(func(w http.ResponseWriter, r *http.Request) {
 		var out []any
-		q := r.URL.Query()
-		switch {
+		switch q := r.URL.Query(); {
 		case q.Get("IncludeItemTypes") == "Movie":
 			for _, id := range ids {
 				out = append(out, map[string]string{"Id": fmt.Sprint("jf", id), "Path": moviePath(id)})
@@ -218,14 +213,11 @@ func serveJellyfin(h *fake.Harness, a *app, posters map[string]string, ids ...in
 			}
 		}
 		writeJSON(w, map[string]any{"Items": out})
-	})
-	h.Jellyfin.HandleFunc("POST", "/Collections", func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
-		defer a.mu.Unlock()
+	}))
+	h.Jellyfin.HandleFunc("POST", "/Collections", a.write(func(r *http.Request) {
 		q := r.URL.Query()
 		route(a.create(fmt.Sprint("box", len(a.colls)), q.Get("name"), strings.Split(q.Get("ids"), ",")))
-		a.writes++
-	})
+	}))
 }
 
 // setup writes the backup (one owner collection with a poster), the approved list (one franchise), movie folders

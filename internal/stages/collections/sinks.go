@@ -384,7 +384,10 @@ func (p *plexSink) SetSort(ctx context.Context, id, sort string) error {
 
 // ---- Jellyfin ----
 
-type jellyfinSink struct{ c *jellyfin.Client }
+type jellyfinSink struct {
+	c    *jellyfin.Client
+	user string // an administrator's id, read once per run
+}
 
 func (*jellyfinSink) Name() string { return "jellyfin" }
 
@@ -442,10 +445,37 @@ func (j *jellyfinSink) Add(ctx context.Context, id string, items []string) error
 	return j.c.PostJSON(ctx, "/Collections/"+url.PathEscape(id)+"/Items?"+url.Values{"ids": {strings.Join(items, ",")}}.Encode(), nil, nil)
 }
 
+// admin is the user SetSort reads an item as: Jellyfin 12.1 answers GET /Items/{id} only for a user (400 otherwise).
+func (j *jellyfinSink) admin(ctx context.Context) (string, error) {
+	if j.user != "" {
+		return j.user, nil
+	}
+	var users []struct {
+		ID     string `json:"Id"`
+		Policy struct {
+			IsAdministrator bool `json:"IsAdministrator"`
+		} `json:"Policy"`
+	}
+	if err := j.c.GetJSON(ctx, "/Users", &users); err != nil {
+		return "", err
+	}
+	for _, u := range users {
+		if u.Policy.IsAdministrator {
+			j.user = u.ID
+			return j.user, nil
+		}
+	}
+	return "", errors.New("jellyfin: no administrator account")
+}
+
 // SetSort posts the item back whole: Jellyfin's update replaces every field, so a partial body would blank the rest.
 func (j *jellyfinSink) SetSort(ctx context.Context, id, sort string) error {
+	user, err := j.admin(ctx)
+	if err != nil {
+		return err
+	}
 	var item map[string]json.RawMessage
-	if err := j.c.GetJSON(ctx, "/Items/"+url.PathEscape(id), &item); err != nil {
+	if err := j.c.GetJSON(ctx, "/Items/"+url.PathEscape(id)+"?userId="+url.QueryEscape(user), &item); err != nil {
 		return err
 	}
 	raw, err := json.Marshal(sort)
