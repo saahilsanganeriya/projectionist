@@ -139,7 +139,12 @@ func sortAZ(names []string) {
 	for _, n := range names {
 		keys[n] = fold(n)
 	}
-	sort.SliceStable(names, func(i, j int) bool { return keys[names[i]] < keys[names[j]] })
+	sort.Slice(names, func(i, j int) bool {
+		if ki, kj := keys[names[i]], keys[names[j]]; ki != kj {
+			return ki < kj
+		}
+		return names[i] < names[j] // equal folds (case twins): a fixed order, so the same twin is kept every run
+	})
 }
 
 // exfatUnsafe returns the first path component exFAT cannot store as spelled: its forbidden characters, or a
@@ -197,7 +202,9 @@ func tempFinal(rel string) (string, bool) {
 // diff lists the actions that turn the SSD into the plan, in the order they run: renames (cheap, and they save
 // copies), then orphans and stale temps (deleting first frees space), then each planned film's copies A→Z.
 // Twins are matched case-insensitively, as exFAT does. It reads only 128 KiB samples, to prove renames.
-func diff(opt Options, lib, ssd tree, plan []planned) ([]action, error) {
+// lib is the whole library: a file of a film the SSD cannot hold (not in films) still has its SSD copy as a twin,
+// so that copy is never an orphan; films, the eligible ones, are the only names an SSD file may be renamed to.
+func diff(opt Options, lib, ssd tree, films []string, plan []planned) ([]action, error) {
 	at := func(root, rel string) string { return filepath.Join(root, rel) }
 	libAt := map[string]file{}
 	for _, files := range lib {
@@ -238,19 +245,21 @@ func diff(opt Options, lib, ssd tree, plan []planned) ([]action, error) {
 	type pair struct{ lib, ssd file }
 	var pairs []pair
 	libHits, ssdHits := map[string]int{}, map[string]int{}
-	for k, l := range libAt {
-		if _, ok := ssdAt[k]; ok {
-			continue
-		}
-		for _, o := range orphanBySize[l.size] {
-			same, err := sampled(at(opt.Source, l.rel), at(opt.Target, o.rel), l.size, sampleWindow)
-			if err != nil {
-				return nil, err
+	for _, film := range films {
+		for _, l := range lib[film] {
+			if _, ok := ssdAt[fold(l.rel)]; ok {
+				continue
 			}
-			if same {
-				pairs = append(pairs, pair{l, o})
-				libHits[l.rel]++
-				ssdHits[o.rel]++
+			for _, o := range orphanBySize[l.size] {
+				same, err := sampled(at(opt.Source, l.rel), at(opt.Target, o.rel), l.size, sampleWindow)
+				if err != nil {
+					return nil, err
+				}
+				if same {
+					pairs = append(pairs, pair{l, o})
+					libHits[l.rel]++
+					ssdHits[o.rel]++
+				}
 			}
 		}
 	}
@@ -264,7 +273,7 @@ func diff(opt Options, lib, ssd tree, plan []planned) ([]action, error) {
 	}
 
 	planFiles := map[string]bool{}
-	var films []action
+	var copies []action
 	for _, p := range plan {
 		for _, l := range lib[p.film] {
 			k := fold(l.rel)
@@ -274,14 +283,14 @@ func diff(opt Options, lib, ssd tree, plan []planned) ([]action, error) {
 			switch {
 			case !ok && renamed[k]:
 			case !ok:
-				films = append(films, copyIt)
+				copies = append(copies, copyIt)
 			default:
 				if filepath.Base(t.rel) != filepath.Base(l.rel) {
-					films = append(films, action{kind: "rename", film: p.film, src: at(opt.Target, filepath.Join(filepath.Dir(l.rel), filepath.Base(t.rel))), dst: copyIt.dst})
+					copies = append(copies, action{kind: "rename", film: p.film, src: at(opt.Target, filepath.Join(filepath.Dir(l.rel), filepath.Base(t.rel))), dst: copyIt.dst})
 				}
 				if d := t.mtime.Sub(l.mtime); t.size != l.size || d > mtimeSlack || d < -mtimeSlack {
 					copyIt.kind = "update"
-					films = append(films, copyIt)
+					copies = append(copies, copyIt)
 				}
 			}
 		}
@@ -299,7 +308,7 @@ func diff(opt Options, lib, ssd tree, plan []planned) ([]action, error) {
 		}
 	}
 	sort.Slice(orphans, func(i, j int) bool { return orphans[i].src < orphans[j].src })
-	return append(append(acts, orphans...), films...), nil
+	return append(append(acts, orphans...), copies...), nil
 }
 
 func topName(rel string) string { return strings.Split(rel, string(filepath.Separator))[0] }
@@ -355,12 +364,8 @@ func (m *mirror) run() error {
 		ssdBytes[fold(n)] += total(files)
 	}
 	films := m.eligible(lib)
-	safe := make(tree, len(films)) // what the SSD can hold: only these may be matched, renamed to or copied
-	for _, f := range films {
-		safe[f] = lib[f]
-	}
 	plan := budgetPlan(films, libBytes, ssdBytes, free, int64(opt.MarginGB*1e9))
-	acts, err := diff(opt, safe, ssd, plan)
+	acts, err := diff(opt, lib, ssd, films, plan)
 	if err != nil {
 		return err
 	}

@@ -138,10 +138,13 @@ func TestSortAZ(t *testing.T) {
 	}
 }
 
-// Catches, on an SSD already holding part of the plan: a film renamed in the library recopied instead of renamed;
-// a sidecar added later missed; a changed copy overwritten instead of archived; an SSD file whose library twin is
-// gone deleted without a byte-identical archived copy; a stale temp left behind; a name exFAT cannot hold mirrored;
-// a dry run that touches the SSD; a second run that does anything. Once as on btrfs, once as on the SSD's exFAT.
+// Catches, on an SSD already holding part of the plan: a film renamed in the library recopied instead of renamed,
+// or its old path then reported as an orphan; a sidecar added later missed; a changed copy, same size or shorter,
+// overwritten instead of archived; an SSD file whose library twin is gone deleted when the archive holds only a
+// same-size file with other bytes; the SSD copy of a film still in the library deleted or reported because one of
+// its files has a name exFAT cannot hold; that name mirrored, by a copy or by renaming an SSD file to it; a stale
+// temp left behind; a dry run that touches the SSD; a second run that does anything. Once as on btrfs, once as on
+// the SSD's exFAT.
 func TestRunReconciles(t *testing.T) {
 	for _, exfat := range []bool{false, true} {
 		t.Run(fmt.Sprintf("exfat=%v", exfat), func(t *testing.T) {
@@ -150,23 +153,29 @@ func TestRunReconciles(t *testing.T) {
 			}
 			r, ctx := newRig(t, "mbps = 0"), context.Background()
 			alien, clerks := "Alien (1979) {tmdb-348}/Alien (1979) {tmdb-348}", "Clerks (1994) {tmdb-2292}/Clerks (1994) {tmdb-2292}.mkv"
-			video, blade, dune, heat := noise(1, 300<<10), noise(2, 300<<10), noise(4, 1000), noise(5, 150<<10)
+			eraser, q := "Eraserhead (1977) {tmdb-985}/Eraserhead (1977) {tmdb-985}.mkv", "Q (2000) {tmdb-1}/Q (2000) {tmdb-1}.mkv"
+			video, blade, dune, heat, qvideo := noise(1, 300<<10), noise(2, 300<<10), noise(4, 1000), noise(5, 150<<10), noise(12, 100<<10)
 			lay(t, r.lib, map[string]string{
 				alien + ".mkv": video, alien + ".en.srt": "1\n00:00:01,000 --> 00:00:02,000\nHello\n",
 				"Alien (1979) {tmdb-348}/.details/Alien (1979) {tmdb-348}.mkv.txt": "codec: hevc\n",
 				"Blade (1998) {tmdb-36647}/Blade (1998) {tmdb-36647}.mkv":          blade,
 				clerks: noise(3, 200<<10),
 				"Dune (2021) {tmdb-438631}/Dune (2021) {tmdb-438631}.mkv": dune,
-				"What? (2020) {tmdb-1}/What? (2020) {tmdb-1}.mkv":         "x",
+				eraser: noise(10, 120<<10),
+				q:      qvideo, "Q (2000) {tmdb-1}/Featurettes/Why?.mkv": "w",
 			})
 			if err := os.Chtimes(filepath.Join(r.lib, clerks), mtime, mtime.Add(time.Hour)); err != nil { // replaced later
 				t.Fatal(err)
 			}
-			lay(t, r.archived, map[string]string{"Heat (1995) {tmdb-949}/Heat.mkv": heat})
+			lay(t, r.archived, map[string]string{"Heat (1995) {tmdb-949}/Heat.mkv": heat, "dup/Q.mkv": qvideo,
+				"Ran (1985)/Ran.mkv": "RAN"}) // same size as the SSD's Ran.mkv, other bytes: no proof
 			lay(t, r.ssd, map[string]string{
-				alien + ".mkv":                  video,
-				"Blade (1998)/Blade (1998).mkv": blade,             // renamed since, in the library
-				clerks:                          noise(6, 200<<10), // replaced since, same size
+				alien + ".mkv":                          video,
+				"Blade (1998)/Blade (1998).mkv":         blade,             // renamed since, in the library
+				clerks:                                  noise(6, 200<<10), // replaced since, same size
+				eraser:                                  noise(11, 60<<10), // replaced since, by a longer file
+				q:                                       qvideo,
+				"Q (2000) {tmdb-1}/Featurettes/Why.mkv": "w", // renamed since to Why?.mkv, which exFAT cannot hold
 				"dune (2021) {tmdb-438631}/Dune (2021) {tmdb-438631}.mkv": dune,
 				"Heat (1995) {tmdb-949}/Heat.mkv":                         heat,  // gone from the library, archived there
 				"Ran (1985)/Ran.mkv":                                      "ran", // gone from the library, archived nowhere
@@ -191,19 +200,24 @@ func TestRunReconciles(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := read(t, r.lib)
-			delete(want, "What? (2020) {tmdb-1}/What? (2020) {tmdb-1}.mkv")
-			want["Ran (1985)/Ran.mkv"] = "ran"
+			delete(want, "Q (2000) {tmdb-1}/Featurettes/Why?.mkv")
+			want["Ran (1985)/Ran.mkv"], want["Q (2000) {tmdb-1}/Featurettes/Why.mkv"] = "ran", "w"
 			if got := read(t, r.ssd); !reflect.DeepEqual(got, want) {
 				t.Fatalf("SSD holds %q", keys(got))
 			}
-			if rep.Counts["copied"] != 3 { // the .en.srt, the .details and the new Clerks; nothing renamed is recopied
+			if rep.Counts["copied"] != 4 { // the .en.srt, the .details, Clerks and Eraserhead; nothing renamed is recopied
 				t.Fatalf("counts = %v", rep.Counts)
 			}
-			if got := read(t, filepath.Join(r.dir, "ssd/_archive"))[filepath.Join("20261005T060000Z", clerks)]; got != noise(6, 200<<10) {
-				t.Fatal("the replaced Clerks copy is not in ssd_archive")
+			archived := read(t, filepath.Join(r.dir, "ssd/_archive", "20261005T060000Z"))
+			if archived[clerks] != noise(6, 200<<10) || archived[eraser] != noise(11, 60<<10) {
+				t.Fatalf("ssd_archive holds %q, want the replaced Clerks and Eraserhead copies", keys(archived))
+			}
+			var p progress
+			if _, err := r.h.Env.Store.GetJSON(ctx, name, "progress", &p); err != nil || !reflect.DeepEqual(p.Orphans, []string{"Q (2000) {tmdb-1}/Featurettes/Why.mkv", "Ran (1985)/Ran.mkv"}) {
+				t.Fatalf("orphans reported = %q, %v", p.Orphans, err)
 			}
 			alerts := strings.Join(rep.Alerts, "\n")
-			if len(rep.Alerts) != 2 || !strings.Contains(alerts, `"What? (2020) {tmdb-1}" cannot be stored on exFAT`) || !strings.Contains(alerts, "Ran (1985)/Ran.mkv") {
+			if len(rep.Alerts) != 2 || !strings.Contains(alerts, `"Q (2000) {tmdb-1}" cannot be stored on exFAT as named ("Why?.mkv")`) || !strings.Contains(alerts, "Ran (1985)/Ran.mkv") {
 				t.Fatalf("alerts = %q", rep.Alerts)
 			}
 
@@ -264,7 +278,20 @@ func TestCopyKeepsTheRate(t *testing.T) {
 	}
 }
 
-// Catches: writing to the SSD while someone other than the owner is watching.
+// Catches: a library holding two films whose names differ only in case (exFAT holds one) mirroring both, or
+// keeping a different one from run to run (each swap a folder rename on the SSD).
+func TestCaseTwinsKeepOne(t *testing.T) {
+	lib := tree{"alien (1979)": nil, "Alien (1979)": nil, "Blade (1998)": nil}
+	for range 50 { // map order differs between calls, so a tie broken by it shows up here
+		m := &mirror{rep: &stage.Report{}}
+		got := m.eligible(lib)
+		if !reflect.DeepEqual(got, []string{"Alien (1979)", "Blade (1998)"}) || len(m.rep.Alerts) != 1 || !strings.Contains(m.rep.Alerts[0], "differ only in case") {
+			t.Fatalf("eligible = %q, alerts %q", got, m.rep.Alerts)
+		}
+	}
+}
+
+// Catches: writing to the SSD while someone other than the owner is watching, or while the servers cannot say.
 func TestGuestPausesCopy(t *testing.T) {
 	r := newRig(t, "mbps = 0")
 	lay(t, r.lib, map[string]string{"A (2000)/A (2000).mkv": "film"})
@@ -273,22 +300,27 @@ func TestGuestPausesCopy(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(r.ssd, "A (2000)")); err == nil {
 			t.Errorf("the SSD was written while a guest was watching")
 		}
-		if calls.Add(1) <= 3 {
+		switch calls.Add(1) {
+		case 1:
+			http.Error(w, "starting", http.StatusServiceUnavailable)
+		case 2, 3:
 			fmt.Fprint(w, `<MediaContainer size="1"><Video type="movie" title="Heat"><User title="roger"/></Video></MediaContainer>`)
-			return
+		default:
+			fmt.Fprint(w, `<MediaContainer size="0"></MediaContainer>`)
 		}
-		fmt.Fprint(w, `<MediaContainer size="0"></MediaContainer>`)
 	})
-	if _, err := r.run(context.Background(), Stage{}); err != nil {
+	start := r.h.Now
+	if _, err := r.run(context.Background(), Stage{Sleep: func(_ context.Context, d time.Duration) error { r.h.Now = r.h.Now.Add(d); return nil }}); err != nil {
 		t.Fatal(err)
 	}
-	if calls.Load() != 4 || read(t, r.ssd)["A (2000)/A (2000).mkv"] != "film" {
-		t.Fatalf("calls = %d, SSD = %q", calls.Load(), keys(read(t, r.ssd)))
+	if calls.Load() != 4 || read(t, r.ssd)["A (2000)/A (2000).mkv"] != "film" || r.h.Now.Sub(start) != 3*r.h.Env.Viewers.Poll {
+		t.Fatalf("calls = %d, waited %v, SSD = %q", calls.Load(), r.h.Now.Sub(start), keys(read(t, r.ssd)))
 	}
 }
 
-// Catches: mirroring into an unmounted SSD's mount point (filling the system disk), and an exFAT rename that
-// replaces an existing file because the filesystem cannot refuse atomically.
+// Catches: mirroring into an unmounted SSD's mount point (filling the system disk), or creating ssd_archive's
+// folders there once the SSD is gone; and an exFAT rename that replaces an existing file because the filesystem
+// cannot refuse atomically.
 func TestRefusals(t *testing.T) {
 	r := newRig(t, "mbps = 0")
 	lay(t, r.lib, map[string]string{"A (2000)/A (2000).mkv": "film"})
@@ -304,6 +336,13 @@ func TestRefusals(t *testing.T) {
 	}
 	if _, err := os.Stat(r.ssd); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal("the SSD's mount point was created")
+	}
+	m.opt.SSDArchive, m.opt.LibraryArchive = filepath.Join(r.dir, "ssd/_archive"), r.archived
+	if err := m.dispose("A (2000)", filepath.Join(r.ssd, "A (2000)/A (2000).mkv"), 4); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("archiving a stale copy without the SSD: %v", err)
+	}
+	if _, err := os.Stat(m.opt.SSDArchive); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("ssd_archive was created without the SSD")
 	}
 
 	playExFAT(t)

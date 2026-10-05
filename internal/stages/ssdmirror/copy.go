@@ -252,7 +252,7 @@ func (m *mirror) dispose(film, path string, size int64) error {
 		return err
 	}
 	dest := filepath.Join(m.opt.SSDArchive, m.stamp, rel)
-	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+	if err := m.ensureDir(filepath.Dir(dest)); err != nil {
 		return err
 	}
 	if err := renameNoClobber(path, dest); err != nil {
@@ -332,19 +332,13 @@ func (m *mirror) archivedTwin(path string, size int64) (string, error) {
 	return "", nil
 }
 
-// ensureDir creates dir and its missing parents below Target, never Target itself: an absent Target means the SSD
-// is not mounted, and a copy made anyway would fill the system disk.
+// ensureDir creates dir (under Target or ssd_archive) and its missing parents, only while Target exists: an absent
+// Target means the SSD is not mounted, and anything made anyway would land on the system disk.
 func (m *mirror) ensureDir(dir string) error {
-	if _, err := os.Stat(dir); err == nil || dir == m.opt.Target || !strings.HasPrefix(dir, m.opt.Target) {
+	if _, err := os.Stat(m.opt.Target); err != nil {
 		return err
 	}
-	if err := m.ensureDir(filepath.Dir(dir)); err != nil {
-		return err
-	}
-	if err := os.Mkdir(dir, 0o755); err != nil && !errors.Is(err, fs.ErrExist) {
-		return err
-	}
-	return nil
+	return os.MkdirAll(dir, 0o755)
 }
 
 // pruneEmpty removes dir and its parents below Target while they are empty.
@@ -361,17 +355,27 @@ func (m *mirror) lowerPriority(idle bool) {
 	}
 }
 
-// gate holds heavy work while anyone but the owner is watching; it asks the servers at most once per Poll.
+// gate holds heavy work while anyone but the owner is watching; it asks the servers at most once per Poll. It
+// waits on the stage's own clock (pace.sleep) rather than Viewers.WaitIdle's, so tests never sleep.
 func (m *mirror) gate() error {
 	if !m.lastGate.IsZero() && m.env.Now().Sub(m.lastGate) < m.env.Viewers.Poll {
 		return nil
 	}
-	if n, err := m.env.Viewers.Count(m.ctx); err != nil || n > 0 { // unknown counts as busy
-		m.prog.Paused = true
-		m.status()
-		if err := m.env.Viewers.WaitIdle(m.ctx); err != nil {
+	for {
+		n, err := m.env.Viewers.Count(m.ctx)
+		if err == nil && n == 0 { // unknown counts as busy
+			break
+		}
+		if !m.prog.Paused {
+			m.prog.Paused = true
+			m.status()
+		}
+		m.env.Log.Info("waiting for viewers", "event", "viewer_wait", "others", n, "err", err)
+		if err := m.pace.sleep(m.ctx, m.env.Viewers.Poll); err != nil {
 			return err
 		}
+	}
+	if m.prog.Paused {
 		m.prog.Paused = false
 		m.pace.reset() // no catch-up burst after a pause
 	}
