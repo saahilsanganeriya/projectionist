@@ -618,7 +618,7 @@ func (r *run) reference(ctx context.Context, t *title) (reference, error) {
 		}
 	}
 	// "_" as the subtitle makes alass write the speech segments it found as an SRT: decoded once, reused per candidate.
-	if _, err := r.cmd(ctx, r.opt.Alass, t.path, "_", ref.speech, "--audio-index", strconv.Itoa(audio.Index)); err != nil {
+	if _, err := r.cmd(ctx, r.opt.Alass, t.path, "_", ref.speech, "--index", strconv.Itoa(audio.Index)); err != nil { // the stream index
 		if ctx.Err() != nil {
 			ref.cleanup()
 			return reference{}, ctx.Err()

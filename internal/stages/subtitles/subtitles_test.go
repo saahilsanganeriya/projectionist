@@ -81,7 +81,8 @@ for n in Ran Heat Clerks Show; do case "$*" in *"/$n "*) cat "`+ff+`/$n.json"; e
 `)
 	f.h.Script(t, "ffmpeg", `case "$*" in *framecrc*) cat "`+ff+`/ran.framecrc";; *"-f srt"*) cat "`+ff+`/heat.srt";; *) exit 1;; esac
 `)
-	alass := f.h.Script(t, "alass", `if [ "$2" = "_" ]; then echo speech > "$3"; exit 0; fi
+	// alass's real CLI: <reference> <incorrect> <output> [--index <audio stream>]; it exits 1 on any other flag.
+	alass := f.h.Script(t, "alass", `if [ "$2" = "_" ]; then [ "$4 $5" = "--index 1" ] || exit 1; echo speech > "$3"; exit 0; fi
 cp "`+ff+`/clerks.aligned.srt" "$3"; echo "info: 'reference file FPS/input file FPS' ratio is 1"
 `)
 
