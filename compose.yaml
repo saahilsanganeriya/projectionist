@@ -7,6 +7,9 @@ services:
     container_name: projectionist
     network_mode: host # Plex 127.0.0.1:32400, Jellyfin 127.0.0.1:8096, /health on 127.0.0.1:8097
     restart: unless-stopped
+    # Docker's default 10 s would SIGKILL a health stage in the middle of restarting Jellyfin (a 120 s stop grace,
+    # then the start). Other stages return promptly on SIGTERM (stage.Stage's contract), so they exit as before.
+    stop_grace_period: 3m
     user: "0:0" # renames must keep each file's owner and set Synology ACLs; capabilities are trimmed below
     group_add: ["937"] # videodriver: owns /dev/dri/renderD128
     devices:
