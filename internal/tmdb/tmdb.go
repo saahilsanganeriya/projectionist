@@ -37,7 +37,7 @@ var RetryDelay = func(n int) time.Duration {
 // Result is one search or find hit, a film or a show.
 type Result struct {
 	ID       int    `json:"id"`
-	Name     string `json:"name"`  // the title in English (TMDB's title / name)
+	Name     string `json:"name"` // the title in English (TMDB's title / name)
 	Original string `json:"original"`
 	Year     int    `json:"year"` // 0 when TMDB has no date
 }
