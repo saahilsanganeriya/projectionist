@@ -381,7 +381,8 @@ esac
 }
 
 // Catches: a GPU hiccup reported as a broken file (it must be retried on the CPU), a truncated end sample
-// passing (too few frames), and the error budget off: two errors after a seek pass, three fail.
+// passing (too few frames), a 2 s extra failing for lacking 5 s of frames, and the error budget off: two errors
+// after a seek pass, three fail.
 func TestDecodeCheck(t *testing.T) {
 	cases := []struct{ script, wantDetail string }{
 		{`case "$*" in *-hwaccel*) echo "hwaccel init failed" >&2; exit 1;; esac; echo frame=120`, ""},
@@ -396,5 +397,10 @@ func TestDecodeCheck(t *testing.T) {
 		if err != nil || clean != (c.wantDetail == "") || detail != c.wantDetail {
 			t.Errorf("script %q: clean=%v detail=%q err=%v; want detail %q", c.script, clean, detail, err, c.wantDetail)
 		}
+	}
+	h := fake.NewEnv(t, nil)
+	h.Script(t, "ffmpeg", "echo frame=48\n") // all of a 2 s clip at 24 fps
+	if clean, detail, err := decodeCheck(context.Background(), h.Env.FFmpeg, "/m/clip.mkv", &probe.Video{Codec: "av1", FPS: 24}, 2); !clean {
+		t.Errorf("2 s clip: clean=false detail=%q err=%v", detail, err)
 	}
 }

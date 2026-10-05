@@ -114,9 +114,10 @@ func decodeCheck(ctx context.Context, ff config.FFmpeg, path string, v *probe.Vi
 	}{{"start", 0}, {"middle", math.Max(0, duration/2-sampleSeconds/2.0)}, {"end", math.Max(0, duration-sampleSeconds-1)}}
 	for _, s := range samples {
 		gpu := gpuCodecs[v.Codec]
-		problem, err := decodeSample(ctx, ff, path, v, s.at, gpu)
+		seconds := math.Min(sampleSeconds, duration-s.at) // a clip shorter than the sample
+		problem, err := decodeSample(ctx, ff, path, v, s.at, seconds, gpu)
 		if err == nil && problem != "" && gpu {
-			problem, err = decodeSample(ctx, ff, path, v, s.at, false)
+			problem, err = decodeSample(ctx, ff, path, v, s.at, seconds, false)
 		}
 		if err != nil {
 			return false, "", err
@@ -128,10 +129,10 @@ func decodeCheck(ctx context.Context, ff config.FFmpeg, path string, v *probe.Vi
 	return true, "", nil
 }
 
-// decodeSample returns "" when the sample decodes cleanly: ffmpeg exits 0, at least half the expected frames come
-// out, and it reports at most two errors (seeking into an open GOP can cost a reference error or two).
+// decodeSample returns "" when the sample decodes cleanly: ffmpeg exits 0, at least half the frames of `seconds`
+// come out, and it reports at most two errors (seeking into an open GOP can cost a reference error or two).
 // err is set only when ffmpeg could not be run or ctx ended.
-func decodeSample(ctx context.Context, ff config.FFmpeg, path string, v *probe.Video, at float64, gpu bool) (problem string, err error) {
+func decodeSample(ctx context.Context, ff config.FFmpeg, path string, v *probe.Video, at, seconds float64, gpu bool) (problem string, err error) {
 	args := []string{"-nostdin", "-v", "error"}
 	if gpu {
 		args = append(args, "-hwaccel", "vaapi", "-hwaccel_device", ff.Device, "-hwaccel_output_format", "vaapi")
@@ -159,7 +160,7 @@ func decodeSample(ctx context.Context, ff config.FFmpeg, path string, v *probe.V
 	if errs[0] == "" {
 		errs = nil
 	}
-	want := max(1, int(v.FPS*sampleSeconds/2))
+	want := max(1, int(v.FPS*seconds/2))
 	switch {
 	case runErr != nil && len(errs) > 0:
 		return fmt.Sprintf("ffmpeg %v: %s", runErr, errs[0]), nil

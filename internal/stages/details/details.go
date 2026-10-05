@@ -216,10 +216,10 @@ func (r *run) one(ctx context.Context, v video, row *fileRow) error {
 	if err != nil {
 		if row.Status != "unreadable" {
 			r.newUnreadable = append(r.newUnreadable, v.path)
+			r.env.Log.Warn("video unreadable", "event", "video_unreadable", "item", v.path, "err", err)
 		}
 		row.Status, row.Error, row.CheckedAt = "unreadable", err.Error(), r.env.Now()
 		r.rep.Count("unreadable", 1)
-		r.env.Log.Warn("video unreadable", "event", "video_unreadable", "item", v.path, "err", err)
 		return r.save(ctx, v.path, row)
 	}
 	if row.Status != "ok" {
