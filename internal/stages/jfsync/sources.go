@@ -98,7 +98,9 @@ func (s *syncer) listPlex(ctx context.Context, a *addresses) error {
 		return err
 	}
 	for _, acc := range accounts.Account {
-		a.Users[acc.Name] = strconv.FormatInt(acc.ID, 10)
+		if acc.Name != "" { // the NAS has an unnamed account; a person configured with no account must not become it
+			a.Users[acc.Name] = strconv.FormatInt(acc.ID, 10)
+		}
 	}
 	for _, path := range []string{fmt.Sprintf("/library/sections/%d/all", s.opt.MoviesSection),
 		fmt.Sprintf("/library/sections/%d/all?type=4", s.opt.TVSection)} {
@@ -136,7 +138,9 @@ func (s *syncer) listJellyfin(ctx context.Context, a *addresses) error {
 		return err
 	}
 	for _, u := range users {
-		a.Users[u.Name] = u.ID
+		if u.Name != "" {
+			a.Users[u.Name] = u.ID
+		}
 	}
 	var list struct{ Items []struct{ ID, Path string } }
 	if err := jf.GetJSON(ctx, "/Items?Recursive=true&IncludeItemTypes=Movie,Episode&Fields=Path&enableImages=false&enableUserData=false", &list); err != nil {
@@ -380,7 +384,7 @@ func (s *syncer) backfillPlex(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		if !done {
+		if !done && u.Plex != "" { // plex = "": the person has no Plex account
 			todo, accounts = append(todo, u), append(accounts, u.Plex)
 		}
 	}

@@ -122,7 +122,7 @@ users = [{ name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" }, {
 	part := func(rk string, index int, file string) string {
 		return `{"ratingKey":"` + rk + `","index":` + string(rune('0'+index)) + `,"Media":[{"Part":[{"file":"` + file + `"}]}]}`
 	}
-	h.Plex.Handle("GET", "/accounts", 200, `{"MediaContainer":{"Account":[{"id":1,"name":"saahilsanganeriya"},{"id":578,"name":"roger"}]}}`)
+	h.Plex.Handle("GET", "/accounts", 200, `{"MediaContainer":{"Account":[{"id":1,"name":"saahilsanganeriya"},{"id":578,"name":"roger"},{"id":9,"name":""}]}}`)
 	h.Plex.Handle("GET", "/library/sections/4/all", 200, `{"MediaContainer":{"Metadata":[`+part("13", 0, heat)+","+
 		part("11", 0, ran)+","+part("12", 0, alien)+","+part("14", 0, clerks)+","+part("15", 0, dune)+","+part("16", 0, fargo)+`]}}`)
 	h.Plex.Handle("GET", "/library/sections/2/all", 200, `{"MediaContainer":{"Metadata":[`+part("20", 1, wire)+","+part("21", 2, wire)+`]}}`)
@@ -294,6 +294,16 @@ func TestPushCrossingAWrite(t *testing.T) {
 	done = len(w.since(0))
 	if run(t, h); len(w.since(done)) != 0 {
 		t.Fatalf("third run wrote %v", w.since(done))
+	}
+}
+
+// Catches: a person configured with no Plex account (plex = "") written as the server's unnamed account, which the
+// NAS has: that person's watch state would land in another account.
+func TestNoAccountMeansNoWrites(t *testing.T) {
+	h, _, options, _ := newHarness(t)
+	h.SetOptions(strings.Replace(options, `plex = "roger"`, `plex = ""`, 1))
+	if rep := run(t, h); rep.Counts["plex_from_jellyfin.roger"] != 0 || !strings.Contains(strings.Join(rep.Alerts, "|"), `plex has no account ""`) {
+		t.Fatalf("counts %v alerts %q", rep.Counts, rep.Alerts)
 	}
 }
 

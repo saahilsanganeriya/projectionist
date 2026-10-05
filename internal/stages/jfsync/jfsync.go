@@ -48,8 +48,8 @@ var apps = []string{jellyfinApp, plexApp}
 // User maps one person to an account in each app.
 type User struct {
 	Name     string `toml:"name"`     // projectionist's name for the viewer, used by the watch record
-	Plex     string `toml:"plex"`     // Plex account name (PMS /accounts, the webhook's Account.title)
-	Jellyfin string `toml:"jellyfin"` // Jellyfin user name
+	Plex     string `toml:"plex"`     // Plex account name (PMS /accounts); "" = no Plex account
+	Jellyfin string `toml:"jellyfin"` // Jellyfin user name; "" = no Jellyfin user
 }
 
 func (u User) account(app string) string {
