@@ -36,6 +36,11 @@ services:
       # GPU self-test sample and the old scripts' state files (imported once at cutover): read-only.
       - /volume1/PlexMediaServer/scripts:/volume1/PlexMediaServer/scripts:ro
       - /volume1/PlexMediaServer/remote4k:/volume1/PlexMediaServer/remote4k # STATUS.txt the owner reads
+      # ssdmirror: the USB SSD, and fill.py's folder whose PROGRESS.txt it takes over. DSM's mounts are private (no
+      # propagation): stop the container before ejecting the SSD and start it after plugging it back in. Started
+      # without the SSD, Docker makes an empty folder at that path and the stage refuses ("SSD not mounted").
+      - /volumeUSB1/usbshare1-2:/volumeUSB1/usbshare1-2
+      - /volume1/PlexMediaServer/ssd-copy:/volume1/PlexMediaServer/ssd-copy
     secrets: [jellyfin_key] # /run/secrets/jellyfin_key, read-only
     logging:
       driver: json-file

@@ -54,6 +54,19 @@ work_dir        = "/volume1/media/.projectionist/remote4k" # same share as the l
 status_file     = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
 default_section = 4
 
+# The USB SSD (exFAT) as a mirror of Movies A→Z, as many as fit; replaces ssd-copy/fill.py. Idle I/O priority, capped,
+# paused while anyone but the owner is watching. Nothing on the SSD is overwritten, or deleted without proof.
+[stages.ssdmirror]
+every           = "6h"
+source          = "/volume1/media/Movies"
+target          = "/volumeUSB1/usbshare1-2/Movies"             # never created: absent means the SSD is not mounted
+library_archive = "/volume1/media/_archive"               # an SSD file is deleted only when byte-identical to one here
+ssd_archive     = "/volumeUSB1/usbshare1-2/_archive/ssdmirror" # stale SSD copies move here (on the SSD)
+margin_gb       = 15                                           # free space always left on the SSD (decimal GB)
+mbps            = 50                                           # cap on bulk reads, MB/s
+io_class        = "idle"                                       # copies yield all disk time; "best-effort" = fill.py's nice 19
+status_file     = "/volume1/PlexMediaServer/ssd-copy/PROGRESS.txt"
+
 # Real-time trigger: inotify on the library and finished downloads. A top-level folder (a movie, a show, a download)
 # that changed and then stayed quiet for `quiet` triggers each stage in `trigger`; each is a reconciler that finds its
 # own work. One run = one `sweep` period (walk every root, then follow events), so `every` must be <= `sweep`: the next
