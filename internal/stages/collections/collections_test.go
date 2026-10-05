@@ -112,9 +112,11 @@ func addNew(have, add []string) []string {
 
 func writeJSON(w http.ResponseWriter, v any) { json.NewEncoder(w).Encode(v) }
 
-func moviePath(id int) string { return fmt.Sprintf("/m/Film %d (2000) {tmdb-%d}/Film %d (2000) {tmdb-%d}.mkv", id, id, id, id) }
+func moviePath(id int) string {
+	return fmt.Sprintf("/m/Film %d (2000) {tmdb-%d}/Film %d (2000) {tmdb-%d}.mkv", id, id, id, id)
+}
 
-// servePlex makes h's Plex hold items (TMDB id → ratingKey "1<id>") in section 4 and the collections in a.
+// servePlex makes h's Plex hold items (ratingKey 100+TMDB id) in section 4 and the collections in a.
 func servePlex(h *fake.Harness, a *app, ids ...int) {
 	var meta []any
 	for _, id := range ids {
@@ -351,8 +353,9 @@ func TestPlexOutageBacksOffAndNeverFailsTheRun(t *testing.T) {
 	}
 }
 
-// Catches: the first run treating the whole library as new, an arrival's join living only in memory, a TMDB error
-// losing the arrival, an id TMDB does not know being retried forever, and an arrival stuck without an alert.
+// Catches: the first run treating the whole library as new, an arrival waiting a day for Plex's cached item list, an
+// arrival's join living only in memory, a TMDB error losing the arrival, an id TMDB does not know being retried
+// forever, and an arrival stuck without an alert.
 func TestArrivalsJoinFromTMDB(t *testing.T) {
 	var mu sync.Mutex
 	asked := map[string]int{}
@@ -377,7 +380,7 @@ func TestArrivalsJoinFromTMDB(t *testing.T) {
 	t.Cleanup(api.Close)
 	h := fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "mid"})
 	px := &app{}
-	servePlex(h, px, 1, 2, 3, 4, 5)
+	servePlex(h, px, 1, 2, 3, 4)
 	movies := setup(t, h, api.URL, `sinks = ["plex"]`, 1, 2, 3, 4)
 
 	runOnce(t, h)
@@ -387,7 +390,8 @@ func TestArrivalsJoinFromTMDB(t *testing.T) {
 	for _, id := range []int{5, 6, 7} {
 		os.MkdirAll(filepath.Join(movies, fmt.Sprintf("Film %d (2000) {tmdb-%d}", id, id)), 0o755)
 	}
-	h.Now = h.Now.Add(25 * time.Hour) // also past the daily re-read of Plex's items
+	servePlex(h, px, 1, 2, 3, 4, 5) // Plex has scanned 5: its cached item list (2 h old) must be re-read
+	h.Now = h.Now.Add(2 * time.Hour)
 	runOnce(t, h)
 	if got := px.colls[1].Members; !reflect.DeepEqual(got, []string{"103", "104", "105"}) {
 		t.Fatalf("Scary Movie in plex = %v; want the arrival 105 added", got)
