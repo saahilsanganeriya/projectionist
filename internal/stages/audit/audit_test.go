@@ -403,12 +403,12 @@ func TestEntryMovedMidRun(t *testing.T) {
 		})
 		rep := run(t, h)
 		if len(rep.Alerts) != 0 || rep.Counts[noEnglish] != c.noEnglish {
-			t.Errorf("%s moved at %q: alerts = %q, counts = %v", c.from, c.at, rep.Alerts, rep.Counts)
+			t.Errorf("%s moved to %q at %q: alerts = %q, counts = %v", c.from, c.to, c.at, rep.Alerts, rep.Counts)
 		}
 		os.Rename(to, from)
 		filepath.WalkDir(root, func(p string, _ fs.DirEntry, err error) error { return os.Chtimes(p, settledAt, settledAt) })
 		if rep := run(t, h); len(rep.Alerts) != 0 {
-			t.Errorf("%s back: alerts = %q", c.from, rep.Alerts)
+			t.Errorf("%s moved to %q at %q, then back: alerts = %q", c.from, c.to, c.at, rep.Alerts)
 		}
 	}
 }
