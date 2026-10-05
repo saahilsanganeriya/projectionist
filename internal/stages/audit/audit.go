@@ -133,12 +133,45 @@ type video struct {
 
 type scan struct {
 	root    string
-	settled time.Time // files modified after this are still settling
-	found   map[string][]string
+	settled time.Time           // files and folders modified after this are still settling
+	found   map[string][]string // category -> findings
+	fresh   map[string][]string // findings in a folder that changed after settled; see hold
 	videos  []*video
 }
 
+func newScan(root string, settled time.Time) *scan {
+	return &scan{root: root, settled: settled, found: map[string][]string{}, fresh: map[string][]string{}}
+}
+
 func (s *scan) add(category, item string) { s.found[category] = append(s.found[category], item) }
+
+// flag files a finding about something in a folder; fresh says that folder changed within the settle time.
+func (s *scan) flag(fresh bool, category, item string) {
+	if fresh {
+		s.fresh[category] = append(s.fresh[category], item)
+		return
+	}
+	s.add(category, item)
+}
+
+// hold settles the fresh findings against the last run: one already known stays listed, a new one waits for a run in
+// which its folder is quiet. A rename, ingest or subtitle download in progress therefore never reads as a new problem
+// (a folder's mtime moves whenever an entry is created, renamed or removed in it). It returns how many wait.
+func (s *scan) hold(prev map[string][]string) (held int) {
+	for category, items := range s.fresh {
+		known := set(prev[category]...)
+		for _, it := range items {
+			if known[it] {
+				s.add(category, it)
+			} else {
+				held++
+			}
+		}
+	}
+	return held
+}
+
+func (s *scan) isFresh(info fs.FileInfo) bool { return info.ModTime().After(s.settled) }
 
 func (s *scan) rel(path string) string { return strings.TrimPrefix(path, s.root+"/") }
 
@@ -160,8 +193,15 @@ func (s *scan) library(ctx context.Context, lib string) error {
 		if skipped(n) || strings.HasPrefix(n, "_") || ignored[n] {
 			continue
 		}
+		info, err := e.Info()
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // moved away mid-walk (the renamer runs alongside)
+		}
+		if err != nil {
+			return err
+		}
 		if !e.IsDir() {
-			s.add(outsideScheme, s.rel(p)+" (loose file)")
+			s.flag(s.isFresh(info), outsideScheme, s.rel(p)+" (loose file)")
 			if videoExts[lowerExt(n)] {
 				if err := s.addVideo(e, p, ""); err != nil {
 					return err
@@ -175,7 +215,7 @@ func (s *scan) library(ctx context.Context, lib string) error {
 		}
 		if !(lib == "Movies" && library.IsMovieFolder(n) || lib == "TV" && library.IsShowFolder(n)) {
 			at = outside
-			s.add(outsideScheme, s.rel(p))
+			s.flag(s.isFresh(info), outsideScheme, s.rel(p))
 		}
 		if err := s.dir(ctx, p, at, show); err != nil {
 			return err
@@ -201,6 +241,14 @@ func (s *scan) dir(ctx context.Context, dir string, at place, show string) error
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	st, err := os.Stat(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	fresh := s.isFresh(st)
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
@@ -237,46 +285,46 @@ func (s *scan) dir(ctx context.Context, dir string, at place, show string) error
 		}
 		stems[strings.TrimSuffix(n, filepath.Ext(n))] = s.videos[len(s.videos)-1]
 		if !named {
-			s.misnamedVideo(s.rel(p), at, sample)
+			s.misnamedVideo(fresh, s.rel(p), at, sample)
 		}
 	}
 	for _, e := range entries {
 		n, p := e.Name(), filepath.Join(dir, e.Name())
 		switch {
 		case e.IsDir():
-			if err := s.subdir(ctx, p, at, show, files); err != nil {
+			if err := s.subdir(ctx, p, at, show, fresh, files); err != nil {
 				return err
 			}
 		case !e.Type().IsRegular() || skipped(n) || ignored[n] || videoExts[lowerExt(n)]:
 		case subExts[lowerExt(n)]:
-			s.checkSidecar(p, at, stems)
+			s.checkSidecar(fresh, p, at, stems)
 		case at != outside && !artwork.MatchString(n):
-			s.add(stray, s.rel(p))
+			s.flag(fresh, stray, s.rel(p))
 		}
 	}
 	return nil
 }
 
 // misnamedVideo files a video that is not named for where it sits.
-func (s *scan) misnamedVideo(rel string, at place, sample bool) {
+func (s *scan) misnamedVideo(fresh bool, rel string, at place, sample bool) {
 	switch {
 	case at == outside || at == badSeason: // the folder itself is already reported
 	case sample:
-		s.add(stray, rel+" (sample)")
+		s.flag(fresh, stray, rel+" (sample)")
 	case at == movieDir:
-		s.add(movieName, rel)
+		s.flag(fresh, movieName, rel)
 	case at == seasonDir:
-		s.add(episodeName, rel)
+		s.flag(fresh, episodeName, rel)
 	case at == showDir:
-		s.add(episodeName, rel+" (not in a Season NN folder)")
+		s.flag(fresh, episodeName, rel+" (not in a Season NN folder)")
 	case at == misplaced:
-		s.add(extraPlace, rel)
+		s.flag(fresh, extraPlace, rel)
 	}
 }
 
 // checkSidecar finds the subtitle's video: the longest video base name in the same folder that the subtitle's name
 // continues with a dot. In a folder outside the scheme only an English match matters (the renamer moves the rest).
-func (s *scan) checkSidecar(path string, at place, stems map[string]*video) {
+func (s *scan) checkSidecar(fresh bool, path string, at place, stems map[string]*video) {
 	n := filepath.Base(path)
 	stem := ""
 	for vs := range stems {
@@ -286,24 +334,24 @@ func (s *scan) checkSidecar(path string, at place, stems map[string]*video) {
 	}
 	if stem == "" {
 		if at != outside {
-			s.add(orphan, s.rel(path))
+			s.flag(fresh, orphan, s.rel(path))
 		}
 		return
 	}
 	m := sidecarSuffix.FindStringSubmatch(strings.TrimSuffix(n[len(stem):], filepath.Ext(n)))
 	if m == nil && at != outside {
-		s.add(sidecarName, s.rel(path))
+		s.flag(fresh, sidecarName, s.rel(path))
 	}
 	if m != nil && (m[1] == "en" || m[1] == "eng") && m[2] != ".forced" && textSubs[lowerExt(n)] {
 		stems[stem].englishSidecar = true
 	}
 }
 
-func (s *scan) subdir(ctx context.Context, path string, at place, show string, parentFiles map[string]bool) error {
+func (s *scan) subdir(ctx context.Context, path string, at place, show string, parentFresh bool, parentFiles map[string]bool) error {
 	n := filepath.Base(path)
 	switch {
 	case n == ".details":
-		return s.notes(path, parentFiles)
+		return s.notes(path, parentFresh, parentFiles)
 	case skipped(n) || n == "Plex Versions": // Synology thumbnails, hidden folders, Plex's own optimized copies
 		return nil
 	case extrasDirs[n] && at != outside:
@@ -316,22 +364,31 @@ func (s *scan) subdir(ctx context.Context, path string, at place, show string, p
 	case showDir:
 		next = seasonDir
 		if !library.IsSeasonFolder(n) {
-			s.add(seasonName, s.rel(path))
+			s.flag(parentFresh, seasonName, s.rel(path))
 			next = badSeason
 		}
 	}
 	return s.dir(ctx, path, next, show)
 }
 
-// notes reports .details/<file>.txt notes whose <file> is no longer beside the .details folder.
-func (s *scan) notes(dir string, parentFiles map[string]bool) error {
+// notes reports .details/<file>.txt notes whose <file> is no longer beside the .details folder. A rename of the
+// video and the rename of its note are two steps, so a change in either folder holds the finding.
+func (s *scan) notes(dir string, parentFresh bool, parentFiles map[string]bool) error {
+	st, err := os.Stat(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	fresh := parentFresh || s.isFresh(st)
 	entries, err := os.ReadDir(dir)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
 	for _, e := range entries {
 		if n := e.Name(); strings.HasSuffix(n, ".txt") && !parentFiles[strings.TrimSuffix(n, ".txt")] {
-			s.add(orphan, s.rel(filepath.Join(dir, n)))
+			s.flag(fresh, orphan, s.rel(filepath.Join(dir, n)))
 		}
 	}
 	return nil
@@ -530,7 +587,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if opt.Report == "" {
 		opt.Report = filepath.Join(root, "_audit.txt")
 	}
-	s := &scan{root: root, settled: env.Now().Add(-opt.Settle), found: map[string][]string{}}
+	s := newScan(root, env.Now().Add(-opt.Settle))
 	for _, lib := range []string{"Movies", "TV"} {
 		if err := s.library(ctx, lib); err != nil {
 			return err
@@ -551,14 +608,15 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	}
 	s.found[duplicate] = s.duplicates(env)
 	shows := s.english()
-	for _, items := range s.found {
-		sort.Strings(items)
-	}
 
 	var prev snapshot
 	hadPrev, err := env.Store.GetJSON(ctx, name, "last", &prev)
 	if err != nil {
 		return err
+	}
+	held := s.hold(prev.Items)
+	for _, items := range s.found {
+		sort.Strings(items)
 	}
 	next := snapshot{At: env.Now(), Items: s.found}
 	if deferred > 0 && hadPrev { // keep a complete baseline for what this partial pass could not see
@@ -578,8 +636,9 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	}
 	rep.Count("videos", len(s.videos))
 	rep.Count("not_probed", deferred)
+	rep.Count("held", held)
 
-	text := report(env, opt.MaxListed, s, shows, deferred, unsettled, prev, hadPrev)
+	text := report(env, opt.MaxListed, s, shows, deferred, unsettled+held, prev, hadPrev)
 	if err := writeReport(opt.Report, text); err != nil {
 		return err
 	}
@@ -596,7 +655,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if !hadPrev {
 		rep.Summary += " (first run: baseline, no growth alerts)"
 	}
-	env.Log.Info("audit written", "event", "audit_report", "path", opt.Report, "videos", len(s.videos), "not_probed", deferred, "unsettled", unsettled)
+	env.Log.Info("audit written", "event", "audit_report", "path", opt.Report, "videos", len(s.videos), "not_probed", deferred, "unsettled", unsettled, "held", held)
 	return nil
 }
 
@@ -611,7 +670,7 @@ func firstNew(now, before []string) string {
 }
 
 // report is the owner's short text: a count table against the last run, then up to max examples per category.
-func report(env *stage.Env, maxListed int, s *scan, shows []showCount, deferred, unsettled int, prev snapshot, hadPrev bool) string {
+func report(env *stage.Env, maxListed int, s *scan, shows []showCount, deferred, waiting int, prev snapshot, hadPrev bool) string {
 	loc := env.Loc
 	if loc == nil {
 		loc = time.UTC
@@ -622,8 +681,8 @@ func report(env *stage.Env, maxListed int, s *scan, shows []showCount, deferred,
 	if deferred > 0 {
 		fmt.Fprintf(&b, " %d not probed yet (someone was watching): the unreadable and English-subtitle counts are partial.", deferred)
 	}
-	if unsettled > 0 {
-		fmt.Fprintf(&b, " %d changed in the last few minutes and are judged next run.", unsettled)
+	if waiting > 0 {
+		fmt.Fprintf(&b, " %d videos or findings changed in the last few minutes and are judged next run.", waiting)
 	}
 	b.WriteString("\n\n   now   last  category\n")
 	for _, c := range categories {

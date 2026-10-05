@@ -17,7 +17,8 @@ import (
 
 var settledAt = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC) // well before the harness clock
 
-// put creates root/rel holding body, dated settledAt unless told otherwise.
+// put creates root/rel holding body, dated settledAt unless told otherwise; the folders above it are dated settledAt
+// too, so only a test that dates a folder itself sees it as changing.
 func put(t *testing.T, root, rel, body string, mtime ...time.Time) {
 	t.Helper()
 	p := filepath.Join(root, rel)
@@ -29,6 +30,9 @@ func put(t *testing.T, root, rel, body string, mtime ...time.Time) {
 	}
 	at := append(mtime, settledAt)[0]
 	os.Chtimes(p, at, at)
+	for d := filepath.Dir(p); d != root; d = filepath.Dir(d) {
+		os.Chtimes(d, settledAt, settledAt)
+	}
 }
 
 // Catches: a file filed under the wrong category or missed by the scheme's file-level rules (movie name, season
@@ -79,7 +83,7 @@ func TestNamingAndPlacement(t *testing.T) {
 			put(t, root, c.path, "x")
 		}
 	}
-	s := &scan{root: root, settled: settledAt, found: map[string][]string{}}
+	s := newScan(root, settledAt)
 	for _, lib := range []string{"Movies", "TV"} {
 		if err := s.library(context.Background(), lib); err != nil {
 			t.Fatal(err)
@@ -213,10 +217,43 @@ func TestRunEndToEnd(t *testing.T) {
 
 	put(t, root, heat+"Heat (1995) {tmdb-949}.de.srt", "1") // still has its video
 	put(t, root, heat+"Heist (2001) {tmdb-2}.en.srt", "1")  // orphan: alerts
-	put(t, root, wire+"S01E05 - E.mkv", "e5")             // quiet category: no alert
+	put(t, root, wire+"S01E05 - E.mkv", "e5")               // quiet category: no alert
 	rep = run(t, h)
 	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "grew 0 -> 1, e.g. "+heat+"Heist (2001) {tmdb-2}.en.srt") {
 		t.Fatalf("alerts = %q", rep.Alerts)
+	}
+}
+
+// Catches: a folder in the middle of a change (a rename, an ingest drop, a subtitle download) alerting as a new problem
+// before the renamer or the subtitles stage is done with it, and a known problem dropping off the list while its
+// folder changes, which would re-alert it as new on the next quiet run.
+func TestChangingFoldersWaitOneRun(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	root := t.TempDir()
+	h.SetOptions(`root = "` + root + `"`)
+	fakeProbe(t, h)
+	old, drop, heat := "Movies/Old.Release.2001", "Movies/New.Release.2024", "Movies/Heat (1995) {tmdb-949}"
+	put(t, root, old+"/Old.Release.2001.mkv", "film")
+	put(t, root, heat+"/Heat (1995) {tmdb-949}.mkv", "film2")
+	os.Mkdir(filepath.Join(root, "TV"), 0o755)
+	run(t, h)
+
+	put(t, root, drop+"/New.Release.2024.mkv", "film3")
+	put(t, root, heat+"/Heat.1995.mkv", "film4")
+	for _, dir := range []string{old, drop, heat} {
+		changed := h.Now.Add(-time.Minute)
+		os.Chtimes(filepath.Join(root, dir), changed, changed)
+	}
+	rep := run(t, h)
+	if len(rep.Alerts) != 0 || rep.Counts[outsideScheme] != 1 || rep.Counts[movieName] != 0 || rep.Counts["held"] != 2 {
+		t.Fatalf("while folders change: alerts = %q, counts = %v", rep.Alerts, rep.Counts)
+	}
+
+	h.Now = h.Now.Add(20 * time.Minute) // past the default 15m settle
+	rep = run(t, h)
+	if len(rep.Alerts) != 2 || !strings.Contains(rep.Alerts[0], "grew 1 -> 2, e.g. "+drop) ||
+		!strings.Contains(rep.Alerts[1], "grew 0 -> 1, e.g. "+heat+"/Heat.1995.mkv") {
+		t.Fatalf("once quiet: alerts = %q", rep.Alerts)
 	}
 }
 
