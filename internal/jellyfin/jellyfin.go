@@ -74,6 +74,11 @@ func (c *Client) PostJSON(ctx context.Context, path string, body, out any) error
 	return c.do(ctx, http.MethodPost, path, body, out)
 }
 
+// Delete sends a DELETE whose answer does not matter (e.g. removing items from a collection).
+func (c *Client) Delete(ctx context.Context, path string) error {
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
+}
+
 type Session struct {
 	ID              string           `json:"Id"`
 	UserName        string           `json:"UserName"`

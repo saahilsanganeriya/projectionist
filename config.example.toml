@@ -53,3 +53,22 @@ small_kbps      = 20000
 work_dir        = "/volume1/media/.projectionist/remote4k" # same share as the library: publish = one rename
 status_file     = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
 default_section = 4
+
+# Letterboxd → Plex + Jellyfin for the owner: watched, play counts, last-played (Jellyfin), star ratings, and his
+# watchlist as a "Watchlist" collection promoted to Plex Home. Letterboxd is the truth; nothing is ever unwatched.
+[stages.letterboxd]
+every          = "30m"                    # the RSS feed is read every run; grid pages once per pages_every
+user           = "saahilsan"
+interval       = "2s"                     # between two Letterboxd requests (letterboxd.com and boxd.it together)
+max_fetches    = 400                      # Letterboxd requests per run; the first backfill resumes over a few runs
+pages_every    = "24h"                    # watchlist + watched-films grid crawl
+export_dir     = "/volume1/docker/projectionist/data/letterboxd" # unzipped account exports; the newest folder wins
+movies_dir     = "/volume1/media/Movies"
+missing_file   = "/volume1/media/_watchlist-missing.txt" # watchlist films not on the NAS; "" = none
+sink_refresh   = "24h"                    # re-read what Plex/Jellyfin hold at most this often (one listing each)
+plex_section   = 4
+jellyfin_user  = "saahil"
+collection     = "Watchlist"              # "" = no Watchlist collection
+plex_watchlist = false                    # also mirror onto his plex.tv watchlist (his Plex friends can see it)
+dry_run        = false                    # plan and count only
+first_films    = 0                        # per-film writes only for the first N library films in diary order; 0 = all
