@@ -410,32 +410,51 @@ func (r *run) plexCollection(ctx context.Context, b *breaker, m sinkMeta, haves 
 	for len(add) > 0 {
 		batch := add[:min(len(add), 50)]
 		add = add[len(batch):]
-		// Look the collection up by title before creating it, so a create whose answer was lost is never repeated.
+		// A busy Plex can apply a create or an add and still time out the answer, and re-adding films already in a
+		// collection answers HTTP 500. So every attempt first looks at what Plex holds: the collection by title,
+		// then its children, and sends only what is missing.
 		err := r.call(ctx, b, func() error {
-			if m.Collection != "" {
-				return r.env.Plex.Do(ctx, http.MethodPut, "/library/collections/"+m.Collection+"/items?uri="+uri(batch))
-			}
-			id, err := r.plexCollectionID(ctx)
-			if err != nil {
-				return err
-			}
-			if id == "" {
-				if err := r.env.Plex.Do(ctx, http.MethodPost, fmt.Sprintf("/library/collections?type=1&smart=0&sectionId=%d&title=%s&uri=%s",
-					r.opt.PlexSection, url.QueryEscape(r.opt.Collection), uri(batch))); err != nil {
-					return err
-				}
-				// plex.Client does not return the create answer's body, so read the new id back.
-				if id, err = r.plexCollectionID(ctx); err != nil {
+			if m.Collection == "" {
+				id, err := r.plexCollectionID(ctx)
+				if err != nil {
 					return err
 				}
 				if id == "" {
-					return fmt.Errorf("plex: collection %q not listed after creating it", r.opt.Collection)
+					if err := r.env.Plex.Do(ctx, http.MethodPost, fmt.Sprintf("/library/collections?type=1&smart=0&sectionId=%d&title=%s&uri=%s",
+						r.opt.PlexSection, url.QueryEscape(r.opt.Collection), uri(batch))); err != nil {
+						return err
+					}
+					// plex.Client does not return the create answer's body, so read the new id back.
+					if id, err = r.plexCollectionID(ctx); err != nil {
+						return err
+					}
+					if id == "" {
+						return fmt.Errorf("plex: collection %q not listed after creating it", r.opt.Collection)
+					}
 				}
-			} else if err := r.env.Plex.Do(ctx, http.MethodPut, "/library/collections/"+id+"/items?uri="+uri(batch)); err != nil {
+				m.Collection = id
+				if err := r.putMeta(ctx, app, m); err != nil {
+					return err
+				}
+			}
+			var kids plexListing
+			if err := r.env.Plex.GetJSON(ctx, "/library/collections/"+m.Collection+"/children", &kids); err != nil {
 				return err
 			}
-			m.Collection = id
-			return r.putMeta(ctx, app, m)
+			in := map[string]bool{}
+			for _, k := range kids.Metadata {
+				in[k.RatingKey] = true
+			}
+			var missing []int
+			for _, id := range batch {
+				if !in[haves[id].Item] {
+					missing = append(missing, id)
+				}
+			}
+			if len(missing) == 0 {
+				return nil
+			}
+			return r.env.Plex.Do(ctx, http.MethodPut, "/library/collections/"+m.Collection+"/items?uri="+uri(missing))
 		})
 		if isStoreErr(err) {
 			return err

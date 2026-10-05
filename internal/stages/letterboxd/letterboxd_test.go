@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -88,15 +89,16 @@ type jfFilm struct {
 }
 
 type apps struct {
-	mu           sync.Mutex
-	plex         map[string]*plexFilm // ratingKey →
-	collection   []string
-	promoted     bool
-	failScrobble bool
-	dropScrobble bool               // count the view, then drop the connection: the answer is lost
-	jf           map[string]*jfFilm // item id →
-	jfSet        []string
-	jfBodies     []string
+	mu               sync.Mutex
+	plex             map[string]*plexFilm // ratingKey →
+	collection       []string
+	promoted         bool
+	failScrobble     bool
+	loseCreateAnswer bool
+	dropScrobble     bool               // count the view, then drop the connection: the answer is lost
+	jf               map[string]*jfFilm // item id →
+	jfSet            []string
+	jfBodies         []string
 }
 
 func setupApps(t *testing.T, h *fake.Harness) *apps {
@@ -141,6 +143,21 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 			return
 		}
 		a.collection = keys(r)
+		if a.loseCreateAnswer { // the busy-Plex case seen on the NAS: created, but the answer never arrives
+			a.loseCreateAnswer = false
+			http.Error(w, "busy", http.StatusInternalServerError)
+		}
+	})
+	px.HandleFunc("PUT", "/library/collections/900/items", func(w http.ResponseWriter, r *http.Request) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		for _, k := range keys(r) {
+			if slices.Contains(a.collection, k) { // what real Plex does when a film is already in the collection
+				http.Error(w, "already a member", http.StatusInternalServerError)
+				return
+			}
+		}
+		a.collection = append(a.collection, keys(r)...)
 	})
 	px.HandleFunc("GET", "/library/collections/900/children", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
@@ -510,5 +527,20 @@ func TestPlexWatchlistMirror(t *testing.T) {
 	if n := len(px.Calls("PUT", "/actions/addToWatchlist")); n != 2 || len(px.Calls("PUT", "/actions/removeFromWatchlist")) != 0 ||
 		len(px.Calls("GET", "/library/metadata/matches")) != 2 {
 		t.Errorf("second run: %d adds total, counts %v", n, again.Counts)
+	}
+}
+
+// Catches: a Plex collection create that took effect but whose answer was lost being followed by a re-add of
+// the same films (real Plex answers that with HTTP 500, as on the NAS), so the collection is never recorded,
+// filled or promoted.
+func TestCollectionCreateAnswerLost(t *testing.T) {
+	w := newWorld(t)
+	w.apps.loseCreateAnswer = true
+	rep := w.run(t, "")
+	if len(w.apps.collection) != 1 || !w.apps.promoted || rep.Counts["plex.failed"] != 0 {
+		t.Errorf("collection %v promoted=%v counts %v", w.apps.collection, w.apps.promoted, rep.Counts)
+	}
+	if n := len(w.h.Plex.Calls("POST", "/library/collections")); n != 1 {
+		t.Errorf("collection created %d times", n)
 	}
 }
