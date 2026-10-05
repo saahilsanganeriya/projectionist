@@ -747,7 +747,7 @@ func TestBudget(t *testing.T) {
 			stamp(w.h.Now), c.batch, c.state, c.held, c.cost)
 		rep := w.run(t)
 		alerted := len(rep.Alerts) == 1 && strings.Contains(rep.Alerts[0], errBudget.Error())
-		if w.messages != 0 || alerted != c.wantAlert || len(rep.Alerts) > 1 {
+		if w.messages != 0 || alerted != c.wantAlert || !c.wantAlert && len(rep.Alerts) != 0 {
 			t.Errorf("%s: %d calls, alerts %v; want no call and a budget alert: %v", c.name, w.messages, rep.Alerts, c.wantAlert)
 		}
 	}
