@@ -24,25 +24,32 @@ func New(baseURL, keyFile string, timeout time.Duration) *Client {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, in any, out any) error {
+	if in == nil {
+		return c.send(ctx, method, path, "", nil, out)
+	}
+	raw, err := json.Marshal(in)
+	if err != nil {
+		return err
+	}
+	return c.send(ctx, method, path, "application/json", raw, out)
+}
+
+func (c *Client) send(ctx context.Context, method, path, contentType string, body []byte, out any) error {
 	key, err := os.ReadFile(c.keyFile)
 	if err != nil {
 		return fmt.Errorf("jellyfin key: %w", err)
 	}
-	var body io.Reader
-	if in != nil {
-		raw, err := json.Marshal(in)
-		if err != nil {
-			return err
-		}
-		body = bytes.NewReader(raw)
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, rd)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", fmt.Sprintf(`MediaBrowser Token="%s"`, strings.TrimSpace(string(key))))
-	if in != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -72,6 +79,11 @@ func (c *Client) GetJSON(ctx context.Context, path string, out any) error {
 // PostJSON sends body as JSON; out may be nil when the answer does not matter.
 func (c *Client) PostJSON(ctx context.Context, path string, body, out any) error {
 	return c.do(ctx, http.MethodPost, path, body, out)
+}
+
+// PostBody sends a raw body, e.g. a base64 image for POST /Items/<id>/Images/Primary.
+func (c *Client) PostBody(ctx context.Context, path, contentType string, body []byte) error {
+	return c.send(ctx, http.MethodPost, path, contentType, body, nil)
 }
 
 type Session struct {
@@ -111,4 +123,9 @@ func (c *Client) MediaUpdated(ctx context.Context, paths ...string) error {
 		body.Updates = append(body.Updates, update{Path: p, UpdateType: "Created"})
 	}
 	return c.PostJSON(ctx, "/Library/Media/Updated", body, nil)
+}
+
+// Delete sends DELETE, e.g. DELETE /Collections/<id>/Items?Ids=... to take films out of a collection.
+func (c *Client) Delete(ctx context.Context, path string) error {
+	return c.do(ctx, http.MethodDelete, path, nil, nil)
 }

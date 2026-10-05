@@ -53,3 +53,26 @@ small_kbps      = 20000
 work_dir        = "/volume1/media/.projectionist/remote4k" # same share as the library: publish = one rename
 status_file     = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
 default_section = 4
+
+# Five unseen films for tonight, picked once a day by one Claude call over his Letterboxd ratings and reviews; a
+# Plex Movies collection "Tonight" promoted to his Home under Continue Watching, and the same BoxSet in Jellyfin.
+# Reconciles every 30 min: a pick he has since watched leaves the row at once.
+[stages.tonight]
+every           = "30m"
+model           = "sonnet:latest" # newest Sonnet, resolved daily via GET /v1/models; or an exact model id
+effort          = "medium"
+max_tokens      = 3000            # the gate run used 422; the cap reserves all of it
+daily_cap_usd   = 0.15            # hard cap: a call whose worst case would pass it is not sent
+pick_after      = "05:00"         # in timezone: a new day's picks after this
+picks           = 5
+max_candidates  = 400             # unseen films shown to the model, best-ranked first; fewer if the cap needs it
+api_key_file    = "/run/secrets/anthropic_api_key"
+tmdb_token_file = "/run/secrets/tmdb_read_token"
+letterboxd_dir  = "/volume1/docker/projectionist/data/letterboxd" # the export CSVs, or the newest export folder in it
+letterboxd_rss  = "https://letterboxd.com/saahilsan/rss/"
+movies_dir      = "/volume1/media/Movies"
+section         = 4
+collection      = "Tonight"
+jellyfin_user   = "saahil"
+sink_timeout    = "3m"            # per sink per run; a failed write is retried with backoff, never failing the run
+plex_map_timeout = "10m"          # the daily Movies listing (TMDB id → ratingKey); a page took 112 s during a scan
