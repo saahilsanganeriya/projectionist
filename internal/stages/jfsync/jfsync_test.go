@@ -349,8 +349,8 @@ func TestListingsFollowTheWrites(t *testing.T) {
 }
 
 // Catches: an unreadable backup copy failing the run (the Jellyfin direction stops with it) or letting Plex writes
-// go out before Plex's history seeds what Plex holds; and a Jellyfin user created after the first run never
-// getting its history imported.
+// go out before Plex's history seeds what Plex holds; a stale copy imported silently (plays since it are missing);
+// and a Jellyfin user created after the first run never getting its history imported.
 func TestImportsWaitForTheirSource(t *testing.T) {
 	h, w, _, backups := newHarness(t)
 	bad := filepath.Join(backups, "pre-z.db")
@@ -366,7 +366,9 @@ func TestImportsWaitForTheirSource(t *testing.T) {
 	os.Remove(bad)
 	h.Jellyfin.Handle("GET", "/Users", 200, `[{"Name":"saahil","Id":"u1"},{"Name":"roger","Id":"u2"}]`)
 	h.Now = h.Now.Add(25 * time.Hour)
-	run(t, h) // relists Jellyfin after its writes
+	if rep = run(t, h); !strings.Contains(strings.Join(rep.Alerts, "|"), "taken 25h10m0s ago") { // also relists Jellyfin
+		t.Errorf("a stale copy imported without an alert: %q", rep.Alerts)
+	}
 	done := len(w.since(0))
 	run(t, h)
 	if got := strings.Join(w.since(0), "\n"); !strings.Contains(got, "owner /:/progress?identifier=com.plexapp.plugins.library&key=11") ||
