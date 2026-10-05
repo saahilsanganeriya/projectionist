@@ -215,6 +215,9 @@ func (r *run) scan(ctx context.Context) ([]*title, error) {
 	var titles []*title
 	for _, root := range r.opt.Roots {
 		pyWalk(root, func(dir string, files []string) {
+			if ctx.Err() != nil {
+				return
+			}
 			names := files
 			if r.opt.OutputDir != "" { // a test run's own sidecars count too, so a rerun does not fetch again
 				if es, err := os.ReadDir(r.mirror(root, dir)); err == nil {
@@ -482,22 +485,24 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	if err != nil {
 		return outcome{result: "error", detail: err.Error()}
 	}
+	// A provider that cannot be searched only raises its alert: the others' candidates still decide, and the title is
+	// recorded, so an unreachable provider does not make every run download the same failed candidates again. A
+	// download refused for quota defers the title instead (nothing was tried; the quota resets daily).
 	var cands []Candidate
-	incomplete := false
 	for _, p := range r.providers {
 		found, err := p.Search(ctx, q)
 		switch {
 		case errors.Is(err, errParked):
-			incomplete = true
 			r.alertParked(p, err)
 		case err != nil:
 			return outcome{result: "error", detail: p.Name() + " search: " + err.Error()}
 		}
 		cands = append(cands, found...)
 	}
+	incomplete := false
 	deferOr := func(o outcome) outcome {
 		if incomplete {
-			return outcome{result: "deferred", detail: "a provider is parked for this run"}
+			return outcome{result: "deferred", detail: "a download quota is spent for this run"}
 		}
 		return o
 	}

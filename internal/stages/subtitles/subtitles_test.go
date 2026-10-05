@@ -34,6 +34,7 @@ type fixture struct {
 	ts       []float64
 	mu       sync.Mutex
 	requests []string
+	quota    bool // downloads answer with a page, as OpenSubtitles does once the day's quota is spent
 }
 
 func (f *fixture) path(rel string) string { return filepath.Join(f.lib, rel) }
@@ -100,6 +101,7 @@ cp "`+ff+`/clerks.aligned.srt" "$3"; echo "info: 'reference file FPS/input file 
 	osSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.requests = append(f.requests, r.URL.Path)
+		quota := f.quota
 		f.mu.Unlock()
 		cand := func(id, release string) string {
 			return `[{"IDSubtitleFile":"` + id + `","SubFormat":"srt","MovieReleaseName":"` + release + `","SubDownloadLink":"` + osSrv.URL + `/dl/` + id + `.gz"}]`
@@ -109,6 +111,8 @@ cp "`+ff+`/clerks.aligned.srt" "$3"; echo "info: 'reference file FPS/input file 
 			w.Write([]byte(cand("ran", "Ran.1985.BluRay")))
 		case strings.Contains(r.URL.Path, "imdbid-0109445"):
 			w.Write([]byte(cand("clerks", "Clerks.1994.DVDRip")))
+		case strings.HasPrefix(r.URL.Path, "/dl/") && quota:
+			w.Write([]byte("<html>download limit reached</html>"))
 		case r.URL.Path == "/dl/ran.gz": // 2.5 s late, plus the ad block OpenSubtitles appends
 			w.Write(gz(srt(f.ts, -2.5) + "999\n00:49:00,000 --> 00:49:02,000\nAdvertise your product or brand here\n"))
 		case r.URL.Path == "/dl/clerks.gz":
@@ -216,6 +220,41 @@ func TestRunWritesSidecarsAndReconciles(t *testing.T) {
 	if n := f.requestCount(); n == before {
 		t.Error("Show was not searched again after retry_after")
 	}
+}
+
+// Catches: an unreachable provider (Subdl behind the home network's filter) deferring every unlucky title, so each
+// run downloads the same failed candidates again, instead of alerting and recording; and a spent download quota
+// recording titles that were never tried, instead of deferring them to the next run.
+func TestRunProviderTrouble(t *testing.T) {
+	f := newFixture(t)
+	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) }))
+	defer down.Close()
+	os.WriteFile(filepath.Join(f.dir, "subdl_api_key"), []byte("k\n"), 0o600)
+	f.st.subdlAPI = down.URL
+	f.quota = true
+	rep := f.run(t)
+	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "subdl unavailable") {
+		t.Errorf("alerts %q", rep.Alerts)
+	}
+	outcomes := map[string]string{}
+	rows, _ := f.h.Env.Store.DB().Query(`SELECT path, outcome FROM subtitles_titles`)
+	for rows.Next() {
+		var p, o string
+		rows.Scan(&p, &o)
+		outcomes[p] = o
+	}
+	rows.Close()
+	if outcomes[f.path(show)] != "no_candidates" {
+		t.Errorf("Show: %q, want no_candidates recorded despite Subdl being down", outcomes[f.path(show)])
+	}
+	if o, ok := outcomes[f.path(ran)]; ok {
+		t.Errorf("Ran recorded %q although its download was refused for quota", o)
+	}
+	f.mu.Lock()
+	f.quota = false
+	f.mu.Unlock()
+	f.run(t)
+	f.sidecar(t, ran)
 }
 
 // Catches an alass failure (a wrong flag, a broken binary) recorded quietly on every title instead of alerting.

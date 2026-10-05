@@ -216,7 +216,7 @@ func (p *pacer) do(ctx context.Context, hc *http.Client, req func() (*http.Reque
 		p.mu.Lock()
 		if p.parked != nil {
 			p.mu.Unlock()
-			return nil, fmt.Errorf("%w: %v", errParked, p.parked)
+			return nil, fmt.Errorf("%w: %w", errParked, p.parked)
 		}
 		wait := p.next.Sub(p.now())
 		p.next = p.now().Add(max(wait, 0) + p.gap)
@@ -266,7 +266,7 @@ func (p *pacer) do(ctx context.Context, hc *http.Client, req func() (*http.Reque
 		}
 	}
 	p.park(last)
-	return nil, fmt.Errorf("%w: %v", errParked, last)
+	return nil, fmt.Errorf("%w: %w", errParked, last)
 }
 
 type statusError struct{ code int }
