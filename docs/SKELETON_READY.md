@@ -48,6 +48,7 @@ raised before the error are kept.
 | `internal/plex` | `Prefs()` / `ReadPrefs(path)` (file, no API), `Sessions`, `GetJSON` (unwraps MediaContainer), `Do(method, path)`. Token read from Preferences.xml on every request and sent as a header. Use the API only where no file source exists |
 | `internal/jellyfin` | `GetJSON`, `PostJSON`, `Sessions(activeWithin)`, `MediaUpdated(paths...)`. Key read from a file on every request |
 | `internal/probe` | `Prober.Probe(ctx, path) (Info, error)`: ffprobe JSON → codec, profile, bit depth, HDR10/HLG/Dolby Vision + dv_profile, size, fps, bitrate, audio and subtitle tracks, duration. Cached in `probe_cache` keyed by (path, size, mtime_ns). `Parse(raw)` is pure, for tests |
+| `internal/watch` | who watched what, as projectionist's own record: `Add` an event (finished, stopped, state, rated) per person and item (`movie/tmdb-N`, `tv/tmdb-N/s01e02`, from `ItemsForPath`), `States` folds them, last writer wins. Fed by jfsync's hooks and imports; read it rather than asking an app |
 | `internal/library` | `ParseMovie(path)` / `ParseEpisode(path)`: identity (`{tmdb-N}`, `{imdb-ttN}`, `{tvdb-N}`), year, label, season, episode range, read from the naming scheme |
 | `internal/fsx` | `RenameNoReplace` (renameat2 RENAME_NOREPLACE; link+unlink fallback for files), `Clone` (FICLONE reflink, byte-copy fallback, never overwrites), `SyncDir` (one fsync per unit) |
 | `internal/obs` | `NewLogger` (UTC, key=value or JSON), `Metrics` (Prometheus text) |
