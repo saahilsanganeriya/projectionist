@@ -41,6 +41,32 @@ cache_ttl    = "24h"
 # every  = "15m"
 # window = "02:00-08:00"
 
+# Movies collections in Plex and Jellyfin: the owner's backed-up collections + the approved list + new arrivals.
+# Facts from the folder names and TMDB; the apps only receive writes. Never removes a member or a collection.
+[stages.collections]
+every           = "6h"
+movies_dir      = "/volume1/media/Movies"
+# The owner's 111 collections, frozen once from Plex's customizations export (a one-time migration; Plex is never
+# read for them again): config/collections.owner.json in this repo, and their posters copied once beside it.
+owner_file      = "/config/collections.owner.json"
+poster_dir      = "/config/collection-posters" # <ratingKey>.jpg
+approved_file   = "/config/collections.approved.json" # config/collections.approved.json in this repo
+plex_section    = 4
+sinks           = ["plex", "jellyfin"] # reconciled concurrently; a slow or down app never fails or holds up the run
+sink_budget     = "20m" # each app's share of a run; out of time, it triggers the next run, which carries on
+call_timeout    = "2m"  # each request, on this stage's own clients ([plex] and [jellyfin] timeouts stay short)
+# A director here gets a "zz<name>" collection once their third film is on disk (names as TMDB spells them).
+canon_directors = [
+  "Paul Greengrass", "Vishal Bhardwaj", "George Miller", "Robert Zemeckis", "Nicolas Winding Refn", "Hayao Miyazaki",
+  "Ang Lee", "Todd Haynes", "Lynne Ramsay", "Andrew Stanton", "Kathryn Bigelow", "The Wachowskis", "Joachim Trier",
+  "Steve McQueen", "Gus Van Sant", "Gaspar Noé", "Chloé Zhao", "Sean Baker", "Barry Jenkins", "David Lean",
+  "Roman Polanski", "David Cronenberg", "Edward Yang", "Alexander Payne", "Kenneth Lonergan", "Miloš Forman",
+  "Jacques Demy", "John Carpenter", "Peter Weir", "Robert Wise", "Elaine May", "Julia Ducournau", "Masaki Kobayashi",
+  "Pablo Larraín", "Satoshi Kon"
+]
+# only    = ["Scary Movie"] # reconcile just these collections (gate runs)
+# dry_run = true            # log every create/add/sort/poster instead of sending it
+
 # Keeps Plex and Jellyfin transcoding on the GPU; replaces scripts/gpu_guard.py (DSM task 8).
 [stages.gpu-guard]
 every           = "15m"
