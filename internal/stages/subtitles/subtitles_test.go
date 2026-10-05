@@ -10,13 +10,16 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"projectionist/internal/fake"
+	"projectionist/internal/probe"
 	"projectionist/internal/stage"
 )
 
@@ -168,8 +171,9 @@ func (f *fixture) requestCount() int {
 
 // Catches, end to end: a sidecar not written for each route (PGS fit, extraction, alass), the PGS fit not landing on
 // the captions or the ad block kept, an existing sidecar touched or its video probed, titles with English audio
-// served before the foreign one, Jellyfin not told, a rerun repeating any search, a title without candidates
-// searched again before retry_after, and the API's redirect followed (OpenSubtitles parked, an alert).
+// served before the foreign one, Jellyfin not told (the first sidecar at once, the rest at the run's end), a rerun
+// repeating any search, a title without candidates searched again before retry_after or a second miss not doubling
+// the wait, and the API's redirect followed (OpenSubtitles parked, an alert).
 func TestRunWritesSidecarsAndReconciles(t *testing.T) {
 	f := newFixture(t)
 	rep := f.run(t)
@@ -216,8 +220,13 @@ func TestRunWritesSidecarsAndReconciles(t *testing.T) {
 	if ms, ok := ev["ref_median_ms"].(float64); !ok || math.Abs(ms) > 210 {
 		t.Errorf("Ran event %s: want ref_median_ms within 210", fields)
 	}
-	if calls := f.h.Jellyfin.Calls("POST", "/Library/Media/Updated"); len(calls) != 1 || bytes.Count(calls[0].Body, []byte(`"Created"`)) != 3 {
-		t.Errorf("Jellyfin calls %v", calls)
+	pushes := f.h.Jellyfin.Calls("POST", "/Library/Media/Updated")
+	var told []byte
+	for _, c := range pushes {
+		told = append(told, c.Body...)
+	}
+	if len(pushes) != 2 || bytes.Count(pushes[0].Body, []byte(`"Created"`)) != 1 || bytes.Count(told, []byte(`"Created"`)) != 3 {
+		t.Errorf("Jellyfin told %s; want the first sidecar at once and the other two at the end", told)
 	}
 
 	before := f.requestCount()
@@ -230,11 +239,24 @@ func TestRunWritesSidecarsAndReconciles(t *testing.T) {
 	if n := f.requestCount(); n == before {
 		t.Error("Show was not searched again after retry_after")
 	}
+	before = f.requestCount()
+	f.h.Now = f.h.Now.Add(169 * time.Hour)
+	f.run(t)
+	if n := f.requestCount(); n != before {
+		t.Error("Show searched again a week after its second miss; want two weeks")
+	}
+	f.h.Now = f.h.Now.Add(168 * time.Hour)
+	f.run(t)
+	if n := f.requestCount(); n == before {
+		t.Error("Show not searched again two weeks after its second miss")
+	}
 }
 
 // Catches: an unreachable provider (Subdl behind the home network's filter) deferring every unlucky title, so each
-// run downloads the same failed candidates again, instead of alerting and recording; a spent download quota, or an
-// outage of every provider, recording titles that were never searched or tried (a week lost) instead of deferring.
+// run downloads the same failed candidates again, instead of alerting and recording; a spent download quota, an
+// outage of every provider, a refused search (403) or TMDB out (no token) recording titles that were never searched
+// or tried (a week lost, silently) instead of deferring with one alert; a refused search deferring its own title too
+// (a refusal of that title alone would then hold up every run).
 func TestRunProviderTrouble(t *testing.T) {
 	outcomes := func(f *fixture) map[string]string {
 		out := map[string]string{}
@@ -282,6 +304,22 @@ func TestRunProviderTrouble(t *testing.T) {
 	quota.mu.Unlock()
 	quota.run(t)
 	quota.sidecar(t, ran)
+
+	refuses := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(403) }))
+	defer refuses.Close()
+	refused := newFixture(t)
+	refused.st.openSubtitles = refuses.URL + "/search/"
+	rep = refused.run(t)
+	if got := outcomes(refused); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "HTTP 403") || len(got) != 2 || got[refused.path(ran)] != "error" {
+		t.Errorf("searches refused: alerts %q, recorded %v; want one alert, Ran recorded, Clerks and Show deferred", rep.Alerts, got)
+	}
+
+	noTMDB := newFixture(t)
+	os.Remove(filepath.Join(noTMDB.dir, "tmdb_read_token"))
+	rep = noTMDB.run(t)
+	if got := outcomes(noTMDB); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "TMDB") || len(got) != 1 {
+		t.Errorf("no TMDB token: alerts %q, recorded %v; want one alert and only Heat's extraction", rep.Alerts, got)
+	}
 }
 
 // Catches: a file-hash match labelled with this film thrown away because its timing could not be confirmed (the
@@ -297,14 +335,32 @@ func TestRunTrustsOwnHashMatch(t *testing.T) {
 	}
 }
 
-// Catches an alass failure (a wrong flag, a broken binary) recorded quietly on every title instead of alerting.
-func TestRunAlertsWhenAlassFails(t *testing.T) {
-	f := newFixture(t)
-	f.h.Script(t, "alass", "exit 1\n")
-	var rep stage.Report
-	f.st.Run(context.Background(), f.h.Env, &rep)
-	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "alass failed") {
-		t.Errorf("alerts %q", rep.Alerts)
+// Catches a missing or broken alass parking titles for a week, or failing quietly: missing, every title that needs it
+// waits; failing, the title it failed on is recorded (it may be that title's audio) and the titles behind it wait;
+// one alert either way.
+func TestRunWhenAlassBreaks(t *testing.T) {
+	outcome := func(f *fixture, rel string) string {
+		o := "deferred"
+		f.h.Env.Store.DB().QueryRow(`SELECT outcome FROM subtitles_titles WHERE path=?`, f.path(rel)).Scan(&o)
+		return o
+	}
+	missing := newFixture(t)
+	os.Remove(filepath.Join(missing.h.Env.FFmpeg.Dir, "alass"))
+	if rep := missing.run(t); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "alass not found") || outcome(missing, clerks) != "deferred" {
+		t.Errorf("alass missing: alerts %q, Clerks %s; want one alert and Clerks deferred", rep.Alerts, outcome(missing, clerks))
+	}
+
+	broken := newFixture(t)
+	alass := broken.h.Script(t, "alass", "exit 1\n")
+	if rep := broken.run(t); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "alass failed") || outcome(broken, clerks) != "no_reference" {
+		t.Errorf("alass failing: alerts %q, Clerks %s; want one alert and Clerks recorded", rep.Alerts, outcome(broken, clerks))
+	}
+	r := &run{env: broken.h.Env, opt: Options{Alass: alass}, rep: &stage.Report{}, alerted: map[string]bool{}}
+	next := &title{path: broken.path(clerks), info: probe.Info{Audio: []probe.Audio{{Index: 1}}}}
+	first, _ := r.reference(context.Background(), next)
+	second, _ := r.reference(context.Background(), next)
+	if first.deferred || !second.deferred {
+		t.Errorf("deferred %v, then %v; want the title after alass failed deferred", first.deferred, second.deferred)
 	}
 }
 
@@ -344,6 +400,86 @@ func TestRunWaitsWhileGuestsWatch(t *testing.T) {
 	mu.Unlock()
 	<-done
 	f.sidecar(t, ran)
+}
+
+// Catches ffmpeg or alass left running while a guest watches (a title may start while nobody watches, and an alass
+// decode runs for minutes): the helper's process group must be stopped, then continued once the guest leaves.
+func TestHelperStopsWhileGuestsWatch(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	dir := t.TempDir()
+	pidPipe, goPipe := filepath.Join(dir, "pid"), filepath.Join(dir, "go")
+	syscall.Mkfifo(pidPipe, 0o600)
+	syscall.Mkfifo(goPipe, 0o600)
+	helper := h.Script(t, "helper", `echo $$ > "`+pidPipe+`"; read x < "`+goPipe+`"; echo done`+"\n")
+	const nobody, guest = `<MediaContainer size="0"></MediaContainer>`,
+		`<MediaContainer size="1"><Video type="episode" title="Y"><User title="guest"/></Video></MediaContainer>`
+	var mu sync.Mutex
+	body, served := nobody, make(chan string, 1000)
+	h.Plex.HandleFunc("GET", "/status/sessions", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		b := body
+		mu.Unlock()
+		w.Write([]byte(b))
+		select {
+		case served <- b:
+		default:
+		}
+	})
+	out := make(chan string, 1)
+	go func() {
+		b, err := (&run{env: h.Env}).cmd(context.Background(), helper)
+		out <- fmt.Sprint(string(b), err)
+	}()
+	pid, _ := os.ReadFile(pidPipe)
+	state := func(b string) string { // after two polls answered b: the first one's signal is sent before the second
+		mu.Lock()
+		body = b
+		mu.Unlock()
+		for n := 0; n < 2; {
+			if <-served == b {
+				n++
+			}
+		}
+		st, _ := exec.Command("ps", "-o", "stat=", "-p", strings.TrimSpace(string(pid))).Output()
+		return string(st)
+	}
+	if st := state(guest); !strings.HasPrefix(st, "T") {
+		t.Errorf("helper state %q while a guest watches, want stopped (T)", st)
+	}
+	if st := state(nobody); strings.HasPrefix(st, "T") {
+		t.Errorf("helper state %q after the guest left, want running", st)
+	}
+	os.WriteFile(goPipe, []byte("go\n"), 0o600)
+	if got := <-out; got != "done\n<nil>" {
+		t.Errorf("helper returned %q", got)
+	}
+}
+
+// Catches a run stopped right after writing a sidecar (a deploy during a days-long backlog run) losing it: never
+// announced to Jellyfin by any later run, or missing from the history.
+func TestRunStoppedAfterAWrite(t *testing.T) {
+	f := newFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	f.h.Jellyfin.HandleFunc("POST", "/Library/Media/Updated", func(w http.ResponseWriter, _ *http.Request) {
+		cancel()
+		w.WriteHeader(500)
+	})
+	f.st.Run(ctx, f.h.Env, &stage.Report{})
+	var o string
+	f.h.Env.Store.DB().QueryRow(`SELECT outcome FROM subtitles_titles WHERE path=?`, f.path(ran)).Scan(&o)
+	if o != "retimed" {
+		t.Errorf("Ran's sidecar, written as the run stopped, recorded as %q", o)
+	}
+	n := len(f.h.Jellyfin.Calls("POST", "/Library/Media/Updated"))
+	f.h.Jellyfin.Handle("POST", "/Library/Media/Updated", 204, "")
+	f.run(t)
+	var told []byte
+	for _, c := range f.h.Jellyfin.Calls("POST", "/Library/Media/Updated")[n:] {
+		told = append(told, c.Body...)
+	}
+	if !bytes.Contains(told, []byte(filepath.Base(strings.TrimSuffix(ran, ".mkv"))+".en.srt")) {
+		t.Errorf("the next run told Jellyfin %s; want Ran's sidecar too", told)
+	}
 }
 
 // Catches an existing subtitle overwritten: .en.srt taken means .eng.srt, both taken means nothing written.

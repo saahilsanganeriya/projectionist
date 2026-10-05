@@ -4,7 +4,8 @@ package subtitles
 // OpenSubtitles.com and Subdl, each only when its API key file exists. Ranking, the file hash, the release name and the ad
 // stripping are ports of subfetch2.py. Every request goes through a pacer: one request per second per provider,
 // exponential backoff on 429/5xx/network errors, and a circuit breaker that parks the provider for the rest of the
-// run once its download quota is spent or it keeps failing, so the remaining titles wait for the next run.
+// run once its download quota is spent, it keeps failing, or it refuses a search, so the remaining titles wait for
+// the next run.
 
 import (
 	"archive/zip"
@@ -62,6 +63,7 @@ type Provider interface {
 	Name() string
 	Search(ctx context.Context, q Query) ([]Candidate, error)
 	Download(ctx context.Context, c Candidate) (string, error) // decoded text
+	pacer() *pacer
 }
 
 var (
@@ -315,7 +317,8 @@ type legacy struct {
 	pace      *pacer
 }
 
-func (o *legacy) Name() string { return "opensubtitles" }
+func (o *legacy) Name() string  { return "opensubtitles" }
+func (o *legacy) pacer() *pacer { return o.pace }
 
 func (o *legacy) get(ctx context.Context, link string) ([]byte, error) {
 	return o.pace.do(ctx, o.hc, func() (*http.Request, error) {
@@ -440,7 +443,8 @@ type dotCom struct {
 	pace      *pacer
 }
 
-func (o *dotCom) Name() string { return "opensubtitles-com" }
+func (o *dotCom) Name() string  { return "opensubtitles-com" }
+func (o *dotCom) pacer() *pacer { return o.pace }
 
 func (o *dotCom) call(ctx context.Context, method, path string, payload any, out any) error {
 	key, err := os.ReadFile(o.keyFile)
@@ -557,7 +561,8 @@ type subdl struct {
 	pace    *pacer
 }
 
-func (o *subdl) Name() string { return "subdl" }
+func (o *subdl) Name() string  { return "subdl" }
+func (o *subdl) pacer() *pacer { return o.pace }
 
 // Search asks by TMDB id (else IMDb id, else the show's name); an episode's results must name that episode.
 func (o *subdl) Search(ctx context.Context, q Query) ([]Candidate, error) {
@@ -649,11 +654,13 @@ type tmdb struct {
 	base      string // .../3
 	tokenFile string // v4 read-access token, sent as a bearer header (never in a URL)
 	hc        *http.Client
+	pace      *pacer
 	mu        sync.Mutex
 	cache     map[string]int
 }
 
-// imdb returns the IMDb number of a TMDB movie or show ("movie" | "tv"), 0 when TMDB has none or no token exists.
+// imdb returns the IMDb number of a TMDB movie or show ("movie" | "tv"), 0 when TMDB has none. Any other answer, a
+// missing token included, is an error: the caller defers the title rather than search it without the id.
 func (t *tmdb) imdb(ctx context.Context, kind string, id string) (int, error) {
 	key := kind + "/" + id
 	t.mu.Lock()
@@ -663,32 +670,27 @@ func (t *tmdb) imdb(ctx context.Context, kind string, id string) (int, error) {
 		return n, nil
 	}
 	token, err := os.ReadFile(t.tokenFile)
-	if errors.Is(err, os.ErrNotExist) {
-		return 0, nil
-	}
 	if err != nil {
 		return 0, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, t.base+"/"+key+"/external_ids", nil)
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
-	req.Header.Set("Accept", "application/json")
-	resp, err := t.hc.Do(req)
-	if err != nil {
-		return 0, fmt.Errorf("tmdb %s: %w", key, err)
-	}
-	defer resp.Body.Close()
+	body, err := t.pace.do(ctx, t.hc, func() (*http.Request, error) {
+		req, err := http.NewRequest(http.MethodGet, t.base+"/"+key+"/external_ids", nil)
+		if err == nil {
+			req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(string(token)))
+			req.Header.Set("Accept", "application/json")
+		}
+		return req, err
+	})
 	var ids struct {
 		IMDb string `json:"imdb_id"`
 	}
+	var se *statusError
 	switch {
-	case resp.StatusCode == http.StatusNotFound:
-	case resp.StatusCode/100 != 2:
-		return 0, fmt.Errorf("tmdb %s: HTTP %d", key, resp.StatusCode)
+	case errors.As(err, &se) && se.code == http.StatusNotFound:
+	case err != nil:
+		return 0, fmt.Errorf("tmdb %s: %w", key, err)
 	default:
-		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&ids); err != nil {
+		if err := json.Unmarshal(body, &ids); err != nil {
 			return 0, fmt.Errorf("tmdb %s: %w", key, err)
 		}
 	}

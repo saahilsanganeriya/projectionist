@@ -9,9 +9,11 @@
 //	accepted                           -> <video>.en.srt, else .eng.srt: created O_EXCL, never overwritten
 //
 // Titles without English audio go first, then those with an English image track. Three titles at a time, at idle CPU
-// and I/O priority, each waiting while anyone but the owner is watching. Every attempt is an event; a title that got
-// no subtitle is tried again only after retry_after. Each run also rewrites the sub_stats TSV (the rename planner's
-// input). Jellyfin hears of each new sidecar; Plex watches the disk.
+// and I/O priority; while anyone but the owner is watching no title starts and every running ffmpeg/alass is stopped.
+// Every attempt is an event; a title that got no subtitle is tried again after retry_after, then after 2, 4 and 8
+// times it. A title whose search could not run (TMDB, every provider, or alass out) is deferred, not recorded, and an
+// alert names the cause. Each run also refreshes sub_stats.py's TSV over the whole library. Jellyfin hears of each new
+// sidecar through a queue kept in the store; Plex watches the disk.
 package subtitles
 
 import (
@@ -110,10 +112,14 @@ type run struct {
 	providers []Provider
 	tmdb      *tmdb
 
-	mu      sync.Mutex
-	rep     *stage.Report
-	written []string
-	alerted map[string]bool
+	mu        sync.Mutex
+	rep       *stage.Report
+	written   int
+	alerted   map[string]bool
+	alassDown bool // alass failed on a title this run: the titles behind it wait for the next run
+
+	jf     sync.Mutex // the Jellyfin queue
+	pushed time.Time
 }
 
 func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
@@ -154,8 +160,8 @@ feed:
 	}
 	close(queue)
 	wg.Wait()
-	r.tellJellyfin(ctx)
-	rep.Summary = fmt.Sprintf("%d sidecar(s) written; %d title(s) lacked one, %d were due", len(r.written), len(titles), len(due))
+	r.tellJellyfin(ctx, "", true)
+	rep.Summary = fmt.Sprintf("%d sidecar(s) written; %d title(s) lacked one, %d were due", r.written, len(titles), len(due))
 	return ctx.Err()
 }
 
@@ -175,7 +181,7 @@ func (s Stage) newRun(env *stage.Env, opt Options, rep *stage.Report) *run {
 	}
 	r := &run{env: env, opt: opt, rep: rep, alerted: map[string]bool{},
 		tmdb: &tmdb{base: or(s.tmdbAPI, "https://api.themoviedb.org/3"), tokenFile: filepath.Join(opt.SecretsDir, "tmdb_read_token"),
-			hc: &http.Client{Timeout: 20 * time.Second}, cache: map[string]int{}}}
+			hc: &http.Client{Timeout: 20 * time.Second}, pace: newPacer(), cache: map[string]int{}}}
 	r.providers = []Provider{&legacy{base: or(s.openSubtitles, "https://rest.opensubtitles.org/search/"), userAgent: userAgent, hc: noRedirect, pace: newPacer()}}
 	if key := filepath.Join(opt.SecretsDir, "opensubtitles_api_key"); fileExists(key) {
 		r.providers = append(r.providers, &dotCom{base: or(s.openSubtitlesCom, "https://api.opensubtitles.com/api/v1"), keyFile: key,
@@ -362,23 +368,25 @@ func (r *run) mirror(root, dir string) string {
 func english(lang string) bool { return lang == "en" || lang == "eng" }
 
 func (r *run) plan(ctx context.Context, titles []*title) ([]*title, error) {
-	last := map[string]time.Time{}
-	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT path, last_try FROM subtitles_titles`)
+	next := map[string]time.Time{}
+	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT path, last_try, tries FROM subtitles_titles`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var p, at string
-		if err := rows.Scan(&p, &at); err != nil {
+		var tries int
+		if err := rows.Scan(&p, &at, &tries); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		last[p], _ = time.Parse(store.TimeFormat, at)
+		last, _ := time.Parse(store.TimeFormat, at)
+		next[p] = last.Add(r.opt.RetryAfter << min(tries-1, 3)) // each miss doubles the wait, up to 8x retry_after
 	}
 	rows.Close()
 	var due []*title
 	for _, t := range titles {
-		if at, ok := last[t.path]; ok && r.env.Now().Before(at.Add(r.opt.RetryAfter)) {
+		if at, ok := next[t.path]; ok && r.env.Now().Before(at) {
 			continue
 		}
 		info, err := r.env.Probe.Probe(ctx, t.path)
@@ -449,6 +457,7 @@ type outcome struct {
 	result string
 	detail string
 	fields map[string]any
+	wrote  bool
 }
 
 func (r *run) process(ctx context.Context, t *title) {
@@ -456,9 +465,10 @@ func (r *run) process(ctx context.Context, t *title) {
 		return
 	}
 	o := r.fetch(ctx, t)
-	if ctx.Err() != nil {
+	if ctx.Err() != nil && !o.wrote {
 		return // shutting down mid-title: nothing was written, the next run starts it again
 	}
+	ctx = context.WithoutCancel(ctx) // a sidecar written as the run stops is still recorded
 	r.count(o.result)
 	if o.result == "deferred" {
 		r.env.Log.Info("title deferred", "event", "subtitle_deferred", "item", t.path, "detail", o.detail)
@@ -478,33 +488,52 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 		data, err := r.cmd(ctx, r.env.FFmpeg.FFmpegPath(), "-nostdin", "-hide_banner", "-loglevel", "error", "-i", t.path,
 			"-map", fmt.Sprintf("0:%d", tr.Index), "-c:s", "srt", "-f", "srt", "-")
 		if err == nil && sane(cues(string(data)), duration) {
-			return r.write(t, data, "extracted", map[string]any{"stream": tr.Index, "codec": tr.Codec})
+			return r.write(ctx, t, data, "extracted", map[string]any{"stream": tr.Index, "codec": tr.Codec})
 		}
 		r.env.Log.Info("embedded track not usable", "event", "extract_rejected", "item", t.path, "stream", tr.Index, "err", err)
 	}
 
-	q, err := r.query(ctx, t)
+	q, err := r.query(t)
 	if err != nil {
 		return outcome{result: "error", detail: err.Error()}
 	}
-	// A provider that cannot be searched raises its alert, and the others' candidates decide: the title is recorded,
-	// so a provider blocked for good does not make every run retry the same titles. With no provider searchable (an
-	// outage) the title is deferred, as it is when a download is refused for quota (the quota resets daily).
+	if t.kind == "movie" || t.kind == "tv" {
+		// OpenSubtitles finds nearly every subtitle by the IMDb id: without TMDB the title waits for it, rather than
+		// being searched by its hash alone and recorded as having none.
+		if q.IMDb, err = r.tmdb.imdb(ctx, t.kind, t.id); err != nil {
+			if ctx.Err() == nil {
+				r.alertOnce("tmdb", "TMDB lookups failing, titles wait for them: %v", err)
+			}
+			return outcome{result: "deferred", detail: err.Error()}
+		}
+	}
+	// A provider that cannot be searched (parked, or it refuses this search: a status no retry changes, or an answer
+	// that is not one) is out for the run with one alert, and the others' candidates decide: the title is recorded, so
+	// a provider blocked for good does not make every run retry the same titles. With no provider searched the title
+	// is deferred (an outage, or the day's quota), except the one whose search was refused: it is recorded, so a
+	// refusal of that title alone cannot hold up every run.
 	var cands []Candidate
-	searched := 0
+	searched, refusal := 0, ""
 	for _, p := range r.providers {
 		found, err := p.Search(ctx, q)
-		switch {
-		case errors.Is(err, errParked):
-			r.alertParked(p, err)
+		if err != nil {
+			if ctx.Err() != nil {
+				return outcome{result: "deferred"}
+			}
+			if !errors.Is(err, errParked) {
+				p.pacer().park(err)
+				refusal = p.Name() + " search: " + err.Error()
+			}
+			r.alertParked(p, t.path, err)
 			continue
-		case err != nil:
-			return outcome{result: "error", detail: p.Name() + " search: " + err.Error()}
 		}
 		searched++
 		cands = append(cands, found...)
 	}
-	if searched == 0 {
+	switch {
+	case searched == 0 && refusal != "":
+		return outcome{result: "error", detail: refusal}
+	case searched == 0:
 		return outcome{result: "deferred", detail: "no provider could be searched this run"}
 	}
 	incomplete := false
@@ -525,6 +554,9 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	}
 	defer ref.cleanup()
 	if ref.label == "" {
+		if ref.deferred {
+			return outcome{result: "deferred", detail: ref.why}
+		}
 		return outcome{result: "no_reference", detail: ref.why}
 	}
 	for _, c := range cands[:min(len(cands), maxTries)] {
@@ -532,11 +564,11 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 		txt, err := c.provider.Download(ctx, c)
 		if errors.Is(err, errParked) {
 			incomplete = true
-			r.alertParked(c.provider, err)
+			r.alertParked(c.provider, t.path, err)
 			continue
 		}
 		if err != nil {
-			r.event(ctx, t.path, outcome{"download_failed", err.Error(), attempt})
+			r.event(ctx, t.path, outcome{result: "download_failed", detail: err.Error(), fields: attempt})
 			continue
 		}
 		txt = stripAds(txt)
@@ -559,28 +591,23 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 		if ref.starts != nil {
 			attempt["ref_median_ms"] = math.Round(medianOffsetMS(spans, ref.starts))
 		}
-		return r.write(t, []byte(out), result, attempt)
+		return r.write(ctx, t, []byte(out), result, attempt)
 	}
 	return deferOr(outcome{result: "no_aligned_candidate", detail: fmt.Sprintf("%d tried", min(len(cands), maxTries))})
 }
 
-// query gathers what the providers search by: the file hash, and the IMDb id from the folder or from TMDB.
-func (r *run) query(ctx context.Context, t *title) (Query, error) {
+// query gathers what the providers search by from the file and its names; fetch adds the IMDb id from TMDB.
+func (r *run) query(t *title) (Query, error) {
 	hash, size, err := openSubtitlesHash(t.path)
 	if err != nil {
 		return Query{}, err
 	}
 	q := Query{Size: size, Hash: hash, Name: t.show, Show: t.show != "", Season: t.season, Episode: t.episode}
-	if t.kind == "movie" || t.kind == "tv" {
-		q.TMDB = t.id
-	}
 	switch t.kind {
 	case "imdb":
 		q.IMDb, _ = strconv.Atoi(strings.TrimPrefix(t.id, "tt"))
 	case "movie", "tv":
-		if q.IMDb, err = r.tmdb.imdb(ctx, t.kind, t.id); err != nil {
-			r.env.Log.Warn("tmdb lookup failed", "event", "tmdb_error", "item", t.path, "err", err) // hash and name still search
-		}
+		q.TMDB = t.id
 	}
 	return q, nil
 }
@@ -588,13 +615,14 @@ func (r *run) query(ctx context.Context, t *title) (Query, error) {
 // reference is the timing a candidate must line up with: an English image track's caption starts, else alass's
 // speech segments of the default audio track.
 type reference struct {
-	label  string // "pgs" | "alass" | "" (none)
-	why    string
-	bits   bitset
-	starts []float64
-	dir    string // alass work files
-	speech string // alass's speech segments as an SRT
-	talk   bitset // the same segments as bins, for the cross-check
+	label    string // "pgs" | "alass" | "" (none)
+	why      string
+	deferred bool // none because alass is out, not because of the title
+	bits     bitset
+	starts   []float64
+	dir      string // alass work files
+	speech   string // alass's speech segments as an SRT
+	talk     bitset // the same segments as bins, for the cross-check
 }
 
 func (ref reference) cleanup() {
@@ -621,8 +649,14 @@ func (r *run) reference(ctx context.Context, t *title) (reference, error) {
 		return reference{why: "no usable image track and no audio"}, nil
 	}
 	if !fileExists(r.opt.Alass) {
-		r.alertOnce("alass", "alass not found at %s: titles without an English image track get no subtitle", r.opt.Alass)
-		return reference{why: "alass missing"}, nil
+		r.alertOnce("alass", "alass not found at %s: titles without an English image track wait for it", r.opt.Alass)
+		return reference{why: "alass missing", deferred: true}, nil
+	}
+	r.mu.Lock()
+	down := r.alassDown
+	r.mu.Unlock()
+	if down {
+		return reference{why: "alass failed on another title this run", deferred: true}, nil
 	}
 	dir, err := os.MkdirTemp("", "subtitles-")
 	if err != nil {
@@ -642,8 +676,13 @@ func (r *run) reference(ctx context.Context, t *title) (reference, error) {
 			ref.cleanup()
 			return reference{}, ctx.Err()
 		}
+		// This title's audio or alass itself: the title is recorded, and the titles behind it wait for the next run
+		// rather than each fail the same way and lose a week.
+		r.mu.Lock()
+		r.alassDown = true
+		r.mu.Unlock()
 		ref.label, ref.why = "", "alass could not read the audio: "+err.Error()
-		r.alertOnce("alass-failed", "alass failed (titles without an English image track get no subtitle): %v", err)
+		r.alertOnce("alass-failed", "alass failed (titles without an English image track wait for the next run): %v", err)
 		return ref, nil
 	}
 	raw, err := os.ReadFile(ref.speech)
@@ -742,7 +781,7 @@ func shifts(before, after []span, ratio float64) (median float64, agree float64,
 }
 
 // write creates the sidecar and records the decision; a test run writes under output_dir instead.
-func (r *run) write(t *title, data []byte, result string, fields map[string]any) outcome {
+func (r *run) write(ctx context.Context, t *title, data []byte, result string, fields map[string]any) outcome {
 	dir := filepath.Dir(t.path)
 	if r.opt.OutputDir != "" {
 		dir = r.mirror(t.root, dir)
@@ -760,10 +799,11 @@ func (r *run) write(t *title, data []byte, result string, fields map[string]any)
 	}
 	fields["sidecar"] = filepath.Base(dest)
 	r.mu.Lock()
-	r.written = append(r.written, dest)
+	r.written++
 	r.mu.Unlock()
 	r.env.Log.Info("subtitle written", "event", "subtitle_written", "item", t.path, "result", result, "sidecar", filepath.Base(dest))
-	return outcome{result: result, detail: filepath.Base(dest), fields: fields}
+	r.tellJellyfin(ctx, dest, false)
+	return outcome{result: result, detail: filepath.Base(dest), fields: fields, wrote: true}
 }
 
 // writeSidecar creates base.en.srt, else base.eng.srt, never replacing a file; it returns "" when both exist, and the
@@ -799,7 +839,8 @@ func writeSidecar(base string, data []byte) (string, error) {
 // ---- side effects shared by the workers ----
 
 // cmd runs a helper at idle CPU and I/O priority in its own process group (so alass's ffmpeg is idle too and dies
-// with it) and returns its stdout.
+// with it) and returns its stdout. The group is stopped while anyone but the owner is watching (an unknown count
+// counts as watching), checked every viewer-gate poll, and continued once they stop.
 func (r *run) cmd(ctx context.Context, bin string, args ...string) ([]byte, error) {
 	c := exec.CommandContext(ctx, bin, args...)
 	c.Env = append(os.Environ(), "ALASS_FFMPEG_PATH="+r.env.FFmpeg.FFmpegPath(), "ALASS_FFPROBE_PATH="+r.env.FFmpeg.FFprobePath())
@@ -811,7 +852,29 @@ func (r *run) cmd(ctx context.Context, bin string, args ...string) ([]byte, erro
 		return nil, err
 	}
 	idle(c.Process.Pid)
-	if err := c.Wait(); err != nil {
+	done := make(chan error, 1)
+	go func() { done <- c.Wait() }()
+	tick := time.NewTicker(r.env.Viewers.Poll)
+	defer tick.Stop()
+	var err error
+	for paused, running := false, true; running; {
+		select {
+		case err = <-done:
+			running = false
+		case <-tick.C:
+			others, cerr := r.env.Viewers.Count(ctx)
+			if busy := cerr != nil || others > 0; busy != paused {
+				sig := syscall.SIGCONT
+				if busy {
+					sig = syscall.SIGSTOP
+				}
+				syscall.Kill(-c.Process.Pid, sig)
+				paused = busy
+				r.env.Log.Info("helper paused for viewers", "event", "subtitle_pause", "bin", filepath.Base(bin), "paused", paused, "others", others, "err", cerr)
+			}
+		}
+	}
+	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if len(msg) > 300 {
 			msg = msg[len(msg)-300:]
@@ -836,13 +899,14 @@ func (r *run) alertOnce(key, format string, args ...any) {
 	}
 }
 
-// alertParked raises an alert when a provider kept failing; a spent download quota is routine and only logged.
-func (r *run) alertParked(p Provider, err error) {
+// alertParked raises an alert when a provider kept failing or refused a search; a spent download quota is routine
+// and only logged.
+func (r *run) alertParked(p Provider, item string, err error) {
 	if errors.Is(err, errQuota) {
 		r.env.Log.Info("provider quota spent", "event", "provider_parked", "provider", p.Name())
 		return
 	}
-	r.alertOnce(p.Name(), "%s unavailable for the rest of the run: %v", p.Name(), err)
+	r.alertOnce(p.Name(), "%s unavailable for the rest of the run (at %s): %v", p.Name(), item, err)
 }
 
 // event records one attempt or decision in the history (the old log2.csv row).
@@ -860,25 +924,36 @@ func (r *run) event(ctx context.Context, path string, o outcome) {
 	r.env.Log.Info("subtitle "+o.result, "event", "subtitle_attempt", "item", path, "result", o.result, "detail", o.detail)
 }
 
-// tellJellyfin announces this run's sidecars plus any a failed earlier push left queued; Plex watches the disk.
-func (r *run) tellJellyfin(ctx context.Context) {
+const pushEvery = 15 * time.Minute // a backlog run lasts days: Jellyfin hears of its sidecars at least this often
+
+// tellJellyfin queues a new sidecar (path set) in the store at once, so a run stopped early loses none, and pushes the
+// queue when forced (the end of a run) or when the last push is pushEvery old. Plex watches the disk.
+func (r *run) tellJellyfin(ctx context.Context, path string, force bool) {
 	if r.opt.OutputDir != "" {
 		return
 	}
+	r.jf.Lock()
+	defer r.jf.Unlock()
+	keep := context.WithoutCancel(ctx) // a sidecar written as the run stops still joins the queue
 	var pending []string
-	if _, err := r.env.Store.GetJSON(ctx, name, "jellyfin_pending", &pending); err != nil {
-		r.env.Log.Warn("jellyfin queue unreadable", "event", "store_error", "err", err)
+	if _, err := r.env.Store.GetJSON(keep, name, "jellyfin_pending", &pending); err != nil {
+		r.env.Log.Error("jellyfin queue unreadable", "event", "store_error", "err", err)
 	}
-	pending = append(pending, r.written...)
+	if path != "" {
+		pending = append(pending, path)
+	}
 	if len(pending) == 0 {
 		return
 	}
-	if err := r.env.Jellyfin.MediaUpdated(ctx, pending...); err != nil {
-		r.env.Log.Warn("jellyfin not told; queued for the next run", "event", "jellyfin_error", "files", len(pending), "err", err)
-	} else {
-		pending = nil
+	if ctx.Err() == nil && (force || r.env.Now().Sub(r.pushed) >= pushEvery) {
+		r.pushed = r.env.Now()
+		if err := r.env.Jellyfin.MediaUpdated(ctx, pending...); err != nil {
+			r.env.Log.Warn("jellyfin not told; kept queued", "event", "jellyfin_error", "files", len(pending), "err", err)
+		} else {
+			pending = nil
+		}
 	}
-	if err := r.env.Store.PutJSON(ctx, name, "jellyfin_pending", pending); err != nil {
-		r.env.Log.Warn("jellyfin queue not saved", "event", "store_error", "err", err)
+	if err := r.env.Store.PutJSON(keep, name, "jellyfin_pending", pending); err != nil {
+		r.env.Log.Error("jellyfin queue not saved", "event", "store_error", "err", err)
 	}
 }
