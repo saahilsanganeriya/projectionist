@@ -134,6 +134,7 @@ type video struct {
 	probed          bool
 	problem         string // why it is unreadable; "" when readable
 	embeddedEnglish bool
+	killed          bool  // ffprobe was SIGKILLed: its time limit, or the OOM killer; see countKills
 	fatal           error // not ffprobe's verdict: a store or file-system failure that must fail the run
 }
 
@@ -511,6 +512,7 @@ func (v *video) read(info probe.Info, err error) {
 	case !errors.As(err, &exitErr) || exitErr.ExitCode() == 126 || exitErr.ExitCode() == 127:
 		v.fatal = err // ffprobe could not start, or the probe cache failed: no file's fault, so fail the run
 	case exitErr.Sys().(syscall.WaitStatus).Signal() == syscall.SIGKILL:
+		v.killed = true
 	default:
 		v.probed, v.problem = true, ffprobeReason(err, v.path)
 	}
@@ -526,6 +528,33 @@ func ffprobeReason(err error, path string) string {
 		msg = msg[i+len(path)+2:]
 	}
 	return msg
+}
+
+// killLimit is how many probes in a row ffprobe may be killed on before the video is filed as unreadable. Until then
+// it stays unprobed, and an unprobed video holds back the first baseline and freezes the probe-bound counts, so one
+// file that always outlasts the time limit would otherwise switch growth alerts off for good.
+const killLimit = 3
+
+// countKills carries each video's run of killed probes over from the last audit (only a verdict ends it; a run that
+// did not probe it keeps it) and files a video whose run reached killLimit as unreadable. It returns the runs to keep.
+func countKills(videos []*video, last map[string]int) map[string]int {
+	kills := map[string]int{}
+	for _, v := range videos {
+		n := last[v.path]
+		if v.killed {
+			n++
+		} else if v.probed {
+			continue
+		}
+		if n == 0 {
+			continue
+		}
+		kills[v.path] = n
+		if n >= killLimit {
+			v.probed, v.problem = true, fmt.Sprintf("ffprobe was killed on %d probes in a row (time limit or out of memory)", n)
+		}
+	}
+	return kills
 }
 
 const hashPrefix = 4 << 20
@@ -637,6 +666,10 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if err != nil {
 		return err
 	}
+	var lastKills map[string]int // video path -> probes in a row ffprobe was killed on
+	if _, err := env.Store.GetJSON(ctx, name, "killed", &lastKills); err != nil {
+		return err
+	}
 	started := env.Now()
 	s := newScan(root, started.Add(-opt.Settle))
 	for _, lib := range []string{"Movies", "TV"} {
@@ -645,6 +678,9 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		}
 	}
 	if err := probeAll(ctx, env, opt.ProbeWorkers, s.videos); err != nil {
+		return err
+	}
+	if err := env.Store.PutJSON(ctx, name, "killed", countKills(s.videos, lastKills)); err != nil {
 		return err
 	}
 	unsettled, notProbed := 0, 0

@@ -330,6 +330,29 @@ func TestNoVerdictIsNotUnreadable(t *testing.T) {
 	}
 }
 
+// Catches: a video whose ffprobe is killed on every run (one that always outlasts the time limit, or meets the OOM
+// killer) staying unprobed for good, which keeps a fresh state from ever taking its first baseline: growth alerts
+// off, silently.
+func TestAlwaysKilledProbeIsUnreadable(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	root := t.TempDir()
+	h.SetOptions(`root = "` + root + `"`)
+	fakeProbe(t, h)
+	ran := "Movies/Ran (1985) {tmdb-11645}/Ran (1985) {tmdb-11645}"
+	put(t, root, ran+".mkv", "ffprobe killed")
+	os.Mkdir(filepath.Join(root, "TV"), 0o755)
+	for i := 1; i <= killLimit; i++ {
+		rep := run(t, h)
+		if want := map[bool]int{true: 1}[i == killLimit]; rep.Counts[unreadable] != want || rep.Counts["not_probed"] != 1-want {
+			t.Fatalf("run %d: counts = %v, want unreadable_video = %d", i, rep.Counts, want)
+		}
+	}
+	put(t, root, ran+".nfo", "1")
+	if rep := run(t, h); len(rep.Alerts) != 1 {
+		t.Fatalf("after the video was judged, a new stray file raised alerts %q, want one", rep.Alerts)
+	}
+}
+
 // Catches: an entry the renamer moves while a run reads the library turning into a false finding or alert: a moved
 // video's subtitle credited to the video listed before it, or filed as an orphan; a panic when it is the first video
 // of the walk; and a run that missed it saved as the baseline, so its return alerts. The move comes between a folder's
