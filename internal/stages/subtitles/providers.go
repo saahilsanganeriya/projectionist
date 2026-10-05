@@ -103,7 +103,7 @@ var (
 	tokenRe      = regexp.MustCompile(`[a-z0-9]+`)
 	sourceTokens = []string{"bluray", "remux", "web", "webrip", "hdtv", "dvdrip", "amzn", "nf", "dsnp", "hmax", "atvp"}
 	originalRe   = regexp.MustCompile(`(?m)^Original (?:name|folder):` + pySpace + `*(.+?)` + pySpace + `*$`)
-	adBlockRe    = regexp.MustCompile(`(?i)opensubtitles|advertise your product`)
+	adBlockRe    = regexp.MustCompile(`(?i)opensubtitles|advertise your product|osdb\.link`) // osdb.link: OpenSubtitles' rotating ad
 	blankLineRe  = regexp.MustCompile(`\n` + pySpace + `*\n`)
 )
 

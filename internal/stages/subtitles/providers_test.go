@@ -40,7 +40,8 @@ func TestOpenSubtitlesHash(t *testing.T) {
 }
 
 // Catches a ranking that differs from subfetch2.py's rank(): hash match first, release group from the .details
-// names, the hearing-impaired penalty, source tags and popularity. Wants are the Python's scores.
+// names, the hearing-impaired penalty, source tags and popularity (wants are the Python's scores); and an ad block
+// kept, including the osdb.link ad the Python misses (it ran a real candidate past the film's end).
 func TestRank(t *testing.T) {
 	dir := t.TempDir()
 	video := filepath.Join(dir, "Heat (1995) {tmdb-949}.mkv")
@@ -63,7 +64,8 @@ func TestRank(t *testing.T) {
 			}
 		}
 	}
-	if got := stripAds("1\r\n00:00:01,000 --> 00:00:02,000\r\nHello\r\n\r\n2\r\n00:00:03,000 --> 00:00:04,000\r\nSupport us at OpenSubtitles.org\r\n \r\n3\r\n00:00:05,000 --> 00:00:06,000\r\nBye\r\n\r\n"); got != "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n3\n00:00:05,000 --> 00:00:06,000\nBye\n" {
+	if got := stripAds("1\r\n00:00:01,000 --> 00:00:02,000\r\nHello\r\n\r\n2\r\n00:00:03,000 --> 00:00:04,000\r\nSupport us at OpenSubtitles.org\r\n \r\n3\r\n00:00:05,000 --> 00:00:06,000\r\nBye\r\n\r\n" +
+		"1071\r\n01:37:31,305 --> 01:38:31,494\r\nWatch Online Movies and Series for FREE\r\nwww.osdb.link/lm\r\n"); got != "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n3\n00:00:05,000 --> 00:00:06,000\nBye\n" {
 		t.Errorf("stripAds = %q", got)
 	}
 }
