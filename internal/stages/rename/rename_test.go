@@ -248,18 +248,21 @@ func TestProblemBlocksOnlyItsFolder(t *testing.T) {
 	}
 }
 
-// Catches: moving files or sweeping a shell while a guest is watching (the owner's own viewing must not block), and
-// moving a folder that is still arriving (written to within the quiet window).
+// Catches: moving files or sweeping a shell while a guest is watching, or while nobody can tell (Plex not answering
+// counts as watching; the owner's own viewing must not block), and moving a folder that is still arriving (written
+// to within the quiet window).
 func TestRunWaitsForViewersAndArrivals(t *testing.T) {
 	cases := []struct {
 		name         string
+		status       int
 		sessions     string
 		touch        string // a file whose mtime is pushed inside the quiet window
 		moved, swept bool
 	}{
-		{"guest watching", `<MediaContainer size="1"><Video><User title="roger"/></Video></MediaContainer>`, "", false, false},
-		{"owner watching", `<MediaContainer size="1"><Video><User title="saahil"/></Video></MediaContainer>`, "", true, true},
-		{"still arriving", `<MediaContainer size="0"></MediaContainer>`, "TV/Show.S01.1080p.WEB-GRP/Show.S01E02.1080p.WEB-GRP.mkv", false, true},
+		{"guest watching", 200, `<MediaContainer size="1"><Video><User title="roger"/></Video></MediaContainer>`, "", false, false},
+		{"plex not answering", 503, "", "", false, false},
+		{"owner watching", 200, `<MediaContainer size="1"><Video><User title="saahil"/></Video></MediaContainer>`, "", true, true},
+		{"still arriving", 200, `<MediaContainer size="0"></MediaContainer>`, "TV/Show.S01.1080p.WEB-GRP/Show.S01E02.1080p.WEB-GRP.mkv", false, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -267,7 +270,7 @@ func TestRunWaitsForViewersAndArrivals(t *testing.T) {
 			if c.touch != "" { // the walk sees the change within quiet of the (fake) clock
 				os.Chtimes(filepath.Join(l.root, c.touch), l.h.Now.Add(-time.Minute), l.h.Now.Add(-time.Minute))
 			}
-			l.h.Plex.Handle("GET", "/status/sessions", 200, c.sessions)
+			l.h.Plex.Handle("GET", "/status/sessions", c.status, c.sessions)
 			l.run(t)
 			moved := lexists(filepath.Join(l.root, "TV/Show (2019) {tmdb-77}/Season 01/Show (2019) - S01E02 - Second.mkv"))
 			swept := !lexists(filepath.Join(l.root, "Movies/Gone.2010"))
