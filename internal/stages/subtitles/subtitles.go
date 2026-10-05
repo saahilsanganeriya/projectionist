@@ -570,7 +570,7 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 		if ctx.Err() != nil {
 			return outcome{result: "deferred"}
 		}
-		if c.provider.pacer().downloaded(err) { // parked now; this title is still recorded, so it cannot trip every run
+		if c.provider.pacer().downloaded(err) { // parked now: the titles behind this one wait for the next run
 			r.alertParked(c.provider, t.path, err)
 		}
 		if err != nil {

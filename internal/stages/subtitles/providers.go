@@ -228,6 +228,7 @@ func (p *pacer) downloaded(err error) bool {
 	return false
 }
 
+// do is doH for callers that need no response header.
 func (p *pacer) do(ctx context.Context, hc *http.Client, req func() (*http.Request, error)) ([]byte, error) {
 	body, _, err := p.doH(ctx, hc, req)
 	return body, err
