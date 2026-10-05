@@ -113,16 +113,18 @@ func TestNamingAndPlacement(t *testing.T) {
 const (
 	videoOnly   = `{"streams":[{"index":0,"codec_type":"video","codec_name":"h264"}],"format":{}}`
 	withEnglish = `{"streams":[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"subtitle","codec_name":"subrip","tags":{"language":"eng"}}],"format":{}}`
+	forcedOnly  = `{"streams":[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"subtitle","codec_name":"subrip","tags":{"language":"eng"},"disposition":{"forced":1}}],"format":{}}`
 )
 
 // fakeProbe answers by file content: "corrupt" fails like ffprobe on a zero-headed file, "embedded" carries an
-// English text track, anything else is a plain video. Every call is logged to <ffmpeg dir>/calls.
+// English text track, "forced" only a forced English one, anything else is a plain video. Every call is logged to <ffmpeg dir>/calls.
 func fakeProbe(t *testing.T, h *fake.Harness) string {
 	calls := filepath.Join(h.Env.FFmpeg.Dir, "calls")
 	h.Script(t, "ffprobe", `for a; do f=$a; done; echo "$f" >> "`+calls+`"
 case "$(cat "$f")" in
 corrupt) echo "[matroska] EBML header parsing failed" >&2; echo "$f: Invalid data found when processing input" >&2; exit 1;;
 embedded) echo '`+withEnglish+`';;
+forced) echo '`+forcedOnly+`';;
 *) echo '`+videoOnly+`';;
 esac
 `)
@@ -176,13 +178,14 @@ func TestRunEndToEnd(t *testing.T) {
 	put(t, root, wire+"S01E03 - The Sample.mkv", "e3")
 	put(t, root, wire+"S01E04 - D.mkv", "e4")
 	put(t, root, wire+"S01E04 - D.en.forced.srt", "1")
+	put(t, root, wire+"S01E05 - E.mkv", "forced")
 	before := tree(t, root)
 
 	rep := run(t, h)
 	if len(rep.Alerts) != 0 {
 		t.Fatalf("first run alerted: %v", rep.Alerts)
 	}
-	want := map[string]int{unreadable: 2, duplicate: 1, noEnglish: 2, orphan: 0, "videos": 11, "not_probed": 0}
+	want := map[string]int{unreadable: 2, duplicate: 1, noEnglish: 3, orphan: 0, "videos": 12, "not_probed": 0}
 	for k, n := range want {
 		if rep.Counts[k] != n {
 			t.Errorf("count %s = %d, want %d (all: %v)", k, rep.Counts[k], n, rep.Counts)
@@ -195,7 +198,7 @@ func TestRunEndToEnd(t *testing.T) {
 	for _, line := range []string{
 		"  " + am + "Featurettes/Screen Tests.mkv: Invalid data found when processing input\n",
 		"  Movies/Empty (2000) {tmdb-1}/Empty (2000) {tmdb-1}.mkv: empty file\n",
-		"  The Wire (2002) {tmdb-1438}: 2 of 4 episodes\n",
+		"  The Wire (2002) {tmdb-1438}: 3 of 5 episodes\n",
 	} {
 		if !strings.Contains(string(text), line) {
 			t.Errorf("report lacks %q:\n%s", line, text)
@@ -219,7 +222,7 @@ func TestRunEndToEnd(t *testing.T) {
 
 	put(t, root, heat+"Heat (1995) {tmdb-949}.de.srt", "1") // still has its video
 	put(t, root, heat+"Heist (2001) {tmdb-2}.en.srt", "1")  // orphan: alerts
-	put(t, root, wire+"S01E05 - E.mkv", "e5")               // quiet category: no alert
+	put(t, root, wire+"S01E06 - F.mkv", "e6")               // quiet category: no alert
 	rep = run(t, h)
 	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "grew 0 -> 1, e.g. "+heat+"Heist (2001) {tmdb-2}.en.srt") {
 		t.Fatalf("alerts = %q", rep.Alerts)
@@ -286,8 +289,8 @@ func TestProbesWaitForGuests(t *testing.T) {
 	}
 }
 
-// Catches: a run cancelled mid-probe (shutdown, redeploy) filing the killed ffprobes as unreadable videos, which the
-// next run would alert on, instead of failing and judging nothing.
+// Catches: a run cancelled mid-probe (shutdown, redeploy) reporting the killed ffprobes as unreadable videos instead
+// of failing and judging nothing.
 func TestCancelledProbesJudgeNothing(t *testing.T) {
 	h := fake.NewEnv(t, nil)
 	root := t.TempDir()
@@ -302,6 +305,9 @@ func TestCancelledProbesJudgeNothing(t *testing.T) {
 	go func() { os.ReadFile(started); cancel() }()
 	if err := (Stage{}).Run(ctx, h.Env, &stage.Report{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if text, err := os.ReadFile(filepath.Join(root, "_audit.txt")); err == nil {
+		t.Fatalf("a cancelled run wrote a report:\n%s", text)
 	}
 }
 

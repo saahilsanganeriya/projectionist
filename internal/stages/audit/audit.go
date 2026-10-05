@@ -587,6 +587,11 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if opt.Report == "" {
 		opt.Report = filepath.Join(root, "_audit.txt")
 	}
+	var prev snapshot
+	hadPrev, err := env.Store.GetJSON(ctx, name, "last", &prev)
+	if err != nil {
+		return err
+	}
 	s := newScan(root, env.Now().Add(-opt.Settle))
 	for _, lib := range []string{"Movies", "TV"} {
 		if err := s.library(ctx, lib); err != nil {
@@ -608,12 +613,6 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	}
 	s.found[duplicate] = s.duplicates(env)
 	shows := s.english()
-
-	var prev snapshot
-	hadPrev, err := env.Store.GetJSON(ctx, name, "last", &prev)
-	if err != nil {
-		return err
-	}
 	held := s.hold(prev.Items)
 	for _, items := range s.found {
 		sort.Strings(items)
@@ -630,7 +629,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		n := len(s.found[c.key])
 		rep.Count(c.key, n)
 		was := len(prev.Items[c.key])
-		if hadPrev && n > was && !quiet[c.key] && !(deferred > 0 && probeBound[c.key]) {
+		if hadPrev && n > was && !quiet[c.key] {
 			rep.Alert("library audit: %s grew %d -> %d, e.g. %s", c.title, was, n, firstNew(s.found[c.key], prev.Items[c.key]))
 		}
 	}
