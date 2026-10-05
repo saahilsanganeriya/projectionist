@@ -4,6 +4,10 @@
 // transcode not on the GPU and on Plex's "no hardware decode accelerator" log line; once a day, when nobody is
 // watching, encodes a 5 s sample on the GPU with Plex's transcoder and with jellyfin-ffmpeg.
 // AV1 sources are the known exception: the J4125 cannot decode AV1, so only the encode side must be on the GPU.
+//
+// Plex settings are read from Preferences.xml, never the API. The two Plex calls left (writing a pin back, listing
+// Plex's sessions) are bounded by plex_timeout and never fail the run: a pin that cannot be written back raises the
+// "GPU pin lost" alert, and missing sessions only cost this run's Plex CPU-transcode check.
 package gpuguard
 
 import (
@@ -48,6 +52,7 @@ type Options struct {
 	Sample         string        `toml:"sample"`      // 5 s HEVC 10-bit 1080p clip, readable by the Plex user
 	SelfTestEvery  time.Duration `toml:"self_test_every"`
 	LegacyState    string        `toml:"legacy_state"` // gpu_guard.state.json; imported once when the store has no state
+	PlexTimeout    time.Duration `toml:"plex_timeout"` // bound on each Plex API call
 }
 
 func defaults() Options {
@@ -62,6 +67,7 @@ func defaults() Options {
 		PlexGroups:     []int{297536, 999, 937},
 		Sample:         "/volume1/PlexMediaServer/scripts/gpu_sample.mkv",
 		SelfTestEvery:  24 * time.Hour,
+		PlexTimeout:    5 * time.Second,
 	}
 }
 
@@ -103,7 +109,7 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if err := pinSettings(ctx, env, opt, rep); err != nil {
 		return err
 	}
-	playing, err := checkLive(ctx, env, &st, rep)
+	playing, err := checkLive(ctx, env, opt, &st, rep)
 	if err != nil {
 		return err
 	}
@@ -170,12 +176,16 @@ func pinSettings(ctx context.Context, env *stage.Env, opt Options, rep *stage.Re
 		return err
 	}
 	for _, p := range plexDrift(prefs, plexPins(opt.PlexDevice)) {
-		if err := env.Plex.Do(ctx, "PUT", "/:/prefs?"+p.key+"="+url.QueryEscape(p.want)); err != nil {
-			return err
-		}
 		have, ok := prefs[p.key]
 		if !ok {
 			have = "unset"
+		}
+		pctx, cancel := context.WithTimeout(ctx, opt.PlexTimeout)
+		err := env.Plex.Do(pctx, "PUT", "/:/prefs?"+p.key+"="+url.QueryEscape(p.want))
+		cancel()
+		if err != nil {
+			rep.Alert("GPU pin lost: Plex %s is %q, want %q, and setting it back failed: %v", p.key, have, p.want, err)
+			continue
 		}
 		rep.Alert("Plex %s was %q; set back to %q", p.key, have, p.want)
 	}
@@ -244,10 +254,15 @@ func remember(seen map[string]bool) []string {
 	return keys
 }
 
-func checkLive(ctx context.Context, env *stage.Env, st *State, rep *stage.Report) (int, error) {
-	px, err := env.Plex.Sessions(ctx)
+// checkLive alerts on CPU transcodes and returns how many sessions are playing. Plex's sessions are best effort:
+// when Plex cannot answer, its sessions count as none, so a Plex that is always slow cannot stop the daily
+// self-test, which is a 5 s encode that moves no files.
+func checkLive(ctx context.Context, env *stage.Env, opt Options, st *State, rep *stage.Report) (int, error) {
+	pctx, cancel := context.WithTimeout(ctx, opt.PlexTimeout)
+	px, err := env.Plex.Sessions(pctx)
+	cancel()
 	if err != nil {
-		return 0, err
+		env.Log.Warn("Plex sessions unavailable; checking Jellyfin only", "event", "plex_unavailable", "err", err)
 	}
 	jf, err := env.Jellyfin.Sessions(ctx, gpuSessionWindow)
 	if err != nil {

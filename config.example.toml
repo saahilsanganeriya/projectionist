@@ -54,6 +54,7 @@ plex_groups     = [297536, 999, 937] # 937 = videodriver, owner of /dev/dri/rend
 sample          = "/volume1/PlexMediaServer/scripts/gpu_sample.mkv"
 self_test_every = "24h"
 legacy_state    = "/volume1/PlexMediaServer/scripts/gpu_guard.state.json" # imported once at cutover
+plex_timeout    = "5s" # each Plex API call; a slower Plex never fails the run
 
 # Small 4K copies of the films listed as "Remote 4K" (Plex playlist, Jellyfin playlist or Jellyfin collection);
 # replaces scripts/remote4k.py (DSM task 9).

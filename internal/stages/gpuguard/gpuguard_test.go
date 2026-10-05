@@ -209,4 +209,44 @@ legacy_state = "` + legacy + `"`)
 	}
 }
 
+// Catches: a slow Plex failing or hanging the run, a pin that could not be written back going unreported (the one
+// Plex failure that must alert), and the daily self-test skipped because Plex could not say who is watching.
+func TestSlowPlexIsNotFatal(t *testing.T) {
+	h := fake.NewEnv(t, map[string]string{"HardwareDevicePath": "", "HardwareAcceleratedCodecs": "1", "HardwareAcceleratedEncoders": "1"})
+	release := make(chan struct{})
+	hang := func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}
+	h.Plex.HandleFunc("PUT", "/:/prefs", hang)
+	h.Plex.HandleFunc("GET", "/status/sessions", hang)
+	t.Cleanup(func() { close(release) }) // runs before the server's own cleanup, so Close does not wait on hang
+	h.Env.Plex = plex.New(h.Plex.URL, h.PrefsPath, time.Hour)
+	app := t.TempDir()
+	os.MkdirAll(filepath.Join(app, "Codecs", "1a2b-linux-x86_64"), 0o755)
+	os.WriteFile(filepath.Join(app, "pms.log"), nil, 0o644)
+	h.SetOptions(`plex_timeout = "20ms"
+plex_app_data = "` + app + `"
+plex_log = "` + filepath.Join(app, "pms.log") + `"`)
+	h.Jellyfin.Handle("GET", "/System/Configuration/encoding", 200, `{"HardwareAccelerationType":"qsv","EnableHardwareEncoding":true,"VaapiDevice":"/dev/dri/renderD128"}`)
+	selfTests := 0
+	s := Stage{Exec: func(context.Context, *exec.Cmd) (int, string, error) {
+		selfTests++
+		return 0, "frame=  121 fps=70", nil
+	}}
+	var rep stage.Report
+	done := make(chan error, 1)
+	go func() { done <- s.Run(context.Background(), h.Env, &rep) }()
+	select {
+	case err := <-done:
+		if err != nil || len(rep.Alerts) != 1 || !strings.HasPrefix(rep.Alerts[0], "GPU pin lost: Plex HardwareDevicePath") || selfTests != 2 {
+			t.Fatalf("err=%v alerts=%q self-tests=%d; want only the pin-lost alert and both self-tests", err, rep.Alerts, selfTests)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("run hung on a slow Plex: the plex_timeout bound is missing")
+	}
+}
+
 func itoa(n int) string { b, _ := json.Marshal(n); return string(b) }
