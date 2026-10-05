@@ -9,17 +9,24 @@ package subtitles
 //
 // and run it with GATE_OUT=<dir> plus any of: GATE_ROOTS (folders, one per line) -> stats.tsv as sub_stats.py prints
 // it; GATE_VIDEOS (files, one per line) -> hashes.tsv; GATE_PAIRS (pairs.tsv: id, framecrc file, duration, candidate
-// file) -> fits.tsv.
+// file) -> fits.tsv; GATE_ALASS (id, video, framecrc, duration, candidate files...) with GATE_ALASS_BIN and
+// GATE_FFMPEG_DIR -> alass.tsv: the stage's alass route per candidate, scored against the PGS captions it never saw.
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+
+	"projectionist/internal/config"
+	"projectionist/internal/stage"
 )
 
 func gateLines(t *testing.T, env string) []string {
@@ -104,4 +111,52 @@ func TestGateFits(t *testing.T) {
 			hex.EncodeToString(sum[:]), sane(cues(out), duration))
 	}
 	gateWrite(t, "fits.tsv", b.String())
+}
+
+func TestGateAlass(t *testing.T) {
+	lines := gateLines(t, "GATE_ALASS")
+	r := &run{env: &stage.Env{FFmpeg: config.FFmpeg{Dir: os.Getenv("GATE_FFMPEG_DIR")}}, opt: Options{Alass: os.Getenv("GATE_ALASS_BIN")}}
+	out := make([]string, len(lines))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 3)
+	for i, line := range lines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			f := strings.Split(line, "\t")
+			raw, _ := exec.Command(r.env.FFmpeg.FFprobePath(), "-v", "error", "-select_streams", "a", "-show_entries",
+				"stream=index:stream_disposition=default", "-of", "csv=p=0", f[1]).Output()
+			audio := strings.Split(strings.Split(string(raw), "\n")[0], ",")[0] // the first audio stream (the default here)
+			for _, l := range strings.Split(string(raw), "\n") {
+				if strings.HasSuffix(l, ",1") {
+					audio = strings.Split(l, ",")[0]
+					break
+				}
+			}
+			dir := t.TempDir()
+			ref := reference{label: "alass", dir: dir, speech: filepath.Join(dir, "speech.srt")}
+			if _, err := r.cmd(context.Background(), r.opt.Alass, f[1], "_", ref.speech, "--index", audio); err != nil {
+				out[i] = f[0] + "\tspeech failed: " + err.Error() + "\n"
+				return
+			}
+			framecrc, _ := os.ReadFile(f[2])
+			duration, _ := strconv.ParseFloat(f[3], 64)
+			starts, _, _ := pgsReference(string(framecrc), duration)
+			for _, cand := range f[4:] {
+				txt, _ := os.ReadFile(cand)
+				attempt := map[string]any{}
+				aligned, result, ok := r.fit(context.Background(), ref, string(txt), attempt)
+				med := ""
+				if ok {
+					med = strconv.FormatFloat(medianOffsetMS(cues(aligned), starts), 'f', 0, 64)
+				}
+				out[i] += fmt.Sprintf("%s\t%s\t%v\t%s\t%v\t%v\t%v\t%s\n", f[0], filepath.Base(cand), ok, result,
+					attempt["offset_ms"], attempt["ratio"], attempt["agree"], med)
+			}
+		}()
+	}
+	wg.Wait()
+	gateWrite(t, "alass.tsv", strings.Join(out, ""))
 }
