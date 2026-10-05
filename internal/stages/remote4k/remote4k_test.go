@@ -13,6 +13,7 @@ import (
 
 	"projectionist/internal/config"
 	"projectionist/internal/fake"
+	"projectionist/internal/jellyfin"
 	"projectionist/internal/plex"
 	"projectionist/internal/probe"
 	"projectionist/internal/stage"
@@ -81,10 +82,11 @@ func TestFFmpegArgs(t *testing.T) {
 }
 
 // Catches, end to end against fake Plex/Jellyfin: a Jellyfin playlist or collection named "Remote 4K" ignored (or
-// another collection obeyed), a film listed in both apps handled twice, a stale or non-movie entry failing the run,
-// the copy not landing under the scheme's name, an encode that keeps running while a guest watches (it must be
-// SIGSTOPped, then resumed), Jellyfin not told, Plex asked to rescan, a DV5 source encoded, and a rerun
-// re-encoding a film that is already done.
+// another collection obeyed, or both asked for in the one query the live server cannot answer in time), a film
+// listed in both apps handled twice, a stale or non-movie entry failing the run, the copy not landing under the
+// scheme's name, an encode that keeps running while a guest watches (it must be SIGSTOPped, then resumed),
+// Jellyfin not told (or its failed notify failing the run and losing the history), Plex asked to rescan, a DV5
+// source encoded, and a rerun re-encoding a film that is already done.
 func TestRunEndToEnd(t *testing.T) {
 	h := fake.NewEnv(t, nil)
 	lib := t.TempDir()
@@ -120,14 +122,23 @@ echo out_time_ms=6612000000 > "$progress"; echo encoded > "$prev"
 		"c1": `{"Items":[{"Name":"Heat","Type":"Movie","Path":"` + heat + `/Heat (1995) {tmdb-949}.mkv"}]}`,
 		"c2": `{"Items":[{"Name":"Clerks","Type":"Movie","Path":"` + clerks + `/Clerks (1994) {tmdb-2292}.mkv"}]}`,
 	}
+	lists := map[string]string{
+		"Playlist": `{"Items":[{"Id":"p1","Name":"Remote 4K","Type":"Playlist"}]}`,
+		"BoxSet":   `{"Items":[{"Id":"c1","Name":"Remote 4K","Type":"BoxSet"},{"Id":"c2","Name":"Other","Type":"BoxSet"}]}`,
+	}
 	h.Jellyfin.HandleFunc("GET", "/Items", func(w http.ResponseWriter, r *http.Request) {
 		if id := r.URL.Query().Get("ParentId"); id != "" {
 			io.WriteString(w, children[id])
 			return
 		}
-		io.WriteString(w, `{"Items":[{"Id":"p1","Name":"Remote 4K","Type":"Playlist"},{"Id":"c1","Name":"Remote 4K","Type":"BoxSet"},{"Id":"c2","Name":"Other","Type":"BoxSet"}]}`)
+		body, ok := lists[r.URL.Query().Get("IncludeItemTypes")]
+		if !ok { // e.g. "Playlist,BoxSet": the live server takes 34-40 s on that, past any client's patience
+			http.Error(w, "combined type query", http.StatusGatewayTimeout)
+			return
+		}
+		io.WriteString(w, body)
 	})
-	h.Jellyfin.Handle("POST", "/Library/Media/Updated", 204, "")
+	h.Jellyfin.Handle("POST", "/Library/Media/Updated", 500, "") // a failing notify must not fail the run
 	done := make(chan error, 1)
 	var rep stage.Report
 	go func() { done <- (Stage{}).Run(context.Background(), h.Env, &rep) }()
@@ -193,33 +204,58 @@ echo out_time_ms=6612000000 > "$progress"; echo encoded > "$prev"
 	}
 }
 
-// Catches: a slow Plex failing the run or hanging it, instead of leaving the Plex half of the list empty; and an
-// empty list doing any work (no ffprobe or ffmpeg exists here, so any probe would fail the run).
-func TestSlowPlexLeavesItsHalfEmpty(t *testing.T) {
-	h := fake.NewEnv(t, nil)
-	release := make(chan struct{})
-	h.Plex.HandleFunc("GET", "/playlists", func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case <-r.Context().Done():
-		case <-release:
+// Catches: a slow app (Plex or Jellyfin) failing or hanging the run instead of leaving its half of the list empty
+// while the other half is still worked through.
+func TestSlowAppLeavesItsHalfEmpty(t *testing.T) {
+	for _, slow := range []string{"plex", "jellyfin"} {
+		h := fake.NewEnv(t, nil)
+		release := make(chan struct{})
+		hang := func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
 		}
-	})
-	t.Cleanup(func() { close(release) }) // runs before the server's own cleanup, so Close does not wait on it
-	h.Env.Plex = plex.New(h.Plex.URL, h.PrefsPath, time.Hour)
-	h.Jellyfin.Handle("GET", "/Items", 200, `{"Items":[]}`)
-	h.SetOptions(`plex_timeout = "20ms"
+		h.Plex.Handle("GET", "/playlists", 200, `{"MediaContainer":{"Metadata":[{"ratingKey":"77","title":"Remote 4K"}]}}`)
+		h.Plex.Handle("GET", "/playlists/77/items", 200, `{"MediaContainer":{"Metadata":[{"type":"episode","title":"Pilot","year":2008}]}}`)
+		h.Jellyfin.HandleFunc("GET", "/Items", func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Query().Get("ParentId") == "p1":
+				io.WriteString(w, `{"Items":[{"Name":"Pilot","Type":"Episode","ProductionYear":2009}]}`)
+			case r.URL.Query().Get("IncludeItemTypes") == "Playlist":
+				io.WriteString(w, `{"Items":[{"Id":"p1","Name":"Remote 4K","Type":"Playlist"}]}`)
+			default:
+				io.WriteString(w, `{"Items":[]}`)
+			}
+		})
+		if slow == "plex" {
+			h.Plex.HandleFunc("GET", "/playlists", hang)
+		} else {
+			h.Jellyfin.HandleFunc("GET", "/Items", hang)
+		}
+		t.Cleanup(func() { close(release) }) // runs before the servers' own cleanup, so Close does not wait on hang
+		h.Env.Plex = plex.New(h.Plex.URL, h.PrefsPath, time.Hour)
+		h.Env.Jellyfin = jellyfin.New(h.Jellyfin.URL, writeKey(t), time.Hour)
+		h.SetOptions(`list_timeout = "20ms"
 status_file = "` + filepath.Join(t.TempDir(), "STATUS.txt") + `"`)
-	var rep stage.Report
-	done := make(chan error, 1)
-	go func() { done <- (Stage{}).Run(context.Background(), h.Env, &rep) }()
-	select {
-	case err := <-done:
-		if err != nil || rep.Summary != "0 film(s) requested, 0 handled" {
-			t.Fatalf("run with Plex hanging: err=%v summary=%q", err, rep.Summary)
+		var rep stage.Report
+		done := make(chan error, 1)
+		go func() { done <- (Stage{}).Run(context.Background(), h.Env, &rep) }()
+		select {
+		case err := <-done:
+			if err != nil || rep.Counts["requested"] != 1 || rep.Counts["list_unavailable"] != 1 {
+				t.Errorf("%s hanging: err=%v counts=%v; want the other app's one request and one unavailable list", slow, err, rep.Counts)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("run hung on a slow %s: the list_timeout bound is missing", slow)
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("run hung on a slow Plex: the plex_timeout bound is missing")
 	}
+}
+
+func writeKey(t *testing.T) string {
+	path := filepath.Join(t.TempDir(), "jellyfin_key")
+	os.WriteFile(path, []byte(fake.JellyfinKey), 0o600)
+	return path
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {

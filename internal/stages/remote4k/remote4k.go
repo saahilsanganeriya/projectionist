@@ -3,15 +3,15 @@
 //
 // The request list is the union of the Plex playlist and any Jellyfin playlist or collection of that name. The apps
 // only say WHICH films; every fact about the files (resolution, bitrate, Dolby Vision profile, audio) comes from
-// ffprobe of the film's folder. A slow or unreachable Plex empties its half of the list for that run, with a
-// warning, and never fails the run.
+// ffprobe of the film's folder. Each app's half is bounded by list_timeout: an app that is slow (both stall during
+// library scans) or unreachable empties its half for that run, with a warning, and never fails the run.
 //
 // One film at a time on the GPU (jellyfin-ffmpeg, hevc_qsv, the source's colour tags and HDR10 metadata kept),
 // paused while anyone but the owner is watching. The copy lands beside the original as
 // "<folder name> - 2160p 14Mbps.mkv", which Plex and Jellyfin list as another version of the film. Skipped:
 // non-movies, films that already have a 4K version at or under 20 Mbps, and Dolby Vision profile 5 sources (no
 // HDR10 base layer to keep). Never overwrites. Progress: STATUS.txt; history: the events table. Plex notices the
-// copy through its filesystem events; Jellyfin is told.
+// copy through its filesystem events; Jellyfin is told, best effort (its own scheduled scan is the fallback).
 //
 // The encode writes into a work dir on the same btrfs subvolume as the library, so publishing the copy is one
 // atomic no-overwrite rename (a reflink clone only if the folder is on another subvolume).
@@ -45,7 +45,7 @@ type Options struct {
 	SmallKbps   int           `toml:"small_kbps"` // a 4K version at or under this already fits the upload
 	WorkDir     string        `toml:"work_dir"`   // must be on the library's subvolume (same share)
 	StatusFile  string        `toml:"status_file"`
-	PlexTimeout time.Duration `toml:"plex_timeout"` // the Plex half of the list is given up after this
+	ListTimeout time.Duration `toml:"list_timeout"` // each app's half of the list is given up after this
 }
 
 func defaults() Options {
@@ -55,7 +55,7 @@ func defaults() Options {
 		SmallKbps:   20000,
 		WorkDir:     "/volume1/media/.projectionist/remote4k",
 		StatusFile:  "/volume1/PlexMediaServer/remote4k/STATUS.txt",
-		PlexTimeout: 5 * time.Second,
+		ListTimeout: 5 * time.Second,
 	}
 }
 
@@ -66,10 +66,8 @@ func movieRequest(file string) request {
 	return request{Key: filepath.Base(filepath.Dir(file)), Folder: filepath.Dir(file)}
 }
 
-// plexRequests reads the owner's Plex playlist, bounded by opt.PlexTimeout. Only the file paths are used.
+// plexRequests reads the owner's Plex playlist. Only the file paths are used.
 func plexRequests(ctx context.Context, env *stage.Env, opt Options) ([]request, error) {
-	ctx, cancel := context.WithTimeout(ctx, opt.PlexTimeout)
-	defer cancel()
 	var lists struct {
 		Metadata []struct {
 			RatingKey string `json:"ratingKey"`
@@ -119,12 +117,17 @@ func jellyfinRequests(ctx context.Context, env *stage.Env, opt Options) ([]reque
 		Path           string `json:"Path"`
 		ProductionYear int    `json:"ProductionYear"`
 	}
-	var lists struct{ Items []item }
-	if err := env.Jellyfin.GetJSON(ctx, "/Items?IncludeItemTypes=Playlist,BoxSet&Recursive=true", &lists); err != nil {
-		return nil, err
+	var lists []item
+	// One type per query: on the NAS, Jellyfin answers Playlist or BoxSet alone in under 1.5 s, both at once in 34-40 s.
+	for _, kind := range []string{"Playlist", "BoxSet"} {
+		var page struct{ Items []item }
+		if err := env.Jellyfin.GetJSON(ctx, "/Items?Recursive=true&IncludeItemTypes="+kind, &page); err != nil {
+			return nil, err
+		}
+		lists = append(lists, page.Items...)
 	}
 	var out []request
-	for _, l := range lists.Items {
+	for _, l := range lists {
 		if l.Name != opt.Playlist {
 			continue
 		}
@@ -250,17 +253,27 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if err := env.Options(&opt); err != nil {
 		return err
 	}
-	fromJellyfin, err := jellyfinRequests(ctx, env, opt)
-	if err != nil {
-		return err
-	}
-	fromPlex, err := plexRequests(ctx, env, opt)
-	if err != nil {
-		env.Log.Warn("Plex playlist unavailable; using Jellyfin's lists only", "event", "plex_unavailable", "err", err)
+	var requests []request
+	for _, app := range []struct {
+		name string
+		list func(context.Context, *stage.Env, Options) ([]request, error)
+	}{{"plex", plexRequests}, {"jellyfin", jellyfinRequests}} {
+		lctx, cancel := context.WithTimeout(ctx, opt.ListTimeout)
+		got, err := app.list(lctx, env, opt)
+		cancel()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			env.Log.Warn("request list unavailable this run", "event", "list_unavailable", "app", app.name, "err", err)
+			rep.Count("list_unavailable", 1)
+			continue
+		}
+		requests = append(requests, got...)
 	}
 	seen := map[request]bool{}
 	handled := 0
-	for _, r := range append(fromPlex, fromJellyfin...) {
+	for _, r := range requests {
 		if seen[r] {
 			continue
 		}
@@ -412,7 +425,7 @@ supervise:
 		return fmt.Errorf("%s: %w", title, err)
 	}
 	if err := env.Jellyfin.MediaUpdated(ctx, r.Folder); err != nil {
-		return err
+		env.Log.Warn("Jellyfin not told about the copy", "event", "jellyfin_notify_failed", "item", title, "err", err)
 	}
 	pixFmt := ""
 	if made.Video != nil {
