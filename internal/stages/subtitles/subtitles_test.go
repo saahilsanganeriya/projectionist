@@ -39,6 +39,7 @@ type fixture struct {
 	mu       sync.Mutex
 	requests []string
 	quota    bool   // downloads answer with a page, as OpenSubtitles does once the day's quota is spent
+	dead     bool   // every download link answers a plain 404, and Ran's IMDb search finds four subtitles
 	hashIMDb string // when set, Ran's file hash finds a misaligned subtitle labelled with this IMDb id
 	ranHash  string
 }
@@ -119,6 +120,10 @@ cp "`+ff+`/clerks.aligned.srt" "$3"; echo "info: 'reference file FPS/input file 
 				`","SubDownloadLink":"` + osSrv.URL + `/dl/hash.gz"}]`))
 		case r.URL.Path == "/dl/hash.gz":
 			w.Write(gz(srt(otherTimes(), 0)))
+		case strings.Contains(r.URL.Path, "imdbid-0089881") && f.dead:
+			w.Write([]byte(strings.ReplaceAll(cand("ran", "Ran")+cand("ran2", "Ran")+cand("ran3", "Ran")+cand("ran4", "Ran"), "][", ",")))
+		case strings.HasPrefix(r.URL.Path, "/dl/") && f.dead:
+			http.NotFound(w, r)
 		case strings.Contains(r.URL.Path, "imdbid-0089881"):
 			w.Write([]byte(cand("ran", "Ran.1985.BluRay")))
 		case strings.Contains(r.URL.Path, "imdbid-0109445"):
@@ -257,7 +262,8 @@ func TestRunWritesSidecarsAndReconciles(t *testing.T) {
 // run downloads the same failed candidates again, instead of alerting and recording; a spent download quota, an
 // outage of every provider, a refused search (403) or TMDB out (no token) recording titles that were never searched
 // or tried (a week lost, silently) instead of deferring with one alert; a refused search deferring its own title too
-// (a refusal of that title alone would then hold up every run).
+// (a refusal of that title alone would then hold up every run); downloads failing in a row (an unknown form of the
+// quota) writing off title after title instead of parking OpenSubtitles.
 func TestRunProviderTrouble(t *testing.T) {
 	outcomes := func(f *fixture) map[string]string {
 		out := map[string]string{}
@@ -313,6 +319,13 @@ func TestRunProviderTrouble(t *testing.T) {
 	rep = refused.run(t)
 	if got := outcomes(refused); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "HTTP 403") || len(got) != 2 || got[refused.path(ran)] != "error" {
 		t.Errorf("searches refused: alerts %q, recorded %v; want one alert, Ran recorded, Clerks and Show deferred", rep.Alerts, got)
+	}
+
+	dead := newFixture(t)
+	dead.dead = true
+	rep = dead.run(t)
+	if got := outcomes(dead); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "HTTP 404") || len(got) != 2 || got[dead.path(ran)] != "no_aligned_candidate" {
+		t.Errorf("dead links: alerts %q, recorded %v; want one alert, Ran recorded, Clerks and Show deferred", rep.Alerts, got)
 	}
 
 	noTMDB := newFixture(t)
