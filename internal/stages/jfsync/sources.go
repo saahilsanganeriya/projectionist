@@ -314,7 +314,8 @@ func parsePlex(r *http.Request, opt Options, now time.Time, names map[string]str
 
 // parseJellyfin takes no rating from a push: the plugin sends `Rating: userItemData.Rating ?? 0`, so an unrated
 // item reads as 0, and Jellyfin's own ratings are Likes (10 or 1) saved with the same reason as a favourite toggle,
-// which carries whatever rating the item had. Ratings come from Plex and Letterboxd.
+// which carries whatever rating the item had. A rating reaches the record from Plex, Letterboxd, or the one-time
+// import of what Jellyfin held.
 func parseJellyfin(r *http.Request, opt Options, now time.Time) (watch.Event, dropped, error) {
 	var p struct {
 		NotificationType, NotificationUsername, ItemID, ItemType, SaveReason string

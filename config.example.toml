@@ -68,8 +68,10 @@ status_file  = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
 list_timeout = "5s" # an app slower than this leaves its half of the list empty for that run
 
 # Watch state (played, play count, resume position, rating) kept the same in Plex and Jellyfin from projectionist's
-# own record: Plex's webhook and the Jellyfin Webhook plugin push plays to /hooks/{plex,jellyfin}; the history that
-# lived only inside the apps is imported once (newest Plex DB backup copy, Jellyfin played/resumable items).
+# own record: Plex's webhook and the Jellyfin Webhook plugin push plays to /hooks/{plex,jellyfin} (a Jellyfin push
+# carries no rating: ratings come from Plex and Letterboxd); the history that lived only inside the apps is imported
+# once (newest Plex DB backup copy, Jellyfin played/resumable/rated items). The listings and the imports wait while
+# anyone but the owner is watching; the writes do not.
 [stages.jfsync]
 every          = "5m"
 apply          = true # false: plan only (no app writes); plan_file lists what would be written
