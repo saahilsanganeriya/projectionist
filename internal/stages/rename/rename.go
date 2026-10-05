@@ -78,7 +78,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		return fmt.Errorf("rename: mode %q: want apply, plan or undo", opt.Mode)
 	}
 	if opt.Mode == "undo" {
-		return undo(ctx, env, rep, opt)
+		return errors.Join(undo(ctx, env, rep, opt), noteChanges(ctx, env, rep))
 	}
 	lib, err := scan(ctx, opt.Root, env.Now().Add(-opt.Quiet))
 	if err != nil {
@@ -122,7 +122,14 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		pushJellyfin(ctx, env, opt, touched)
 	}
 	rep.Summary = fmt.Sprintf("%d unit(s) applied, %d left for review", rep.Counts["units_done"], len(review))
-	return err
+	return errors.Join(err, noteChanges(ctx, env, rep))
+}
+
+// noteChanges counts the files this run moved, archived, deleted or put back: Plex records each one, and the health
+// stage optimizes Plex's database after a big batch.
+func noteChanges(ctx context.Context, env *stage.Env, rep *stage.Report) error {
+	n := rep.Counts["moved"] + rep.Counts["archived"] + rep.Counts["deleted"] + rep.Counts["undone"]
+	return env.Store.AddLibraryChanges(context.WithoutCancel(ctx), name, n)
 }
 
 // ---- the library on disk

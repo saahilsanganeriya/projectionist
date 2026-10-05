@@ -91,6 +91,8 @@ func TestRunHealsJellyfin(t *testing.T) {
 		h.Jellyfin.HandleFunc("GET", "/Items", reply(items))
 	}
 	h.Plex.Handle("GET", "/identity", 200, `<MediaContainer machineIdentifier="m"/>`)
+	h.Plex.Handle("GET", "/hubs/sections/4", 200, "")
+	h.Plex.Handle("GET", "/hubs", 200, "")
 	qbit := httptest.NewServer(reply(403))
 	t.Cleanup(qbit.Close)
 	tunnel := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -249,12 +251,14 @@ func TestResumesACutOffRestart(t *testing.T) {
 }
 
 // Catches: options that break the restart bounds accepted: fail_threshold 0 restarts a healthy Jellyfin once per
-// cooldown, a cooldown under 1 h restarts it more than once an hour, a zero timeout fails every probe.
+// cooldown, a cooldown under 1 h restarts it more than once an hour, a zero timeout fails every probe; and an empty
+// plex_optimize_window, which would optimize Plex at prime time.
 func TestRefusesUnsafeOptions(t *testing.T) {
 	h := fake.NewEnv(t, nil)
-	for _, opts := range []string{`fail_threshold = 0`, `restart_cooldown = "59m"`, `timeout = "0s"`} {
+	for opts, want := range map[string]string{`fail_threshold = 0`: "restart_cooldown >= 1h", `restart_cooldown = "59m"`: "restart_cooldown >= 1h",
+		`timeout = "0s"`: "restart_cooldown >= 1h", `plex_optimize_window = ""`: "plex_optimize_window HH:MM-HH:MM"} {
 		h.SetOptions(opts)
-		if err := (Stage{}).Run(context.Background(), h.Env, &stage.Report{}); err == nil || !strings.Contains(err.Error(), "restart_cooldown >= 1h") {
+		if err := (Stage{}).Run(context.Background(), h.Env, &stage.Report{}); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: err = %v, want the options refusal", opts, err)
 		}
 	}

@@ -94,6 +94,12 @@ docker_socket         = "/var/run/docker.sock"
 jellyfin_container    = "jellyfin"
 qbittorrent_container = "qbittorrent"
 qbittorrent_url       = "http://127.0.0.1:8080" # 403 counts as up: the WebUI answers and wants a login
+# Plex's speed: the Movies and Home hubs are timed every run; Plex's Optimize Database runs once (at most daily, no
+# guest watching) when they are slower than plex_slow 3 runs in a row, or after a big batch of library changes.
+plex_movies_section   = 4
+plex_slow             = "5s"           # a cold Movies tab took 26.8 s on a fragmented database, 17 ms after an optimize
+plex_batch            = 500            # details notes + rename moves + Plex collection edits since the last optimize
+plex_optimize_window  = "03:00-06:00"  # when an optimize may start (timezone above); the 2026-10-05 one took 4 min 21 s
 [stages.health.public] # URL = the status it must answer through the Cloudflare tunnel; redirects are not followed
 "https://jellyfin.example.com"    = 302
 "https://plex.example.com"    = 401
