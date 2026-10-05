@@ -217,8 +217,8 @@ func restart(ctx context.Context, env *stage.Env, dk *docker, st *State, svc, c 
 }
 
 // resume starts a container that a restart of ours stopped and nothing started again (projectionist died between
-// Docker's stop and its start). A container the owner stops after one of our restarts started after it, so it
-// stays stopped.
+// Docker's stop and its start): it last started before we asked, and its stop ended inside the request's own bound.
+// A container the owner stops later is left stopped: it started after our restart, or stopped after that bound.
 func resume(ctx context.Context, env *stage.Env, dk *docker, st State, restartable []string, rep *stage.Report) error {
 	for _, c := range restartable {
 		asked, ok := st.LastRestart[c]
@@ -226,7 +226,8 @@ func resume(ctx context.Context, env *stage.Env, dk *docker, st State, restartab
 			continue
 		}
 		s, err := dk.inspect(ctx, c)
-		if err != nil || s.Status != "exited" || !s.StartedAt.Before(asked) || s.FinishedAt.Before(asked) {
+		ours := !s.FinishedAt.Before(asked) && s.FinishedAt.Before(asked.Add(restartTimeout))
+		if err != nil || s.Status != "exited" || !s.StartedAt.Before(asked) || !ours {
 			continue // an inspect error is the probe's to report
 		}
 		rep.Alert("container %s stopped during this stage's restart at %s and never started again; starting it",

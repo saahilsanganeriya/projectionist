@@ -169,8 +169,8 @@ func TestRunHealsJellyfin(t *testing.T) {
 }
 
 // Catches: a restart cut off between Docker's stop and its start (projectionist killed mid-restart) leaving
-// Jellyfin stopped for good, and the opposite: starting a container the owner stopped, one Docker's restart policy
-// is already bringing back, or one outside restartable.
+// Jellyfin stopped for good, and the opposite: starting a container the owner stopped (also after a restart of ours
+// that never took effect), one Docker's restart policy is already bringing back, or one outside restartable.
 func TestResumesACutOffRestart(t *testing.T) {
 	asked := time.Date(2026, 10, 5, 5, 0, 0, 0, time.UTC) // this stage's recorded restart of jellyfin
 	cases := []struct {
@@ -182,6 +182,7 @@ func TestResumesACutOffRestart(t *testing.T) {
 		{"stopped by our restart, never started again", "exited", -time.Hour, time.Minute, `["jellyfin"]`, 1},
 		{"stopped by the owner after our restart", "exited", time.Minute, time.Hour, `["jellyfin"]`, 0},
 		{"stopped before we asked", "exited", -time.Hour, -time.Minute, `["jellyfin"]`, 0},
+		{"stopped by the owner, our restart having done nothing", "exited", -time.Hour, time.Hour, `["jellyfin"]`, 0},
 		{"Docker's restart policy has it", "restarting", -time.Hour, time.Minute, `["jellyfin"]`, 0},
 		{"not in restartable", "exited", -time.Hour, time.Minute, `[]`, 0},
 	}
