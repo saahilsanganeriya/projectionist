@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -235,16 +236,8 @@ func TestErrorsAndRetries(t *testing.T) {
 		case c.wantErr == nil && c.wantMsg == "" && err != nil:
 			t.Errorf("%s: err=%v", c.name, err)
 		}
-		if strings.Join(durations(h.slept), ",") != strings.Join(durations(c.wantSleep), ",") {
+		if !slices.Equal(h.slept, c.wantSleep) {
 			t.Errorf("%s: slept %v, want %v", c.name, h.slept, c.wantSleep)
 		}
 	}
-}
-
-func durations(ds []time.Duration) []string {
-	out := make([]string, len(ds))
-	for i, d := range ds {
-		out[i] = d.String()
-	}
-	return out
 }
