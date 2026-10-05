@@ -192,6 +192,18 @@ trigger = ["rename", "details", "subtitles", "posters", "collections", "jfsync"]
 ignore  = ["@eaDir", "#recycle", "#snapshot", "_archive", "_assets"] # never watched or counted; dot folders (.details) too
 partial_suffixes = [".part", ".!qB"] # in-progress files (and dot files): keep a folder busy, never trigger on their own
 
+# Read-only library audit: names outside the scheme, unreadable videos, orphan sidecars, identical copies, episodes
+# without English subtitles. Writes <root>/_audit.txt and alerts when a category grows; never moves or deletes.
+[stages.audit]
+every         = "24h"
+window        = "04:00-07:00"
+root          = "/volume1/media"          # holds Movies/ and TV/
+report        = "/volume1/media/_audit.txt"
+max_listed    = 50                             # examples per category in the report
+settle        = "15m"                          # a file or folder changed more recently may still be moving: judged next run
+probe_workers = 2                              # ffprobes on cache misses, only while no guest is watching
+quiet         = ["missing_english_subs"]       # grows with every download until the subtitles stage catches up
+
 # The most artistic poster for every movie, show and season, on Jellyfin and Plex; replaces posters/posters.py.
 # Candidates: the owner's poster (from a Plex DB backup and the export taken with it), TMDB and fanart.tv (the shared
 # clients). Judge: Claude on the owner's own Anthropic key (secrets_dir/anthropic_api_key), the model chosen by
