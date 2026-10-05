@@ -487,19 +487,25 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	if err != nil {
 		return outcome{result: "error", detail: err.Error()}
 	}
-	// A provider that cannot be searched only raises its alert: the others' candidates still decide, and the title is
-	// recorded, so an unreachable provider does not make every run download the same failed candidates again. A
-	// download refused for quota defers the title instead (nothing was tried; the quota resets daily).
+	// A provider that cannot be searched raises its alert, and the others' candidates decide: the title is recorded,
+	// so a provider blocked for good does not make every run retry the same titles. With no provider searchable (an
+	// outage) the title is deferred, as it is when a download is refused for quota (the quota resets daily).
 	var cands []Candidate
+	searched := 0
 	for _, p := range r.providers {
 		found, err := p.Search(ctx, q)
 		switch {
 		case errors.Is(err, errParked):
 			r.alertParked(p, err)
+			continue
 		case err != nil:
 			return outcome{result: "error", detail: p.Name() + " search: " + err.Error()}
 		}
+		searched++
 		cands = append(cands, found...)
+	}
+	if searched == 0 {
+		return outcome{result: "deferred", detail: "no provider could be searched this run"}
 	}
 	incomplete := false
 	deferOr := func(o outcome) outcome {

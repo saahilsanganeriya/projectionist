@@ -233,38 +233,55 @@ func TestRunWritesSidecarsAndReconciles(t *testing.T) {
 }
 
 // Catches: an unreachable provider (Subdl behind the home network's filter) deferring every unlucky title, so each
-// run downloads the same failed candidates again, instead of alerting and recording; and a spent download quota
-// recording titles that were never tried, instead of deferring them to the next run.
+// run downloads the same failed candidates again, instead of alerting and recording; a spent download quota, or an
+// outage of every provider, recording titles that were never searched or tried (a week lost) instead of deferring.
 func TestRunProviderTrouble(t *testing.T) {
-	f := newFixture(t)
-	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) }))
-	defer down.Close()
-	os.WriteFile(filepath.Join(f.dir, "subdl_api_key"), []byte("k\n"), 0o600)
-	f.st.subdlAPI = down.URL
-	f.quota = true
-	rep := f.run(t)
+	outcomes := func(f *fixture) map[string]string {
+		out := map[string]string{}
+		rows, _ := f.h.Env.Store.DB().Query(`SELECT path, outcome FROM subtitles_titles`)
+		defer rows.Close()
+		for rows.Next() {
+			var p, o string
+			rows.Scan(&p, &o)
+			out[p] = o
+		}
+		return out
+	}
+	gone := httptest.NewServer(http.NotFoundHandler())
+	gone.Close()
+
+	outage := newFixture(t)
+	outage.st.openSubtitles = gone.URL + "/search/"
+	outage.run(t)
+	if got := outcomes(outage); len(got) != 1 || got[outage.path(heat)] != "extracted" {
+		t.Errorf("outage of every provider recorded %v; want only Heat's extraction", got)
+	}
+
+	blocked := newFixture(t)
+	os.WriteFile(filepath.Join(blocked.dir, "subdl_api_key"), []byte("k\n"), 0o600)
+	blocked.st.subdlAPI = gone.URL
+	rep := blocked.run(t)
 	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "subdl unavailable") {
 		t.Errorf("alerts %q", rep.Alerts)
 	}
-	outcomes := map[string]string{}
-	rows, _ := f.h.Env.Store.DB().Query(`SELECT path, outcome FROM subtitles_titles`)
-	for rows.Next() {
-		var p, o string
-		rows.Scan(&p, &o)
-		outcomes[p] = o
+	if got := outcomes(blocked)[blocked.path(show)]; got != "no_candidates" {
+		t.Errorf("Show: %q, want no_candidates recorded although Subdl is blocked", got)
 	}
-	rows.Close()
-	if outcomes[f.path(show)] != "no_candidates" {
-		t.Errorf("Show: %q, want no_candidates recorded despite Subdl being down", outcomes[f.path(show)])
+	blocked.sidecar(t, ran)
+
+	quota := newFixture(t)
+	quota.quota = true
+	if rep := quota.run(t); len(rep.Alerts) != 0 {
+		t.Errorf("a spent quota raised alerts %q", rep.Alerts)
 	}
-	if o, ok := outcomes[f.path(ran)]; ok {
+	if o, ok := outcomes(quota)[quota.path(ran)]; ok {
 		t.Errorf("Ran recorded %q although its download was refused for quota", o)
 	}
-	f.mu.Lock()
-	f.quota = false
-	f.mu.Unlock()
-	f.run(t)
-	f.sidecar(t, ran)
+	quota.mu.Lock()
+	quota.quota = false
+	quota.mu.Unlock()
+	quota.run(t)
+	quota.sidecar(t, ran)
 }
 
 // Catches: a file-hash match labelled with this film thrown away because its timing could not be confirmed (the
