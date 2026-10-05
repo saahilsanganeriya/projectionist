@@ -306,7 +306,7 @@ func (r *run) readFeed(ctx context.Context) error {
 			continue
 		}
 		res, err := r.db.ExecContext(ctx, `INSERT INTO letterboxd_entry(id, slug, tmdb, title, year, watched, rating, logged_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET rating=excluded.rating`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET rating=excluded.rating WHERE rating != excluded.rating`,
 			e.ID, e.Slug, e.TMDB, e.Title, e.Year, e.Watched, e.Rating, e.LoggedAt.Format(store.TimeFormat))
 		if err != nil {
 			return storeErr{err}

@@ -390,12 +390,13 @@ func planMembers(desired map[int]bool, haves map[int]have) (add, remove []int) {
 	return add, remove
 }
 
-// unwatchedWatchlist is the films the Watchlist collection should hold in one app: on the Letterboxd watchlist,
-// in the library (when libraryOnly), and watched neither on Letterboxd nor in that app.
-func unwatchedWatchlist(wants []want, haves map[int]have, libraryOnly bool) map[int]bool {
+// unwatchedWatchlist is the films on the Letterboxd watchlist watched neither there nor in the app. inApp (an
+// app's own collection) keeps only films the app lists; the plex.tv watchlist takes any film.
+func unwatchedWatchlist(wants []want, haves map[int]have, inApp bool) map[int]bool {
 	out := map[int]bool{}
 	for _, w := range wants {
-		if w.Watchlist && !w.Watched && (w.InLibrary || !libraryOnly) && haves[w.TMDB].Plays == 0 {
+		h := haves[w.TMDB]
+		if w.Watchlist && !w.Watched && h.Plays == 0 && (!inApp || h.Item != "") {
 			out[w.TMDB] = true
 		}
 	}

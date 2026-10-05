@@ -106,16 +106,18 @@ func TestPlanFilms(t *testing.T) {
 	}
 }
 
-// Catches: a film the owner put in the collection himself removed, a watched film kept in it, and a watchlist
-// film the app already shows as watched added.
+// Catches: a film the owner put in the collection himself removed, a watched film kept in it, a watchlist film
+// the app already shows as watched added, and a film the app has not indexed sent with an empty item id.
 func TestPlanMembers(t *testing.T) {
 	wants := []want{
 		{TMDB: 1, InLibrary: true, Watchlist: true},
 		{TMDB: 2, InLibrary: true, Watchlist: true, Watched: true},
 		{TMDB: 3, InLibrary: true, Watchlist: true},
-		{TMDB: 4, Watchlist: true}, // not on the NAS
+		{TMDB: 4, Watchlist: true},                  // not on the NAS
+		{TMDB: 5, InLibrary: true, Watchlist: true}, // on the NAS, not indexed by the app yet
 	}
 	haves := map[int]have{
+		1: {Item: "a"},
 		2: {Item: "b", Member: true, Added: true},
 		3: {Item: "c", Plays: 1},
 		9: {Item: "z", Member: true}, // the owner's own
@@ -125,7 +127,7 @@ func TestPlanMembers(t *testing.T) {
 	if !reflect.DeepEqual(add, []int{1}) || !reflect.DeepEqual(remove, []int{2}) {
 		t.Errorf("add=%v remove=%v", add, remove)
 	}
-	if online := unwatchedWatchlist(wants, haves, false); !online[4] || len(online) != 2 {
+	if online := unwatchedWatchlist(wants, haves, false); !online[4] || !online[5] || len(online) != 3 {
 		t.Errorf("plex.tv desired = %v", online)
 	}
 }
