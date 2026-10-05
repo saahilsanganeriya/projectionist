@@ -333,7 +333,9 @@ esac
 	}
 
 	guest.Store(true)
+	h.Env.Viewers.Poll = time.Hour // only the check before starting can keep the work from running
 	rep := runOnce(t, h.Env)
+	h.Env.Viewers.Poll = 5 * time.Millisecond
 	if read("scans") != "" || read("decodes") != "" || rep.Counts["heavy_deferred"] != 2 || strings.Contains(note(), "Peak bitrate") ||
 		len(h.Plex.Calls("GET", "/status/sessions")) != 1 {
 		t.Fatalf("guest watching: scans %q decodes %q counts %v", read("scans"), read("decodes"), rep.Counts)

@@ -235,7 +235,7 @@ func applySideData(v *Video, sd map[string]any) {
 		return 0
 	}
 	switch kind, _ := sd["side_data_type"].(string); {
-	case sd["dv_profile"] != nil && v.DVProfile == 0: // DOVI configuration record (frame-level DV data has no profile)
+	case sd["dv_profile"] != nil: // DOVI configuration record; frame-level DV side data carries no profile
 		v.HDR, v.DVProfile, v.DVLevel = DolbyVision, int(num("dv_profile")), int(num("dv_level"))
 		v.DVBLCompat, v.DVEL = int(num("dv_bl_signal_compatibility_id")), num("el_present_flag") == 1
 	case strings.Contains(kind, "SMPTE2094-40"):
