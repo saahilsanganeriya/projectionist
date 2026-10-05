@@ -308,7 +308,7 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if opt.DryRun {
 		mode = "dry run"
 	}
-	rep.Summary = fmt.Sprintf("%s: %d diary events recorded, %d Letterboxd films in the library (%d watched), %d unresolved, %d watchlist films not on the NAS",
+	rep.Summary = fmt.Sprintf("%s: %d new diary events, %d Letterboxd films in the library (%d watched), %d unresolved, %d watchlist films not on the NAS",
 		mode, rep.Counts["events.logged"]+rep.Counts["events.rated"], inLib, watched, unresolved, len(missing))
 	return nil
 }

@@ -161,8 +161,9 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		delete(unnamed, u.Name)
 	}
 	for _, person := range slices.Sorted(maps.Keys(unnamed)) {
-		rep.Alert("the watch record holds state for %q (%d items), whom no users entry names, so it reaches neither app "+
-			"(the letterboxd stage's person must be a users name)", person, unnamed[person])
+		rep.Alert("the watch record holds state for %q (%d items), whom no users entry names, so it reaches neither app: "+
+			"the letterboxd stage's person must be a users name, and a person to leave alone needs an entry with no accounts",
+			person, unnamed[person])
 	}
 	for _, app := range apps {
 		if !addrs[app].At.IsZero() {
