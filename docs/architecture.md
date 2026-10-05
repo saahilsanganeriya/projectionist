@@ -17,7 +17,7 @@ that means every disruptive job pauses while anyone but the owner is watching.
  │      │                       │                                                                  │
  │      │            ┌──────────┼──────────────┬───────────────┬──────────────┐                    │
  │      │            ▼          ▼              ▼               ▼              ▼                    │
- │      │        gpu-guard   remote4k    details*   subtitles    rename   ingest*  jf-sync*  ssd*  │
+ │      │        gpu-guard   remote4k    details    subtitles    rename   ingest*  jf-sync*  ssd*  │
  │      │            │          │                                                                  │
  │      │   env: Plex client · Jellyfin client · viewers.Gate (pause rule) · probe (ffprobe cache)│
  │      │        fsx (renameat2 NOREPLACE, FICLONE, dir fsync) · store · FFmpeg paths              │
