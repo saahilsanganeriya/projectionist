@@ -12,7 +12,6 @@ import (
 	"projectionist/internal/stages/posters"
 	"projectionist/internal/stages/remote4k"
 	"projectionist/internal/stages/rename"
-	"projectionist/internal/stages/ssdmirror"
 	"projectionist/internal/stages/subtitles"
 	"projectionist/internal/stages/tonight"
 	"projectionist/internal/stages/watcher"
@@ -32,7 +31,6 @@ func stages() []stage.Stage {
 		posters.Stage{},
 		remote4k.Stage{},
 		rename.Stage{},
-		ssdmirror.Stage{},
 		subtitles.Stage{},
 		tonight.Stage{},
 		watcher.Stage{},
