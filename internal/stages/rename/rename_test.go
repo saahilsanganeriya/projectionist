@@ -175,7 +175,8 @@ func TestRunNewArrivalsThenUndo(t *testing.T) {
 	if got := tree(t, l.root); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("after apply:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-	if probed, _ := os.ReadFile(filepath.Join(l.h.Env.FFmpeg.Dir, "probed")); strings.Count(string(probed), "\n") != 2 {
+	// One stream probe per file; an HDR file also gets a frame probe, which is not counted.
+	if probed, _ := os.ReadFile(filepath.Join(l.h.Env.FFmpeg.Dir, "probed")); strings.Count(string(probed), "-show_streams") != 2 {
 		t.Fatalf("probed:\n%s\nwant the two Heat versions only (the labels need them; nothing else does)", probed)
 	}
 	review, _ := os.ReadFile(l.review)
