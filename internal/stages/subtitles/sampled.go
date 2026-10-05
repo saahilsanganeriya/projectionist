@@ -15,7 +15,7 @@ package subtitles
 // A subtitle of another cut puts its windows on different offsets, one timed for another frame rate drifts between
 // them, and another film's matches no window: none is written, and the title goes on to the whole-file alignment
 // queue. A window whose reference holds no dialogue (fewer than quietLines captions, or under quietSpeech of its
-// frames voiced) cannot judge: it is replaced by the stretch right after it, at most maxExtra times per title.
+// frames voiced) cannot judge: it is replaced by the stretch next to it, at most maxExtra times per title.
 
 import (
 	"context"

@@ -956,8 +956,8 @@ func (r *run) sampledFit(ctx context.Context, t *title, pool []Candidate, reject
 			r.event(ctx, t.path, outcome{result: "download_failed", detail: err.Error(), fields: attempt})
 			continue
 		}
-		r.keep(ctx, t, c, txt)
 		if smp == nil {
+			r.keep(ctx, t, c, txt) // the queue may want it: the windows may not judge
 			if err := r.probe(ctx, t); err != nil {
 				return outcome{result: "error", detail: err.Error()}, true
 			}
@@ -991,6 +991,7 @@ func (r *run) sampledFit(ctx context.Context, t *title, pool []Candidate, reject
 			fit.Refused = "the retimed cues do not fit the video's length"
 		}
 		if fit.Refused != "" {
+			r.keep(ctx, t, c, txt)
 			r.event(ctx, t.path, outcome{result: "rejected_sampled", detail: fit.Refused, fields: attempt})
 			continue
 		}
@@ -1036,8 +1037,8 @@ func (r *run) check(ctx context.Context, t *title, c Candidate, txt string, atte
 
 func (r *run) sampled() bool { return r.opt.Mode == "sampled" }
 
-// download is c's text with OpenSubtitles' ads stripped: from the store when the cheap route downloaded it before (a
-// release match cheapCheck refused), else from its provider.
+// download is c's text with OpenSubtitles' ads stripped: from the store when a route before the queue downloaded and
+// refused it, else from its provider.
 func (r *run) download(ctx context.Context, c Candidate) (string, error) {
 	if body, ok, err := r.env.Store.CacheGet(ctx, keptAs+c.key(), r.env.Now().Add(-keptFor)); err == nil && ok {
 		return string(body), nil
