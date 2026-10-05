@@ -1,4 +1,4 @@
-// Package tonight fills a "Tonight" row on the owner's Plex Home, directly under Continue Watching: five films
+// Package tonight fills a "Tonight" row on the owner's Plex Home, first of its Movies rows: five films
 // from his library he has not seen, picked once a day by one Claude call that reads his Letterboxd ratings and
 // reviews, each with a one-line reason tied to a film or director he rated highly.
 //

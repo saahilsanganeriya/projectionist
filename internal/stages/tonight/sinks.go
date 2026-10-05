@@ -224,8 +224,9 @@ func (t plexTarget) uri(rks []string) string {
 }
 
 // syncPlex converges the collection on the picks: members, summary, the day's poster, and its Home row at the
-// top of the Movies section's hubs (directly below Continue Watching and On Deck on his Home). persist saves the
-// state around the create, so a crash or a lost answer never leaves a second collection behind.
+// top of the Movies section's hubs. On his Home only Continue Watching, On Deck and the rows of libraries listed
+// before Movies come above it (2026-10-05: Recently Added in Home Videos, while that library has new items).
+// persist saves the state around the create, so a crash or a lost answer never leaves a second collection behind.
 func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarget, m idMap, s *sinkState, day string,
 	picks []pick, poster func() ([]byte, error), persist func() error) error {
 	if len(m.Items) == 0 {
