@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
 )
 
 // Catches a hash that differs from OpenSubtitles' (and subfetch2.py's oshash): head and tail words, the size, and a
@@ -294,5 +295,29 @@ func TestDotCom(t *testing.T) {
 	}
 	if _, err := o.Download(context.Background(), got[0]); !errors.Is(err, errQuota) {
 		t.Errorf("406: %v", err)
+	}
+}
+
+// Catches a declared UTF-16 download left undecoded (read as UTF-8 or cp1252 it is text with NULs between letters,
+// whose cues never match) or a malformed one decoded where strict decoding falls through to cp1252. Wants are
+// subfetch2.py decode()'s outputs.
+func TestDecodeDownload(t *testing.T) {
+	text := "1\n00:00:01,000 --> 00:00:02,000\nCaf\u00e9 \u266a\n"
+	var le, be []byte
+	for _, u := range utf16.Encode([]rune(text)) {
+		le, be = append(le, byte(u), byte(u>>8)), append(be, byte(u>>8), byte(u))
+	}
+	for _, c := range []struct {
+		name, raw, enc, want string
+	}{
+		{"BOM", "\xff\xfe" + string(le), "UTF-16", text},
+		{"no BOM: little-endian", string(le), "UTF-16", text},
+		{"big-endian", string(be), "utf-16be", text},
+		{"odd length", "\xff\xfe1\x00x", "UTF-16", "\u00ff\u00fe1\x00x"},
+		{"lone surrogate", "\xff\xfe1\x00\x00\xd8\n\x00", "UTF-16", "\u00ff\u00fe1\x00\x00\u00d8\n\x00"},
+	} {
+		if got := decodeDownload([]byte(c.raw), c.enc); got != c.want {
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
 	}
 }

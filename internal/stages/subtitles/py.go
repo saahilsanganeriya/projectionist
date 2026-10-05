@@ -133,10 +133,7 @@ func pyUTF8Replace(b []byte) string {
 	return sb.String()
 }
 
-// pyUTF16Replace is bytes.decode("utf-16", "replace") for input that starts with a BOM.
-func pyUTF16Replace(b []byte) string {
-	big := b[0] == 0xfe
-	b = b[2:]
+func utf16Units(b []byte, big bool) []uint16 {
 	units := make([]uint16, len(b)/2)
 	for i := range units {
 		if big {
@@ -145,11 +142,38 @@ func pyUTF16Replace(b []byte) string {
 			units[i] = uint16(b[2*i+1])<<8 | uint16(b[2*i])
 		}
 	}
-	s := string(utf16.Decode(units)) // an unpaired surrogate decodes to U+FFFD, as Python's replace does
+	return units
+}
+
+// pyUTF16Replace is bytes.decode("utf-16", "replace") for input that starts with a BOM.
+func pyUTF16Replace(b []byte) string {
+	s := string(utf16.Decode(utf16Units(b[2:], b[0] == 0xfe))) // an unpaired surrogate decodes to U+FFFD, as replace does
 	if len(b)%2 == 1 {
 		s += "\ufffd"
 	}
 	return s
+}
+
+// pyUTF16Strict is bytes.decode(enc) for "utf16" (a BOM picks the order, else little-endian, the NAS's own) and
+// "utf16le" / "utf16be" (a BOM stays a character); ok is false where strict raises: an odd length or a lone surrogate.
+func pyUTF16Strict(b []byte, enc string) (string, bool) {
+	big := enc == "utf16be"
+	if enc == "utf16" && len(b) >= 2 && (b[0] == 0xff && b[1] == 0xfe || b[0] == 0xfe && b[1] == 0xff) {
+		big, b = b[0] == 0xfe, b[2:]
+	}
+	if len(b)%2 == 1 {
+		return "", false
+	}
+	units := utf16Units(b, big)
+	for i := 0; i < len(units); i++ {
+		if u := units[i]; u >= 0xd800 && u < 0xe000 {
+			if u >= 0xdc00 || i+1 == len(units) || units[i+1] < 0xdc00 || units[i+1] >= 0xe000 {
+				return "", false
+			}
+			i++
+		}
+	}
+	return string(utf16.Decode(units)), true
 }
 
 // cp1252High maps 0x80-0x9f; the five bytes Python's cp1252 leaves undefined are U+FFFD ('replace').
@@ -188,13 +212,15 @@ func decodeStats(raw []byte) string {
 }
 
 // decodeDownload is subfetch2.py's decode(raw, encoding): the provider's declared encoding, then UTF-8, then cp1252,
-// each strict, BOM dropped. Encodings beyond UTF-8, cp1252, Latin-1 and ASCII count as unknown (Python's
-// LookupError) and fall through; English subtitles here come in those four.
+// each strict, leading BOMs dropped. Declared encodings other than UTF-8, UTF-16, cp1252, Latin-1 and ASCII are
+// skipped here where Python would use them (cp1250, ISO-8859-2, ...): such a file decodes as UTF-8 or cp1252
+// instead, so its cue times are the same and only letters outside ASCII can differ from the Python's.
 func decodeDownload(raw []byte, encoding string) string {
 	for _, enc := range []string{encoding, "utf-8", "cp1252"} {
 		var s string
 		ok := false
-		switch strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(enc)) {
+		norm := strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(enc))
+		switch norm {
 		case "", "utf8":
 			s, ok = string(raw), utf8.Valid(raw)
 		case "cp1252", "windows1252":
@@ -207,6 +233,8 @@ func decodeDownload(raw []byte, encoding string) string {
 			s, ok = string(rs), true
 		case "ascii", "usascii":
 			s, ok = string(raw), strings.IndexFunc(string(raw), func(r rune) bool { return r >= 0x80 }) < 0
+		case "utf16", "utf16le", "utf16be":
+			s, ok = pyUTF16Strict(raw, norm)
 		}
 		if ok {
 			return strings.TrimLeft(s, "\ufeff")
