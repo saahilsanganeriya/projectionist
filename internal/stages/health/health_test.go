@@ -180,7 +180,7 @@ func TestResumesACutOffRestart(t *testing.T) {
 		starts            int
 	}{
 		{"stopped by our restart, never started again", "exited", -time.Hour, time.Minute, `["jellyfin"]`, 1},
-		{"stopped by the owner after our restart", "exited", time.Minute, time.Hour, `["jellyfin"]`, 0},
+		{"stopped by the owner minutes after our restart", "exited", time.Minute, 5 * time.Minute, `["jellyfin"]`, 0},
 		{"stopped before we asked", "exited", -time.Hour, -time.Minute, `["jellyfin"]`, 0},
 		{"stopped by the owner, our restart having done nothing", "exited", -time.Hour, time.Hour, `["jellyfin"]`, 0},
 		{"Docker's restart policy has it", "restarting", -time.Hour, time.Minute, `["jellyfin"]`, 0},
