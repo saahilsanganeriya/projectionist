@@ -1,9 +1,10 @@
 // Package library reads identity from the library's naming scheme, so stages need neither Plex's API nor its DB:
 //
 //	Movies/Title (Year) {tmdb-N}/Title (Year) {tmdb-N}[ - label].ext
-//	TV/Show (Year) {tmdb-N}/Season NN/Show (Year) - SxxEyy[-Eyy] - Title.ext
+//	TV/Show (Year) {tmdb-N}/Season NN/Show (Year) - SxxEyy[-Eyy][ - Title].ext
 //
-// Movie folders may carry {imdb-ttN} and show folders {tvdb-N} when TMDB had no match.
+// Movie folders may carry {imdb-ttN} and show folders {tvdb-N} when TMDB had no match. The rename engine leaves the
+// episode title out when TMDB only has "Episode N" or a multi-episode file has no title of its own.
 package library
 
 import (
@@ -42,8 +43,13 @@ var (
 	movieFolder = regexp.MustCompile(`^(.+) \((\d{4})\) \{(tmdb|imdb)-([0-9a-z]+)\}$`)
 	showFolder  = regexp.MustCompile(`^(.+) \((\d{4})\) \{(tmdb|tvdb)-(\d+)\}$`)
 	seasonDir   = regexp.MustCompile(`^Season (\d{2,})$`)
-	episodeFile = regexp.MustCompile(`^(.+) \((\d{4})\) - S(\d{2,})E(\d{2,})(?:-E(\d{2,}))? - (.*)$`)
+	episodeFile = regexp.MustCompile(`^(.+) \((\d{4})\) - S(\d{2,})E(\d{2,})(?:-E(\d{2,}))?(?: - (.*))?$`)
 )
+
+// IsMovieFolder, IsShowFolder and IsSeasonFolder report whether one path element is in the scheme.
+func IsMovieFolder(name string) bool  { return movieFolder.MatchString(name) }
+func IsShowFolder(name string) bool   { return showFolder.MatchString(name) }
+func IsSeasonFolder(name string) bool { return seasonDir.MatchString(name) }
 
 // ParseMovie reads a path ending in <movie folder>/<file>; ok is false when it is not in the scheme.
 func ParseMovie(path string) (m Movie, ok bool) {
