@@ -278,14 +278,17 @@ func TestCopyKeepsTheRate(t *testing.T) {
 	}
 }
 
-// Catches: a library holding two films whose names differ only in case (exFAT holds one) mirroring both, or
-// keeping a different one from run to run (each swap a folder rename on the SSD).
+// Catches: two films whose names differ only in case (exFAT holds one) both mirrored, or a different one kept from
+// run to run (each swap a folder rename on the SSD); and a film with two such files mirrored (each run would
+// archive one copy and write the other over the same exFAT name).
 func TestCaseTwinsKeepOne(t *testing.T) {
-	lib := tree{"alien (1979)": nil, "Alien (1979)": nil, "Blade (1998)": nil}
+	lib := tree{"alien (1979)": nil, "Alien (1979)": nil, "Blade (1998)": nil,
+		"Heat (1995)": {{rel: "Heat (1995)/Heat.en.srt"}, {rel: "Heat (1995)/Heat.EN.srt"}}}
 	for range 50 { // map order differs between calls, so a tie broken by it shows up here
 		m := &mirror{rep: &stage.Report{}}
-		got := m.eligible(lib)
-		if !reflect.DeepEqual(got, []string{"Alien (1979)", "Blade (1998)"}) || len(m.rep.Alerts) != 1 || !strings.Contains(m.rep.Alerts[0], "differ only in case") {
+		got, alerts := m.eligible(lib), strings.Join(m.rep.Alerts, "\n")
+		if !reflect.DeepEqual(got, []string{"Alien (1979)", "Blade (1998)"}) || len(m.rep.Alerts) != 2 ||
+			!strings.Contains(alerts, `so "alien (1979)" is not mirrored`) || !strings.Contains(alerts, `"Heat (1995)" cannot be stored on exFAT as named ("Heat (1995)/Heat.EN.srt")`) {
 			t.Fatalf("eligible = %q, alerts %q", got, m.rep.Alerts)
 		}
 	}

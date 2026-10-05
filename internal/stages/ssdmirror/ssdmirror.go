@@ -425,11 +425,15 @@ func (m *mirror) eligible(lib tree) []string {
 			continue
 		}
 		seen[fold(f)] = f
-		bad := exfatUnsafe(f)
+		bad, names := exfatUnsafe(f), map[string]bool{}
 		for _, l := range lib[f] {
+			if bad == "" && names[fold(l.rel)] { // a case twin of an earlier file: exFAT would store the two as one
+				bad = l.rel
+			}
 			if bad == "" {
 				bad = exfatUnsafe(l.rel)
 			}
+			names[fold(l.rel)] = true
 		}
 		if bad != "" {
 			m.rep.Alert("%q cannot be stored on exFAT as named (%q); not mirrored", f, bad)
