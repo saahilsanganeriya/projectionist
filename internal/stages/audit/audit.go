@@ -93,8 +93,6 @@ var (
 	ignored    = set("Thumbs.db", "desktop.ini") // dot files are skipped too
 	// The rename engine's sample rule, applied to the file name.
 	sampleName = regexp.MustCompile(`(?i)(^|[ ._\-\[(])sample([ ._\-\])]|$)|^sitea\.com|^sitee\.|^main menu`)
-	// Local artwork and theme music both servers read beside the media.
-	artwork = regexp.MustCompile(`(?i)^(poster|fanart|folder|backdrop|banner|logo|clearlogo|landscape|thumb|theme|season\d{2,}(-poster)?|season-specials-poster)\.(jpe?g|png|mp3)$`)
 	// What may sit between a video's base name and a subtitle's extension.
 	sidecarSuffix = regexp.MustCompile(`^\.([a-z]{2,3})(\.sdh|\.forced)?$`)
 )
@@ -335,7 +333,7 @@ func (s *scan) dir(ctx context.Context, dir string, at place, show string) error
 		case !e.Type().IsRegular() || skipped(n) || ignored[n] || videoExts[lowerExt(n)]:
 		case subExts[lowerExt(n)]:
 			s.checkSidecar(fresh, p, at, stems)
-		case at != outside && !artwork.MatchString(n):
+		case at != outside: // local artwork too: images reach the servers through their APIs, never as files here
 			s.flag(fresh, stray, s.rel(p))
 		}
 	}

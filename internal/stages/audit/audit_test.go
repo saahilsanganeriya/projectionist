@@ -58,7 +58,7 @@ func TestNamingAndPlacement(t *testing.T) {
 		{m + "Extras/Bonus.mkv", extraPlace},
 		{m + "Heat.sample.mkv", stray},
 		{m + "movie.nfo", stray},
-		{m + "poster.jpg", ""},
+		{m + "poster.jpg", stray},
 		{m + ".DS_Store", ""},
 		{m + "@eaDir/thumb.jpg", ""},
 		{"Movies/Heat.1995.BluRay-GRP/", outsideScheme},
