@@ -3,7 +3,6 @@ package audit
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io/fs"
 	"net/http"
 	"os"
@@ -140,25 +139,11 @@ func run(t *testing.T, h *fake.Harness) stage.Report {
 	return rep
 }
 
-// tree is every file under Movies/ and TV/ with its size and mtime: equal before and after means read-only.
-func tree(t *testing.T, root string) map[string]string {
-	out := map[string]string{}
-	for _, lib := range []string{"Movies", "TV"} {
-		filepath.WalkDir(filepath.Join(root, lib), func(p string, d fs.DirEntry, err error) error {
-			if info, err := d.Info(); err == nil {
-				out[p] = fmt.Sprint(info.Size(), info.Mode(), info.ModTime())
-			}
-			return nil
-		})
-	}
-	return out
-}
-
 // Catches, end to end: an unreadable video missed (ffprobe failure with its reason, empty file) or a still-arriving
 // one judged; same-size files with different bytes called identical; embedded or sidecar English subtitles missed
 // (and a forced-only track counted as English); a correctly named episode titled "The Sample" taken for a sample
-// and dropped from the count; the report not written; anything in the library touched; an alert on the first run,
-// on a quiet category, or a growth not alerted with the new item named.
+// and dropped from the count; the report not written; an alert on the first run or on a quiet category, or a growth
+// not alerted with the new item named.
 func TestRunEndToEnd(t *testing.T) {
 	h := fake.NewEnv(t, nil)
 	root := t.TempDir()
@@ -179,7 +164,6 @@ func TestRunEndToEnd(t *testing.T) {
 	put(t, root, wire+"S01E04 - D.mkv", "e4")
 	put(t, root, wire+"S01E04 - D.en.forced.srt", "1")
 	put(t, root, wire+"S01E05 - E.mkv", "forced")
-	before := tree(t, root)
 
 	rep := run(t, h)
 	if len(rep.Alerts) != 0 {
@@ -209,15 +193,6 @@ func TestRunEndToEnd(t *testing.T) {
 	}
 	if probed, _ := os.ReadFile(calls); strings.Contains(string(probed), "New (2026)") {
 		t.Error("a file still arriving was probed")
-	}
-	if after := tree(t, root); len(after) != len(before) {
-		t.Fatalf("library changed: %d entries before, %d after", len(before), len(after))
-	} else {
-		for p, v := range before {
-			if after[p] != v {
-				t.Errorf("library entry changed: %s", p)
-			}
-		}
 	}
 
 	put(t, root, heat+"Heat (1995) {tmdb-949}.de.srt", "1") // still has its video

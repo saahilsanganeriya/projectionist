@@ -62,6 +62,6 @@ window        = "04:00-07:00"
 root          = "/volume1/media"          # holds Movies/ and TV/
 report        = "/volume1/media/_audit.txt"
 max_listed    = 50                             # examples per category in the report
-settle        = "15m"                          # younger files may still be arriving: judged next run
+settle        = "15m"                          # a file or folder changed more recently may still be moving: judged next run
 probe_workers = 2                              # ffprobes on cache misses, only while no guest is watching
 quiet         = ["missing_english_subs"]       # grows with every download until the subtitles stage catches up
