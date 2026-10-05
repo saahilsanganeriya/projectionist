@@ -35,7 +35,7 @@ import (
 
 const (
 	name           = "health"
-	restartTimeout = 2 * time.Minute // Docker's 30 s stop grace plus the start
+	restartTimeout = 10 * time.Minute // a busybox restart took 111 s on the loaded NAS (30 s of it the stop grace)
 )
 
 type Options struct {
@@ -196,7 +196,10 @@ func restart(ctx context.Context, env *stage.Env, dk *docker, st *State, svc, c 
 	if err := env.Store.PutJSON(context.WithoutCancel(ctx), name, "state", st); err != nil {
 		return err
 	}
-	rctx, cancel := context.WithTimeout(ctx, restartTimeout)
+	// Docker 24 runs the stop and then the start on the request's context: a request we abandon can leave the
+	// container stopped, so a shutdown never cancels it and the timeout is far above a slow restart.
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restartTimeout)
+	start := time.Now()
 	err := dk.restart(rctx, c)
 	cancel()
 	outcome := "restarted"
@@ -204,7 +207,8 @@ func restart(ctx context.Context, env *stage.Env, dk *docker, st *State, svc, c 
 		outcome = "restart_failed"
 		rep.Alert("restart of container %s failed: %v", c, err)
 	}
-	env.Log.Warn("container restart", "event", "container_restart", "container", c, "service", svc, "outcome", outcome, "err", err)
+	env.Log.Warn("container restart", "event", "container_restart", "container", c, "service", svc, "outcome", outcome,
+		"duration_ms", time.Since(start).Milliseconds(), "err", err)
 	env.Metrics.Add("projectionist_health_restarts_total", 1, "container", c, "outcome", outcome)
 	return env.Store.AddEvent(context.WithoutCancel(ctx), now, name, c, outcome, map[string]any{"failed": why})
 }
@@ -254,9 +258,12 @@ func decide(c restartCase) verdict {
 // jellyfinPlaying counts every playing session, the owner's included: a restart cuts his stream too.
 func jellyfinPlaying(ctx context.Context, env *stage.Env, timeout time.Duration) func() (int, error) {
 	return func() (int, error) {
-		ctx, cancel := context.WithTimeout(ctx, timeout)
+		callCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
-		sessions, err := env.Jellyfin.Sessions(ctx, viewers.JellyfinActiveWithin)
+		sessions, err := env.Jellyfin.Sessions(callCtx, viewers.JellyfinActiveWithin)
+		if ctx.Err() != nil {
+			return 0, ctx.Err() // shutting down: an unanswered call says nothing about who is watching
+		}
 		n := 0
 		for _, s := range sessions {
 			if s.NowPlayingItem != nil {

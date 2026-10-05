@@ -187,6 +187,33 @@ func TestHungProbeTimesOut(t *testing.T) {
 	}
 }
 
+// Catches: a shutdown landing during the viewer check read as "Jellyfin is not answering, so nobody is watching",
+// which would restart Jellyfin under a viewer.
+func TestShutdownDuringViewerCheckHoldsTheRestart(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	h.Jellyfin.HandleFunc("GET", "/Sessions", func(w http.ResponseWriter, _ *http.Request) { cancel(); w.Write([]byte(`[]`)) })
+	c := restartCase{streak: 3, threshold: 3, faults: []fault{down}, container: "jellyfin", allowed: true,
+		sinceRestart: 2 * time.Hour, cooldown: time.Hour, playing: jellyfinPlaying(ctx, h.Env, time.Minute)}
+	if v := decide(c); v.restart || !strings.Contains(v.hold, "cannot tell who is playing") {
+		t.Fatalf("verdict %+v; want the restart held", v)
+	}
+}
+
+// Catches: a shutdown abandoning a restart request; Docker 24 stops and starts on the request's context, so an
+// abandoned restart can leave Jellyfin stopped, which this stage then never restarts.
+func TestRestartOutlivesShutdown(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /containers/jellyfin/restart", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	st, rep := State{Streak: map[string]int{}, LastRestart: map[string]time.Time{}}, stage.Report{}
+	if err := restart(ctx, h.Env, newDocker(serveUnix(t, mux)), &st, "jellyfin", "jellyfin", h.Now, "test", &rep); err != nil || len(rep.Alerts) > 0 {
+		t.Fatalf("err = %v, alerts %q; want the restart sent despite the shutdown", err, rep.Alerts)
+	}
+}
+
 // serveUnix serves h on a unix socket, as dockerd does, and returns the socket path.
 func serveUnix(t *testing.T, h http.Handler) string {
 	dir, err := os.MkdirTemp("", "hc") // short path: macOS caps unix socket paths at 104 bytes
