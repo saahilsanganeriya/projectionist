@@ -46,12 +46,13 @@ cache_ttl    = "24h"
 [stages.collections]
 every           = "6h"
 movies_dir      = "/volume1/media/Movies"
-backup_file     = "/volume1/PlexMediaServer/backups/customizations/collections.json"
-poster_dir      = "/volume1/PlexMediaServer/backups/customizations/posters/collection"
+# The owner's 111 collections, frozen once from Plex's customizations export (a one-time migration; Plex is never
+# read for them again): config/collections.owner.json in this repo, and their posters copied once beside it.
+owner_file      = "/config/collections.owner.json"
+poster_dir      = "/config/collection-posters" # <ratingKey>.jpg
 approved_file   = "/config/collections.approved.json" # config/collections.approved.json in this repo
 plex_section    = 4
 sinks           = ["plex", "jellyfin"]
-tmdb_token_file = "/run/secrets/tmdb_read_token" # TMDB v4 read token
 # A director here gets a "zz<name>" collection once their third film is on disk (names as TMDB spells them).
 canon_directors = [
   "Paul Greengrass", "Vishal Bhardwaj", "George Miller", "Robert Zemeckis", "Nicolas Winding Refn", "Hayao Miyazaki",

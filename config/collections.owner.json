@@ -1,0 +1,10223 @@
+[
+ {
+  "ratingKey": "40699",
+  "title": "28...Later",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "28 Days Later",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0289043",
+     "tmdb://170",
+     "tvdb://871"
+    ]
+   },
+   {
+    "title": "28 Weeks Later",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0463854",
+     "tmdb://1562",
+     "tvdb://835"
+    ]
+   },
+   {
+    "title": "28 Years Later",
+    "year": 2025,
+    "ids": [
+     "imdb://tt10548174",
+     "tmdb://1100988",
+     "tvdb://307356"
+    ]
+   },
+   {
+    "title": "28 Years Later: The Bone Temple",
+    "year": 2026,
+    "ids": [
+     "imdb://tt32141377",
+     "tmdb://1272837",
+     "tvdb://362473"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "19608",
+  "title": "Alien",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Alien",
+    "year": 1979,
+    "ids": [
+     "imdb://tt0078748",
+     "tmdb://348",
+     "tvdb://264"
+    ]
+   },
+   {
+    "title": "Aliens",
+    "year": 1986,
+    "ids": [
+     "imdb://tt0090605",
+     "tmdb://679",
+     "tvdb://654"
+    ]
+   },
+   {
+    "title": "Alien 3",
+    "year": 1992,
+    "ids": [
+     "imdb://tt0103644",
+     "tmdb://8077",
+     "tvdb://670"
+    ]
+   },
+   {
+    "title": "Alien: Resurrection",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0118583",
+     "tmdb://8078",
+     "tvdb://784"
+    ]
+   },
+   {
+    "title": "Alien vs. Predator",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0370263",
+     "tmdb://395",
+     "tvdb://1589"
+    ]
+   },
+   {
+    "title": "Aliens vs. Predator: Requiem",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0758730",
+     "tmdb://440",
+     "tvdb://1227"
+    ]
+   },
+   {
+    "title": "Prometheus",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1446714",
+     "tmdb://70981",
+     "tvdb://527"
+    ]
+   },
+   {
+    "title": "Alien: Covenant",
+    "year": 2017,
+    "ids": [
+     "imdb://tt2316204",
+     "tmdb://126889",
+     "tvdb://199"
+    ]
+   },
+   {
+    "title": "Alien: Romulus",
+    "year": 2024,
+    "ids": [
+     "imdb://tt18412256",
+     "tmdb://945961",
+     "tvdb://349288"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "19800",
+  "title": "And the Oscar goes to...",
+  "titleSort": null,
+  "summary": "Best picture winners over the years",
+  "art": null,
+  "members": [
+   {
+    "title": "Gone with the Wind",
+    "year": 1939,
+    "ids": [
+     "imdb://tt0031381",
+     "tmdb://770",
+     "tvdb://1328"
+    ]
+   },
+   {
+    "title": "Rebecca",
+    "year": 1940,
+    "ids": [
+     "imdb://tt0032976",
+     "tmdb://223",
+     "tvdb://2518"
+    ]
+   },
+   {
+    "title": "Mrs. Miniver",
+    "year": 1942,
+    "ids": [
+     "imdb://tt0035093",
+     "tmdb://27367",
+     "tvdb://8987"
+    ]
+   },
+   {
+    "title": "Casablanca",
+    "year": 1942,
+    "ids": [
+     "imdb://tt0034583",
+     "tmdb://289",
+     "tvdb://1762"
+    ]
+   },
+   {
+    "title": "All About Eve",
+    "year": 1950,
+    "ids": [
+     "imdb://tt0042192",
+     "tmdb://705",
+     "tvdb://3105"
+    ]
+   },
+   {
+    "title": "An American in Paris",
+    "year": 1951,
+    "ids": [
+     "imdb://tt0043278",
+     "tmdb://2769",
+     "tvdb://6331"
+    ]
+   },
+   {
+    "title": "On the Waterfront",
+    "year": 1954,
+    "ids": [
+     "imdb://tt0047296",
+     "tmdb://654",
+     "tvdb://2734"
+    ]
+   },
+   {
+    "title": "The Bridge on the River Kwai",
+    "year": 1957,
+    "ids": [
+     "imdb://tt0050212",
+     "tmdb://826",
+     "tvdb://3668"
+    ]
+   },
+   {
+    "title": "The Apartment",
+    "year": 1960,
+    "ids": [
+     "imdb://tt0053604",
+     "tmdb://284",
+     "tvdb://3801"
+    ]
+   },
+   {
+    "title": "West Side Story",
+    "year": 1961,
+    "ids": [
+     "imdb://tt0055614",
+     "tmdb://1725",
+     "tvdb://9244"
+    ]
+   },
+   {
+    "title": "Lawrence of Arabia",
+    "year": 1962,
+    "ids": [
+     "imdb://tt0056172",
+     "tmdb://947",
+     "tvdb://2466"
+    ]
+   },
+   {
+    "title": "Tom Jones",
+    "year": 1963,
+    "ids": [
+     "imdb://tt0057590",
+     "tmdb://5769",
+     "tvdb://4954"
+    ]
+   },
+   {
+    "title": "My Fair Lady",
+    "year": 1964,
+    "ids": [
+     "imdb://tt0058385",
+     "tmdb://11113",
+     "tvdb://4577"
+    ]
+   },
+   {
+    "title": "The Sound of Music",
+    "year": 1965,
+    "ids": [
+     "imdb://tt0059742",
+     "tmdb://15121",
+     "tvdb://1600"
+    ]
+   },
+   {
+    "title": "A Man for All Seasons",
+    "year": 1966,
+    "ids": [
+     "imdb://tt0060665",
+     "tmdb://874",
+     "tvdb://4816"
+    ]
+   },
+   {
+    "title": "In the Heat of the Night",
+    "year": 1967,
+    "ids": [
+     "imdb://tt0061811",
+     "tmdb://10633",
+     "tvdb://4667"
+    ]
+   },
+   {
+    "title": "Oliver!",
+    "year": 1968,
+    "ids": [
+     "imdb://tt0063385",
+     "tmdb://17917",
+     "tvdb://6941"
+    ]
+   },
+   {
+    "title": "Midnight Cowboy",
+    "year": 1969,
+    "ids": [
+     "imdb://tt0064665",
+     "tmdb://3116",
+     "tvdb://2098"
+    ]
+   },
+   {
+    "title": "Patton",
+    "year": 1970,
+    "ids": [
+     "imdb://tt0066206",
+     "tmdb://11202",
+     "tvdb://2502"
+    ]
+   },
+   {
+    "title": "The French Connection",
+    "year": 1971,
+    "ids": [
+     "imdb://tt0067116",
+     "tmdb://1051",
+     "tvdb://2573"
+    ]
+   },
+   {
+    "title": "The Godfather",
+    "year": 1972,
+    "ids": [
+     "imdb://tt0068646",
+     "tmdb://238",
+     "tvdb://275"
+    ]
+   },
+   {
+    "title": "The Sting",
+    "year": 1973,
+    "ids": [
+     "imdb://tt0070735",
+     "tmdb://9277",
+     "tvdb://3077"
+    ]
+   },
+   {
+    "title": "The Godfather Part II",
+    "year": 1974,
+    "ids": [
+     "imdb://tt0071562",
+     "tmdb://240",
+     "tvdb://780"
+    ]
+   },
+   {
+    "title": "One Flew Over the Cuckoo's Nest",
+    "year": 1975,
+    "ids": [
+     "imdb://tt0073486",
+     "tmdb://510",
+     "tvdb://785"
+    ]
+   },
+   {
+    "title": "Rocky",
+    "year": 1976,
+    "ids": [
+     "imdb://tt0075148",
+     "tmdb://1366",
+     "tvdb://531"
+    ]
+   },
+   {
+    "title": "Annie Hall",
+    "year": 1977,
+    "ids": [
+     "imdb://tt0075686",
+     "tmdb://703",
+     "tvdb://3855"
+    ]
+   },
+   {
+    "title": "The Deer Hunter",
+    "year": 1978,
+    "ids": [
+     "imdb://tt0077416",
+     "tmdb://11778",
+     "tvdb://1619"
+    ]
+   },
+   {
+    "title": "Kramer vs. Kramer",
+    "year": 1979,
+    "ids": [
+     "imdb://tt0079417",
+     "tmdb://12102",
+     "tvdb://6217"
+    ]
+   },
+   {
+    "title": "Ordinary People",
+    "year": 1980,
+    "ids": [
+     "imdb://tt0081283",
+     "tmdb://16619",
+     "tvdb://6823"
+    ]
+   },
+   {
+    "title": "Chariots of Fire",
+    "year": 1981,
+    "ids": [
+     "imdb://tt0082158",
+     "tmdb://9443",
+     "tvdb://6623"
+    ]
+   },
+   {
+    "title": "Gandhi",
+    "year": 1982,
+    "ids": [
+     "imdb://tt0083987",
+     "tmdb://783",
+     "tvdb://2510"
+    ]
+   },
+   {
+    "title": "Terms of Endearment",
+    "year": 1983,
+    "ids": [
+     "imdb://tt0086425",
+     "tmdb://11050",
+     "tvdb://7095"
+    ]
+   },
+   {
+    "title": "Amadeus",
+    "year": 1984,
+    "ids": [
+     "imdb://tt0086879",
+     "tmdb://279",
+     "tvdb://3982"
+    ]
+   },
+   {
+    "title": "Out of Africa",
+    "year": 1985,
+    "ids": [
+     "imdb://tt0089755",
+     "tmdb://606",
+     "tvdb://4953"
+    ]
+   },
+   {
+    "title": "Platoon",
+    "year": 1986,
+    "ids": [
+     "imdb://tt0091763",
+     "tmdb://792",
+     "tvdb://2050"
+    ]
+   },
+   {
+    "title": "The Last Emperor",
+    "year": 1987,
+    "ids": [
+     "imdb://tt0093389",
+     "tmdb://746",
+     "tvdb://3084"
+    ]
+   },
+   {
+    "title": "Rain Man",
+    "year": 1988,
+    "ids": [
+     "imdb://tt0095953",
+     "tmdb://380",
+     "tvdb://1917"
+    ]
+   },
+   {
+    "title": "Driving Miss Daisy",
+    "year": 1989,
+    "ids": [
+     "imdb://tt0097239",
+     "tmdb://403",
+     "tvdb://4565"
+    ]
+   },
+   {
+    "title": "Dances with Wolves",
+    "year": 1990,
+    "ids": [
+     "imdb://tt0099348",
+     "tmdb://581",
+     "tvdb://1624"
+    ]
+   },
+   {
+    "title": "The Silence of the Lambs",
+    "year": 1991,
+    "ids": [
+     "imdb://tt0102926",
+     "tmdb://274",
+     "tvdb://15030"
+    ]
+   },
+   {
+    "title": "Unforgiven",
+    "year": 1992,
+    "ids": [
+     "imdb://tt0105695",
+     "tmdb://33",
+     "tvdb://1504"
+    ]
+   },
+   {
+    "title": "Schindler's List",
+    "year": 1993,
+    "ids": [
+     "imdb://tt0108052",
+     "tmdb://424",
+     "tvdb://223"
+    ]
+   },
+   {
+    "title": "Forrest Gump",
+    "year": 1994,
+    "ids": [
+     "imdb://tt0109830",
+     "tmdb://13",
+     "tvdb://294"
+    ]
+   },
+   {
+    "title": "Braveheart",
+    "year": 1995,
+    "ids": [
+     "imdb://tt0112573",
+     "tmdb://197",
+     "tvdb://703"
+    ]
+   },
+   {
+    "title": "The English Patient",
+    "year": 1996,
+    "ids": [
+     "imdb://tt0116209",
+     "tmdb://409",
+     "tvdb://2591"
+    ]
+   },
+   {
+    "title": "Titanic",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0120338",
+     "tmdb://597",
+     "tvdb://231"
+    ]
+   },
+   {
+    "title": "Shakespeare in Love",
+    "year": 1998,
+    "ids": [
+     "imdb://tt0138097",
+     "tmdb://1934",
+     "tvdb://2259"
+    ]
+   },
+   {
+    "title": "American Beauty",
+    "year": 1999,
+    "ids": [
+     "imdb://tt0169547",
+     "tmdb://14",
+     "tvdb://445"
+    ]
+   },
+   {
+    "title": "Gladiator",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0172495",
+     "tmdb://98",
+     "tvdb://419"
+    ]
+   },
+   {
+    "title": "A Beautiful Mind",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0268978",
+     "tmdb://453",
+     "tvdb://1472"
+    ]
+   },
+   {
+    "title": "Chicago",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0299658",
+     "tmdb://1574",
+     "tvdb://3927"
+    ]
+   },
+   {
+    "title": "The Lord of the Rings: The Return of the King",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0167260",
+     "tmdb://122",
+     "tvdb://74"
+    ]
+   },
+   {
+    "title": "Crash",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0375679",
+     "tmdb://1640",
+     "tvdb://1955"
+    ]
+   },
+   {
+    "title": "Million Dollar Baby",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0405159",
+     "tmdb://70",
+     "tvdb://1475"
+    ]
+   },
+   {
+    "title": "The Departed",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0407887",
+     "tmdb://1422",
+     "tvdb://590"
+    ]
+   },
+   {
+    "title": "No Country for Old Men",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0477348",
+     "tmdb://6977",
+     "tvdb://207"
+    ]
+   },
+   {
+    "title": "The Hurt Locker",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0887912",
+     "tmdb://12162",
+     "tvdb://1284"
+    ]
+   },
+   {
+    "title": "Slumdog Millionaire",
+    "year": 2008,
+    "ids": [
+     "imdb://tt1010048",
+     "tmdb://12405",
+     "tvdb://1166"
+    ]
+   },
+   {
+    "title": "The King's Speech",
+    "year": 2010,
+    "ids": [
+     "imdb://tt1504320",
+     "tmdb://45269",
+     "tvdb://627"
+    ]
+   },
+   {
+    "title": "The Artist",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1655442",
+     "tmdb://74643",
+     "tvdb://2189"
+    ]
+   },
+   {
+    "title": "Argo",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1024648",
+     "tmdb://68734",
+     "tvdb://2627"
+    ]
+   },
+   {
+    "title": "12 Years a Slave",
+    "year": 2013,
+    "ids": [
+     "imdb://tt2024544",
+     "tmdb://76203",
+     "tvdb://802"
+    ]
+   },
+   {
+    "title": "Birdman or (The Unexpected Virtue of Ignorance)",
+    "year": 2014,
+    "ids": [
+     "imdb://tt2562232",
+     "tmdb://194662",
+     "tvdb://265"
+    ]
+   },
+   {
+    "title": "Spotlight",
+    "year": 2015,
+    "ids": [
+     "imdb://tt1895587",
+     "tmdb://314365",
+     "tvdb://606"
+    ]
+   },
+   {
+    "title": "Moonlight",
+    "year": 2016,
+    "ids": [
+     "imdb://tt4975722",
+     "tmdb://376867",
+     "tvdb://776"
+    ]
+   },
+   {
+    "title": "The Shape of Water",
+    "year": 2017,
+    "ids": [
+     "imdb://tt5580390",
+     "tmdb://399055",
+     "tvdb://241"
+    ]
+   },
+   {
+    "title": "Green Book",
+    "year": 2018,
+    "ids": [
+     "imdb://tt6966692",
+     "tmdb://490132",
+     "tvdb://32"
+    ]
+   },
+   {
+    "title": "Parasite",
+    "year": 2019,
+    "ids": [
+     "imdb://tt6751668",
+     "tmdb://496243",
+     "tvdb://41517"
+    ]
+   },
+   {
+    "title": "Nomadland",
+    "year": 2021,
+    "ids": [
+     "imdb://tt9770150",
+     "tmdb://581734",
+     "tvdb://140648"
+    ]
+   },
+   {
+    "title": "CODA",
+    "year": 2021,
+    "ids": [
+     "imdb://tt10366460",
+     "tmdb://776503",
+     "tvdb://149849"
+    ]
+   },
+   {
+    "title": "Everything Everywhere All at Once",
+    "year": 2022,
+    "ids": [
+     "imdb://tt6710474",
+     "tmdb://545611",
+     "tvdb://331939"
+    ]
+   },
+   {
+    "title": "Oppenheimer",
+    "year": 2023,
+    "ids": [
+     "imdb://tt15398776",
+     "tmdb://872585",
+     "tvdb://287533"
+    ]
+   },
+   {
+    "title": "Anora",
+    "year": 2024,
+    "ids": [
+     "imdb://tt28607951",
+     "tmdb://1064213",
+     "tvdb://355641"
+    ]
+   },
+   {
+    "title": "One Battle After Another",
+    "year": 2025,
+    "ids": [
+     "imdb://tt30144839",
+     "tmdb://1054867",
+     "tvdb://355416"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20485",
+  "title": "The Apu Trilogy",
+  "titleSort": "Apu Trilogy",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Pather Panchali",
+    "year": 1955,
+    "ids": [
+     "imdb://tt0048473",
+     "tmdb://5801",
+     "tvdb://10985"
+    ]
+   },
+   {
+    "title": "Aparajito",
+    "year": 1956,
+    "ids": [
+     "imdb://tt0048956",
+     "tmdb://897",
+     "tvdb://14366"
+    ]
+   },
+   {
+    "title": "Apur Sansar",
+    "year": 1958,
+    "ids": [
+     "imdb://tt0052572",
+     "tmdb://896",
+     "tvdb://132388"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "23380",
+  "title": "Bad Boys",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Bad Boys",
+    "year": 1995,
+    "ids": [
+     "imdb://tt0112442",
+     "tmdb://9737",
+     "tvdb://898"
+    ]
+   },
+   {
+    "title": "Bad Boys II",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0172156",
+     "tmdb://8961",
+     "tvdb://2079"
+    ]
+   },
+   {
+    "title": "Bad Boys for Life",
+    "year": 2020,
+    "ids": [
+     "imdb://tt1502397",
+     "tmdb://38700",
+     "tvdb://25615"
+    ]
+   },
+   {
+    "title": "Bad Boys: Ride or Die",
+    "year": 2024,
+    "ids": [
+     "imdb://tt4919268",
+     "tmdb://573435",
+     "tvdb://88362"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "19568",
+  "title": "The Before Trilogy",
+  "titleSort": "Before Trilogy",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Before Sunrise",
+    "year": 1995,
+    "ids": [
+     "imdb://tt0112471",
+     "tmdb://76",
+     "tvdb://1129"
+    ]
+   },
+   {
+    "title": "Before Sunset",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0381681",
+     "tmdb://80",
+     "tvdb://3157"
+    ]
+   },
+   {
+    "title": "Before Midnight",
+    "year": 2013,
+    "ids": [
+     "imdb://tt2209418",
+     "tmdb://132344",
+     "tvdb://3208"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "26703",
+  "title": "The Conjuring Universe",
+  "titleSort": "Conjuring Universe",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "The Conjuring",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1457767",
+     "tmdb://138843",
+     "tvdb://626"
+    ]
+   },
+   {
+    "title": "Annabelle",
+    "year": 2014,
+    "ids": [
+     "imdb://tt3322940",
+     "tmdb://250546",
+     "tvdb://4756"
+    ]
+   },
+   {
+    "title": "The Conjuring 2",
+    "year": 2016,
+    "ids": [
+     "imdb://tt3065204",
+     "tmdb://259693",
+     "tvdb://913"
+    ]
+   },
+   {
+    "title": "Annabelle: Creation",
+    "year": 2017,
+    "ids": [
+     "imdb://tt5140878",
+     "tmdb://396422",
+     "tvdb://1198"
+    ]
+   },
+   {
+    "title": "The Nun",
+    "year": 2018,
+    "ids": [
+     "imdb://tt5814060",
+     "tmdb://439079",
+     "tvdb://85"
+    ]
+   },
+   {
+    "title": "The Curse of La Llorona",
+    "year": 2019,
+    "ids": [
+     "imdb://tt4913966",
+     "tmdb://480414",
+     "tvdb://16229"
+    ]
+   },
+   {
+    "title": "Annabelle Comes Home",
+    "year": 2019,
+    "ids": [
+     "imdb://tt8350360",
+     "tmdb://521029",
+     "tvdb://16669"
+    ]
+   },
+   {
+    "title": "The Conjuring: The Devil Made Me Do It",
+    "year": 2021,
+    "ids": [
+     "imdb://tt7069210",
+     "tmdb://423108",
+     "tvdb://25153"
+    ]
+   },
+   {
+    "title": "The Nun II",
+    "year": 2023,
+    "ids": [
+     "imdb://tt10160976",
+     "tmdb://968051",
+     "tvdb://340887"
+    ]
+   },
+   {
+    "title": "The Conjuring: Last Rites",
+    "year": 2025,
+    "ids": [
+     "imdb://tt22898462",
+     "tmdb://1038392",
+     "tvdb://346014"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20633",
+  "title": "Disney Animation",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Lilo & Stitch",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0275847",
+     "tmdb://11544",
+     "tvdb://864"
+    ]
+   },
+   {
+    "title": "Tangled",
+    "year": 2010,
+    "ids": [
+     "imdb://tt0398286",
+     "tmdb://38757",
+     "tvdb://636"
+    ]
+   },
+   {
+    "title": "Wreck-It Ralph",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1772341",
+     "tmdb://82690",
+     "tvdb://237"
+    ]
+   },
+   {
+    "title": "Frozen",
+    "year": 2013,
+    "ids": [
+     "imdb://tt2294629",
+     "tmdb://109445",
+     "tvdb://89"
+    ]
+   },
+   {
+    "title": "Big Hero 6",
+    "year": 2014,
+    "ids": [
+     "imdb://tt2245084",
+     "tmdb://177572",
+     "tvdb://151"
+    ]
+   },
+   {
+    "title": "Zootopia",
+    "year": 2016,
+    "ids": [
+     "imdb://tt2948356",
+     "tmdb://269149",
+     "tvdb://77"
+    ]
+   },
+   {
+    "title": "Ralph Breaks the Internet",
+    "year": 2018,
+    "ids": [
+     "imdb://tt5848272",
+     "tmdb://404368",
+     "tvdb://3"
+    ]
+   },
+   {
+    "title": "Frozen II",
+    "year": 2019,
+    "ids": [
+     "imdb://tt4520988",
+     "tmdb://330457",
+     "tvdb://9436"
+    ]
+   },
+   {
+    "title": "Raya and the Last Dragon",
+    "year": 2021,
+    "ids": [
+     "imdb://tt5109280",
+     "tmdb://527774",
+     "tvdb://131415"
+    ]
+   },
+   {
+    "title": "Encanto",
+    "year": 2021,
+    "ids": [
+     "imdb://tt2953050",
+     "tmdb://568124",
+     "tvdb://145454"
+    ]
+   },
+   {
+    "title": "Moana 2",
+    "year": 2024,
+    "ids": [
+     "imdb://tt13622970",
+     "tmdb://1241982",
+     "tvdb://353754"
+    ]
+   },
+   {
+    "title": "Zootopia 2",
+    "year": 2025,
+    "ids": [
+     "imdb://tt26443597",
+     "tmdb://1084242",
+     "tvdb://344109"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "24123",
+  "title": "Fast & Furious",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "The Fast and the Furious",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0232500",
+     "tmdb://9799",
+     "tvdb://41146"
+    ]
+   },
+   {
+    "title": "2 Fast 2 Furious",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0322259",
+     "tmdb://584",
+     "tvdb://20800"
+    ]
+   },
+   {
+    "title": "The Fast and the Furious: Tokyo Drift",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0463985",
+     "tmdb://9615",
+     "tvdb://26328"
+    ]
+   },
+   {
+    "title": "Fast & Furious",
+    "year": 2009,
+    "ids": [
+     "imdb://tt1013752",
+     "tmdb://13804",
+     "tvdb://39824"
+    ]
+   },
+   {
+    "title": "Fast Five",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1596343",
+     "tmdb://51497",
+     "tvdb://32308"
+    ]
+   },
+   {
+    "title": "Fast & Furious 6",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1905041",
+     "tmdb://82992",
+     "tvdb://39780"
+    ]
+   },
+   {
+    "title": "Furious 7",
+    "year": 2015,
+    "ids": [
+     "imdb://tt2820852",
+     "tmdb://168259",
+     "tvdb://571"
+    ]
+   },
+   {
+    "title": "The Fate of the Furious",
+    "year": 2017,
+    "ids": [
+     "imdb://tt4630562",
+     "tmdb://337339",
+     "tvdb://120"
+    ]
+   },
+   {
+    "title": "Fast & Furious Presents: Hobbs & Shaw",
+    "year": 2019,
+    "ids": [
+     "imdb://tt6806448",
+     "tmdb://384018",
+     "tvdb://10677"
+    ]
+   },
+   {
+    "title": "F9: The Fast Saga",
+    "year": 2021,
+    "ids": [
+     "imdb://tt5433138",
+     "tmdb://385128",
+     "tvdb://8856"
+    ]
+   },
+   {
+    "title": "Fast X",
+    "year": 2023,
+    "ids": [
+     "imdb://tt5433140",
+     "tmdb://385687",
+     "tvdb://4215"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "19612",
+  "title": "The Hunger Games",
+  "titleSort": "Hunger Games",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "The Hunger Games",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1392170",
+     "tmdb://70160",
+     "tvdb://1211"
+    ]
+   },
+   {
+    "title": "The Hunger Games: Catching Fire",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1951264",
+     "tmdb://101299",
+     "tvdb://542"
+    ]
+   },
+   {
+    "title": "The Hunger Games: Mockingjay - Part 1",
+    "year": 2014,
+    "ids": [
+     "imdb://tt1951265",
+     "tmdb://131631",
+     "tvdb://164"
+    ]
+   },
+   {
+    "title": "The Hunger Games: Mockingjay - Part 2",
+    "year": 2015,
+    "ids": [
+     "imdb://tt1951266",
+     "tmdb://131634",
+     "tvdb://257"
+    ]
+   },
+   {
+    "title": "The Hunger Games: The Ballad of Songbirds & Snakes",
+    "year": 2023,
+    "ids": [
+     "imdb://tt10545296",
+     "tmdb://695721",
+     "tvdb://135073"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "22778",
+  "title": "Indiana Jones",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Raiders of the Lost Ark",
+    "year": 1981,
+    "ids": [
+     "imdb://tt0082971",
+     "tmdb://85",
+     "tvdb://323"
+    ]
+   },
+   {
+    "title": "Indiana Jones and the Temple of Doom",
+    "year": 1984,
+    "ids": [
+     "imdb://tt0087469",
+     "tmdb://87",
+     "tvdb://752"
+    ]
+   },
+   {
+    "title": "Indiana Jones and the Last Crusade",
+    "year": 1989,
+    "ids": [
+     "imdb://tt0097576",
+     "tmdb://89",
+     "tvdb://519"
+    ]
+   },
+   {
+    "title": "Indiana Jones and the Kingdom of the Crystal Skull",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0367882",
+     "tmdb://217",
+     "tvdb://1023"
+    ]
+   },
+   {
+    "title": "Indiana Jones and the Dial of Destiny",
+    "year": 2023,
+    "ids": [
+     "imdb://tt1462764",
+     "tmdb://335977",
+     "tvdb://134846"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "19757",
+  "title": "James Bond",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Dr. No",
+    "year": 1962,
+    "ids": [
+     "imdb://tt0055928",
+     "tmdb://646",
+     "tvdb://450"
+    ]
+   },
+   {
+    "title": "From Russia with Love",
+    "year": 1963,
+    "ids": [
+     "imdb://tt0057076",
+     "tmdb://657",
+     "tvdb://638"
+    ]
+   },
+   {
+    "title": "Goldfinger",
+    "year": 1964,
+    "ids": [
+     "imdb://tt0058150",
+     "tmdb://658",
+     "tvdb://701"
+    ]
+   },
+   {
+    "title": "Thunderball",
+    "year": 1965,
+    "ids": [
+     "imdb://tt0059800",
+     "tmdb://660",
+     "tvdb://1685"
+    ]
+   },
+   {
+    "title": "You Only Live Twice",
+    "year": 1967,
+    "ids": [
+     "imdb://tt0062512",
+     "tmdb://667",
+     "tvdb://1192"
+    ]
+   },
+   {
+    "title": "On Her Majesty's Secret Service",
+    "year": 1969,
+    "ids": [
+     "imdb://tt0064757",
+     "tmdb://668",
+     "tvdb://862"
+    ]
+   },
+   {
+    "title": "Diamonds Are Forever",
+    "year": 1971,
+    "ids": [
+     "imdb://tt0066995",
+     "tmdb://681",
+     "tvdb://2675"
+    ]
+   },
+   {
+    "title": "Live and Let Die",
+    "year": 1973,
+    "ids": [
+     "imdb://tt0070328",
+     "tmdb://253",
+     "tvdb://1110"
+    ]
+   },
+   {
+    "title": "The Man with the Golden Gun",
+    "year": 1974,
+    "ids": [
+     "imdb://tt0071807",
+     "tmdb://682",
+     "tvdb://860"
+    ]
+   },
+   {
+    "title": "The Spy Who Loved Me",
+    "year": 1977,
+    "ids": [
+     "imdb://tt0076752",
+     "tmdb://691",
+     "tvdb://1137"
+    ]
+   },
+   {
+    "title": "Moonraker",
+    "year": 1979,
+    "ids": [
+     "imdb://tt0079574",
+     "tmdb://698",
+     "tvdb://1442"
+    ]
+   },
+   {
+    "title": "For Your Eyes Only",
+    "year": 1981,
+    "ids": [
+     "imdb://tt0082398",
+     "tmdb://699",
+     "tvdb://1159"
+    ]
+   },
+   {
+    "title": "Octopussy",
+    "year": 1983,
+    "ids": [
+     "imdb://tt0086034",
+     "tmdb://700",
+     "tvdb://1272"
+    ]
+   },
+   {
+    "title": "Never Say Never Again",
+    "year": 1983,
+    "ids": [
+     "imdb://tt0086006",
+     "tmdb://36670",
+     "tvdb://4831"
+    ]
+   },
+   {
+    "title": "A View to a Kill",
+    "year": 1985,
+    "ids": [
+     "imdb://tt0090264",
+     "tmdb://707",
+     "tvdb://642"
+    ]
+   },
+   {
+    "title": "The Living Daylights",
+    "year": 1987,
+    "ids": [
+     "imdb://tt0093428",
+     "tmdb://708",
+     "tvdb://680"
+    ]
+   },
+   {
+    "title": "Licence to Kill",
+    "year": 1989,
+    "ids": [
+     "imdb://tt0097742",
+     "tmdb://709",
+     "tvdb://822"
+    ]
+   },
+   {
+    "title": "GoldenEye",
+    "year": 1995,
+    "ids": [
+     "imdb://tt0113189",
+     "tmdb://710",
+     "tvdb://765"
+    ]
+   },
+   {
+    "title": "Tomorrow Never Dies",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0120347",
+     "tmdb://714",
+     "tvdb://1124"
+    ]
+   },
+   {
+    "title": "The World Is Not Enough",
+    "year": 1999,
+    "ids": [
+     "imdb://tt0143145",
+     "tmdb://36643",
+     "tvdb://755"
+    ]
+   },
+   {
+    "title": "Die Another Day",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0246460",
+     "tmdb://36669",
+     "tvdb://941"
+    ]
+   },
+   {
+    "title": "Casino Royale",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0381061",
+     "tmdb://36557",
+     "tvdb://330"
+    ]
+   },
+   {
+    "title": "Quantum of Solace",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0830515",
+     "tmdb://10764",
+     "tvdb://400"
+    ]
+   },
+   {
+    "title": "Skyfall",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1074638",
+     "tmdb://37724",
+     "tvdb://279"
+    ]
+   },
+   {
+    "title": "Spectre",
+    "year": 2015,
+    "ids": [
+     "imdb://tt2379713",
+     "tmdb://206647",
+     "tvdb://296"
+    ]
+   },
+   {
+    "title": "No Time to Die",
+    "year": 2021,
+    "ids": [
+     "imdb://tt2382320",
+     "tmdb://370172",
+     "tvdb://131152"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "28220",
+  "title": "Jason Bourne",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "The Bourne Identity",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0258463",
+     "tmdb://2501",
+     "tvdb://730"
+    ]
+   },
+   {
+    "title": "The Bourne Supremacy",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0372183",
+     "tmdb://2502",
+     "tvdb://842"
+    ]
+   },
+   {
+    "title": "The Bourne Ultimatum",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0440963",
+     "tmdb://2503",
+     "tvdb://1421"
+    ]
+   },
+   {
+    "title": "The Bourne Legacy",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1194173",
+     "tmdb://49040",
+     "tvdb://1478"
+    ]
+   },
+   {
+    "title": "Jason Bourne",
+    "year": 2016,
+    "ids": [
+     "imdb://tt4196776",
+     "tmdb://324668",
+     "tvdb://173"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "22779",
+  "title": "John Wick",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "John Wick",
+    "year": 2014,
+    "ids": [
+     "imdb://tt2911666",
+     "tmdb://245891",
+     "tvdb://155"
+    ]
+   },
+   {
+    "title": "John Wick: Chapter 2",
+    "year": 2017,
+    "ids": [
+     "imdb://tt4425200",
+     "tmdb://324552",
+     "tvdb://511"
+    ]
+   },
+   {
+    "title": "John Wick: Chapter 3 - Parabellum",
+    "year": 2019,
+    "ids": [
+     "imdb://tt6146586",
+     "tmdb://458156",
+     "tvdb://6494"
+    ]
+   },
+   {
+    "title": "John Wick: Chapter 4",
+    "year": 2023,
+    "ids": [
+     "imdb://tt10366206",
+     "tmdb://603692",
+     "tvdb://131523"
+    ]
+   },
+   {
+    "title": "Ballerina",
+    "year": 2025,
+    "ids": [
+     "imdb://tt7181546",
+     "tmdb://541671",
+     "tvdb://158074"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "19611",
+  "title": "Jurassic Park",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Jurassic Park",
+    "year": 1993,
+    "ids": [
+     "imdb://tt0107290",
+     "tmdb://329",
+     "tvdb://867"
+    ]
+   },
+   {
+    "title": "The Lost World: Jurassic Park",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0119567",
+     "tmdb://330",
+     "tvdb://100418"
+    ]
+   },
+   {
+    "title": "Jurassic Park III",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0163025",
+     "tmdb://331",
+     "tvdb://111647"
+    ]
+   },
+   {
+    "title": "Jurassic World",
+    "year": 2015,
+    "ids": [
+     "imdb://tt0369610",
+     "tmdb://135397",
+     "tvdb://200"
+    ]
+   },
+   {
+    "title": "Jurassic World: Fallen Kingdom",
+    "year": 2018,
+    "ids": [
+     "imdb://tt4881806",
+     "tmdb://351286",
+     "tvdb://57"
+    ]
+   },
+   {
+    "title": "Jurassic World Dominion",
+    "year": 2022,
+    "ids": [
+     "imdb://tt8041270",
+     "tmdb://507086",
+     "tvdb://13720"
+    ]
+   },
+   {
+    "title": "Jurassic World: Rebirth",
+    "year": 2025,
+    "ids": [
+     "imdb://tt31036941",
+     "tmdb://1234821",
+     "tvdb://353703"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "21461",
+  "title": "Mad Max",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Mad Max",
+    "year": 1979,
+    "ids": [
+     "imdb://tt0079501",
+     "tmdb://9659",
+     "tvdb://1370"
+    ]
+   },
+   {
+    "title": "Mad Max 2: The Road Warrior",
+    "year": 1981,
+    "ids": [
+     "imdb://tt0082694",
+     "tmdb://8810",
+     "tvdb://2289"
+    ]
+   },
+   {
+    "title": "Mad Max: Beyond Thunderdome",
+    "year": 1985,
+    "ids": [
+     "imdb://tt0089530",
+     "tmdb://9355",
+     "tvdb://3665"
+    ]
+   },
+   {
+    "title": "Mad Max: Fury Road",
+    "year": 2015,
+    "ids": [
+     "imdb://tt1392190",
+     "tmdb://76341",
+     "tvdb://383"
+    ]
+   },
+   {
+    "title": "Furiosa: A Mad Max Saga",
+    "year": 2024,
+    "ids": [
+     "imdb://tt12037194",
+     "tmdb://786892",
+     "tvdb://157390"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20351",
+  "title": "The Man with No Name",
+  "titleSort": "Man with No Name",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "A Fistful of Dollars",
+    "year": 1964,
+    "ids": [
+     "imdb://tt0058461",
+     "tmdb://391",
+     "tvdb://1175"
+    ]
+   },
+   {
+    "title": "For a Few Dollars More",
+    "year": 1965,
+    "ids": [
+     "imdb://tt0059578",
+     "tmdb://938",
+     "tvdb://976"
+    ]
+   },
+   {
+    "title": "The Good, the Bad and the Ugly",
+    "year": 1966,
+    "ids": [
+     "imdb://tt0060196",
+     "tmdb://429",
+     "tvdb://513"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "19566",
+  "title": "Marvel Cinematic Universe",
+  "titleSort": null,
+  "summary": "",
+  "art": "/library/metadata/19566/art/1778649516",
+  "members": [
+   {
+    "title": "Iron Man",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0371746",
+     "tmdb://1726",
+     "tvdb://108"
+    ]
+   },
+   {
+    "title": "The Incredible Hulk",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0800080",
+     "tmdb://1724",
+     "tvdb://584"
+    ]
+   },
+   {
+    "title": "Iron Man 2",
+    "year": 2010,
+    "ids": [
+     "imdb://tt1228705",
+     "tmdb://10138",
+     "tvdb://187"
+    ]
+   },
+   {
+    "title": "Thor",
+    "year": 2011,
+    "ids": [
+     "imdb://tt0800369",
+     "tmdb://10195",
+     "tvdb://123"
+    ]
+   },
+   {
+    "title": "Captain America: The First Avenger",
+    "year": 2011,
+    "ids": [
+     "imdb://tt0458339",
+     "tmdb://1771",
+     "tvdb://180"
+    ]
+   },
+   {
+    "title": "The Avengers",
+    "year": 2012,
+    "ids": [
+     "imdb://tt0848228",
+     "tmdb://24428",
+     "tvdb://31"
+    ]
+   },
+   {
+    "title": "Iron Man 3",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1300854",
+     "tmdb://68721",
+     "tvdb://188"
+    ]
+   },
+   {
+    "title": "Thor: The Dark World",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1981115",
+     "tmdb://76338",
+     "tvdb://178"
+    ]
+   },
+   {
+    "title": "Captain America: The Winter Soldier",
+    "year": 2014,
+    "ids": [
+     "imdb://tt1843866",
+     "tmdb://100402",
+     "tvdb://965"
+    ]
+   },
+   {
+    "title": "Guardians of the Galaxy",
+    "year": 2014,
+    "ids": [
+     "imdb://tt2015381",
+     "tmdb://118340",
+     "tvdb://26"
+    ]
+   },
+   {
+    "title": "Avengers: Age of Ultron",
+    "year": 2015,
+    "ids": [
+     "imdb://tt2395427",
+     "tmdb://99861",
+     "tvdb://59"
+    ]
+   },
+   {
+    "title": "Ant-Man",
+    "year": 2015,
+    "ids": [
+     "imdb://tt0478970",
+     "tmdb://102899",
+     "tvdb://163"
+    ]
+   },
+   {
+    "title": "Captain America: Civil War",
+    "year": 2016,
+    "ids": [
+     "imdb://tt3498820",
+     "tmdb://271110",
+     "tvdb://118"
+    ]
+   },
+   {
+    "title": "Doctor Strange",
+    "year": 2016,
+    "ids": [
+     "imdb://tt1211837",
+     "tmdb://284052",
+     "tvdb://145"
+    ]
+   },
+   {
+    "title": "Guardians of the Galaxy: Vol. 2",
+    "year": 2017,
+    "ids": [
+     "imdb://tt3896198",
+     "tmdb://283995",
+     "tvdb://67"
+    ]
+   },
+   {
+    "title": "Spider-Man: Homecoming",
+    "year": 2017,
+    "ids": [
+     "imdb://tt2250912",
+     "tmdb://315635",
+     "tvdb://68"
+    ]
+   },
+   {
+    "title": "Thor: Ragnarok",
+    "year": 2017,
+    "ids": [
+     "imdb://tt3501632",
+     "tmdb://284053",
+     "tvdb://62"
+    ]
+   },
+   {
+    "title": "Black Panther",
+    "year": 2018,
+    "ids": [
+     "imdb://tt1825683",
+     "tmdb://284054",
+     "tvdb://48"
+    ]
+   },
+   {
+    "title": "Avengers: Infinity War",
+    "year": 2018,
+    "ids": [
+     "imdb://tt4154756",
+     "tmdb://299536",
+     "tvdb://8"
+    ]
+   },
+   {
+    "title": "Ant-Man and the Wasp",
+    "year": 2018,
+    "ids": [
+     "imdb://tt5095030",
+     "tmdb://363088",
+     "tvdb://28"
+    ]
+   },
+   {
+    "title": "Captain Marvel",
+    "year": 2019,
+    "ids": [
+     "imdb://tt4154664",
+     "tmdb://299537",
+     "tvdb://10"
+    ]
+   },
+   {
+    "title": "Avengers: Endgame",
+    "year": 2019,
+    "ids": [
+     "imdb://tt4154796",
+     "tmdb://299534",
+     "tvdb://148"
+    ]
+   },
+   {
+    "title": "Spider-Man: Far from Home",
+    "year": 2019,
+    "ids": [
+     "imdb://tt6320628",
+     "tmdb://429617",
+     "tvdb://4137"
+    ]
+   },
+   {
+    "title": "Black Widow",
+    "year": 2021,
+    "ids": [
+     "imdb://tt3480822",
+     "tmdb://497698",
+     "tvdb://27759"
+    ]
+   },
+   {
+    "title": "Shang-Chi and the Legend of the Ten Rings",
+    "year": 2021,
+    "ids": [
+     "imdb://tt9376612",
+     "tmdb://566525",
+     "tvdb://131146"
+    ]
+   },
+   {
+    "title": "Eternals",
+    "year": 2021,
+    "ids": [
+     "imdb://tt9032400",
+     "tmdb://524434",
+     "tvdb://131147"
+    ]
+   },
+   {
+    "title": "Spider-Man: No Way Home",
+    "year": 2021,
+    "ids": [
+     "imdb://tt10872600",
+     "tmdb://634649",
+     "tvdb://132448"
+    ]
+   },
+   {
+    "title": "Doctor Strange in the Multiverse of Madness",
+    "year": 2022,
+    "ids": [
+     "imdb://tt9419884",
+     "tmdb://453395",
+     "tvdb://32426"
+    ]
+   },
+   {
+    "title": "Thor: Love and Thunder",
+    "year": 2022,
+    "ids": [
+     "imdb://tt10648342",
+     "tmdb://616037",
+     "tvdb://131141"
+    ]
+   },
+   {
+    "title": "Werewolf by Night",
+    "year": 2022,
+    "ids": [
+     "imdb://tt15318872",
+     "tmdb://894205",
+     "tvdb://339967"
+    ]
+   },
+   {
+    "title": "Black Panther: Wakanda Forever",
+    "year": 2022,
+    "ids": [
+     "imdb://tt9114286",
+     "tmdb://505642",
+     "tvdb://31110"
+    ]
+   },
+   {
+    "title": "The Guardians of the Galaxy Holiday Special",
+    "year": 2022,
+    "ids": [
+     "imdb://tt13623136",
+     "tmdb://774752",
+     "tvdb://144720"
+    ]
+   },
+   {
+    "title": "Ant-Man and the Wasp: Quantumania",
+    "year": 2023,
+    "ids": [
+     "imdb://tt10954600",
+     "tmdb://640146",
+     "tvdb://132202"
+    ]
+   },
+   {
+    "title": "Guardians of the Galaxy Vol. 3",
+    "year": 2023,
+    "ids": [
+     "imdb://tt6791350",
+     "tmdb://447365",
+     "tvdb://11716"
+    ]
+   },
+   {
+    "title": "The Marvels",
+    "year": 2023,
+    "ids": [
+     "imdb://tt10676048",
+     "tmdb://609681",
+     "tvdb://134366"
+    ]
+   },
+   {
+    "title": "Deadpool & Wolverine",
+    "year": 2024,
+    "ids": [
+     "imdb://tt6263850",
+     "tmdb://533535",
+     "tvdb://49196"
+    ]
+   },
+   {
+    "title": "Captain America: Brave New World",
+    "year": 2025,
+    "ids": [
+     "imdb://tt14513804",
+     "tmdb://822119",
+     "tvdb://160768"
+    ]
+   },
+   {
+    "title": "Thunderbolts*",
+    "year": 2025,
+    "ids": [
+     "imdb://tt20969586",
+     "tmdb://986056",
+     "tvdb://337758"
+    ]
+   },
+   {
+    "title": "The Fantastic Four: First Steps",
+    "year": 2025,
+    "ids": [
+     "imdb://tt10676052",
+     "tmdb://617126",
+     "tvdb://131702"
+    ]
+   },
+   {
+    "title": "The Punisher: One Last Kill",
+    "year": 2026,
+    "ids": [
+     "imdb://tt36042156",
+     "tmdb://1439930",
+     "tvdb://371477"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20488",
+  "title": "Marvel Legacy",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Blade",
+    "year": 1998,
+    "ids": [
+     "imdb://tt0120611",
+     "tmdb://36647",
+     "tvdb://1651"
+    ]
+   },
+   {
+    "title": "X-Men",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0120903",
+     "tmdb://36657",
+     "tvdb://60871"
+    ]
+   },
+   {
+    "title": "Blade II",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0187738",
+     "tmdb://36586",
+     "tvdb://2004"
+    ]
+   },
+   {
+    "title": "X2: X-Men United",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0290334",
+     "tmdb://36658",
+     "tvdb://72106"
+    ]
+   },
+   {
+    "title": "Blade: Trinity",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0359013",
+     "tmdb://36648",
+     "tvdb://1700"
+    ]
+   },
+   {
+    "title": "Fantastic Four",
+    "year": 2005,
+    "ids": [
+     "imdb://tt0120667",
+     "tmdb://9738",
+     "tvdb://900"
+    ]
+   },
+   {
+    "title": "X-Men: The Last Stand",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0376994",
+     "tmdb://36668",
+     "tvdb://75608"
+    ]
+   },
+   {
+    "title": "Fantastic Four: Rise of the Silver Surfer",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0486576",
+     "tmdb://1979",
+     "tvdb://811"
+    ]
+   },
+   {
+    "title": "X-Men Origins: Wolverine",
+    "year": 2009,
+    "ids": [
+     "imdb://tt0458525",
+     "tmdb://2080",
+     "tvdb://42403"
+    ]
+   },
+   {
+    "title": "X-Men: First Class",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1270798",
+     "tmdb://49538",
+     "tvdb://69081"
+    ]
+   },
+   {
+    "title": "The Wolverine",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1430132",
+     "tmdb://76170",
+     "tvdb://20145"
+    ]
+   },
+   {
+    "title": "X-Men: Days of Future Past",
+    "year": 2014,
+    "ids": [
+     "imdb://tt1877832",
+     "tmdb://127585",
+     "tvdb://79"
+    ]
+   },
+   {
+    "title": "Deadpool",
+    "year": 2016,
+    "ids": [
+     "imdb://tt1431045",
+     "tmdb://293660",
+     "tvdb://115"
+    ]
+   },
+   {
+    "title": "X-Men: Apocalypse",
+    "year": 2016,
+    "ids": [
+     "imdb://tt3385516",
+     "tmdb://246655",
+     "tvdb://112"
+    ]
+   },
+   {
+    "title": "Logan",
+    "year": 2017,
+    "ids": [
+     "imdb://tt3315342",
+     "tmdb://263115",
+     "tvdb://143"
+    ]
+   },
+   {
+    "title": "Deadpool 2",
+    "year": 2018,
+    "ids": [
+     "imdb://tt5463162",
+     "tmdb://383498",
+     "tvdb://91"
+    ]
+   },
+   {
+    "title": "X-Men: Dark Phoenix",
+    "year": 2019,
+    "ids": [
+     "imdb://tt6565702",
+     "tmdb://320288",
+     "tvdb://185"
+    ]
+   },
+   {
+    "title": "The New Mutants",
+    "year": 2020,
+    "ids": [
+     "imdb://tt4682266",
+     "tmdb://340102",
+     "tvdb://2599"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "28375",
+  "title": "The Matrix",
+  "titleSort": "Matrix",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "The Matrix",
+    "year": 1999,
+    "ids": [
+     "imdb://tt0133093",
+     "tmdb://603",
+     "tvdb://169"
+    ]
+   },
+   {
+    "title": "The Animatrix",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0328832",
+     "tmdb://55931"
+    ]
+   },
+   {
+    "title": "The Matrix Reloaded",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0234215",
+     "tmdb://604",
+     "tvdb://553"
+    ]
+   },
+   {
+    "title": "The Matrix Revolutions",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0242653",
+     "tmdb://605",
+     "tvdb://687"
+    ]
+   },
+   {
+    "title": "The Matrix Resurrections",
+    "year": 2021,
+    "ids": [
+     "imdb://tt10838180",
+     "tmdb://624860",
+     "tvdb://131590"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "19613",
+  "title": "Middle Earth",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "The Lord of the Rings: The Fellowship of the Ring",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0120737",
+     "tmdb://120",
+     "tvdb://107"
+    ]
+   },
+   {
+    "title": "The Lord of the Rings: The Two Towers",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0167261",
+     "tmdb://121",
+     "tvdb://157"
+    ]
+   },
+   {
+    "title": "The Lord of the Rings: The Return of the King",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0167260",
+     "tmdb://122",
+     "tvdb://74"
+    ]
+   },
+   {
+    "title": "The Hobbit: An Unexpected Journey",
+    "year": 2012,
+    "ids": [
+     "imdb://tt0903624",
+     "tmdb://49051",
+     "tvdb://138"
+    ]
+   },
+   {
+    "title": "The Hobbit: The Desolation of Smaug",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1170358",
+     "tmdb://57158",
+     "tvdb://235"
+    ]
+   },
+   {
+    "title": "The Hobbit: The Battle of the Five Armies",
+    "year": 2014,
+    "ids": [
+     "imdb://tt2310332",
+     "tmdb://122917",
+     "tvdb://30"
+    ]
+   },
+   {
+    "title": "The Lord of the Rings: The War of the Rohirrim",
+    "year": 2024,
+    "ids": [
+     "imdb://tt14824600",
+     "tmdb://839033",
+     "tvdb://332952"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20342",
+  "title": "Mission: Impossible",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Mission: Impossible",
+    "year": 1996,
+    "ids": [
+     "imdb://tt0117060",
+     "tmdb://954",
+     "tvdb://284"
+    ]
+   },
+   {
+    "title": "Mission: Impossible II",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0120755",
+     "tmdb://955",
+     "tvdb://818"
+    ]
+   },
+   {
+    "title": "Mission: Impossible III",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0317919",
+     "tmdb://956",
+     "tvdb://827"
+    ]
+   },
+   {
+    "title": "Mission: Impossible - Ghost Protocol",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1229238",
+     "tmdb://56292",
+     "tvdb://384"
+    ]
+   },
+   {
+    "title": "Mission: Impossible - Rogue Nation",
+    "year": 2015,
+    "ids": [
+     "imdb://tt2381249",
+     "tmdb://177677",
+     "tvdb://484"
+    ]
+   },
+   {
+    "title": "Mission: Impossible - Fallout",
+    "year": 2018,
+    "ids": [
+     "imdb://tt4912910",
+     "tmdb://353081",
+     "tvdb://22"
+    ]
+   },
+   {
+    "title": "Mission: Impossible - Dead Reckoning",
+    "year": 2023,
+    "ids": [
+     "imdb://tt9603212",
+     "tmdb://575264",
+     "tvdb://30294"
+    ]
+   },
+   {
+    "title": "Mission: Impossible - The Final Reckoning",
+    "year": 2025,
+    "ids": [
+     "imdb://tt9603208",
+     "tmdb://575265",
+     "tvdb://52001"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "23665",
+  "title": "Pirates of the Caribbean",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Pirates of the Caribbean: The Curse of the Black Pearl",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0325980",
+     "tmdb://22",
+     "tvdb://64"
+    ]
+   },
+   {
+    "title": "Pirates of the Caribbean: Dead Man's Chest",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0383574",
+     "tmdb://58",
+     "tvdb://177"
+    ]
+   },
+   {
+    "title": "Pirates of the Caribbean: At World's End",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0449088",
+     "tmdb://285",
+     "tvdb://196"
+    ]
+   },
+   {
+    "title": "Pirates of the Caribbean: On Stranger Tides",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1298650",
+     "tmdb://1865",
+     "tvdb://211"
+    ]
+   },
+   {
+    "title": "Pirates of the Caribbean: Dead Men Tell No Tales",
+    "year": 2017,
+    "ids": [
+     "imdb://tt1790809",
+     "tmdb://166426",
+     "tvdb://287"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "19610",
+  "title": "Pixar",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Toy Story",
+    "year": 1995,
+    "ids": [
+     "imdb://tt0114709",
+     "tmdb://862",
+     "tvdb://318"
+    ]
+   },
+   {
+    "title": "A Bug's Life",
+    "year": 1998,
+    "ids": [
+     "imdb://tt0120623",
+     "tmdb://9487",
+     "tvdb://708"
+    ]
+   },
+   {
+    "title": "Toy Story 2",
+    "year": 1999,
+    "ids": [
+     "imdb://tt0120363",
+     "tmdb://863",
+     "tvdb://378"
+    ]
+   },
+   {
+    "title": "Monsters, Inc.",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0198781",
+     "tmdb://585",
+     "tvdb://331"
+    ]
+   },
+   {
+    "title": "Finding Nemo",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0266543",
+     "tmdb://12",
+     "tvdb://256"
+    ]
+   },
+   {
+    "title": "The Incredibles",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0317705",
+     "tmdb://9806",
+     "tvdb://263"
+    ]
+   },
+   {
+    "title": "Cars",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0317219",
+     "tmdb://920",
+     "tvdb://562"
+    ]
+   },
+   {
+    "title": "Ratatouille",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0382932",
+     "tmdb://2062",
+     "tvdb://534"
+    ]
+   },
+   {
+    "title": "WALL\u00b7E",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0910970",
+     "tmdb://10681",
+     "tvdb://516"
+    ]
+   },
+   {
+    "title": "Toy Story 3",
+    "year": 2010,
+    "ids": [
+     "imdb://tt0435761",
+     "tmdb://10193",
+     "tvdb://329"
+    ]
+   },
+   {
+    "title": "Cars 2",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1216475",
+     "tmdb://49013",
+     "tvdb://709"
+    ]
+   },
+   {
+    "title": "Monsters University",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1453405",
+     "tmdb://62211",
+     "tvdb://411"
+    ]
+   },
+   {
+    "title": "Inside Out",
+    "year": 2015,
+    "ids": [
+     "imdb://tt2096673",
+     "tmdb://150540",
+     "tvdb://159"
+    ]
+   },
+   {
+    "title": "The Good Dinosaur",
+    "year": 2015,
+    "ids": [
+     "imdb://tt1979388",
+     "tmdb://105864",
+     "tvdb://699"
+    ]
+   },
+   {
+    "title": "Finding Dory",
+    "year": 2016,
+    "ids": [
+     "imdb://tt2277860",
+     "tmdb://127380",
+     "tvdb://576"
+    ]
+   },
+   {
+    "title": "Cars 3",
+    "year": 2017,
+    "ids": [
+     "imdb://tt3606752",
+     "tmdb://260514",
+     "tvdb://671"
+    ]
+   },
+   {
+    "title": "Coco",
+    "year": 2017,
+    "ids": [
+     "imdb://tt2380307",
+     "tmdb://354912",
+     "tvdb://321"
+    ]
+   },
+   {
+    "title": "Incredibles 2",
+    "year": 2018,
+    "ids": [
+     "imdb://tt3606756",
+     "tmdb://260513",
+     "tvdb://49"
+    ]
+   },
+   {
+    "title": "Toy Story 4",
+    "year": 2019,
+    "ids": [
+     "imdb://tt1979376",
+     "tmdb://301528",
+     "tvdb://10792"
+    ]
+   },
+   {
+    "title": "Onward",
+    "year": 2020,
+    "ids": [
+     "imdb://tt7146812",
+     "tmdb://508439",
+     "tvdb://66180"
+    ]
+   },
+   {
+    "title": "Soul",
+    "year": 2020,
+    "ids": [
+     "imdb://tt2948372",
+     "tmdb://508442",
+     "tvdb://131117"
+    ]
+   },
+   {
+    "title": "Luca",
+    "year": 2021,
+    "ids": [
+     "imdb://tt12801262",
+     "tmdb://508943",
+     "tvdb://137867"
+    ]
+   },
+   {
+    "title": "Turning Red",
+    "year": 2022,
+    "ids": [
+     "imdb://tt8097030",
+     "tmdb://508947",
+     "tvdb://146582"
+    ]
+   },
+   {
+    "title": "Lightyear",
+    "year": 2022,
+    "ids": [
+     "imdb://tt10298810",
+     "tmdb://718789",
+     "tvdb://144721"
+    ]
+   },
+   {
+    "title": "Elemental",
+    "year": 2023,
+    "ids": [
+     "imdb://tt15789038",
+     "tmdb://976573",
+     "tvdb://337156"
+    ]
+   },
+   {
+    "title": "Inside Out 2",
+    "year": 2024,
+    "ids": [
+     "imdb://tt22022452",
+     "tmdb://1022789",
+     "tvdb://339957"
+    ]
+   },
+   {
+    "title": "Elio",
+    "year": 2025,
+    "ids": [
+     "imdb://tt4900148",
+     "tmdb://1022787",
+     "tvdb://339956"
+    ]
+   },
+   {
+    "title": "Hoppers",
+    "year": 2026,
+    "ids": [
+     "imdb://tt26443616",
+     "tmdb://1327819",
+     "tvdb://120621"
+    ]
+   },
+   {
+    "title": "Toy Story 5",
+    "year": 2026,
+    "ids": [
+     "imdb://tt29355505",
+     "tmdb://1084244",
+     "tvdb://344106"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "22264",
+  "title": "Planet of the Apes",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Rise of the Planet of the Apes",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1318514",
+     "tmdb://61791",
+     "tvdb://359"
+    ]
+   },
+   {
+    "title": "Dawn of the Planet of the Apes",
+    "year": 2014,
+    "ids": [
+     "imdb://tt2103281",
+     "tmdb://119450",
+     "tvdb://333"
+    ]
+   },
+   {
+    "title": "War for the Planet of the Apes",
+    "year": 2017,
+    "ids": [
+     "imdb://tt3450958",
+     "tmdb://281338",
+     "tvdb://292"
+    ]
+   },
+   {
+    "title": "Kingdom of the Planet of the Apes",
+    "year": 2024,
+    "ids": [
+     "imdb://tt11389872",
+     "tmdb://653346",
+     "tvdb://312226"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "35134",
+  "title": "Predator",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Predator",
+    "year": 1987,
+    "ids": [
+     "imdb://tt0093773",
+     "tmdb://106",
+     "tvdb://479"
+    ]
+   },
+   {
+    "title": "Predator 2",
+    "year": 1990,
+    "ids": [
+     "imdb://tt0100403",
+     "tmdb://169",
+     "tvdb://1085"
+    ]
+   },
+   {
+    "title": "Alien vs. Predator",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0370263",
+     "tmdb://395",
+     "tvdb://1589"
+    ]
+   },
+   {
+    "title": "Aliens vs. Predator: Requiem",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0758730",
+     "tmdb://440",
+     "tvdb://1227"
+    ]
+   },
+   {
+    "title": "Predators",
+    "year": 2010,
+    "ids": [
+     "imdb://tt1424381",
+     "tmdb://34851",
+     "tvdb://1107"
+    ]
+   },
+   {
+    "title": "The Predator",
+    "year": 2018,
+    "ids": [
+     "imdb://tt3829266",
+     "tmdb://346910",
+     "tvdb://76"
+    ]
+   },
+   {
+    "title": "Prey",
+    "year": 2022,
+    "ids": [
+     "imdb://tt11866324",
+     "tmdb://766507",
+     "tvdb://332435"
+    ]
+   },
+   {
+    "title": "Predator: Killer of Killers",
+    "year": 2025,
+    "ids": [
+     "imdb://tt36463894",
+     "tmdb://1376434",
+     "tvdb://365795"
+    ]
+   },
+   {
+    "title": "Predator: Badlands",
+    "year": 2025,
+    "ids": [
+     "imdb://tt31227572",
+     "tmdb://1242898",
+     "tvdb://353858"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "25892",
+  "title": "Rambo",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "First Blood",
+    "year": 1982,
+    "ids": [
+     "imdb://tt0083944",
+     "tmdb://1368",
+     "tvdb://565"
+    ]
+   },
+   {
+    "title": "Rambo: First Blood Part II",
+    "year": 1985,
+    "ids": [
+     "imdb://tt0089880",
+     "tmdb://1369",
+     "tvdb://481"
+    ]
+   },
+   {
+    "title": "Rambo III",
+    "year": 1988,
+    "ids": [
+     "imdb://tt0095956",
+     "tmdb://1370",
+     "tvdb://1020"
+    ]
+   },
+   {
+    "title": "Rambo",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0462499",
+     "tmdb://7555",
+     "tvdb://989"
+    ]
+   },
+   {
+    "title": "Rambo: Last Blood",
+    "year": 2019,
+    "ids": [
+     "imdb://tt1206885",
+     "tmdb://522938",
+     "tvdb://13659"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "25162",
+  "title": "Rocky/Creed",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Rocky",
+    "year": 1976,
+    "ids": [
+     "imdb://tt0075148",
+     "tmdb://1366",
+     "tvdb://531"
+    ]
+   },
+   {
+    "title": "Rocky II",
+    "year": 1979,
+    "ids": [
+     "imdb://tt0079817",
+     "tmdb://1367",
+     "tvdb://1850"
+    ]
+   },
+   {
+    "title": "Rocky III",
+    "year": 1982,
+    "ids": [
+     "imdb://tt0084602",
+     "tmdb://1371",
+     "tvdb://964"
+    ]
+   },
+   {
+    "title": "Rocky IV",
+    "year": 1985,
+    "ids": [
+     "imdb://tt0089927",
+     "tmdb://1374",
+     "tvdb://702"
+    ]
+   },
+   {
+    "title": "Rocky Balboa",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0479143",
+     "tmdb://1246",
+     "tvdb://1001"
+    ]
+   },
+   {
+    "title": "Creed",
+    "year": 2015,
+    "ids": [
+     "imdb://tt3076658",
+     "tmdb://312221",
+     "tvdb://261"
+    ]
+   },
+   {
+    "title": "Creed II",
+    "year": 2018,
+    "ids": [
+     "imdb://tt6343314",
+     "tmdb://480530",
+     "tvdb://36"
+    ]
+   },
+   {
+    "title": "Creed III",
+    "year": 2023,
+    "ids": [
+     "imdb://tt11145118",
+     "tmdb://677179",
+     "tvdb://157601"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "25174",
+  "title": "Scream",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Scream",
+    "year": 1996,
+    "ids": [
+     "imdb://tt0117571",
+     "tmdb://4232",
+     "tvdb://1167"
+    ]
+   },
+   {
+    "title": "Scream 2",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0120082",
+     "tmdb://4233",
+     "tvdb://1492"
+    ]
+   },
+   {
+    "title": "Scream 3",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0134084",
+     "tmdb://4234",
+     "tvdb://2187"
+    ]
+   },
+   {
+    "title": "Scream 4",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1262416",
+     "tmdb://41446",
+     "tvdb://3146"
+    ]
+   },
+   {
+    "title": "Scream",
+    "year": 2022,
+    "ids": [
+     "imdb://tt11245972",
+     "tmdb://646385",
+     "tvdb://136280"
+    ]
+   },
+   {
+    "title": "Scream VI",
+    "year": 2023,
+    "ids": [
+     "imdb://tt17663992",
+     "tmdb://934433",
+     "tvdb://336103"
+    ]
+   },
+   {
+    "title": "Scream 7",
+    "year": 2026,
+    "ids": [
+     "imdb://tt27047903",
+     "tmdb://1159559",
+     "tvdb://346010"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "23605",
+  "title": "Star Trek",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Star Trek: The Motion Picture",
+    "year": 1979,
+    "ids": [
+     "imdb://tt0079945",
+     "tmdb://152",
+     "tvdb://1928"
+    ]
+   },
+   {
+    "title": "Star Trek II: The Wrath of Khan",
+    "year": 1982,
+    "ids": [
+     "imdb://tt0084726",
+     "tmdb://154",
+     "tvdb://3201"
+    ]
+   },
+   {
+    "title": "Star Trek III: The Search for Spock",
+    "year": 1984,
+    "ids": [
+     "imdb://tt0088170",
+     "tmdb://157",
+     "tvdb://4606"
+    ]
+   },
+   {
+    "title": "Star Trek IV: The Voyage Home",
+    "year": 1986,
+    "ids": [
+     "imdb://tt0092007",
+     "tmdb://168",
+     "tvdb://2464"
+    ]
+   },
+   {
+    "title": "Star Trek",
+    "year": 2009,
+    "ids": [
+     "imdb://tt0796366",
+     "tmdb://13475",
+     "tvdb://583"
+    ]
+   },
+   {
+    "title": "Star Trek Into Darkness",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1408101",
+     "tmdb://54138",
+     "tvdb://613"
+    ]
+   },
+   {
+    "title": "Star Trek Beyond",
+    "year": 2016,
+    "ids": [
+     "imdb://tt2660888",
+     "tmdb://188927",
+     "tvdb://618"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "19567",
+  "title": "Star Wars",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Star Wars: Episode IV - A New Hope",
+    "year": 1977,
+    "ids": [
+     "imdb://tt0076759",
+     "tmdb://11",
+     "tvdb://71"
+    ]
+   },
+   {
+    "title": "Star Wars: Episode V - The Empire Strikes Back",
+    "year": 1980,
+    "ids": [
+     "imdb://tt0080684",
+     "tmdb://1891",
+     "tvdb://466"
+    ]
+   },
+   {
+    "title": "Star Wars: Episode VI - Return of the Jedi",
+    "year": 1983,
+    "ids": [
+     "imdb://tt0086190",
+     "tmdb://1892",
+     "tvdb://698"
+    ]
+   },
+   {
+    "title": "Star Wars: Episode I - The Phantom Menace",
+    "year": 1999,
+    "ids": [
+     "imdb://tt0120915",
+     "tmdb://1893",
+     "tvdb://134347",
+     "tvdb://334"
+    ]
+   },
+   {
+    "title": "Star Wars: Episode II - Attack of the Clones",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0121765",
+     "tmdb://1894",
+     "tvdb://500"
+    ]
+   },
+   {
+    "title": "Star Wars: Episode III - Revenge of the Sith",
+    "year": 2005,
+    "ids": [
+     "imdb://tt0121766",
+     "tmdb://1895",
+     "tvdb://875"
+    ]
+   },
+   {
+    "title": "Star Wars: Episode VII - The Force Awakens",
+    "year": 2015,
+    "ids": [
+     "imdb://tt2488496",
+     "tmdb://140607",
+     "tvdb://213"
+    ]
+   },
+   {
+    "title": "Rogue One: A Star Wars Story",
+    "year": 2016,
+    "ids": [
+     "imdb://tt3748528",
+     "tmdb://330459",
+     "tvdb://367"
+    ]
+   },
+   {
+    "title": "Star Wars: Episode VIII - The Last Jedi",
+    "year": 2017,
+    "ids": [
+     "imdb://tt2527336",
+     "tmdb://181808",
+     "tvdb://99"
+    ]
+   },
+   {
+    "title": "Solo: A Star Wars Story",
+    "year": 2018,
+    "ids": [
+     "imdb://tt3778644",
+     "tmdb://348350",
+     "tvdb://60"
+    ]
+   },
+   {
+    "title": "Star Wars: The Rise Of Skywalker",
+    "year": 2019,
+    "ids": [
+     "imdb://tt2527338",
+     "tmdb://181812",
+     "tvdb://12879"
+    ]
+   },
+   {
+    "title": "Star Wars: The Mandalorian and Grogu",
+    "year": 2026,
+    "ids": [
+     "imdb://tt30825738",
+     "tmdb://1228710",
+     "tvdb://352968"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "19609",
+  "title": "Studio Ghibli",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "My Neighbor Totoro",
+    "year": 1988,
+    "ids": [
+     "imdb://tt0096283",
+     "tmdb://8392",
+     "tvdb://339"
+    ]
+   },
+   {
+    "title": "Whisper of the Heart",
+    "year": 1995,
+    "ids": [
+     "imdb://tt0113824",
+     "tmdb://37797",
+     "tvdb://1218"
+    ]
+   },
+   {
+    "title": "Princess Mononoke",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0119698",
+     "tmdb://128",
+     "tvdb://791"
+    ]
+   },
+   {
+    "title": "Spirited Away",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0245429",
+     "tmdb://129",
+     "tvdb://276"
+    ]
+   },
+   {
+    "title": "Howl's Moving Castle",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0347149",
+     "tmdb://4935",
+     "tvdb://573"
+    ]
+   },
+   {
+    "title": "The Boy and the Heron",
+    "year": 2023,
+    "ids": [
+     "imdb://tt6587046",
+     "tmdb://508883",
+     "tvdb://295917"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "26867",
+  "title": "Transformers",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Transformers",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0418279",
+     "tmdb://1858",
+     "tvdb://14648"
+    ]
+   },
+   {
+    "title": "Transformers: Revenge of the Fallen",
+    "year": 2009,
+    "ids": [
+     "imdb://tt1055369",
+     "tmdb://8373",
+     "tvdb://10466"
+    ]
+   },
+   {
+    "title": "Transformers: Dark of the Moon",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1399103",
+     "tmdb://38356",
+     "tvdb://12217"
+    ]
+   },
+   {
+    "title": "Transformers: Age of Extinction",
+    "year": 2014,
+    "ids": [
+     "imdb://tt2109248",
+     "tmdb://91314",
+     "tvdb://631"
+    ]
+   },
+   {
+    "title": "Transformers: The Last Knight",
+    "year": 2017,
+    "ids": [
+     "imdb://tt3371366",
+     "tmdb://335988",
+     "tvdb://408"
+    ]
+   },
+   {
+    "title": "Bumblebee",
+    "year": 2018,
+    "ids": [
+     "imdb://tt4701182",
+     "tmdb://424783",
+     "tvdb://52"
+    ]
+   },
+   {
+    "title": "Transformers: Rise of the Beasts",
+    "year": 2023,
+    "ids": [
+     "imdb://tt5090568",
+     "tmdb://667538",
+     "tvdb://158131"
+    ]
+   },
+   {
+    "title": "Transformers One",
+    "year": 2024,
+    "ids": [
+     "imdb://tt8864596",
+     "tmdb://698687",
+     "tvdb://158132"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "19738",
+  "title": "Wizarding World",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Harry Potter and the Sorcerer's Stone",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0241527",
+     "tmdb://671",
+     "tvdb://66"
+    ]
+   },
+   {
+    "title": "Harry Potter and the Chamber of Secrets",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0295297",
+     "tmdb://672",
+     "tvdb://63"
+    ]
+   },
+   {
+    "title": "Harry Potter and the Prisoner of Azkaban",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0304141",
+     "tmdb://673",
+     "tvdb://154"
+    ]
+   },
+   {
+    "title": "Harry Potter and the Goblet of Fire",
+    "year": 2005,
+    "ids": [
+     "imdb://tt0330373",
+     "tmdb://674",
+     "tvdb://153"
+    ]
+   },
+   {
+    "title": "Harry Potter and the Order of the Phoenix",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0373889",
+     "tmdb://675",
+     "tvdb://128"
+    ]
+   },
+   {
+    "title": "Harry Potter and the Half-Blood Prince",
+    "year": 2009,
+    "ids": [
+     "imdb://tt0417741",
+     "tmdb://767",
+     "tvdb://181"
+    ]
+   },
+   {
+    "title": "Harry Potter and the Deathly Hallows: Part 1",
+    "year": 2010,
+    "ids": [
+     "imdb://tt0926084",
+     "tmdb://12444",
+     "tvdb://201"
+    ]
+   },
+   {
+    "title": "Harry Potter and the Deathly Hallows: Part 2",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1201607",
+     "tmdb://12445",
+     "tvdb://142"
+    ]
+   },
+   {
+    "title": "Fantastic Beasts and Where to Find Them",
+    "year": 2016,
+    "ids": [
+     "imdb://tt3183660",
+     "tmdb://259316",
+     "tvdb://80"
+    ]
+   },
+   {
+    "title": "Fantastic Beasts: The Crimes of Grindelwald",
+    "year": 2018,
+    "ids": [
+     "imdb://tt4123430",
+     "tmdb://338952",
+     "tvdb://5"
+    ]
+   },
+   {
+    "title": "Harry Potter 20th Anniversary: Return to Hogwarts",
+    "year": 2022,
+    "ids": [
+     "imdb://tt16116174",
+     "tmdb://899082",
+     "tvdb://318407"
+    ]
+   },
+   {
+    "title": "Fantastic Beasts: The Secrets of Dumbledore",
+    "year": 2022,
+    "ids": [
+     "imdb://tt4123432",
+     "tmdb://338953",
+     "tvdb://17657"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "24088",
+  "title": "X Trilogy",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "X",
+    "year": 2022,
+    "ids": [
+     "imdb://tt13560574",
+     "tmdb://760104",
+     "tvdb://154561"
+    ]
+   },
+   {
+    "title": "Pearl: An X-traordinary Origin Story",
+    "year": 2022,
+    "ids": [
+     "imdb://tt18925334",
+     "tmdb://949423",
+     "tvdb://338580"
+    ]
+   },
+   {
+    "title": "MaXXXine",
+    "year": 2024,
+    "ids": [
+     "imdb://tt22048412",
+     "tmdb://1023922",
+     "tvdb://340093"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "28196",
+  "title": "YRF Spy Universe",
+  "titleSort": null,
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Ek Tha Tiger",
+    "year": 2012,
+    "ids": [
+     "imdb://tt2016894",
+     "tmdb://85985",
+     "tvdb://11112"
+    ]
+   },
+   {
+    "title": "Tiger Zinda Hai",
+    "year": 2017,
+    "ids": [
+     "imdb://tt5956100",
+     "tmdb://441909",
+     "tvdb://14189"
+    ]
+   },
+   {
+    "title": "War",
+    "year": 2019,
+    "ids": [
+     "imdb://tt7430722",
+     "tmdb://585268",
+     "tvdb://131739"
+    ]
+   },
+   {
+    "title": "Pathaan",
+    "year": 2023,
+    "ids": [
+     "imdb://tt12844910",
+     "tmdb://864692",
+     "tvdb://145651"
+    ]
+   },
+   {
+    "title": "Tiger 3",
+    "year": 2023,
+    "ids": [
+     "imdb://tt18411490",
+     "tmdb://720557",
+     "tvdb://223282"
+    ]
+   },
+   {
+    "title": "War 2",
+    "year": 2025,
+    "ids": [
+     "imdb://tt27425164",
+     "tmdb://1109086",
+     "tvdb://345532"
+    ]
+   },
+   {
+    "title": "Alpha",
+    "year": 2026,
+    "ids": [
+     "imdb://tt28363783",
+     "tmdb://1122030",
+     "tvdb://358081"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20559",
+  "title": "Aaron Sorkin",
+  "titleSort": "zzAaron Sorkin",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "A Few Good Men",
+    "year": 1992,
+    "ids": [
+     "imdb://tt0104257",
+     "tmdb://881",
+     "tvdb://1668"
+    ]
+   },
+   {
+    "title": "The Social Network",
+    "year": 2010,
+    "ids": [
+     "imdb://tt1285016",
+     "tmdb://37799",
+     "tvdb://2240"
+    ]
+   },
+   {
+    "title": "Moneyball",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1210166",
+     "tmdb://60308",
+     "tvdb://3053"
+    ]
+   },
+   {
+    "title": "Steve Jobs",
+    "year": 2015,
+    "ids": [
+     "imdb://tt2080374",
+     "tmdb://321697",
+     "tvdb://3271"
+    ]
+   },
+   {
+    "title": "Molly's Game",
+    "year": 2017,
+    "ids": [
+     "imdb://tt4209788",
+     "tmdb://396371",
+     "tvdb://1069"
+    ]
+   },
+   {
+    "title": "The Trial of the Chicago 7",
+    "year": 2020,
+    "ids": [
+     "imdb://tt1070874",
+     "tmdb://556984",
+     "tvdb://132892"
+    ]
+   },
+   {
+    "title": "Being the Ricardos",
+    "year": 2021,
+    "ids": [
+     "imdb://tt4995540",
+     "tmdb://517088",
+     "tvdb://98098"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "27203",
+  "title": "Adam McKay",
+  "titleSort": "zzAdam McKay",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Anchorman: The Legend of Ron Burgundy",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0357413",
+     "tmdb://8699",
+     "tvdb://1766"
+    ]
+   },
+   {
+    "title": "Talladega Nights: The Ballad of Ricky Bobby",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0415306",
+     "tmdb://9718",
+     "tvdb://2194"
+    ]
+   },
+   {
+    "title": "Step Brothers",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0838283",
+     "tmdb://12133",
+     "tvdb://790"
+    ]
+   },
+   {
+    "title": "Anchorman 2: The Legend Continues",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1229340",
+     "tmdb://109443",
+     "tvdb://1805"
+    ]
+   },
+   {
+    "title": "Ant-Man",
+    "year": 2015,
+    "ids": [
+     "imdb://tt0478970",
+     "tmdb://102899",
+     "tvdb://163"
+    ]
+   },
+   {
+    "title": "The Big Short",
+    "year": 2015,
+    "ids": [
+     "imdb://tt1596363",
+     "tmdb://318846",
+     "tvdb://1238"
+    ]
+   },
+   {
+    "title": "Vice",
+    "year": 2018,
+    "ids": [
+     "imdb://tt6266538",
+     "tmdb://429197",
+     "tvdb://94"
+    ]
+   },
+   {
+    "title": "Don't Look Up",
+    "year": 2021,
+    "ids": [
+     "imdb://tt11286314",
+     "tmdb://646380",
+     "tvdb://141495"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "41950",
+  "title": "Aditya Dhar",
+  "titleSort": "zzAditya Dhar",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Uri: The Surgical Strike",
+    "year": 2019,
+    "ids": [
+     "imdb://tt8291224",
+     "tmdb://554600",
+     "tvdb://2252"
+    ]
+   },
+   {
+    "title": "Article 370",
+    "year": 2024,
+    "ids": [
+     "imdb://tt30970235",
+     "tmdb://1233531",
+     "tvdb://353384"
+    ]
+   },
+   {
+    "title": "Baramulla",
+    "year": 2025,
+    "ids": [
+     "imdb://tt29247040",
+     "tmdb://1561969",
+     "tvdb://370489"
+    ]
+   },
+   {
+    "title": "Dhurandhar",
+    "year": 2025,
+    "ids": [
+     "imdb://tt33014583",
+     "tmdb://1291608",
+     "tvdb://363182"
+    ]
+   },
+   {
+    "title": "Dhurandhar: The Revenge",
+    "year": 2026,
+    "ids": [
+     "imdb://tt39139925",
+     "tmdb://1582770",
+     "tvdb://372129"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "23612",
+  "title": "Akira Kurosawa",
+  "titleSort": "zzAkira Kurosawa",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Rashomon",
+    "year": 1950,
+    "ids": [
+     "imdb://tt0042876",
+     "tmdb://548",
+     "tvdb://2998"
+    ]
+   },
+   {
+    "title": "Ikiru",
+    "year": 1952,
+    "ids": [
+     "imdb://tt0044741",
+     "tmdb://3782",
+     "tvdb://4795"
+    ]
+   },
+   {
+    "title": "Seven Samurai",
+    "year": 1954,
+    "ids": [
+     "imdb://tt0047478",
+     "tmdb://346",
+     "tvdb://1537"
+    ]
+   },
+   {
+    "title": "Throne of Blood",
+    "year": 1957,
+    "ids": [
+     "imdb://tt0050613",
+     "tmdb://3777",
+     "tvdb://4791"
+    ]
+   },
+   {
+    "title": "High and Low",
+    "year": 1963,
+    "ids": [
+     "imdb://tt0057565",
+     "tmdb://12493",
+     "tvdb://2208"
+    ]
+   },
+   {
+    "title": "Ran",
+    "year": 1985,
+    "ids": [
+     "imdb://tt0089881",
+     "tmdb://11645",
+     "tvdb://4626"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20732",
+  "title": "Alejandro Gonz\u00e1lez I\u00f1\u00e1rritu",
+  "titleSort": "zzAlejandro Gonzalez Inarritu",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Amores Perros",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0245712",
+     "tmdb://55",
+     "tvdb://1982"
+    ]
+   },
+   {
+    "title": "21 Grams",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0315733",
+     "tmdb://470",
+     "tvdb://4035"
+    ]
+   },
+   {
+    "title": "Babel",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0449467",
+     "tmdb://1164",
+     "tvdb://1673"
+    ]
+   },
+   {
+    "title": "Biutiful",
+    "year": 2010,
+    "ids": [
+     "imdb://tt1164999",
+     "tmdb://45958",
+     "tvdb://8029"
+    ]
+   },
+   {
+    "title": "Birdman or (The Unexpected Virtue of Ignorance)",
+    "year": 2014,
+    "ids": [
+     "imdb://tt2562232",
+     "tmdb://194662",
+     "tvdb://265"
+    ]
+   },
+   {
+    "title": "The Revenant",
+    "year": 2015,
+    "ids": [
+     "imdb://tt1663202",
+     "tmdb://281957",
+     "tvdb://593"
+    ]
+   },
+   {
+    "title": "BARDO, False Chronicle of a Handful of Truths",
+    "year": 2022,
+    "ids": [
+     "imdb://tt14176542",
+     "tmdb://685691",
+     "tvdb://223416"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20542",
+  "title": "Alex Garland",
+  "titleSort": "zzAlex Garland",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "28 Days Later",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0289043",
+     "tmdb://170",
+     "tvdb://871"
+    ]
+   },
+   {
+    "title": "Sunshine",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0448134",
+     "tmdb://1272",
+     "tvdb://3443"
+    ]
+   },
+   {
+    "title": "Dredd",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1343727",
+     "tmdb://49049",
+     "tvdb://2686"
+    ]
+   },
+   {
+    "title": "Ex Machina",
+    "year": 2014,
+    "ids": [
+     "imdb://tt0470752",
+     "tmdb://264660",
+     "tvdb://175"
+    ]
+   },
+   {
+    "title": "Annihilation",
+    "year": 2018,
+    "ids": [
+     "imdb://tt2798920",
+     "tmdb://300668",
+     "tvdb://166"
+    ]
+   },
+   {
+    "title": "Men",
+    "year": 2022,
+    "ids": [
+     "imdb://tt13841850",
+     "tmdb://780609",
+     "tvdb://332874"
+    ]
+   },
+   {
+    "title": "Civil War",
+    "year": 2024,
+    "ids": [
+     "imdb://tt17279496",
+     "tmdb://929590",
+     "tvdb://349134"
+    ]
+   },
+   {
+    "title": "Warfare",
+    "year": 2025,
+    "ids": [
+     "imdb://tt31434639",
+     "tmdb://1241436",
+     "tvdb://360185"
+    ]
+   },
+   {
+    "title": "28 Years Later",
+    "year": 2025,
+    "ids": [
+     "imdb://tt10548174",
+     "tmdb://1100988",
+     "tvdb://307356"
+    ]
+   },
+   {
+    "title": "28 Years Later: The Bone Temple",
+    "year": 2026,
+    "ids": [
+     "imdb://tt32141377",
+     "tmdb://1272837",
+     "tvdb://362473"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20733",
+  "title": "Alfonso Cuar\u00f3n",
+  "titleSort": "zzAlfonso Cuaron",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Y Tu Mam\u00e1 Tambi\u00e9n",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0245574",
+     "tmdb://1391",
+     "tvdb://2771"
+    ]
+   },
+   {
+    "title": "Harry Potter and the Prisoner of Azkaban",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0304141",
+     "tmdb://673",
+     "tvdb://154"
+    ]
+   },
+   {
+    "title": "Children of Men",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0206634",
+     "tmdb://9693",
+     "tvdb://1628"
+    ]
+   },
+   {
+    "title": "Gravity",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1454468",
+     "tmdb://49047",
+     "tvdb://418"
+    ]
+   },
+   {
+    "title": "Roma",
+    "year": 2018,
+    "ids": [
+     "imdb://tt6155172",
+     "tmdb://426426",
+     "tvdb://16"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20550",
+  "title": "Alfred Hitchcock",
+  "titleSort": "zzAlfred Hitchcock",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Rebecca",
+    "year": 1940,
+    "ids": [
+     "imdb://tt0032976",
+     "tmdb://223",
+     "tvdb://2518"
+    ]
+   },
+   {
+    "title": "Notorious",
+    "year": 1946,
+    "ids": [
+     "imdb://tt0038787",
+     "tmdb://303",
+     "tvdb://5527"
+    ]
+   },
+   {
+    "title": "Rope",
+    "year": 1948,
+    "ids": [
+     "imdb://tt0040746",
+     "tmdb://1580",
+     "tvdb://2196"
+    ]
+   },
+   {
+    "title": "Dial M for Murder",
+    "year": 1954,
+    "ids": [
+     "imdb://tt0046912",
+     "tmdb://521",
+     "tvdb://598"
+    ]
+   },
+   {
+    "title": "Rear Window",
+    "year": 1954,
+    "ids": [
+     "imdb://tt0047396",
+     "tmdb://567",
+     "tvdb://1872"
+    ]
+   },
+   {
+    "title": "To Catch a Thief",
+    "year": 1955,
+    "ids": [
+     "imdb://tt0048728",
+     "tmdb://381",
+     "tvdb://3729"
+    ]
+   },
+   {
+    "title": "Vertigo",
+    "year": 1958,
+    "ids": [
+     "imdb://tt0052357",
+     "tmdb://426",
+     "tvdb://1385"
+    ]
+   },
+   {
+    "title": "North by Northwest",
+    "year": 1959,
+    "ids": [
+     "imdb://tt0053125",
+     "tmdb://213",
+     "tvdb://2093"
+    ]
+   },
+   {
+    "title": "Psycho",
+    "year": 1960,
+    "ids": [
+     "imdb://tt0054215",
+     "tmdb://539",
+     "tvdb://645"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "36018",
+  "title": "Anurag Kashyap",
+  "titleSort": "zzAnurag Kashyap",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Black Friday",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0400234",
+     "tmdb://28740",
+     "tvdb://31041"
+    ]
+   },
+   {
+    "title": "No Smoking",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0995740",
+     "tmdb://36204",
+     "tvdb://44533"
+    ]
+   },
+   {
+    "title": "Dev.D",
+    "year": 2009,
+    "ids": [
+     "imdb://tt1327035",
+     "tmdb://15977",
+     "tvdb://14789"
+    ]
+   },
+   {
+    "title": "Udaan",
+    "year": 2010,
+    "ids": [
+     "imdb://tt1639426",
+     "tmdb://45316",
+     "tvdb://17225"
+    ]
+   },
+   {
+    "title": "Gangs of Wasseypur - Part 1",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1954470",
+     "tmdb://117691",
+     "tvdb://19330",
+     "tvdb://9201"
+    ]
+   },
+   {
+    "title": "Gangs of Wasseypur - Part 2",
+    "year": 2012,
+    "ids": [
+     "tmdb://126400"
+    ]
+   },
+   {
+    "title": "Ugly",
+    "year": 2013,
+    "ids": [
+     "imdb://tt2882328",
+     "tmdb://191726",
+     "tvdb://21227"
+    ]
+   },
+   {
+    "title": "Raman Raghav 2.0",
+    "year": 2016,
+    "ids": [
+     "imdb://tt5662932",
+     "tmdb://393562",
+     "tvdb://20424"
+    ]
+   },
+   {
+    "title": "Almost Pyaar with DJ Mohabbat",
+    "year": 2023,
+    "ids": [
+     "imdb://tt23472806",
+     "tmdb://1049623"
+    ]
+   },
+   {
+    "title": "Kennedy",
+    "year": 2023,
+    "ids": [
+     "imdb://tt27502523",
+     "tmdb://1112552",
+     "tvdb://371875"
+    ]
+   },
+   {
+    "title": "Nishaanchi",
+    "year": 2025,
+    "ids": [
+     "imdb://tt34794166",
+     "tmdb://1499082",
+     "tvdb://369854"
+    ]
+   },
+   {
+    "title": "Nishaanchi 2",
+    "year": 2025,
+    "ids": [
+     "imdb://tt38948631",
+     "tmdb://1580286",
+     "tvdb://371251"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20728",
+  "title": "Ari Aster",
+  "titleSort": "zzAri Aster",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Hereditary",
+    "year": 2018,
+    "ids": [
+     "imdb://tt7784604",
+     "tmdb://493922",
+     "tvdb://212"
+    ]
+   },
+   {
+    "title": "Midsommar",
+    "year": 2019,
+    "ids": [
+     "imdb://tt8772262",
+     "tmdb://530385",
+     "tvdb://8794"
+    ]
+   },
+   {
+    "title": "Beau Is Afraid",
+    "year": 2023,
+    "ids": [
+     "imdb://tt13521006",
+     "tmdb://798286",
+     "tvdb://223074"
+    ]
+   },
+   {
+    "title": "Eddington",
+    "year": 2025,
+    "ids": [
+     "imdb://tt31176520",
+     "tmdb://648878",
+     "tvdb://354049"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20558",
+  "title": "Billy Wilder",
+  "titleSort": "zzBilly Wilder",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Sunset Boulevard",
+    "year": 1950,
+    "ids": [
+     "imdb://tt0043014",
+     "tmdb://599",
+     "tvdb://2351"
+    ]
+   },
+   {
+    "title": "Sabrina",
+    "year": 1954,
+    "ids": [
+     "imdb://tt0047437",
+     "tmdb://6620",
+     "tvdb://1729"
+    ]
+   },
+   {
+    "title": "Some Like It Hot",
+    "year": 1959,
+    "ids": [
+     "imdb://tt0053291",
+     "tmdb://239",
+     "tvdb://2024"
+    ]
+   },
+   {
+    "title": "The Apartment",
+    "year": 1960,
+    "ids": [
+     "imdb://tt0053604",
+     "tmdb://284",
+     "tvdb://3801"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20586",
+  "title": "Bong Joon-ho",
+  "titleSort": "zzBong Joon-ho",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Memories of Murder",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0353969",
+     "tmdb://11423",
+     "tvdb://2586"
+    ]
+   },
+   {
+    "title": "The Host",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0468492",
+     "tmdb://1255",
+     "tvdb://6513"
+    ]
+   },
+   {
+    "title": "Mother",
+    "year": 2009,
+    "ids": [
+     "imdb://tt1216496",
+     "tmdb://30018",
+     "tvdb://5950"
+    ]
+   },
+   {
+    "title": "Snowpiercer",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1706620",
+     "tmdb://110415",
+     "tvdb://1502"
+    ]
+   },
+   {
+    "title": "Okja",
+    "year": 2017,
+    "ids": [
+     "imdb://tt3967856",
+     "tmdb://387426",
+     "tvdb://8238"
+    ]
+   },
+   {
+    "title": "Parasite",
+    "year": 2019,
+    "ids": [
+     "imdb://tt6751668",
+     "tmdb://496243",
+     "tvdb://41517"
+    ]
+   },
+   {
+    "title": "Mickey 17",
+    "year": 2025,
+    "ids": [
+     "imdb://tt12299608",
+     "tmdb://696506",
+     "tvdb://336798"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "25211",
+  "title": "Brian De Palma",
+  "titleSort": "zzBrian De Palma",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Carrie",
+    "year": 1976,
+    "ids": [
+     "imdb://tt0074285",
+     "tmdb://7340",
+     "tvdb://4084"
+    ]
+   },
+   {
+    "title": "Dressed to Kill",
+    "year": 1980,
+    "ids": [
+     "imdb://tt0080661",
+     "tmdb://11033",
+     "tvdb://2739"
+    ]
+   },
+   {
+    "title": "Blow Out",
+    "year": 1981,
+    "ids": [
+     "imdb://tt0082085",
+     "tmdb://11644",
+     "tvdb://5342"
+    ]
+   },
+   {
+    "title": "Scarface",
+    "year": 1983,
+    "ids": [
+     "imdb://tt0086250",
+     "tmdb://111",
+     "tvdb://814"
+    ]
+   },
+   {
+    "title": "Carlito's Way",
+    "year": 1993,
+    "ids": [
+     "imdb://tt0106519",
+     "tmdb://6075",
+     "tvdb://3461"
+    ]
+   },
+   {
+    "title": "Mission: Impossible",
+    "year": 1996,
+    "ids": [
+     "imdb://tt0117060",
+     "tmdb://954",
+     "tvdb://284"
+    ]
+   },
+   {
+    "title": "Snake Eyes",
+    "year": 1998,
+    "ids": [
+     "imdb://tt0120832",
+     "tmdb://8688",
+     "tvdb://2699"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20555",
+  "title": "Charlie Kaufman",
+  "titleSort": "zzCharlie Kaufman",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Adaptation.",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0268126",
+     "tmdb://2757",
+     "tvdb://3432"
+    ]
+   },
+   {
+    "title": "Eternal Sunshine of the Spotless Mind",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0338013",
+     "tmdb://38",
+     "tvdb://751"
+    ]
+   },
+   {
+    "title": "Synecdoche, New York",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0383028",
+     "tmdb://4960",
+     "tvdb://3694"
+    ]
+   },
+   {
+    "title": "I'm Thinking of Ending Things",
+    "year": 2020,
+    "ids": [
+     "imdb://tt7939766",
+     "tmdb://500840",
+     "tvdb://136343"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "34198",
+  "title": "Christopher McQuarrie",
+  "titleSort": "zzChristopher McQuarrie",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "The Usual Suspects",
+    "year": 1995,
+    "ids": [
+     "imdb://tt0114814",
+     "tmdb://629",
+     "tvdb://1048"
+    ]
+   },
+   {
+    "title": "Valkyrie",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0985699",
+     "tmdb://2253",
+     "tvdb://2303"
+    ]
+   },
+   {
+    "title": "Jack Reacher",
+    "year": 2012,
+    "ids": [
+     "imdb://tt0790724",
+     "tmdb://75780",
+     "tvdb://789"
+    ]
+   },
+   {
+    "title": "Edge of Tomorrow",
+    "year": 2014,
+    "ids": [
+     "imdb://tt1631867",
+     "tmdb://137113",
+     "tvdb://868"
+    ]
+   },
+   {
+    "title": "Mission: Impossible - Rogue Nation",
+    "year": 2015,
+    "ids": [
+     "imdb://tt2381249",
+     "tmdb://177677",
+     "tvdb://484"
+    ]
+   },
+   {
+    "title": "Mission: Impossible - Fallout",
+    "year": 2018,
+    "ids": [
+     "imdb://tt4912910",
+     "tmdb://353081",
+     "tvdb://22"
+    ]
+   },
+   {
+    "title": "Top Gun: Maverick",
+    "year": 2022,
+    "ids": [
+     "imdb://tt1745960",
+     "tmdb://361743",
+     "tvdb://16721"
+    ]
+   },
+   {
+    "title": "Mission: Impossible - Dead Reckoning",
+    "year": 2023,
+    "ids": [
+     "imdb://tt9603212",
+     "tmdb://575264",
+     "tvdb://30294"
+    ]
+   },
+   {
+    "title": "Mission: Impossible - The Final Reckoning",
+    "year": 2025,
+    "ids": [
+     "imdb://tt9603208",
+     "tmdb://575265",
+     "tvdb://52001"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "19780",
+  "title": "\u200eChristopher Nolan",
+  "titleSort": "zzChristopher Nolan",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Following",
+    "year": 1998,
+    "ids": [
+     "imdb://tt0154506",
+     "tmdb://11660",
+     "tvdb://6207"
+    ]
+   },
+   {
+    "title": "Memento",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0209144",
+     "tmdb://77",
+     "tvdb://434"
+    ]
+   },
+   {
+    "title": "Insomnia",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0278504",
+     "tmdb://320",
+     "tvdb://2364"
+    ]
+   },
+   {
+    "title": "Batman Begins",
+    "year": 2005,
+    "ids": [
+     "imdb://tt0372784",
+     "tmdb://272",
+     "tvdb://293"
+    ]
+   },
+   {
+    "title": "The Prestige",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0482571",
+     "tmdb://1124",
+     "tvdb://302"
+    ]
+   },
+   {
+    "title": "The Dark Knight",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0468569",
+     "tmdb://155",
+     "tvdb://116"
+    ]
+   },
+   {
+    "title": "Inception",
+    "year": 2010,
+    "ids": [
+     "imdb://tt1375666",
+     "tmdb://27205",
+     "tvdb://113"
+    ]
+   },
+   {
+    "title": "The Dark Knight Rises",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1345836",
+     "tmdb://49026",
+     "tvdb://222"
+    ]
+   },
+   {
+    "title": "Interstellar",
+    "year": 2014,
+    "ids": [
+     "imdb://tt0816692",
+     "tmdb://157336",
+     "tvdb://131079"
+    ]
+   },
+   {
+    "title": "Dunkirk",
+    "year": 2017,
+    "ids": [
+     "imdb://tt5013056",
+     "tmdb://374720",
+     "tvdb://424"
+    ]
+   },
+   {
+    "title": "Tenet",
+    "year": 2020,
+    "ids": [
+     "imdb://tt6723592",
+     "tmdb://577922",
+     "tvdb://131281"
+    ]
+   },
+   {
+    "title": "Oppenheimer",
+    "year": 2023,
+    "ids": [
+     "imdb://tt15398776",
+     "tmdb://872585",
+     "tvdb://287533"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "28635",
+  "title": "Clint Eastwood",
+  "titleSort": "zzClint Eastwood",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Unforgiven",
+    "year": 1992,
+    "ids": [
+     "imdb://tt0105695",
+     "tmdb://33",
+     "tvdb://1504"
+    ]
+   },
+   {
+    "title": "Mystic River",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0327056",
+     "tmdb://322",
+     "tvdb://2076"
+    ]
+   },
+   {
+    "title": "Million Dollar Baby",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0405159",
+     "tmdb://70",
+     "tvdb://1475"
+    ]
+   },
+   {
+    "title": "Flags of Our Fathers",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0418689",
+     "tmdb://3683",
+     "tvdb://2663"
+    ]
+   },
+   {
+    "title": "Letters from Iwo Jima",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0498380",
+     "tmdb://1251",
+     "tvdb://4187"
+    ]
+   },
+   {
+    "title": "Gran Torino",
+    "year": 2008,
+    "ids": [
+     "imdb://tt1205489",
+     "tmdb://13223",
+     "tvdb://1578"
+    ]
+   },
+   {
+    "title": "Invictus",
+    "year": 2009,
+    "ids": [
+     "imdb://tt1057500",
+     "tmdb://22954",
+     "tvdb://2910"
+    ]
+   },
+   {
+    "title": "J. Edgar",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1616195",
+     "tmdb://88794",
+     "tvdb://3875"
+    ]
+   },
+   {
+    "title": "American Sniper",
+    "year": 2014,
+    "ids": [
+     "imdb://tt2179136",
+     "tmdb://190859",
+     "tvdb://792"
+    ]
+   },
+   {
+    "title": "Sully",
+    "year": 2016,
+    "ids": [
+     "imdb://tt3263904",
+     "tmdb://363676",
+     "tvdb://1314"
+    ]
+   },
+   {
+    "title": "The Mule",
+    "year": 2018,
+    "ids": [
+     "imdb://tt7959026",
+     "tmdb://504172",
+     "tvdb://46"
+    ]
+   },
+   {
+    "title": "Juror #2",
+    "year": 2024,
+    "ids": [
+     "imdb://tt27403986",
+     "tmdb://1106739",
+     "tvdb://355404"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20768",
+  "title": "The Coen Brothers",
+  "titleSort": "zzCoen Brothers",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Blood Simple",
+    "year": 1984,
+    "ids": [
+     "imdb://tt0086979",
+     "tmdb://11368",
+     "tvdb://3477"
+    ]
+   },
+   {
+    "title": "Raising Arizona",
+    "year": 1987,
+    "ids": [
+     "imdb://tt0093822",
+     "tmdb://378",
+     "tvdb://1947"
+    ]
+   },
+   {
+    "title": "Miller's Crossing",
+    "year": 1990,
+    "ids": [
+     "imdb://tt0100150",
+     "tmdb://379",
+     "tvdb://3876"
+    ]
+   },
+   {
+    "title": "Barton Fink",
+    "year": 1991,
+    "ids": [
+     "imdb://tt0101410",
+     "tmdb://290",
+     "tvdb://2265"
+    ]
+   },
+   {
+    "title": "The Big Lebowski",
+    "year": 1998,
+    "ids": [
+     "imdb://tt0118715",
+     "tmdb://115",
+     "tvdb://659"
+    ]
+   },
+   {
+    "title": "O Brother, Where Art Thou?",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0190590",
+     "tmdb://134",
+     "tvdb://1567"
+    ]
+   },
+   {
+    "title": "The Man Who Wasn't There",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0243133",
+     "tmdb://10778",
+     "tvdb://4395"
+    ]
+   },
+   {
+    "title": "The Ladykillers",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0335245",
+     "tmdb://5516",
+     "tvdb://2862"
+    ]
+   },
+   {
+    "title": "No Country for Old Men",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0477348",
+     "tmdb://6977",
+     "tvdb://207"
+    ]
+   },
+   {
+    "title": "Burn After Reading",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0887883",
+     "tmdb://4944",
+     "tvdb://1147"
+    ]
+   },
+   {
+    "title": "True Grit",
+    "year": 2010,
+    "ids": [
+     "imdb://tt1403865",
+     "tmdb://44264",
+     "tvdb://1603"
+    ]
+   },
+   {
+    "title": "Inside Llewyn Davis",
+    "year": 2013,
+    "ids": [
+     "imdb://tt2042568",
+     "tmdb://86829",
+     "tvdb://1842"
+    ]
+   },
+   {
+    "title": "Bridge of Spies",
+    "year": 2015,
+    "ids": [
+     "imdb://tt3682448",
+     "tmdb://296098",
+     "tvdb://1082"
+    ]
+   },
+   {
+    "title": "Hail, Caesar!",
+    "year": 2016,
+    "ids": [
+     "imdb://tt0475290",
+     "tmdb://270487",
+     "tvdb://1899"
+    ]
+   },
+   {
+    "title": "The Tragedy of Macbeth",
+    "year": 2021,
+    "ids": [
+     "imdb://tt10095582",
+     "tmdb://591538",
+     "tvdb://190419"
+    ]
+   },
+   {
+    "title": "Honey Don't!",
+    "year": 2025,
+    "ids": [
+     "imdb://tt30645201",
+     "tmdb://1149504",
+     "tvdb://356777"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "19764",
+  "title": "\u200eDamien Chazelle",
+  "titleSort": "zzDamien Chazelle",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Whiplash",
+    "year": 2014,
+    "ids": [
+     "imdb://tt2582802",
+     "tmdb://244786",
+     "tvdb://129"
+    ]
+   },
+   {
+    "title": "La La Land",
+    "year": 2016,
+    "ids": [
+     "imdb://tt3783958",
+     "tmdb://313369",
+     "tvdb://139"
+    ]
+   },
+   {
+    "title": "First Man",
+    "year": 2018,
+    "ids": [
+     "imdb://tt1213641",
+     "tmdb://369972",
+     "tvdb://17"
+    ]
+   },
+   {
+    "title": "Babylon",
+    "year": 2022,
+    "ids": [
+     "imdb://tt10640346",
+     "tmdb://615777",
+     "tvdb://134452"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "29980",
+  "title": "Danny Boyle",
+  "titleSort": "zzDanny Boyle",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Shallow Grave",
+    "year": 1994,
+    "ids": [
+     "imdb://tt0111149",
+     "tmdb://9905",
+     "tvdb://8011"
+    ]
+   },
+   {
+    "title": "Trainspotting",
+    "year": 1996,
+    "ids": [
+     "imdb://tt0117951",
+     "tmdb://627",
+     "tvdb://463"
+    ]
+   },
+   {
+    "title": "The Beach",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0163978",
+     "tmdb://1907",
+     "tvdb://3644"
+    ]
+   },
+   {
+    "title": "28 Days Later",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0289043",
+     "tmdb://170",
+     "tvdb://871"
+    ]
+   },
+   {
+    "title": "Sunshine",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0448134",
+     "tmdb://1272",
+     "tvdb://3443"
+    ]
+   },
+   {
+    "title": "Slumdog Millionaire",
+    "year": 2008,
+    "ids": [
+     "imdb://tt1010048",
+     "tmdb://12405",
+     "tvdb://1166"
+    ]
+   },
+   {
+    "title": "127 Hours",
+    "year": 2010,
+    "ids": [
+     "imdb://tt1542344",
+     "tmdb://44115",
+     "tvdb://1412"
+    ]
+   },
+   {
+    "title": "Steve Jobs",
+    "year": 2015,
+    "ids": [
+     "imdb://tt2080374",
+     "tmdb://321697",
+     "tvdb://3271"
+    ]
+   },
+   {
+    "title": "T2 Trainspotting",
+    "year": 2017,
+    "ids": [
+     "imdb://tt2763304",
+     "tmdb://180863",
+     "tvdb://2322"
+    ]
+   },
+   {
+    "title": "Yesterday",
+    "year": 2019,
+    "ids": [
+     "imdb://tt8079248",
+     "tmdb://515195",
+     "tvdb://13306"
+    ]
+   },
+   {
+    "title": "28 Years Later",
+    "year": 2025,
+    "ids": [
+     "imdb://tt10548174",
+     "tmdb://1100988",
+     "tvdb://307356"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20549",
+  "title": "Darren Aronofsky",
+  "titleSort": "zzDarren Aronofsky",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Pi",
+    "year": 1998,
+    "ids": [
+     "imdb://tt0138704",
+     "tmdb://473",
+     "tvdb://3399"
+    ]
+   },
+   {
+    "title": "Requiem for a Dream",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0180093",
+     "tmdb://641",
+     "tvdb://9496"
+    ]
+   },
+   {
+    "title": "The Fountain",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0414993",
+     "tmdb://1381",
+     "tvdb://1595"
+    ]
+   },
+   {
+    "title": "The Wrestler",
+    "year": 2008,
+    "ids": [
+     "imdb://tt1125849",
+     "tmdb://12163",
+     "tvdb://2764"
+    ]
+   },
+   {
+    "title": "Black Swan",
+    "year": 2010,
+    "ids": [
+     "imdb://tt0947798",
+     "tmdb://44214",
+     "tvdb://721"
+    ]
+   },
+   {
+    "title": "Mother!",
+    "year": 2017,
+    "ids": [
+     "imdb://tt5109784",
+     "tmdb://381283",
+     "tvdb://541"
+    ]
+   },
+   {
+    "title": "The Whale",
+    "year": 2022,
+    "ids": [
+     "imdb://tt13833688",
+     "tmdb://785084",
+     "tvdb://152790"
+    ]
+   },
+   {
+    "title": "Caught Stealing",
+    "year": 2025,
+    "ids": [
+     "imdb://tt1493274",
+     "tmdb://1245993",
+     "tvdb://358275"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20420",
+  "title": "David Fincher",
+  "titleSort": "zzDavid Fincher",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Alien 3",
+    "year": 1992,
+    "ids": [
+     "imdb://tt0103644",
+     "tmdb://8077",
+     "tvdb://670"
+    ]
+   },
+   {
+    "title": "Seven",
+    "year": 1995,
+    "ids": [
+     "imdb://tt0114369",
+     "tmdb://807",
+     "tvdb://268"
+    ]
+   },
+   {
+    "title": "The Game",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0119174",
+     "tmdb://2649",
+     "tvdb://3282"
+    ]
+   },
+   {
+    "title": "Fight Club",
+    "year": 1999,
+    "ids": [
+     "imdb://tt0137523",
+     "tmdb://550",
+     "tvdb://247"
+    ]
+   },
+   {
+    "title": "Panic Room",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0258000",
+     "tmdb://4547",
+     "tvdb://1867"
+    ]
+   },
+   {
+    "title": "Zodiac",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0443706",
+     "tmdb://1949",
+     "tvdb://1363"
+    ]
+   },
+   {
+    "title": "The Curious Case of Benjamin Button",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0421715",
+     "tmdb://4922",
+     "tvdb://1508"
+    ]
+   },
+   {
+    "title": "The Social Network",
+    "year": 2010,
+    "ids": [
+     "imdb://tt1285016",
+     "tmdb://37799",
+     "tvdb://2240"
+    ]
+   },
+   {
+    "title": "The Girl with the Dragon Tattoo",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1568346",
+     "tmdb://65754",
+     "tvdb://761"
+    ]
+   },
+   {
+    "title": "Gone Girl",
+    "year": 2014,
+    "ids": [
+     "imdb://tt2267998",
+     "tmdb://210577",
+     "tvdb://130"
+    ]
+   },
+   {
+    "title": "Mank",
+    "year": 2020,
+    "ids": [
+     "imdb://tt10618286",
+     "tmdb://614560",
+     "tvdb://132209"
+    ]
+   },
+   {
+    "title": "The Killer",
+    "year": 2023,
+    "ids": [
+     "imdb://tt1136617",
+     "tmdb://800158",
+     "tvdb://336482"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20729",
+  "title": "David Lynch",
+  "titleSort": "zzDavid Lynch",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Eraserhead",
+    "year": 1977,
+    "ids": [
+     "imdb://tt0074486",
+     "tmdb://985",
+     "tvdb://5282"
+    ]
+   },
+   {
+    "title": "The Elephant Man",
+    "year": 1980,
+    "ids": [
+     "imdb://tt0080678",
+     "tmdb://1955",
+     "tvdb://4410"
+    ]
+   },
+   {
+    "title": "Dune",
+    "year": 1984,
+    "ids": [
+     "imdb://tt0087182",
+     "tmdb://841",
+     "tvdb://1406"
+    ]
+   },
+   {
+    "title": "Blue Velvet",
+    "year": 1986,
+    "ids": [
+     "imdb://tt0090756",
+     "tmdb://793",
+     "tvdb://2126"
+    ]
+   },
+   {
+    "title": "Lost Highway",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0116922",
+     "tmdb://638",
+     "tvdb://2333"
+    ]
+   },
+   {
+    "title": "Mulholland Drive",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0166924",
+     "tmdb://1018",
+     "tvdb://915"
+    ]
+   },
+   {
+    "title": "Inland Empire",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0460829",
+     "tmdb://1730",
+     "tvdb://2308"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20546",
+  "title": "Denis Villeneuve",
+  "titleSort": "zzDenis Villeneuve",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Incendies",
+    "year": 2010,
+    "ids": [
+     "imdb://tt1255953",
+     "tmdb://46738",
+     "tvdb://3783"
+    ]
+   },
+   {
+    "title": "Enemy",
+    "year": 2013,
+    "ids": [
+     "imdb://tt2316411",
+     "tmdb://181886",
+     "tvdb://2314"
+    ]
+   },
+   {
+    "title": "Prisoners",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1392214",
+     "tmdb://146233",
+     "tvdb://1992"
+    ]
+   },
+   {
+    "title": "Sicario",
+    "year": 2015,
+    "ids": [
+     "imdb://tt3397884",
+     "tmdb://273481",
+     "tvdb://892"
+    ]
+   },
+   {
+    "title": "Arrival",
+    "year": 2016,
+    "ids": [
+     "imdb://tt2543164",
+     "tmdb://329865",
+     "tvdb://219"
+    ]
+   },
+   {
+    "title": "Blade Runner 2049",
+    "year": 2017,
+    "ids": [
+     "imdb://tt1856101",
+     "tmdb://335984",
+     "tvdb://117"
+    ]
+   },
+   {
+    "title": "Dune: Part One",
+    "year": 2021,
+    "ids": [
+     "imdb://tt1160419",
+     "tmdb://438631",
+     "tvdb://6187"
+    ]
+   },
+   {
+    "title": "Dune: Part Two",
+    "year": 2024,
+    "ids": [
+     "imdb://tt15239678",
+     "tmdb://693134",
+     "tvdb://290272"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "27299",
+  "title": "Edgar Wright",
+  "titleSort": "zzEdgar Wright",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Shaun of the Dead",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0365748",
+     "tmdb://747",
+     "tvdb://770"
+    ]
+   },
+   {
+    "title": "Hot Fuzz",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0425112",
+     "tmdb://4638",
+     "tvdb://1279"
+    ]
+   },
+   {
+    "title": "Scott Pilgrim vs. the World",
+    "year": 2010,
+    "ids": [
+     "imdb://tt0446029",
+     "tmdb://22538",
+     "tvdb://1263"
+    ]
+   },
+   {
+    "title": "The Adventures of Tintin",
+    "year": 2011,
+    "ids": [
+     "imdb://tt0983193",
+     "tmdb://17578",
+     "tvdb://1156"
+    ]
+   },
+   {
+    "title": "The World's End",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1213663",
+     "tmdb://107985",
+     "tvdb://1316"
+    ]
+   },
+   {
+    "title": "Ant-Man",
+    "year": 2015,
+    "ids": [
+     "imdb://tt0478970",
+     "tmdb://102899",
+     "tvdb://163"
+    ]
+   },
+   {
+    "title": "Baby Driver",
+    "year": 2017,
+    "ids": [
+     "imdb://tt3890160",
+     "tmdb://339403",
+     "tvdb://342"
+    ]
+   },
+   {
+    "title": "Last Night in Soho",
+    "year": 2021,
+    "ids": [
+     "imdb://tt9639470",
+     "tmdb://576845",
+     "tvdb://70065"
+    ]
+   },
+   {
+    "title": "The Running Man",
+    "year": 2025,
+    "ids": [
+     "imdb://tt14107334",
+     "tmdb://798645",
+     "tvdb://336622"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20731",
+  "title": "Federico Fellini",
+  "titleSort": "zzFederico Fellini",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Variety Lights",
+    "year": 1953,
+    "ids": [
+     "imdb://tt0042692",
+     "tmdb://43389",
+     "tvdb://43366"
+    ]
+   },
+   {
+    "title": "I Vitelloni",
+    "year": 1954,
+    "ids": [
+     "imdb://tt0046521",
+     "tmdb://12548",
+     "tvdb://6759"
+    ]
+   },
+   {
+    "title": "La Strada",
+    "year": 1954,
+    "ids": [
+     "imdb://tt0047528",
+     "tmdb://405",
+     "tvdb://5637"
+    ]
+   },
+   {
+    "title": "The White Sheik",
+    "year": 1955,
+    "ids": [
+     "imdb://tt0044000",
+     "tmdb://43361",
+     "tvdb://25561"
+    ]
+   },
+   {
+    "title": "The Swindle",
+    "year": 1955,
+    "ids": [
+     "imdb://tt0047876",
+     "tmdb://36102",
+     "tvdb://40641"
+    ]
+   },
+   {
+    "title": "Nights of Cabiria",
+    "year": 1957,
+    "ids": [
+     "imdb://tt0050783",
+     "tmdb://19426",
+     "tvdb://6755"
+    ]
+   },
+   {
+    "title": "La Dolce Vita",
+    "year": 1960,
+    "ids": [
+     "imdb://tt0053779",
+     "tmdb://439",
+     "tvdb://3179"
+    ]
+   },
+   {
+    "title": "8\u00bd",
+    "year": 1963,
+    "ids": [
+     "imdb://tt0056801",
+     "tmdb://422",
+     "tvdb://4813"
+    ]
+   },
+   {
+    "title": "Juliet of the Spirits",
+    "year": 1965,
+    "ids": [
+     "imdb://tt0059229",
+     "tmdb://19120",
+     "tvdb://12796"
+    ]
+   },
+   {
+    "title": "Satyricon",
+    "year": 1969,
+    "ids": [
+     "imdb://tt0064940",
+     "tmdb://11163",
+     "tvdb://7662"
+    ]
+   },
+   {
+    "title": "Roma",
+    "year": 1972,
+    "ids": [
+     "imdb://tt0069191",
+     "tmdb://11035",
+     "tvdb://11303"
+    ]
+   },
+   {
+    "title": "Amarcord",
+    "year": 1973,
+    "ids": [
+     "imdb://tt0071129",
+     "tmdb://7857",
+     "tvdb://7546"
+    ]
+   },
+   {
+    "title": "And the Ship Sails On",
+    "year": 1983,
+    "ids": [
+     "imdb://tt0087188",
+     "tmdb://5622",
+     "tvdb://20369"
+    ]
+   },
+   {
+    "title": "Intervista",
+    "year": 1987,
+    "ids": [
+     "imdb://tt0093267",
+     "tmdb://47715",
+     "tvdb://57883"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20548",
+  "title": "Francis Ford Coppola",
+  "titleSort": "zzFrancis Ford Coppola",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "The Godfather",
+    "year": 1972,
+    "ids": [
+     "imdb://tt0068646",
+     "tmdb://238",
+     "tvdb://275"
+    ]
+   },
+   {
+    "title": "The Conversation",
+    "year": 1974,
+    "ids": [
+     "imdb://tt0071360",
+     "tmdb://592",
+     "tvdb://4324"
+    ]
+   },
+   {
+    "title": "The Godfather Part II",
+    "year": 1974,
+    "ids": [
+     "imdb://tt0071562",
+     "tmdb://240",
+     "tvdb://780"
+    ]
+   },
+   {
+    "title": "Apocalypse Now",
+    "year": 1979,
+    "ids": [
+     "imdb://tt0078788",
+     "tmdb://28",
+     "tvdb://1077"
+    ]
+   },
+   {
+    "title": "The Outsiders",
+    "year": 1983,
+    "ids": [
+     "imdb://tt0086066",
+     "tmdb://227",
+     "tvdb://5014"
+    ]
+   },
+   {
+    "title": "The Godfather Part III",
+    "year": 1990,
+    "ids": [
+     "imdb://tt0099674",
+     "tmdb://242",
+     "tvdb://2270"
+    ]
+   },
+   {
+    "title": "Bram Stoker's Dracula",
+    "year": 1992,
+    "ids": [
+     "imdb://tt0103874",
+     "tmdb://6114",
+     "tvdb://1717"
+    ]
+   },
+   {
+    "title": "Megalopolis",
+    "year": 2024,
+    "ids": [
+     "imdb://tt10128846",
+     "tmdb://592831",
+     "tvdb://339489"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20556",
+  "title": "Greta Gerwig",
+  "titleSort": "zzGreta Gerwig",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Frances Ha",
+    "year": 2013,
+    "ids": [
+     "imdb://tt2347569",
+     "tmdb://121986",
+     "tvdb://5615"
+    ]
+   },
+   {
+    "title": "Mistress America",
+    "year": 2015,
+    "ids": [
+     "imdb://tt2872462",
+     "tmdb://309245",
+     "tvdb://7561"
+    ]
+   },
+   {
+    "title": "Lady Bird",
+    "year": 2017,
+    "ids": [
+     "imdb://tt4925292",
+     "tmdb://391713",
+     "tvdb://620"
+    ]
+   },
+   {
+    "title": "Little Women",
+    "year": 2019,
+    "ids": [
+     "imdb://tt3281548",
+     "tmdb://331482",
+     "tvdb://20220"
+    ]
+   },
+   {
+    "title": "Barbie",
+    "year": 2023,
+    "ids": [
+     "imdb://tt1517268",
+     "tmdb://346698",
+     "tvdb://16612"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "32155",
+  "title": "Guillermo del Toro",
+  "titleSort": "zzGuillermo del Toro",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Cronos",
+    "year": 1993,
+    "ids": [
+     "imdb://tt0104029",
+     "tmdb://11655",
+     "tvdb://8600"
+    ]
+   },
+   {
+    "title": "Mimic",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0119675",
+     "tmdb://4961",
+     "tvdb://3920"
+    ]
+   },
+   {
+    "title": "The Devil's Backbone",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0256009",
+     "tmdb://1433",
+     "tvdb://8324"
+    ]
+   },
+   {
+    "title": "Blade II",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0187738",
+     "tmdb://36586",
+     "tvdb://2004"
+    ]
+   },
+   {
+    "title": "Hellboy",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0167190",
+     "tmdb://1487",
+     "tvdb://890"
+    ]
+   },
+   {
+    "title": "Pan's Labyrinth",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0457430",
+     "tmdb://1417",
+     "tvdb://1074"
+    ]
+   },
+   {
+    "title": "Hellboy II: The Golden Army",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0411477",
+     "tmdb://11253",
+     "tvdb://1520"
+    ]
+   },
+   {
+    "title": "The Hobbit: An Unexpected Journey",
+    "year": 2012,
+    "ids": [
+     "imdb://tt0903624",
+     "tmdb://49051",
+     "tvdb://138"
+    ]
+   },
+   {
+    "title": "Pacific Rim",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1663662",
+     "tmdb://68726",
+     "tvdb://846"
+    ]
+   },
+   {
+    "title": "The Hobbit: The Desolation of Smaug",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1170358",
+     "tmdb://57158",
+     "tvdb://235"
+    ]
+   },
+   {
+    "title": "The Hobbit: The Battle of the Five Armies",
+    "year": 2014,
+    "ids": [
+     "imdb://tt2310332",
+     "tmdb://122917",
+     "tvdb://30"
+    ]
+   },
+   {
+    "title": "Crimson Peak",
+    "year": 2015,
+    "ids": [
+     "imdb://tt2554274",
+     "tmdb://201085",
+     "tvdb://2097"
+    ]
+   },
+   {
+    "title": "The Shape of Water",
+    "year": 2017,
+    "ids": [
+     "imdb://tt5580390",
+     "tmdb://399055",
+     "tvdb://241"
+    ]
+   },
+   {
+    "title": "Nightmare Alley",
+    "year": 2021,
+    "ids": [
+     "imdb://tt7740496",
+     "tmdb://597208",
+     "tvdb://131600"
+    ]
+   },
+   {
+    "title": "Guillermo del Toro's Pinocchio",
+    "year": 2022,
+    "ids": [
+     "imdb://tt1488589",
+     "tmdb://555604",
+     "tvdb://96850"
+    ]
+   },
+   {
+    "title": "Frankenstein",
+    "year": 2025,
+    "ids": [
+     "imdb://tt1312221",
+     "tmdb://1062722",
+     "tvdb://350412"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "23905",
+  "title": "Guy Ritchie",
+  "titleSort": "zzGuy Ritchie",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Lock, Stock and Two Smoking Barrels",
+    "year": 1998,
+    "ids": [
+     "imdb://tt0120735",
+     "tmdb://100",
+     "tvdb://5995"
+    ]
+   },
+   {
+    "title": "Snatch",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0208092",
+     "tmdb://107",
+     "tvdb://753"
+    ]
+   },
+   {
+    "title": "RocknRolla",
+    "year": 2008,
+    "ids": [
+     "imdb://tt1032755",
+     "tmdb://13809",
+     "tvdb://2833"
+    ]
+   },
+   {
+    "title": "Sherlock Holmes",
+    "year": 2009,
+    "ids": [
+     "imdb://tt0988045",
+     "tmdb://10528",
+     "tvdb://718"
+    ]
+   },
+   {
+    "title": "Sherlock Holmes: A Game of Shadows",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1515091",
+     "tmdb://58574",
+     "tvdb://980"
+    ]
+   },
+   {
+    "title": "The Man from U.N.C.L.E.",
+    "year": 2015,
+    "ids": [
+     "imdb://tt1638355",
+     "tmdb://203801",
+     "tvdb://1210"
+    ]
+   },
+   {
+    "title": "King Arthur: Legend of the Sword",
+    "year": 2017,
+    "ids": [
+     "imdb://tt1972591",
+     "tmdb://274857",
+     "tvdb://1018"
+    ]
+   },
+   {
+    "title": "The Gentlemen",
+    "year": 2020,
+    "ids": [
+     "imdb://tt8367814",
+     "tmdb://522627",
+     "tvdb://131524"
+    ]
+   },
+   {
+    "title": "Wrath of Man",
+    "year": 2021,
+    "ids": [
+     "imdb://tt11083552",
+     "tmdb://637649",
+     "tvdb://141791"
+    ]
+   },
+   {
+    "title": "The Covenant",
+    "year": 2023,
+    "ids": [
+     "imdb://tt4873118",
+     "tmdb://882569",
+     "tvdb://343900"
+    ]
+   },
+   {
+    "title": "The Ministry of Ungentlemanly Warfare",
+    "year": 2024,
+    "ids": [
+     "imdb://tt5177120",
+     "tmdb://799583",
+     "tvdb://345742"
+    ]
+   },
+   {
+    "title": "Fountain of Youth",
+    "year": 2025,
+    "ids": [
+     "imdb://tt27075958",
+     "tmdb://1098006",
+     "tvdb://356132"
+    ]
+   },
+   {
+    "title": "In the Grey",
+    "year": 2026,
+    "ids": [
+     "imdb://tt27681354",
+     "tmdb://1122573",
+     "tvdb://356348"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20730",
+  "title": "Ingmar Bergman",
+  "titleSort": "zzIngmar Bergman",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "The Seventh Seal",
+    "year": 1957,
+    "ids": [
+     "imdb://tt0050976",
+     "tmdb://490",
+     "tvdb://4639"
+    ]
+   },
+   {
+    "title": "Winter Light",
+    "year": 1963,
+    "ids": [
+     "imdb://tt0057358",
+     "tmdb://29455",
+     "tvdb://9797"
+    ]
+   },
+   {
+    "title": "Persona",
+    "year": 1966,
+    "ids": [
+     "imdb://tt0060827",
+     "tmdb://797",
+     "tvdb://4579"
+    ]
+   },
+   {
+    "title": "Autumn Sonata",
+    "year": 1978,
+    "ids": [
+     "imdb://tt0077711",
+     "tmdb://12761",
+     "tvdb://8781"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "23613",
+  "title": "J.J. Abrams",
+  "titleSort": "zzJ.J. Abrams",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Mission: Impossible III",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0317919",
+     "tmdb://956",
+     "tvdb://827"
+    ]
+   },
+   {
+    "title": "Star Trek",
+    "year": 2009,
+    "ids": [
+     "imdb://tt0796366",
+     "tmdb://13475",
+     "tvdb://583"
+    ]
+   },
+   {
+    "title": "Star Trek Into Darkness",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1408101",
+     "tmdb://54138",
+     "tvdb://613"
+    ]
+   },
+   {
+    "title": "Star Wars: Episode VII - The Force Awakens",
+    "year": 2015,
+    "ids": [
+     "imdb://tt2488496",
+     "tmdb://140607",
+     "tvdb://213"
+    ]
+   },
+   {
+    "title": "Star Wars: The Rise Of Skywalker",
+    "year": 2019,
+    "ids": [
+     "imdb://tt2527338",
+     "tmdb://181812",
+     "tvdb://12879"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "25246",
+  "title": "James Cameron",
+  "titleSort": "zzJames Cameron",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "The Terminator",
+    "year": 1984,
+    "ids": [
+     "imdb://tt0088247",
+     "tmdb://218",
+     "tvdb://470"
+    ]
+   },
+   {
+    "title": "Aliens",
+    "year": 1986,
+    "ids": [
+     "imdb://tt0090605",
+     "tmdb://679",
+     "tvdb://654"
+    ]
+   },
+   {
+    "title": "The Abyss",
+    "year": 1989,
+    "ids": [
+     "imdb://tt0096754",
+     "tmdb://2756",
+     "tvdb://2273"
+    ]
+   },
+   {
+    "title": "Terminator 2: Judgment Day",
+    "year": 1991,
+    "ids": [
+     "imdb://tt0103064",
+     "tmdb://280",
+     "tvdb://412"
+    ]
+   },
+   {
+    "title": "True Lies",
+    "year": 1994,
+    "ids": [
+     "imdb://tt0111503",
+     "tmdb://36955",
+     "tvdb://1193"
+    ]
+   },
+   {
+    "title": "Titanic",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0120338",
+     "tmdb://597",
+     "tvdb://231"
+    ]
+   },
+   {
+    "title": "Avatar",
+    "year": 2009,
+    "ids": [
+     "imdb://tt0499549",
+     "tmdb://19995",
+     "tvdb://165"
+    ]
+   },
+   {
+    "title": "Avatar: The Way of Water",
+    "year": 2022,
+    "ids": [
+     "imdb://tt1630029",
+     "tmdb://76600",
+     "tvdb://5483"
+    ]
+   },
+   {
+    "title": "Avatar: Fire and Ash",
+    "year": 2025,
+    "ids": [
+     "imdb://tt1757678",
+     "tmdb://83533",
+     "tvdb://30126"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20552",
+  "title": "James Gray",
+  "titleSort": "zzJames Gray",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Two Lovers",
+    "year": 2008,
+    "ids": [
+     "imdb://tt1103275",
+     "tmdb://10362",
+     "tvdb://3473"
+    ]
+   },
+   {
+    "title": "Ad Astra",
+    "year": 2019,
+    "ids": [
+     "imdb://tt2935510",
+     "tmdb://419704",
+     "tvdb://9229"
+    ]
+   },
+   {
+    "title": "Armageddon Time",
+    "year": 2022,
+    "ids": [
+     "imdb://tt10343028",
+     "tmdb://615952",
+     "tvdb://323892"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "42549",
+  "title": "James Mangold",
+  "titleSort": "zzJames Mangold",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Cop Land",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0118887",
+     "tmdb://2142",
+     "tvdb://3987"
+    ]
+   },
+   {
+    "title": "Walk the Line",
+    "year": 2005,
+    "ids": [
+     "imdb://tt0358273",
+     "tmdb://69",
+     "tvdb://3828"
+    ]
+   },
+   {
+    "title": "3:10 to Yuma",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0381849",
+     "tmdb://5176",
+     "tvdb://1862"
+    ]
+   },
+   {
+    "title": "The Wolverine",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1430132",
+     "tmdb://76170",
+     "tvdb://20145"
+    ]
+   },
+   {
+    "title": "Logan",
+    "year": 2017,
+    "ids": [
+     "imdb://tt3315342",
+     "tmdb://263115",
+     "tvdb://143"
+    ]
+   },
+   {
+    "title": "Ford v Ferrari",
+    "year": 2019,
+    "ids": [
+     "imdb://tt1950186",
+     "tmdb://359724",
+     "tvdb://57613"
+    ]
+   },
+   {
+    "title": "Indiana Jones and the Dial of Destiny",
+    "year": 2023,
+    "ids": [
+     "imdb://tt1462764",
+     "tmdb://335977",
+     "tvdb://134846"
+    ]
+   },
+   {
+    "title": "A Complete Unknown",
+    "year": 2024,
+    "ids": [
+     "imdb://tt11563598",
+     "tmdb://661539",
+     "tvdb://313177"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20727",
+  "title": "Jordan Peele",
+  "titleSort": "zzJordan Peele",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Get Out",
+    "year": 2017,
+    "ids": [
+     "imdb://tt5052448",
+     "tmdb://419430",
+     "tvdb://270"
+    ]
+   },
+   {
+    "title": "Us",
+    "year": 2019,
+    "ids": [
+     "imdb://tt6857112",
+     "tmdb://458723",
+     "tvdb://609"
+    ]
+   },
+   {
+    "title": "Nope",
+    "year": 2022,
+    "ids": [
+     "imdb://tt10954984",
+     "tmdb://762504",
+     "tvdb://153745"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "33792",
+  "title": "Joseph Kosinski",
+  "titleSort": "zzJoseph Kosinski",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Tron: Legacy",
+    "year": 2010,
+    "ids": [
+     "imdb://tt1104001",
+     "tmdb://20526",
+     "tvdb://1550"
+    ]
+   },
+   {
+    "title": "Oblivion",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1483013",
+     "tmdb://75612",
+     "tvdb://1196"
+    ]
+   },
+   {
+    "title": "Only the Brave",
+    "year": 2017,
+    "ids": [
+     "imdb://tt3829920",
+     "tmdb://395991",
+     "tvdb://817"
+    ]
+   },
+   {
+    "title": "Top Gun: Maverick",
+    "year": 2022,
+    "ids": [
+     "imdb://tt1745960",
+     "tmdb://361743",
+     "tvdb://16721"
+    ]
+   },
+   {
+    "title": "Spiderhead",
+    "year": 2022,
+    "ids": [
+     "imdb://tt9783600",
+     "tmdb://615469",
+     "tvdb://146509"
+    ]
+   },
+   {
+    "title": "F1: The Movie",
+    "year": 2025,
+    "ids": [
+     "imdb://tt16311594",
+     "tmdb://911430",
+     "tvdb://347720"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "28446",
+  "title": "Lars Von Trier",
+  "titleSort": "zzLars Von Trier",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Dancer in the Dark",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0168629",
+     "tmdb://16",
+     "tvdb://2801"
+    ]
+   },
+   {
+    "title": "Dogville",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0276919",
+     "tmdb://553",
+     "tvdb://4001"
+    ]
+   },
+   {
+    "title": "Antichrist",
+    "year": 2009,
+    "ids": [
+     "imdb://tt0870984",
+     "tmdb://17609",
+     "tvdb://1909"
+    ]
+   },
+   {
+    "title": "Melancholia",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1527186",
+     "tmdb://62215",
+     "tvdb://2735"
+    ]
+   },
+   {
+    "title": "Nymphomaniac: Vol. I",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1937390",
+     "tmdb://258216",
+     "tvdb://1667"
+    ]
+   },
+   {
+    "title": "Nymphomaniac: Vol. II",
+    "year": 2013,
+    "ids": [
+     "imdb://tt2382009",
+     "tmdb://249397",
+     "tvdb://1214"
+    ]
+   },
+   {
+    "title": "The House That Jack Built",
+    "year": 2018,
+    "ids": [
+     "imdb://tt4003440",
+     "tmdb://398173",
+     "tvdb://78"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20540",
+  "title": "Luca Guadagnino",
+  "titleSort": "zzLuca Guadagnino",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "I Am Love",
+    "year": 2009,
+    "ids": [
+     "imdb://tt1226236",
+     "tmdb://41110",
+     "tvdb://8021"
+    ]
+   },
+   {
+    "title": "Call Me by Your Name",
+    "year": 2017,
+    "ids": [
+     "imdb://tt5726616",
+     "tmdb://398818",
+     "tvdb://341"
+    ]
+   },
+   {
+    "title": "Bones and All",
+    "year": 2022,
+    "ids": [
+     "imdb://tt10168670",
+     "tmdb://791177",
+     "tvdb://149380"
+    ]
+   },
+   {
+    "title": "Challengers",
+    "year": 2024,
+    "ids": [
+     "imdb://tt16426418",
+     "tmdb://937287",
+     "tvdb://336742"
+    ]
+   },
+   {
+    "title": "Queer",
+    "year": 2024,
+    "ids": [
+     "imdb://tt24176060",
+     "tmdb://1059128",
+     "tvdb://347591"
+    ]
+   },
+   {
+    "title": "After the Hunt",
+    "year": 2025,
+    "ids": [
+     "imdb://tt32159989",
+     "tmdb://1265063",
+     "tvdb://358148"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "23664",
+  "title": "M. Night Shyamalan",
+  "titleSort": "zzM. Night Shyamalan",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "The Sixth Sense",
+    "year": 1999,
+    "ids": [
+     "imdb://tt0167404",
+     "tmdb://745",
+     "tvdb://947"
+    ]
+   },
+   {
+    "title": "Unbreakable",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0217869",
+     "tmdb://9741",
+     "tvdb://510"
+    ]
+   },
+   {
+    "title": "Signs",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0286106",
+     "tmdb://2675",
+     "tvdb://1900"
+    ]
+   },
+   {
+    "title": "The Village",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0368447",
+     "tmdb://6947",
+     "tvdb://1415"
+    ]
+   },
+   {
+    "title": "Split",
+    "year": 2017,
+    "ids": [
+     "imdb://tt4972582",
+     "tmdb://381288",
+     "tvdb://198"
+    ]
+   },
+   {
+    "title": "Glass",
+    "year": 2019,
+    "ids": [
+     "imdb://tt6823368",
+     "tmdb://450465",
+     "tvdb://35"
+    ]
+   },
+   {
+    "title": "Old",
+    "year": 2021,
+    "ids": [
+     "imdb://tt10954652",
+     "tmdb://631843",
+     "tvdb://141977"
+    ]
+   },
+   {
+    "title": "Knock at the Cabin",
+    "year": 2023,
+    "ids": [
+     "imdb://tt15679400",
+     "tmdb://631842",
+     "tvdb://336359"
+    ]
+   },
+   {
+    "title": "Trap",
+    "year": 2024,
+    "ids": [
+     "imdb://tt26753003",
+     "tmdb://1032823",
+     "tvdb://355922"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20487",
+  "title": "Martin McDonagh",
+  "titleSort": "zzMartin McDonagh",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "In Bruges",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0780536",
+     "tmdb://8321",
+     "tvdb://1823"
+    ]
+   },
+   {
+    "title": "Seven Psychopaths",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1931533",
+     "tmdb://86838",
+     "tvdb://1935"
+    ]
+   },
+   {
+    "title": "Three Billboards Outside Ebbing, Missouri",
+    "year": 2017,
+    "ids": [
+     "imdb://tt5027774",
+     "tmdb://359940",
+     "tvdb://453"
+    ]
+   },
+   {
+    "title": "The Banshees of Inisherin",
+    "year": 2022,
+    "ids": [
+     "imdb://tt11813216",
+     "tmdb://674324",
+     "tvdb://175911"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20490",
+  "title": "Martin Scorcese",
+  "titleSort": "zzMartin Scorcese",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Boxcar Bertha",
+    "year": 1972,
+    "ids": [
+     "imdb://tt0068309",
+     "tmdb://22784",
+     "tvdb://12330"
+    ]
+   },
+   {
+    "title": "Mean Streets",
+    "year": 1973,
+    "ids": [
+     "imdb://tt0070379",
+     "tmdb://203",
+     "tvdb://2647"
+    ]
+   },
+   {
+    "title": "Alice Doesn't Live Here Anymore",
+    "year": 1974,
+    "ids": [
+     "imdb://tt0071115",
+     "tmdb://16153",
+     "tvdb://4876"
+    ]
+   },
+   {
+    "title": "Taxi Driver",
+    "year": 1976,
+    "ids": [
+     "imdb://tt0075314",
+     "tmdb://103",
+     "tvdb://472"
+    ]
+   },
+   {
+    "title": "New York, New York",
+    "year": 1977,
+    "ids": [
+     "imdb://tt0076451",
+     "tmdb://12637",
+     "tvdb://6946"
+    ]
+   },
+   {
+    "title": "Raging Bull",
+    "year": 1980,
+    "ids": [
+     "imdb://tt0081398",
+     "tmdb://1578",
+     "tvdb://1303"
+    ]
+   },
+   {
+    "title": "The King of Comedy",
+    "year": 1982,
+    "ids": [
+     "imdb://tt0085794",
+     "tmdb://262",
+     "tvdb://5814"
+    ]
+   },
+   {
+    "title": "After Hours",
+    "year": 1985,
+    "ids": [
+     "imdb://tt0088680",
+     "tmdb://10843",
+     "tvdb://2572"
+    ]
+   },
+   {
+    "title": "The Color of Money",
+    "year": 1986,
+    "ids": [
+     "imdb://tt0090863",
+     "tmdb://11873",
+     "tvdb://5431"
+    ]
+   },
+   {
+    "title": "The Last Temptation of Christ",
+    "year": 1988,
+    "ids": [
+     "imdb://tt0095497",
+     "tmdb://11051",
+     "tvdb://5344"
+    ]
+   },
+   {
+    "title": "GoodFellas",
+    "year": 1990,
+    "ids": [
+     "imdb://tt0099685",
+     "tmdb://769",
+     "tvdb://380"
+    ]
+   },
+   {
+    "title": "Cape Fear",
+    "year": 1991,
+    "ids": [
+     "imdb://tt0101540",
+     "tmdb://1598",
+     "tvdb://3216"
+    ]
+   },
+   {
+    "title": "The Age of Innocence",
+    "year": 1993,
+    "ids": [
+     "imdb://tt0106226",
+     "tmdb://10436",
+     "tvdb://6799"
+    ]
+   },
+   {
+    "title": "Casino",
+    "year": 1995,
+    "ids": [
+     "imdb://tt0112641",
+     "tmdb://524",
+     "tvdb://1634"
+    ]
+   },
+   {
+    "title": "Kundun",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0119485",
+     "tmdb://9746",
+     "tvdb://12418"
+    ]
+   },
+   {
+    "title": "Bringing Out the Dead",
+    "year": 1999,
+    "ids": [
+     "imdb://tt0163988",
+     "tmdb://8649",
+     "tvdb://8087"
+    ]
+   },
+   {
+    "title": "Gangs of New York",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0217505",
+     "tmdb://3131",
+     "tvdb://2457"
+    ]
+   },
+   {
+    "title": "The Aviator",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0338751",
+     "tmdb://2567",
+     "tvdb://1744"
+    ]
+   },
+   {
+    "title": "The Departed",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0407887",
+     "tmdb://1422",
+     "tvdb://590"
+    ]
+   },
+   {
+    "title": "Shutter Island",
+    "year": 2010,
+    "ids": [
+     "imdb://tt1130884",
+     "tmdb://11324",
+     "tvdb://558"
+    ]
+   },
+   {
+    "title": "Hugo",
+    "year": 2011,
+    "ids": [
+     "imdb://tt0970179",
+     "tmdb://44826",
+     "tvdb://1181"
+    ]
+   },
+   {
+    "title": "The Wolf of Wall Street",
+    "year": 2013,
+    "ids": [
+     "imdb://tt0993846",
+     "tmdb://106646",
+     "tvdb://389"
+    ]
+   },
+   {
+    "title": "Silence",
+    "year": 2016,
+    "ids": [
+     "imdb://tt0490215",
+     "tmdb://68730",
+     "tvdb://2180"
+    ]
+   },
+   {
+    "title": "The Irishman",
+    "year": 2019,
+    "ids": [
+     "imdb://tt1302006",
+     "tmdb://398978",
+     "tvdb://14156"
+    ]
+   },
+   {
+    "title": "Killers of the Flower Moon",
+    "year": 2023,
+    "ids": [
+     "imdb://tt5537002",
+     "tmdb://466420",
+     "tvdb://135852"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "22934",
+  "title": "Michael Mann",
+  "titleSort": "zzMichael Mann",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Thief",
+    "year": 1981,
+    "ids": [
+     "imdb://tt0083190",
+     "tmdb://11524",
+     "tvdb://4692"
+    ]
+   },
+   {
+    "title": "Manhunter",
+    "year": 1986,
+    "ids": [
+     "imdb://tt0091474",
+     "tmdb://11454",
+     "tvdb://131172"
+    ]
+   },
+   {
+    "title": "The Last of the Mohicans",
+    "year": 1992,
+    "ids": [
+     "imdb://tt0104691",
+     "tmdb://9361",
+     "tvdb://2639"
+    ]
+   },
+   {
+    "title": "Heat",
+    "year": 1995,
+    "ids": [
+     "imdb://tt0113277",
+     "tmdb://949",
+     "tvdb://1305"
+    ]
+   },
+   {
+    "title": "The Insider",
+    "year": 1999,
+    "ids": [
+     "imdb://tt0140352",
+     "tmdb://9008",
+     "tvdb://3309"
+    ]
+   },
+   {
+    "title": "Ali",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0248667",
+     "tmdb://8489",
+     "tvdb://8518"
+    ]
+   },
+   {
+    "title": "Collateral",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0369339",
+     "tmdb://1538",
+     "tvdb://990"
+    ]
+   },
+   {
+    "title": "Miami Vice",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0430357",
+     "tmdb://82",
+     "tvdb://3479"
+    ]
+   },
+   {
+    "title": "Blackhat",
+    "year": 2015,
+    "ids": [
+     "imdb://tt2717822",
+     "tmdb://201088",
+     "tvdb://1152"
+    ]
+   },
+   {
+    "title": "Ferrari",
+    "year": 2023,
+    "ids": [
+     "imdb://tt3758542",
+     "tmdb://365620",
+     "tvdb://45990"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20551",
+  "title": "Mike Mills",
+  "titleSort": "zzMike Mills",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Beginners",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1532503",
+     "tmdb://55347",
+     "tvdb://6517"
+    ]
+   },
+   {
+    "title": "20th Century Women",
+    "year": 2016,
+    "ids": [
+     "imdb://tt4385888",
+     "tmdb://342737",
+     "tvdb://2917"
+    ]
+   },
+   {
+    "title": "C'mon C'mon",
+    "year": 2021,
+    "ids": [
+     "imdb://tt10986222",
+     "tmdb://632617",
+     "tvdb://133331"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20557",
+  "title": "Noah Baumbach",
+  "titleSort": "zzNoah Baumbach",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Kicking and Screaming",
+    "year": 1995,
+    "ids": [
+     "imdb://tt0113537",
+     "tmdb://28387",
+     "tvdb://20173"
+    ]
+   },
+   {
+    "title": "The Squid and the Whale",
+    "year": 2005,
+    "ids": [
+     "imdb://tt0367089",
+     "tmdb://10707",
+     "tvdb://3946"
+    ]
+   },
+   {
+    "title": "Greenberg",
+    "year": 2010,
+    "ids": [
+     "imdb://tt1234654",
+     "tmdb://27583",
+     "tvdb://8788"
+    ]
+   },
+   {
+    "title": "Frances Ha",
+    "year": 2013,
+    "ids": [
+     "imdb://tt2347569",
+     "tmdb://121986",
+     "tvdb://5615"
+    ]
+   },
+   {
+    "title": "While We're Young",
+    "year": 2015,
+    "ids": [
+     "imdb://tt1791682",
+     "tmdb://252512",
+     "tvdb://9447"
+    ]
+   },
+   {
+    "title": "Mistress America",
+    "year": 2015,
+    "ids": [
+     "imdb://tt2872462",
+     "tmdb://309245",
+     "tvdb://7561"
+    ]
+   },
+   {
+    "title": "The Meyerowitz Stories",
+    "year": 2017,
+    "ids": [
+     "imdb://tt5536736",
+     "tmdb://396398",
+     "tvdb://4837"
+    ]
+   },
+   {
+    "title": "Marriage Story",
+    "year": 2019,
+    "ids": [
+     "imdb://tt7653254",
+     "tmdb://492188",
+     "tvdb://131153"
+    ]
+   },
+   {
+    "title": "White Noise",
+    "year": 2022,
+    "ids": [
+     "imdb://tt6160448",
+     "tmdb://744594",
+     "tvdb://332800"
+    ]
+   },
+   {
+    "title": "Barbie",
+    "year": 2023,
+    "ids": [
+     "imdb://tt1517268",
+     "tmdb://346698",
+     "tvdb://16612"
+    ]
+   },
+   {
+    "title": "Jay Kelly",
+    "year": 2025,
+    "ids": [
+     "imdb://tt30446847",
+     "tmdb://1069905",
+     "tvdb://358048"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "23661",
+  "title": "Oliver Stone",
+  "titleSort": "zzOliver Stone",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Scarface",
+    "year": 1983,
+    "ids": [
+     "imdb://tt0086250",
+     "tmdb://111",
+     "tvdb://814"
+    ]
+   },
+   {
+    "title": "Platoon",
+    "year": 1986,
+    "ids": [
+     "imdb://tt0091763",
+     "tmdb://792",
+     "tvdb://2050"
+    ]
+   },
+   {
+    "title": "Wall Street",
+    "year": 1987,
+    "ids": [
+     "imdb://tt0094291",
+     "tmdb://10673",
+     "tvdb://3328"
+    ]
+   },
+   {
+    "title": "JFK",
+    "year": 1991,
+    "ids": [
+     "imdb://tt0102138",
+     "tmdb://820",
+     "tvdb://2476"
+    ]
+   },
+   {
+    "title": "Natural Born Killers",
+    "year": 1994,
+    "ids": [
+     "imdb://tt0110632",
+     "tmdb://241",
+     "tvdb://1897"
+    ]
+   },
+   {
+    "title": "Wall Street: Money Never Sleeps",
+    "year": 2010,
+    "ids": [
+     "imdb://tt1027718",
+     "tmdb://33909",
+     "tvdb://3009"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20614",
+  "title": "Park Chan-wook",
+  "titleSort": "zzPark Chan-wook",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Joint Security Area",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0260991",
+     "tmdb://2440",
+     "tvdb://3953"
+    ]
+   },
+   {
+    "title": "Sympathy for Mr. Vengeance",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0310775",
+     "tmdb://4689",
+     "tvdb://5677"
+    ]
+   },
+   {
+    "title": "Oldboy",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0364569",
+     "tmdb://670",
+     "tvdb://1200"
+    ]
+   },
+   {
+    "title": "Lady Vengeance",
+    "year": 2005,
+    "ids": [
+     "imdb://tt0451094",
+     "tmdb://4550",
+     "tvdb://2561"
+    ]
+   },
+   {
+    "title": "Stoker",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1682180",
+     "tmdb://86825",
+     "tvdb://3991"
+    ]
+   },
+   {
+    "title": "The Handmaiden",
+    "year": 2016,
+    "ids": [
+     "imdb://tt4016934",
+     "tmdb://290098",
+     "tvdb://999"
+    ]
+   },
+   {
+    "title": "Decision to Leave",
+    "year": 2022,
+    "ids": [
+     "imdb://tt12477480",
+     "tmdb://705996",
+     "tvdb://336736"
+    ]
+   },
+   {
+    "title": "No Other Choice",
+    "year": 2025,
+    "ids": [
+     "imdb://tt1527793",
+     "tmdb://639988",
+     "tvdb://355386"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20574",
+  "title": "Paul Schrader",
+  "titleSort": "zzPaul Schrader",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Taxi Driver",
+    "year": 1976,
+    "ids": [
+     "imdb://tt0075314",
+     "tmdb://103",
+     "tvdb://472"
+    ]
+   },
+   {
+    "title": "Raging Bull",
+    "year": 1980,
+    "ids": [
+     "imdb://tt0081398",
+     "tmdb://1578",
+     "tvdb://1303"
+    ]
+   },
+   {
+    "title": "Mishima: A Life in Four Chapters",
+    "year": 1985,
+    "ids": [
+     "imdb://tt0089603",
+     "tmdb://27064",
+     "tvdb://11921"
+    ]
+   },
+   {
+    "title": "The Last Temptation of Christ",
+    "year": 1988,
+    "ids": [
+     "imdb://tt0095497",
+     "tmdb://11051",
+     "tvdb://5344"
+    ]
+   },
+   {
+    "title": "Bringing Out the Dead",
+    "year": 1999,
+    "ids": [
+     "imdb://tt0163988",
+     "tmdb://8649",
+     "tvdb://8087"
+    ]
+   },
+   {
+    "title": "First Reformed",
+    "year": 2018,
+    "ids": [
+     "imdb://tt6053438",
+     "tmdb://458737",
+     "tvdb://340"
+    ]
+   },
+   {
+    "title": "Oh, Canada",
+    "year": 2024,
+    "ids": [
+     "imdb://tt29994753",
+     "tmdb://1113583",
+     "tvdb://355651"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "19785",
+  "title": "Paul Thomas Anderson",
+  "titleSort": "zzPaul Thomas Anderson",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Hard Eight",
+    "year": 1996,
+    "ids": [
+     "imdb://tt0119256",
+     "tmdb://8052",
+     "tvdb://5286"
+    ]
+   },
+   {
+    "title": "Boogie Nights",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0118749",
+     "tmdb://4995",
+     "tvdb://1654"
+    ]
+   },
+   {
+    "title": "Magnolia",
+    "year": 1999,
+    "ids": [
+     "imdb://tt0175880",
+     "tmdb://334",
+     "tvdb://1929"
+    ]
+   },
+   {
+    "title": "Punch-Drunk Love",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0272338",
+     "tmdb://8051",
+     "tvdb://3825"
+    ]
+   },
+   {
+    "title": "There Will Be Blood",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0469494",
+     "tmdb://7345",
+     "tvdb://1722"
+    ]
+   },
+   {
+    "title": "The Master",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1560747",
+     "tmdb://68722",
+     "tvdb://4292"
+    ]
+   },
+   {
+    "title": "Inherent Vice",
+    "year": 2014,
+    "ids": [
+     "imdb://tt1791528",
+     "tmdb://171274",
+     "tvdb://723"
+    ]
+   },
+   {
+    "title": "Phantom Thread",
+    "year": 2017,
+    "ids": [
+     "imdb://tt5776858",
+     "tmdb://400617",
+     "tvdb://798"
+    ]
+   },
+   {
+    "title": "Licorice Pizza",
+    "year": 2021,
+    "ids": [
+     "imdb://tt11271038",
+     "tmdb://718032",
+     "tvdb://157720"
+    ]
+   },
+   {
+    "title": "One Battle After Another",
+    "year": 2025,
+    "ids": [
+     "imdb://tt30144839",
+     "tmdb://1054867",
+     "tvdb://355416"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20489",
+  "title": "Quentin Tarantino",
+  "titleSort": "zzQuentin Tarantino",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Reservoir Dogs",
+    "year": 1992,
+    "ids": [
+     "imdb://tt0105236",
+     "tmdb://500",
+     "tvdb://879"
+    ]
+   },
+   {
+    "title": "Pulp Fiction",
+    "year": 1994,
+    "ids": [
+     "imdb://tt0110912",
+     "tmdb://680",
+     "tvdb://228"
+    ]
+   },
+   {
+    "title": "Jackie Brown",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0119396",
+     "tmdb://184",
+     "tvdb://2258"
+    ]
+   },
+   {
+    "title": "Kill Bill: Vol. 1",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0266697",
+     "tmdb://24",
+     "tvdb://908"
+    ]
+   },
+   {
+    "title": "Kill Bill: Vol. 2",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0378194",
+     "tmdb://393",
+     "tvdb://1409"
+    ]
+   },
+   {
+    "title": "Death Proof",
+    "year": 2007,
+    "ids": [
+     "imdb://tt1028528",
+     "tmdb://1991",
+     "tvdb://1750"
+    ]
+   },
+   {
+    "title": "Inglourious Basterds",
+    "year": 2009,
+    "ids": [
+     "imdb://tt0361748",
+     "tmdb://16869",
+     "tvdb://397"
+    ]
+   },
+   {
+    "title": "Django Unchained",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1853728",
+     "tmdb://68718",
+     "tvdb://289"
+    ]
+   },
+   {
+    "title": "The Hateful Eight",
+    "year": 2015,
+    "ids": [
+     "imdb://tt3460252",
+     "tmdb://273248",
+     "tvdb://532"
+    ]
+   },
+   {
+    "title": "Once Upon a Time in... Hollywood",
+    "year": 2019,
+    "ids": [
+     "imdb://tt7131622",
+     "tmdb://466272",
+     "tvdb://12999"
+    ]
+   },
+   {
+    "title": "Kill Bill: The Whole Bloody Affair",
+    "year": 2025,
+    "ids": [
+     "imdb://tt6019206",
+     "tmdb://414419"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "23842",
+  "title": "Rian Johnson",
+  "titleSort": "zzRian Johnson",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Brick",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0393109",
+     "tmdb://9270",
+     "tvdb://4622"
+    ]
+   },
+   {
+    "title": "The Brothers Bloom",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0844286",
+     "tmdb://21755",
+     "tvdb://4073"
+    ]
+   },
+   {
+    "title": "Looper",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1276104",
+     "tmdb://59967",
+     "tvdb://1111"
+    ]
+   },
+   {
+    "title": "Star Wars: Episode VIII - The Last Jedi",
+    "year": 2017,
+    "ids": [
+     "imdb://tt2527336",
+     "tmdb://181808",
+     "tvdb://99"
+    ]
+   },
+   {
+    "title": "Knives Out",
+    "year": 2019,
+    "ids": [
+     "imdb://tt8946378",
+     "tmdb://546554",
+     "tvdb://35214"
+    ]
+   },
+   {
+    "title": "Glass Onion",
+    "year": 2022,
+    "ids": [
+     "imdb://tt11564570",
+     "tmdb://661374",
+     "tvdb://166019"
+    ]
+   },
+   {
+    "title": "Wake Up Dead Man",
+    "year": 2025,
+    "ids": [
+     "imdb://tt14364480",
+     "tmdb://812583",
+     "tvdb://342946"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20553",
+  "title": "Richard Curtis",
+  "titleSort": "zzRichard Curtis",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Love Actually",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0314331",
+     "tmdb://508",
+     "tvdb://639"
+    ]
+   },
+   {
+    "title": "About Time",
+    "year": 2013,
+    "ids": [
+     "imdb://tt2194499",
+     "tmdb://122906",
+     "tvdb://889"
+    ]
+   },
+   {
+    "title": "Yesterday",
+    "year": 2019,
+    "ids": [
+     "imdb://tt8079248",
+     "tmdb://515195",
+     "tvdb://13306"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20486",
+  "title": "Richard Linklater",
+  "titleSort": "zzRichard Linklater",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Slacker",
+    "year": 1990,
+    "ids": [
+     "imdb://tt0102943",
+     "tmdb://14022",
+     "tvdb://11018"
+    ]
+   },
+   {
+    "title": "Dazed and Confused",
+    "year": 1993,
+    "ids": [
+     "imdb://tt0106677",
+     "tmdb://9571",
+     "tvdb://2490"
+    ]
+   },
+   {
+    "title": "Before Sunrise",
+    "year": 1995,
+    "ids": [
+     "imdb://tt0112471",
+     "tmdb://76",
+     "tvdb://1129"
+    ]
+   },
+   {
+    "title": "Waking Life",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0243017",
+     "tmdb://9081",
+     "tvdb://9303"
+    ]
+   },
+   {
+    "title": "School of Rock",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0332379",
+     "tmdb://1584",
+     "tvdb://1058"
+    ]
+   },
+   {
+    "title": "Before Sunset",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0381681",
+     "tmdb://80",
+     "tvdb://3157"
+    ]
+   },
+   {
+    "title": "A Scanner Darkly",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0405296",
+     "tmdb://3509",
+     "tvdb://4313"
+    ]
+   },
+   {
+    "title": "Before Midnight",
+    "year": 2013,
+    "ids": [
+     "imdb://tt2209418",
+     "tmdb://132344",
+     "tvdb://3208"
+    ]
+   },
+   {
+    "title": "Boyhood",
+    "year": 2014,
+    "ids": [
+     "imdb://tt1065073",
+     "tmdb://85350",
+     "tvdb://360"
+    ]
+   },
+   {
+    "title": "Everybody Wants Some!!",
+    "year": 2016,
+    "ids": [
+     "imdb://tt2937696",
+     "tmdb://295699",
+     "tvdb://9178"
+    ]
+   },
+   {
+    "title": "Last Flag Flying",
+    "year": 2017,
+    "ids": [
+     "imdb://tt6018306",
+     "tmdb://419709",
+     "tvdb://5496"
+    ]
+   },
+   {
+    "title": "Apollo 10\u00bd: A Space Age Childhood",
+    "year": 2022,
+    "ids": [
+     "imdb://tt7978758",
+     "tmdb://664996",
+     "tvdb://163283"
+    ]
+   },
+   {
+    "title": "Hit Man",
+    "year": 2024,
+    "ids": [
+     "imdb://tt20215968",
+     "tmdb://974635",
+     "tvdb://349518"
+    ]
+   },
+   {
+    "title": "Nouvelle Vague",
+    "year": 2025,
+    "ids": [
+     "imdb://tt31688586",
+     "tmdb://1254808",
+     "tvdb://362899"
+    ]
+   },
+   {
+    "title": "Blue Moon",
+    "year": 2025,
+    "ids": [
+     "imdb://tt32536315",
+     "tmdb://1299655",
+     "tvdb://357693"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20545",
+  "title": "Ridley Scott",
+  "titleSort": "zzRidley Scott",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Alien",
+    "year": 1979,
+    "ids": [
+     "imdb://tt0078748",
+     "tmdb://348",
+     "tvdb://264"
+    ]
+   },
+   {
+    "title": "Blade Runner",
+    "year": 1982,
+    "ids": [
+     "imdb://tt0083658",
+     "tmdb://78",
+     "tvdb://343"
+    ]
+   },
+   {
+    "title": "Thelma & Louise",
+    "year": 1991,
+    "ids": [
+     "imdb://tt0103074",
+     "tmdb://1541",
+     "tvdb://4817"
+    ]
+   },
+   {
+    "title": "Gladiator",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0172495",
+     "tmdb://98",
+     "tvdb://419"
+    ]
+   },
+   {
+    "title": "Hannibal",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0212985",
+     "tmdb://9740",
+     "tvdb://23638"
+    ]
+   },
+   {
+    "title": "Black Hawk Down",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0265086",
+     "tmdb://855",
+     "tvdb://1059"
+    ]
+   },
+   {
+    "title": "Matchstick Men",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0325805",
+     "tmdb://7270",
+     "tvdb://7594"
+    ]
+   },
+   {
+    "title": "American Gangster",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0765429",
+     "tmdb://4982",
+     "tvdb://839"
+    ]
+   },
+   {
+    "title": "Body of Lies",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0758774",
+     "tmdb://12113",
+     "tvdb://3183"
+    ]
+   },
+   {
+    "title": "Prometheus",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1446714",
+     "tmdb://70981",
+     "tvdb://527"
+    ]
+   },
+   {
+    "title": "The Martian",
+    "year": 2015,
+    "ids": [
+     "imdb://tt3659388",
+     "tmdb://286217",
+     "tvdb://132"
+    ]
+   },
+   {
+    "title": "Alien: Covenant",
+    "year": 2017,
+    "ids": [
+     "imdb://tt2316204",
+     "tmdb://126889",
+     "tvdb://199"
+    ]
+   },
+   {
+    "title": "All the Money in the World",
+    "year": 2017,
+    "ids": [
+     "imdb://tt5294550",
+     "tmdb://446791",
+     "tvdb://1674"
+    ]
+   },
+   {
+    "title": "The Last Duel",
+    "year": 2021,
+    "ids": [
+     "imdb://tt4244994",
+     "tmdb://617653",
+     "tvdb://134015"
+    ]
+   },
+   {
+    "title": "House of Gucci",
+    "year": 2021,
+    "ids": [
+     "imdb://tt11214590",
+     "tmdb://644495",
+     "tvdb://145486"
+    ]
+   },
+   {
+    "title": "Napoleon",
+    "year": 2023,
+    "ids": [
+     "imdb://tt13287846",
+     "tmdb://753342",
+     "tvdb://332434"
+    ]
+   },
+   {
+    "title": "Gladiator II",
+    "year": 2024,
+    "ids": [
+     "imdb://tt9218128",
+     "tmdb://558449",
+     "tvdb://73592"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "32378",
+  "title": "Rob Reiner",
+  "titleSort": "zzRob Reiner",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "This Is Spinal Tap",
+    "year": 1984,
+    "ids": [
+     "imdb://tt0088258",
+     "tmdb://11031",
+     "tvdb://3761"
+    ]
+   },
+   {
+    "title": "The Sure Thing",
+    "year": 1985,
+    "ids": [
+     "imdb://tt0090103",
+     "tmdb://8992",
+     "tvdb://7034"
+    ]
+   },
+   {
+    "title": "Stand by Me",
+    "year": 1986,
+    "ids": [
+     "imdb://tt0092005",
+     "tmdb://235",
+     "tvdb://347"
+    ]
+   },
+   {
+    "title": "When Harry Met Sally...",
+    "year": 1989,
+    "ids": [
+     "imdb://tt0098635",
+     "tmdb://639",
+     "tvdb://3606"
+    ]
+   },
+   {
+    "title": "Misery",
+    "year": 1990,
+    "ids": [
+     "imdb://tt0100157",
+     "tmdb://1700",
+     "tvdb://3607"
+    ]
+   },
+   {
+    "title": "A Few Good Men",
+    "year": 1992,
+    "ids": [
+     "imdb://tt0104257",
+     "tmdb://881",
+     "tvdb://1668"
+    ]
+   },
+   {
+    "title": "Spinal Tap II: The End Continues",
+    "year": 2025,
+    "ids": [
+     "imdb://tt20222166",
+     "tmdb://975225",
+     "tvdb://368396"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20538",
+  "title": "Robert Altman",
+  "titleSort": "zzRobert Altman",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "The Long Goodbye",
+    "year": 1973,
+    "ids": [
+     "imdb://tt0070334",
+     "tmdb://1847",
+     "tvdb://6299"
+    ]
+   },
+   {
+    "title": "Nashville",
+    "year": 1975,
+    "ids": [
+     "imdb://tt0073440",
+     "tmdb://3121",
+     "tvdb://7053"
+    ]
+   },
+   {
+    "title": "Gosford Park",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0280707",
+     "tmdb://5279",
+     "tvdb://3139"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "30151",
+  "title": "Robert Eggers",
+  "titleSort": "zzRobert Eggers",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "The Witch",
+    "year": 2015,
+    "ids": [
+     "imdb://tt4263482",
+     "tmdb://310131",
+     "tvdb://1916"
+    ]
+   },
+   {
+    "title": "The Lighthouse",
+    "year": 2019,
+    "ids": [
+     "imdb://tt7984734",
+     "tmdb://503919",
+     "tvdb://24493"
+    ]
+   },
+   {
+    "title": "The Northman",
+    "year": 2022,
+    "ids": [
+     "imdb://tt11138512",
+     "tmdb://639933",
+     "tvdb://139174"
+    ]
+   },
+   {
+    "title": "Nosferatu",
+    "year": 2024,
+    "ids": [
+     "imdb://tt5040012",
+     "tmdb://426063",
+     "tvdb://59698"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "31676",
+  "title": "Ryan Coogler",
+  "titleSort": "zzRyan Coogler",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Fruitvale Station",
+    "year": 2013,
+    "ids": [
+     "imdb://tt2334649",
+     "tmdb://157354",
+     "tvdb://6306"
+    ]
+   },
+   {
+    "title": "Creed",
+    "year": 2015,
+    "ids": [
+     "imdb://tt3076658",
+     "tmdb://312221",
+     "tvdb://261"
+    ]
+   },
+   {
+    "title": "Black Panther",
+    "year": 2018,
+    "ids": [
+     "imdb://tt1825683",
+     "tmdb://284054",
+     "tvdb://48"
+    ]
+   },
+   {
+    "title": "Black Panther: Wakanda Forever",
+    "year": 2022,
+    "ids": [
+     "imdb://tt9114286",
+     "tmdb://505642",
+     "tvdb://31110"
+    ]
+   },
+   {
+    "title": "Sinners",
+    "year": 2025,
+    "ids": [
+     "imdb://tt31193180",
+     "tmdb://1233413",
+     "tvdb://358595"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20797",
+  "title": "The Safdie Brothers",
+  "titleSort": "zzSafdie Brothers",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Daddy Longlegs",
+    "year": 2009,
+    "ids": [
+     "imdb://tt1426362",
+     "tmdb://58251",
+     "tvdb://47047"
+    ]
+   },
+   {
+    "title": "Heaven Knows What",
+    "year": 2015,
+    "ids": [
+     "imdb://tt3687186",
+     "tmdb://285024",
+     "tvdb://15844"
+    ]
+   },
+   {
+    "title": "Good Time",
+    "year": 2017,
+    "ids": [
+     "imdb://tt4846232",
+     "tmdb://429200",
+     "tvdb://2509"
+    ]
+   },
+   {
+    "title": "Uncut Gems",
+    "year": 2019,
+    "ids": [
+     "imdb://tt5727208",
+     "tmdb://473033",
+     "tvdb://118299"
+    ]
+   },
+   {
+    "title": "The Smashing Machine",
+    "year": 2025,
+    "ids": [
+     "imdb://tt11214558",
+     "tmdb://760329",
+     "tvdb://356582"
+    ]
+   },
+   {
+    "title": "Marty Supreme",
+    "year": 2025,
+    "ids": [
+     "imdb://tt32916440",
+     "tmdb://1317288",
+     "tvdb://358417"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20638",
+  "title": "Sam Mendes",
+  "titleSort": "zzSam Mendes",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "American Beauty",
+    "year": 1999,
+    "ids": [
+     "imdb://tt0169547",
+     "tmdb://14",
+     "tvdb://445"
+    ]
+   },
+   {
+    "title": "Revolutionary Road",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0959337",
+     "tmdb://4148",
+     "tvdb://3899"
+    ]
+   },
+   {
+    "title": "Skyfall",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1074638",
+     "tmdb://37724",
+     "tvdb://279"
+    ]
+   },
+   {
+    "title": "Spectre",
+    "year": 2015,
+    "ids": [
+     "imdb://tt2379713",
+     "tmdb://206647",
+     "tvdb://296"
+    ]
+   },
+   {
+    "title": "1917",
+    "year": 2019,
+    "ids": [
+     "imdb://tt8579674",
+     "tmdb://530915",
+     "tvdb://30526"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20726",
+  "title": "Sidney Lumet",
+  "titleSort": "zzSidney Lumet",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Serpico",
+    "year": 1973,
+    "ids": [
+     "imdb://tt0070666",
+     "tmdb://9040",
+     "tvdb://4566"
+    ]
+   },
+   {
+    "title": "Dog Day Afternoon",
+    "year": 1975,
+    "ids": [
+     "imdb://tt0072890",
+     "tmdb://968",
+     "tvdb://2956"
+    ]
+   },
+   {
+    "title": "Network",
+    "year": 1976,
+    "ids": [
+     "imdb://tt0074958",
+     "tmdb://10774",
+     "tvdb://4179"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20547",
+  "title": "Sofia Coppola",
+  "titleSort": "zzSofia Coppola",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "The Virgin Suicides",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0159097",
+     "tmdb://1443",
+     "tvdb://3481"
+    ]
+   },
+   {
+    "title": "Lost in Translation",
+    "year": 2003,
+    "ids": [
+     "imdb://tt0335266",
+     "tmdb://153",
+     "tvdb://1169"
+    ]
+   },
+   {
+    "title": "Marie Antoinette",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0422720",
+     "tmdb://1887",
+     "tvdb://2909"
+    ]
+   },
+   {
+    "title": "Somewhere",
+    "year": 2010,
+    "ids": [
+     "imdb://tt1421051",
+     "tmdb://39210",
+     "tvdb://5448"
+    ]
+   },
+   {
+    "title": "On the Rocks",
+    "year": 2020,
+    "ids": [
+     "imdb://tt9606374",
+     "tmdb://575417",
+     "tvdb://133530"
+    ]
+   },
+   {
+    "title": "Priscilla",
+    "year": 2023,
+    "ids": [
+     "imdb://tt22041854",
+     "tmdb://1020006",
+     "tvdb://347355"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20554",
+  "title": "Spike Jonze",
+  "titleSort": "zzSpike Jonze",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Being John Malkovich",
+    "year": 1999,
+    "ids": [
+     "imdb://tt0120601",
+     "tmdb://492",
+     "tvdb://2356"
+    ]
+   },
+   {
+    "title": "Adaptation.",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0268126",
+     "tmdb://2757",
+     "tvdb://3432"
+    ]
+   },
+   {
+    "title": "Her",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1798709",
+     "tmdb://152601",
+     "tvdb://711"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "36128",
+  "title": "Spike Lee",
+  "titleSort": "zzSpike Lee",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "She's Gotta Have It",
+    "year": 1986,
+    "ids": [
+     "imdb://tt0091939",
+     "tmdb://27995",
+     "tvdb://15443"
+    ]
+   },
+   {
+    "title": "Do the Right Thing",
+    "year": 1989,
+    "ids": [
+     "imdb://tt0097216",
+     "tmdb://925",
+     "tvdb://3874"
+    ]
+   },
+   {
+    "title": "Mo' Better Blues",
+    "year": 1990,
+    "ids": [
+     "imdb://tt0100168",
+     "tmdb://41823",
+     "tvdb://9830"
+    ]
+   },
+   {
+    "title": "Jungle Fever",
+    "year": 1991,
+    "ids": [
+     "imdb://tt0102175",
+     "tmdb://1713",
+     "tvdb://9059"
+    ]
+   },
+   {
+    "title": "Malcolm X",
+    "year": 1992,
+    "ids": [
+     "imdb://tt0104797",
+     "tmdb://1883",
+     "tvdb://5111"
+    ]
+   },
+   {
+    "title": "Crooklyn",
+    "year": 1994,
+    "ids": [
+     "imdb://tt0109504",
+     "tmdb://34152",
+     "tvdb://14298"
+    ]
+   },
+   {
+    "title": "He Got Game",
+    "year": 1998,
+    "ids": [
+     "imdb://tt0124718",
+     "tmdb://9469",
+     "tvdb://7045"
+    ]
+   },
+   {
+    "title": "25th Hour",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0307901",
+     "tmdb://1429",
+     "tvdb://1838"
+    ]
+   },
+   {
+    "title": "Inside Man",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0454848",
+     "tmdb://388",
+     "tvdb://1268"
+    ]
+   },
+   {
+    "title": "BlacKkKlansman",
+    "year": 2018,
+    "ids": [
+     "imdb://tt7349662",
+     "tmdb://487558",
+     "tvdb://23"
+    ]
+   },
+   {
+    "title": "Da 5 Bloods",
+    "year": 2020,
+    "ids": [
+     "imdb://tt9777644",
+     "tmdb://581859",
+     "tvdb://73718"
+    ]
+   },
+   {
+    "title": "Highest 2 Lowest",
+    "year": 2025,
+    "ids": [
+     "imdb://tt31194612",
+     "tmdb://1242434",
+     "tvdb://355852"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20725",
+  "title": "Stanley Kubrick",
+  "titleSort": "zzStanley Kubrick",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Fear and Desire",
+    "year": 1953,
+    "ids": [
+     "imdb://tt0045758",
+     "tmdb://10165",
+     "tvdb://9562"
+    ]
+   },
+   {
+    "title": "Killer's Kiss",
+    "year": 1955,
+    "ids": [
+     "imdb://tt0048254",
+     "tmdb://10056",
+     "tvdb://8724"
+    ]
+   },
+   {
+    "title": "The Killing",
+    "year": 1956,
+    "ids": [
+     "imdb://tt0049406",
+     "tmdb://247",
+     "tvdb://4147"
+    ]
+   },
+   {
+    "title": "Paths of Glory",
+    "year": 1957,
+    "ids": [
+     "imdb://tt0050825",
+     "tmdb://975",
+     "tvdb://2294"
+    ]
+   },
+   {
+    "title": "Spartacus",
+    "year": 1960,
+    "ids": [
+     "imdb://tt0054331",
+     "tmdb://967",
+     "tvdb://6381"
+    ]
+   },
+   {
+    "title": "Lolita",
+    "year": 1962,
+    "ids": [
+     "imdb://tt0056193",
+     "tmdb://802",
+     "tvdb://2672"
+    ]
+   },
+   {
+    "title": "Dr. Strangelove or: How I Learned to Stop Worrying and Love the Bomb",
+    "year": 1964,
+    "ids": [
+     "imdb://tt0057012",
+     "tmdb://935",
+     "tvdb://1657"
+    ]
+   },
+   {
+    "title": "2001: A Space Odyssey",
+    "year": 1968,
+    "ids": [
+     "imdb://tt0062622",
+     "tmdb://62",
+     "tvdb://242"
+    ]
+   },
+   {
+    "title": "A Clockwork Orange",
+    "year": 1971,
+    "ids": [
+     "imdb://tt0066921",
+     "tmdb://185",
+     "tvdb://641"
+    ]
+   },
+   {
+    "title": "Barry Lyndon",
+    "year": 1975,
+    "ids": [
+     "imdb://tt0072684",
+     "tmdb://3175",
+     "tvdb://3296"
+    ]
+   },
+   {
+    "title": "The Shining",
+    "year": 1980,
+    "ids": [
+     "imdb://tt0081505",
+     "tmdb://694",
+     "tvdb://579"
+    ]
+   },
+   {
+    "title": "Full Metal Jacket",
+    "year": 1987,
+    "ids": [
+     "imdb://tt0093058",
+     "tmdb://600",
+     "tvdb://694"
+    ]
+   },
+   {
+    "title": "Eyes Wide Shut",
+    "year": 1999,
+    "ids": [
+     "imdb://tt0120663",
+     "tmdb://345",
+     "tvdb://1557"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "34070",
+  "title": "Steven Soderbergh",
+  "titleSort": "zzSteven Soderbergh",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Sex, Lies, and Videotape",
+    "year": 1989,
+    "ids": [
+     "imdb://tt0098724",
+     "tmdb://1412",
+     "tvdb://4359"
+    ]
+   },
+   {
+    "title": "Out of Sight",
+    "year": 1998,
+    "ids": [
+     "imdb://tt0120780",
+     "tmdb://1389",
+     "tvdb://6165"
+    ]
+   },
+   {
+    "title": "Erin Brockovich",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0195685",
+     "tmdb://462",
+     "tvdb://5881"
+    ]
+   },
+   {
+    "title": "Traffic",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0181865",
+     "tmdb://1900",
+     "tvdb://2937"
+    ]
+   },
+   {
+    "title": "Ocean's Eleven",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0240772",
+     "tmdb://161",
+     "tvdb://1011"
+    ]
+   },
+   {
+    "title": "Ocean's Twelve",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0349903",
+     "tmdb://163",
+     "tvdb://1461"
+    ]
+   },
+   {
+    "title": "Ocean's Thirteen",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0496806",
+     "tmdb://298",
+     "tvdb://2114"
+    ]
+   },
+   {
+    "title": "Che: Part One",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0892255",
+     "tmdb://8881",
+     "tvdb://3214"
+    ]
+   },
+   {
+    "title": "Che: Part Two",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0374569",
+     "tmdb://8880",
+     "tvdb://6009"
+    ]
+   },
+   {
+    "title": "Contagion",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1598778",
+     "tmdb://39538",
+     "tvdb://1804"
+    ]
+   },
+   {
+    "title": "Magic Mike",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1915581",
+     "tmdb://77930",
+     "tvdb://2547"
+    ]
+   },
+   {
+    "title": "Logan Lucky",
+    "year": 2017,
+    "ids": [
+     "imdb://tt5439796",
+     "tmdb://399170",
+     "tvdb://1844"
+    ]
+   },
+   {
+    "title": "No Sudden Move",
+    "year": 2021,
+    "ids": [
+     "imdb://tt11525644",
+     "tmdb://649409",
+     "tvdb://161788"
+    ]
+   },
+   {
+    "title": "Kimi",
+    "year": 2022,
+    "ids": [
+     "imdb://tt14128670",
+     "tmdb://800510",
+     "tvdb://157543"
+    ]
+   },
+   {
+    "title": "Magic Mike's Last Dance",
+    "year": 2023,
+    "ids": [
+     "imdb://tt16280138",
+     "tmdb://906221",
+     "tvdb://341058"
+    ]
+   },
+   {
+    "title": "Presence",
+    "year": 2025,
+    "ids": [
+     "imdb://tt28249919",
+     "tmdb://1140535",
+     "tvdb://359119"
+    ]
+   },
+   {
+    "title": "Black Bag",
+    "year": 2025,
+    "ids": [
+     "imdb://tt30988739",
+     "tmdb://1233575",
+     "tvdb://358626"
+    ]
+   },
+   {
+    "title": "The Christophers",
+    "year": 2026,
+    "ids": [
+     "imdb://tt34966562",
+     "tmdb://1400357",
+     "tvdb://362483"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20491",
+  "title": "Steven Spielberg",
+  "titleSort": "zzSteven Spielberg",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Duel",
+    "year": 1971,
+    "ids": [
+     "imdb://tt0067023",
+     "tmdb://839",
+     "tvdb://7201"
+    ]
+   },
+   {
+    "title": "The Sugarland Express",
+    "year": 1974,
+    "ids": [
+     "imdb://tt0072226",
+     "tmdb://5121",
+     "tvdb://8298"
+    ]
+   },
+   {
+    "title": "Jaws",
+    "year": 1975,
+    "ids": [
+     "imdb://tt0073195",
+     "tmdb://578",
+     "tvdb://829"
+    ]
+   },
+   {
+    "title": "Close Encounters of the Third Kind",
+    "year": 1977,
+    "ids": [
+     "imdb://tt0075860",
+     "tmdb://840",
+     "tvdb://388"
+    ]
+   },
+   {
+    "title": "1941",
+    "year": 1979,
+    "ids": [
+     "imdb://tt0078723",
+     "tmdb://11519",
+     "tvdb://6078"
+    ]
+   },
+   {
+    "title": "Raiders of the Lost Ark",
+    "year": 1981,
+    "ids": [
+     "imdb://tt0082971",
+     "tmdb://85",
+     "tvdb://323"
+    ]
+   },
+   {
+    "title": "E.T.",
+    "year": 1982,
+    "ids": [
+     "imdb://tt0083866",
+     "tmdb://601",
+     "tvdb://758"
+    ]
+   },
+   {
+    "title": "Indiana Jones and the Temple of Doom",
+    "year": 1984,
+    "ids": [
+     "imdb://tt0087469",
+     "tmdb://87",
+     "tvdb://752"
+    ]
+   },
+   {
+    "title": "The Color Purple",
+    "year": 1985,
+    "ids": [
+     "imdb://tt0088939",
+     "tmdb://873",
+     "tvdb://5364"
+    ]
+   },
+   {
+    "title": "Empire of the Sun",
+    "year": 1987,
+    "ids": [
+     "imdb://tt0092965",
+     "tmdb://10110",
+     "tvdb://4241"
+    ]
+   },
+   {
+    "title": "Indiana Jones and the Last Crusade",
+    "year": 1989,
+    "ids": [
+     "imdb://tt0097576",
+     "tmdb://89",
+     "tvdb://519"
+    ]
+   },
+   {
+    "title": "Hook",
+    "year": 1991,
+    "ids": [
+     "imdb://tt0102057",
+     "tmdb://879",
+     "tvdb://1682"
+    ]
+   },
+   {
+    "title": "Jurassic Park",
+    "year": 1993,
+    "ids": [
+     "imdb://tt0107290",
+     "tmdb://329",
+     "tvdb://867"
+    ]
+   },
+   {
+    "title": "Schindler's List",
+    "year": 1993,
+    "ids": [
+     "imdb://tt0108052",
+     "tmdb://424",
+     "tvdb://223"
+    ]
+   },
+   {
+    "title": "The Lost World: Jurassic Park",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0119567",
+     "tmdb://330",
+     "tvdb://100418"
+    ]
+   },
+   {
+    "title": "Amistad",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0118607",
+     "tmdb://11831",
+     "tvdb://32080"
+    ]
+   },
+   {
+    "title": "Saving Private Ryan",
+    "year": 1998,
+    "ids": [
+     "imdb://tt0120815",
+     "tmdb://857",
+     "tvdb://569"
+    ]
+   },
+   {
+    "title": "A.I. Artificial Intelligence",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0212720",
+     "tmdb://644",
+     "tvdb://1062"
+    ]
+   },
+   {
+    "title": "Minority Report",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0181689",
+     "tmdb://180",
+     "tvdb://1078"
+    ]
+   },
+   {
+    "title": "Catch Me If You Can",
+    "year": 2002,
+    "ids": [
+     "imdb://tt0264464",
+     "tmdb://640",
+     "tvdb://312"
+    ]
+   },
+   {
+    "title": "The Terminal",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0362227",
+     "tmdb://594",
+     "tvdb://1278"
+    ]
+   },
+   {
+    "title": "War of the Worlds",
+    "year": 2005,
+    "ids": [
+     "imdb://tt0407304",
+     "tmdb://74",
+     "tvdb://1398"
+    ]
+   },
+   {
+    "title": "Munich",
+    "year": 2005,
+    "ids": [
+     "imdb://tt0408306",
+     "tmdb://612",
+     "tvdb://3777"
+    ]
+   },
+   {
+    "title": "Indiana Jones and the Kingdom of the Crystal Skull",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0367882",
+     "tmdb://217",
+     "tvdb://1023"
+    ]
+   },
+   {
+    "title": "The Adventures of Tintin",
+    "year": 2011,
+    "ids": [
+     "imdb://tt0983193",
+     "tmdb://17578",
+     "tvdb://1156"
+    ]
+   },
+   {
+    "title": "War Horse",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1568911",
+     "tmdb://57212",
+     "tvdb://2511"
+    ]
+   },
+   {
+    "title": "Lincoln",
+    "year": 2012,
+    "ids": [
+     "imdb://tt0443272",
+     "tmdb://72976",
+     "tvdb://3148"
+    ]
+   },
+   {
+    "title": "Bridge of Spies",
+    "year": 2015,
+    "ids": [
+     "imdb://tt3682448",
+     "tmdb://296098",
+     "tvdb://1082"
+    ]
+   },
+   {
+    "title": "The BFG",
+    "year": 2016,
+    "ids": [
+     "imdb://tt3691740",
+     "tmdb://267935",
+     "tvdb://885"
+    ]
+   },
+   {
+    "title": "The Post",
+    "year": 2017,
+    "ids": [
+     "imdb://tt6294822",
+     "tmdb://446354",
+     "tvdb://943"
+    ]
+   },
+   {
+    "title": "Ready Player One",
+    "year": 2018,
+    "ids": [
+     "imdb://tt1677720",
+     "tmdb://333339",
+     "tvdb://73"
+    ]
+   },
+   {
+    "title": "West Side Story",
+    "year": 2021,
+    "ids": [
+     "imdb://tt3581652",
+     "tmdb://511809",
+     "tvdb://113232"
+    ]
+   },
+   {
+    "title": "The Fabelmans",
+    "year": 2022,
+    "ids": [
+     "imdb://tt14208870",
+     "tmdb://804095",
+     "tvdb://195090"
+    ]
+   },
+   {
+    "title": "Disclosure Day",
+    "year": 2026,
+    "ids": [
+     "imdb://tt15047880",
+     "tmdb://1275779",
+     "tvdb://358923"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "23663",
+  "title": "Terrence Malick",
+  "titleSort": "zzTerrence Malick",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Dirty Harry",
+    "year": 1971,
+    "ids": [
+     "imdb://tt0066999",
+     "tmdb://984",
+     "tvdb://954"
+    ]
+   },
+   {
+    "title": "Badlands",
+    "year": 1973,
+    "ids": [
+     "imdb://tt0069762",
+     "tmdb://3133",
+     "tvdb://1778"
+    ]
+   },
+   {
+    "title": "Days of Heaven",
+    "year": 1978,
+    "ids": [
+     "imdb://tt0077405",
+     "tmdb://16642",
+     "tvdb://4821"
+    ]
+   },
+   {
+    "title": "The Thin Red Line",
+    "year": 1998,
+    "ids": [
+     "imdb://tt0120863",
+     "tmdb://8741",
+     "tvdb://1681"
+    ]
+   },
+   {
+    "title": "The New World",
+    "year": 2006,
+    "ids": [
+     "imdb://tt0402399",
+     "tmdb://11400",
+     "tvdb://5548"
+    ]
+   },
+   {
+    "title": "Che: Part Two",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0374569",
+     "tmdb://8880",
+     "tvdb://6009"
+    ]
+   },
+   {
+    "title": "The Tree of Life",
+    "year": 2011,
+    "ids": [
+     "imdb://tt0478304",
+     "tmdb://8967",
+     "tvdb://4643"
+    ]
+   },
+   {
+    "title": "To the Wonder",
+    "year": 2013,
+    "ids": [
+     "imdb://tt1595656",
+     "tmdb://60281",
+     "tvdb://7681"
+    ]
+   },
+   {
+    "title": "Knight of Cups",
+    "year": 2015,
+    "ids": [
+     "imdb://tt2101383",
+     "tmdb://86835",
+     "tvdb://5981"
+    ]
+   },
+   {
+    "title": "Song to Song",
+    "year": 2017,
+    "ids": [
+     "imdb://tt2062700",
+     "tmdb://330947",
+     "tvdb://5706"
+    ]
+   },
+   {
+    "title": "A Hidden Life",
+    "year": 2019,
+    "ids": [
+     "imdb://tt5827916",
+     "tmdb://403300",
+     "tvdb://131101"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "25622",
+  "title": "Tim Burton",
+  "titleSort": "zzTim Burton",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Beetlejuice",
+    "year": 1988,
+    "ids": [
+     "imdb://tt0094721",
+     "tmdb://4011",
+     "tvdb://344"
+    ]
+   },
+   {
+    "title": "Batman",
+    "year": 1989,
+    "ids": [
+     "imdb://tt0096895",
+     "tmdb://268",
+     "tvdb://1204"
+    ]
+   },
+   {
+    "title": "Edward Scissorhands",
+    "year": 1990,
+    "ids": [
+     "imdb://tt0099487",
+     "tmdb://162",
+     "tvdb://566"
+    ]
+   },
+   {
+    "title": "Batman Returns",
+    "year": 1992,
+    "ids": [
+     "imdb://tt0103776",
+     "tmdb://364",
+     "tvdb://865"
+    ]
+   },
+   {
+    "title": "Ed Wood",
+    "year": 1994,
+    "ids": [
+     "imdb://tt0109707",
+     "tmdb://522",
+     "tvdb://3097"
+    ]
+   },
+   {
+    "title": "Beetlejuice Beetlejuice",
+    "year": 2024,
+    "ids": [
+     "imdb://tt2049403",
+     "tmdb://917496",
+     "tvdb://65987"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20544",
+  "title": "Wes Anderson",
+  "titleSort": "zzWes Anderson",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Bottle Rocket",
+    "year": 1996,
+    "ids": [
+     "imdb://tt0115734",
+     "tmdb://13685",
+     "tvdb://7625"
+    ]
+   },
+   {
+    "title": "The Royal Tenenbaums",
+    "year": 2001,
+    "ids": [
+     "imdb://tt0265666",
+     "tmdb://9428",
+     "tvdb://3364"
+    ]
+   },
+   {
+    "title": "The Life Aquatic with Steve Zissou",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0362270",
+     "tmdb://421",
+     "tvdb://2796"
+    ]
+   },
+   {
+    "title": "The Squid and the Whale",
+    "year": 2005,
+    "ids": [
+     "imdb://tt0367089",
+     "tmdb://10707",
+     "tvdb://3946"
+    ]
+   },
+   {
+    "title": "The Darjeeling Limited",
+    "year": 2007,
+    "ids": [
+     "imdb://tt0838221",
+     "tmdb://4538",
+     "tvdb://4783"
+    ]
+   },
+   {
+    "title": "Hotel Chevalier",
+    "year": 2007,
+    "ids": [
+     "imdb://tt1094249",
+     "tmdb://6418",
+     "tvdb://4385"
+    ]
+   },
+   {
+    "title": "Fantastic Mr. Fox",
+    "year": 2009,
+    "ids": [
+     "imdb://tt0432283",
+     "tmdb://10315",
+     "tvdb://1309"
+    ]
+   },
+   {
+    "title": "Moonrise Kingdom",
+    "year": 2012,
+    "ids": [
+     "imdb://tt1748122",
+     "tmdb://83666",
+     "tvdb://1587"
+    ]
+   },
+   {
+    "title": "The Grand Budapest Hotel",
+    "year": 2014,
+    "ids": [
+     "imdb://tt2278388",
+     "tmdb://120467",
+     "tvdb://421"
+    ]
+   },
+   {
+    "title": "Isle of Dogs",
+    "year": 2018,
+    "ids": [
+     "imdb://tt5104604",
+     "tmdb://399174",
+     "tvdb://313"
+    ]
+   },
+   {
+    "title": "The French Dispatch",
+    "year": 2021,
+    "ids": [
+     "imdb://tt8847712",
+     "tmdb://542178",
+     "tvdb://83119"
+    ]
+   },
+   {
+    "title": "Asteroid City",
+    "year": 2023,
+    "ids": [
+     "imdb://tt14230388",
+     "tmdb://747188",
+     "tvdb://318317"
+    ]
+   },
+   {
+    "title": "The Phoenician Scheme",
+    "year": 2025,
+    "ids": [
+     "imdb://tt30840798",
+     "tmdb://1137350",
+     "tvdb://357577"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20615",
+  "title": "Wong Kar-wai",
+  "titleSort": "zzWong Kar-wai",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Days of Being Wild",
+    "year": 1990,
+    "ids": [
+     "imdb://tt0101258",
+     "tmdb://18311",
+     "tvdb://5923"
+    ]
+   },
+   {
+    "title": "Chungking Express",
+    "year": 1994,
+    "ids": [
+     "imdb://tt0109424",
+     "tmdb://11104",
+     "tvdb://4982"
+    ]
+   },
+   {
+    "title": "Fallen Angels",
+    "year": 1995,
+    "ids": [
+     "imdb://tt0112913",
+     "tmdb://11220",
+     "tvdb://4210"
+    ]
+   },
+   {
+    "title": "Happy Together",
+    "year": 1997,
+    "ids": [
+     "imdb://tt0118845",
+     "tmdb://18329",
+     "tvdb://3109"
+    ]
+   },
+   {
+    "title": "In the Mood for Love",
+    "year": 2000,
+    "ids": [
+     "imdb://tt0118694",
+     "tmdb://843",
+     "tvdb://2616"
+    ]
+   },
+   {
+    "title": "2046",
+    "year": 2004,
+    "ids": [
+     "imdb://tt0212712",
+     "tmdb://844",
+     "tvdb://8069"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20933",
+  "title": "Woody Allen",
+  "titleSort": "zzWoody Allen",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Annie Hall",
+    "year": 1977,
+    "ids": [
+     "imdb://tt0075686",
+     "tmdb://703",
+     "tvdb://3855"
+    ]
+   },
+   {
+    "title": "Manhattan",
+    "year": 1979,
+    "ids": [
+     "imdb://tt0079522",
+     "tmdb://696",
+     "tvdb://5708"
+    ]
+   },
+   {
+    "title": "Zelig",
+    "year": 1983,
+    "ids": [
+     "imdb://tt0086637",
+     "tmdb://11030",
+     "tvdb://7218"
+    ]
+   },
+   {
+    "title": "Hannah and Her Sisters",
+    "year": 1986,
+    "ids": [
+     "imdb://tt0091167",
+     "tmdb://5143",
+     "tvdb://7224"
+    ]
+   },
+   {
+    "title": "Crimes and Misdemeanors",
+    "year": 1989,
+    "ids": [
+     "imdb://tt0097123",
+     "tmdb://11562",
+     "tvdb://7715"
+    ]
+   },
+   {
+    "title": "Vicky Cristina Barcelona",
+    "year": 2008,
+    "ids": [
+     "imdb://tt0497465",
+     "tmdb://5038",
+     "tvdb://3660"
+    ]
+   },
+   {
+    "title": "Midnight in Paris",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1605783",
+     "tmdb://59436",
+     "tvdb://2010"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "20543",
+  "title": "Yorgos Lanthimos",
+  "titleSort": "zzYorgos Lanthimos",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Dogtooth",
+    "year": 2009,
+    "ids": [
+     "imdb://tt1379182",
+     "tmdb://38810",
+     "tvdb://914"
+    ]
+   },
+   {
+    "title": "The Lobster",
+    "year": 2015,
+    "ids": [
+     "imdb://tt3464902",
+     "tmdb://254320",
+     "tvdb://895"
+    ]
+   },
+   {
+    "title": "The Killing of a Sacred Deer",
+    "year": 2017,
+    "ids": [
+     "imdb://tt5715874",
+     "tmdb://399057",
+     "tvdb://847"
+    ]
+   },
+   {
+    "title": "The Favourite",
+    "year": 2018,
+    "ids": [
+     "imdb://tt5083738",
+     "tmdb://375262",
+     "tvdb://7"
+    ]
+   },
+   {
+    "title": "Poor Things",
+    "year": 2023,
+    "ids": [
+     "imdb://tt14230458",
+     "tmdb://792307",
+     "tvdb://158867"
+    ]
+   },
+   {
+    "title": "Kinds of Kindness",
+    "year": 2024,
+    "ids": [
+     "imdb://tt22408160",
+     "tmdb://1029955",
+     "tvdb://353597"
+    ]
+   },
+   {
+    "title": "Bugonia",
+    "year": 2025,
+    "ids": [
+     "imdb://tt12300742",
+     "tmdb://701387",
+     "tvdb://354097"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "23989",
+  "title": "Zack Snyder",
+  "titleSort": "zzZack Snyder",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Watchmen",
+    "year": 2009,
+    "ids": [
+     "imdb://tt0409459",
+     "tmdb://13183",
+     "tvdb://1731"
+    ]
+   },
+   {
+    "title": "Man of Steel",
+    "year": 2013,
+    "ids": [
+     "imdb://tt0770828",
+     "tmdb://49521",
+     "tvdb://652"
+    ]
+   },
+   {
+    "title": "Batman v Superman: Dawn of Justice",
+    "year": 2016,
+    "ids": [
+     "imdb://tt2975590",
+     "tmdb://209112",
+     "tvdb://158"
+    ]
+   },
+   {
+    "title": "Zack Snyder's Justice League",
+    "year": 2021,
+    "ids": [
+     "imdb://tt12361974",
+     "tmdb://791373",
+     "tvdb://157282"
+    ]
+   }
+  ]
+ },
+ {
+  "ratingKey": "24883",
+  "title": "Zoya Akhtar",
+  "titleSort": "zzZoya Akhtar",
+  "summary": "",
+  "art": null,
+  "members": [
+   {
+    "title": "Luck by Chance",
+    "year": 2009,
+    "ids": [
+     "imdb://tt0886539",
+     "tmdb://16344",
+     "tvdb://45341"
+    ]
+   },
+   {
+    "title": "Zindagi Na Milegi Dobara",
+    "year": 2011,
+    "ids": [
+     "imdb://tt1562872",
+     "tmdb://61202",
+     "tvdb://7497"
+    ]
+   },
+   {
+    "title": "Dil Dhadakne Do",
+    "year": 2015,
+    "ids": [
+     "imdb://tt4110568",
+     "tmdb://338065",
+     "tvdb://13212"
+    ]
+   },
+   {
+    "title": "Gully Boy",
+    "year": 2019,
+    "ids": [
+     "imdb://tt2395469",
+     "tmdb://491625",
+     "tvdb://4829"
+    ]
+   },
+   {
+    "title": "The Archies",
+    "year": 2023,
+    "ids": [
+     "imdb://tt15979666",
+     "tmdb://975533",
+     "tvdb://343182"
+    ]
+   }
+  ]
+ }
+]
