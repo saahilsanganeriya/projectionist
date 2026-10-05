@@ -90,6 +90,7 @@ func run(cfgPath, only string) int {
 		owners[o] = true
 	}
 	metrics := obs.NewMetrics()
+	var sched *scheduler.Scheduler // stays nil for a one-off run: a trigger then has nowhere to go
 	runner := &scheduler.Runner{
 		Store: st, Log: log, Metrics: metrics,
 		Now: func() time.Time { return time.Now().UTC() },
@@ -100,6 +101,7 @@ func run(cfgPath, only string) int {
 				Now:     func() time.Time { return time.Now().UTC() },
 				Loc:     cfg.Location(),
 				Options: func(v any) error { return cfg.StageOptions(s.Name(), v) },
+				Trigger: func(name string) bool { return sched != nil && sched.Trigger(name) },
 			}
 		},
 	}
@@ -137,7 +139,8 @@ func run(cfgPath, only string) int {
 			stop()
 		}
 	}()
-	(&scheduler.Scheduler{Jobs: jobs, Runner: runner, Loc: cfg.Location()}).Run(ctx)
+	sched = &scheduler.Scheduler{Jobs: jobs, Runner: runner, Loc: cfg.Location()}
+	sched.Run(ctx)
 	log.Info("stopped", "event", "stop")
 	return 0
 }
