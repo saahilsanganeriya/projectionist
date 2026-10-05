@@ -91,7 +91,7 @@ image, enables the stage's `[stages.<name>]` table, and imports any legacy state
 | 6 | autorename | `rename/autorename.py` | GOAL item 7: one dropped folder is renamed, gets `.details` and a subtitle queue entry, and both servers rescan. An unmatched folder goes to `_needs-review.txt`. |
 | 7 | ingest | qBittorrent hook (in progress) | Hardlink within the `Plex Media` share, reflink across shares. Same bytes and inode/extent sharing verified, zero extra space used, the torrent keeps seeding. |
 | 8 | jf-sync | `jellyfin/jf_mirror.py` | Watch state for both users equals `plex_watch.tsv`. Collections match `collections.json`. A second run changes nothing. |
-| 9 | ssd-mirror | `ssd-copy/fill.py` | The same A→Z plan for the same free space. Resumes after a kill. Runs at idle I/O priority. |
+| 9 | ssdmirror | `ssd-copy/fill.py` | **Ported.** On the NAS, read-only: the dry run plans the same 640 films A→Z as fill.py's own planning code on the same free space. In scratch: SIGKILL mid-file, and the rerun resumes from the partial (same bytes, no second file). Copies run at the idle I/O class; `io_class = "best-effort"` gives fill.py's nice 19 instead. |
 | 10 | backups | `backup_plex_db.sh`, `export_customizations.py` | `PRAGMA integrity_check` = ok on the copy. The exported file set equals the Python's. |
 | 11 | posters | `posters/posters.py` (runs on the Mac) | Last. It needs AI gateway keys, which would become a compose secret. Replay of `decisions.json` gives identical choices. |
 
