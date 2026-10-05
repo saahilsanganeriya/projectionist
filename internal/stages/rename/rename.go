@@ -352,29 +352,26 @@ func sortedInts(m map[int]bool) []int {
 	return out
 }
 
-// probeWorkUnits reads resolution and codec for every video of a film or show unit that is not all "keep", so
-// version and duplicate-episode labels are right; it returns how many it read. A file ffprobe cannot read gets no
-// facts, so a label that needs them is left for review. Units already in the scheme keep their labels from their
-// names and are never probed.
+// probeWorkUnits reads resolution and codec for the videos of every unit the first plan left waiting on them (a
+// version or duplicate-episode label), and returns how many it read. Nothing else is probed: a single version needs
+// no label, and names already in the scheme keep theirs. A file ffprobe cannot read stays without facts, so its
+// unit is left for review rather than labelled wrongly.
 func probeWorkUnits(ctx context.Context, env *stage.Env, in *Input, plan Plan) int {
-	unsettled := map[string]bool{} // a version label may hinge on a resolution even when the unit only has a "leave"
+	waiting := map[string]bool{}
 	for _, o := range plan.Ops {
-		if o.Op != "keep" && (strings.HasPrefix(o.Unit, "movie:") || strings.HasPrefix(o.Unit, "show:")) {
-			unsettled[o.Unit] = true
+		if o.Op == "leave" && strings.HasPrefix(o.Reason, needsFacts) {
+			waiting[o.Unit] = true
 		}
 	}
 	n := 0
 	for _, o := range plan.Ops {
-		if !unsettled[o.Unit] || !isVideo(o.Src) {
-			continue
-		}
-		if _, done := in.Video[o.Src]; done {
+		if _, done := in.Video[o.Src]; !waiting[o.Unit] || !isVideo(o.Src) || done {
 			continue
 		}
 		info, err := env.Probe.Probe(ctx, o.Src)
 		if err != nil || info.Video == nil {
 			env.Log.Warn("probe failed", "event", "probe_error", "item", o.Src, "err", err)
-			continue // no facts: a label that needs them leaves its unit for review
+			continue
 		}
 		in.Video[o.Src] = VideoFacts{info.Video.Width, info.Video.Height, info.Video.Codec}
 		n++

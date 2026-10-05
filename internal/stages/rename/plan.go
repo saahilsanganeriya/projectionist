@@ -62,6 +62,9 @@ type Plan struct {
 	Unplanned []string            // files no op covers (a planner gap; never acted on)
 }
 
+// needsFacts starts the reason of a video left because its label needs a resolution the input lacks.
+const needsFacts = "label needs the resolution ffprobe could not read"
+
 const (
 	bigFile = 1_500_000_000
 	maxName = 255
@@ -347,7 +350,7 @@ func (p *planner) planMovies() (*videoPlan, []Op, []Review) {
 		labels, unread := p.movieLabels(keep, folder, base)
 		if unread != "" {
 			for _, f := range keep {
-				ops = append(ops, Op{unit, "leave", f, "", "version labels need the resolution ffprobe could not read: " + path.Base(unread)})
+				ops = append(ops, Op{unit, "leave", f, "", needsFacts + ": " + path.Base(unread)})
 			}
 			continue
 		}
@@ -612,7 +615,7 @@ func (p *planner) planTV() (*videoPlan, []Op, []Review) {
 		}
 		if perEp[epKey{c.unit, c.season, c.ep}] > 1 {
 			if _, known := in.Video[f]; !known {
-				ops = append(ops, Op{c.unit, "leave", f, "", "duplicate-episode label needs the resolution ffprobe could not read"})
+				ops = append(ops, Op{c.unit, "leave", f, "", needsFacts})
 				continue
 			}
 			label := clean(releaseGroup(f))

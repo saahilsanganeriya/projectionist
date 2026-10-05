@@ -105,15 +105,19 @@ review_file = %q
 tmdb_key_file = %q
 tmdb_api = %q
 aligned_log = ""`, root, l.undoLog, l.review, keyFile, srv.URL))
-	dv8, _ := os.ReadFile("../../probe/testdata/dv8_hevc.json")
-	write(t, filepath.Join(h.Env.FFmpeg.Dir, "probe.json"), string(dv8))
-	h.Script(t, "ffprobe", `cat "`+filepath.Join(h.Env.FFmpeg.Dir, "probe.json")+`"`+"\n")
+	for _, f := range []string{"dv8_hevc.json", "hlg_h264_8bit.json"} { // 3840x2160 HEVC, 1920x1080 H.264
+		raw, _ := os.ReadFile("../../probe/testdata/" + f)
+		write(t, filepath.Join(h.Env.FFmpeg.Dir, f), string(raw))
+	}
+	ff := h.Env.FFmpeg.Dir
+	h.Script(t, "ffprobe", `echo "$*" >> "`+ff+`/probed"; case "$*" in *1080p*) cat "`+ff+`/hlg_h264_8bit.json";; *) cat "`+ff+`/dv8_hevc.json";; esac`+"\n")
 	h.Jellyfin.Handle("POST", "/Library/Media/Updated", 204, "")
 	movies, tv := filepath.Join(root, "Movies"), filepath.Join(root, "TV")
 	write(t, filepath.Join(movies, "Heat.1995.1080p.BluRay.x264-GRP", "Heat.1995.1080p.BluRay.x264-GRP.mkv"), "film")
 	write(t, filepath.Join(movies, "Heat.1995.1080p.BluRay.x264-GRP", "Heat.1995.1080p.BluRay.x264-GRP.srt"), englishSRT(120))
 	write(t, filepath.Join(movies, "Heat.1995.1080p.BluRay.x264-GRP", "SITEA.txt"), "ad")
 	write(t, filepath.Join(movies, "Heat.1995.1080p.BluRay.x264-GRP", "@eaDir", "x.jpg"), "thumbnail")
+	write(t, filepath.Join(movies, "Heat.1995.2160p.UHD.BluRay-GRP", "Heat.1995.2160p.UHD.BluRay-GRP.mkv"), "a second version")
 	write(t, filepath.Join(movies, "Mystery.2001.mkv"), "unmatched")
 	write(t, filepath.Join(movies, "Gone.2010", "@eaDir", "thumb.jpg"), "a shell left by an earlier move")
 	write(t, filepath.Join(movies, "Gone.2010", ".DS_Store"), "")
@@ -136,8 +140,9 @@ func (l *library4test) run(t *testing.T) stage.Report {
 	return rep
 }
 
-// Catches, end to end: a new film or show not reaching its scheme name (TMDB identity, episode titles, subtitle
-// language from its text, junk archived, the emptied folder pruned), an ambiguous TMDB match being renamed instead of
+// Catches, end to end: a new film or show not reaching its scheme name (TMDB identity, two versions labelled by
+// the resolutions ffprobe reads — and nothing else probed —, episode titles, subtitle language from its text, junk
+// archived, the emptied folder pruned), an ambiguous TMDB match being renamed instead of
 // listed for review, junk archived out of a folder whose video waits for review, an episode already named being
 // renamed to TMDB's spelling, an empty shell (only @eaDir/.DS_Store) left behind or a recycle bin swept, clutter
 // deleted instead of archived, Jellyfin not told, a second run changing anything, and undo not restoring the tree
@@ -149,8 +154,9 @@ func TestRunNewArrivalsThenUndo(t *testing.T) {
 
 	want := []string{
 		".projectionist/rename/undo.tsv",
-		"Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.en.srt",
-		"Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv",
+		"Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949} - 1080p.en.srt",
+		"Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949} - 1080p.mkv",
+		"Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949} - 2160p.mkv",
 		"Movies/Kept.2011/#recycle/x.mkv",
 		"Movies/Mystery.2001.mkv",
 		"Movies/Unknown.Thing.2001/Unknown.Thing.2001.mkv",
@@ -166,6 +172,9 @@ func TestRunNewArrivalsThenUndo(t *testing.T) {
 	}
 	if got := tree(t, l.root); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("after apply:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if probed, _ := os.ReadFile(filepath.Join(l.h.Env.FFmpeg.Dir, "probed")); strings.Count(string(probed), "\n") != 2 {
+		t.Fatalf("probed:\n%s\nwant the two Heat versions only (the labels need them; nothing else does)", probed)
 	}
 	review, _ := os.ReadFile(l.review)
 	if !strings.Contains(string(review), "Movies/Mystery.2001.mkv\tno confident TMDB match for Mystery (2001); candidates: Mystery (2001) {tmdb-10}; Mystery (2002) {tmdb-11}") {
