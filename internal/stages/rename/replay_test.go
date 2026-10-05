@@ -39,8 +39,8 @@ type replayInputs struct {
 		Lang string `json:"lang"`
 		SDH  bool   `json:"sdh"`
 	} `json:"llm"`
-	Hints map[string][][]any  `json:"hints"`
-	Moved map[string]string   `json:"moved"`
+	Hints map[string][][]any `json:"hints"`
+	Moved map[string]string  `json:"moved"`
 }
 
 func env(t *testing.T, key string) string {
@@ -287,8 +287,12 @@ func TestReplayHistory(t *testing.T) {
 		plexShow[r["file"]] = true
 	}
 	var titles titleSource = recordedTitles(ri)
-	if dir := os.Getenv("RENAME_REPLAY_TMDB"); dir != "" {
-		titles = tmdbCache(dir)
+	cache := tmdbCache(os.Getenv("RENAME_REPLAY_TMDB"))
+	if os.Getenv("RENAME_REPLAY_TITLES") == "tmdb" {
+		titles = cache
+	}
+	for u, tt := range unitTitle { // the rest of the identity: TMDB's original-language name
+		unitTitle[u] = cache.withOriginal(tt)
 	}
 	lists := map[string][]Episode{}
 	for _, r := range recorded {
@@ -368,8 +372,23 @@ func recordedTitles(ri *replayInputs) mapTitles {
 	return out
 }
 
-// tmdbCache answers from cached TMDB /tv/{id}/season/{n} responses (one JSON file per request path).
+// tmdbCache answers from cached TMDB responses (one JSON file per request path); "" answers nothing.
 type tmdbCache string
+
+func (dir tmdbCache) get(p string, v any) bool {
+	raw, err := os.ReadFile(filepath.Join(string(dir), url.QueryEscape(p)+".json"))
+	return dir != "" && err == nil && json.Unmarshal(raw, v) == nil
+}
+
+func (dir tmdbCache) withOriginal(t Title) Title {
+	var show struct {
+		Original string `json:"original_name"`
+	}
+	if id, ok := strings.CutPrefix(t.ID, "tmdb-"); ok && dir.get("/tv/"+id, &show) {
+		t.Original = show.Original
+	}
+	return t
+}
 
 func (dir tmdbCache) episodes(show Title) []Episode {
 	id, ok := strings.CutPrefix(show.ID, "tmdb-")
@@ -378,10 +397,6 @@ func (dir tmdbCache) episodes(show Title) []Episode {
 	}
 	var out []Episode
 	for n := 0; n < 100; n++ {
-		raw, err := os.ReadFile(filepath.Join(string(dir), url.QueryEscape(fmt.Sprintf("/tv/%s/season/%d", id, n))+".json"))
-		if err != nil {
-			continue
-		}
 		var season struct {
 			Episodes []struct {
 				Season  int    `json:"season_number"`
@@ -389,7 +404,7 @@ func (dir tmdbCache) episodes(show Title) []Episode {
 				Name    string `json:"name"`
 			} `json:"episodes"`
 		}
-		if json.Unmarshal(raw, &season) == nil {
+		if dir.get(fmt.Sprintf("/tv/%s/season/%d", id, n), &season) {
 			for _, e := range season.Episodes {
 				out = append(out, Episode{e.Season, e.Episode, e.Name})
 			}

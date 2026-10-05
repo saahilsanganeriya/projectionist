@@ -14,6 +14,7 @@ var (
 	codeNxMM       = regexp.MustCompile(`(?i)(?:^|[^0-9a-z])(\d{1,2})x(\d{2,3})(?:[^0-9]|$)`)
 	seasonEpisode  = regexp.MustCompile(`(?i)\bSeason[ ._]?(\d{1,2})[ ._]?Episode[ ._]?(\d{1,3})`)
 	episodeOnly    = regexp.MustCompile(`(?i)(?:^|[ ._\-\[])E(?:p|pisode)?[ ._]?(\d{1,3})(?:[^0-9a-z]|$)`)
+	leadingNumber  = regexp.MustCompile(`^(\d{1,3})(?:[ ._]*-[ ._]*|[ ._]+)\S`)
 	bracketGroups  = regexp.MustCompile(`\[[^\]]*\]|\([^)]*\)`)
 	trailingNumber = regexp.MustCompile(`[-–]` + pyS + `*(\d{1,4})` + pyS + `*$`)
 	folderSeason   = regexp.MustCompile(`(?i)(?:^|[ ._\-\[(])(?:season|series|S)[ ._-]?(\d{1,2})(?:$|[ ._\-\])]|E\d)`)
@@ -21,7 +22,7 @@ var (
 
 // episodeNumbers reads (season, first, last, the file's own title) from a TV file's path. season is -1 when only an
 // absolute number is known. The extended spellings rename_engine.py left to Plex (4x01, "Season 3 Episode 1", E01
-// under an S01 folder, "Show- 01") carry no title: the source's title is used for them, as Plex's was.
+// under an S01 folder, "01 Introduction", "Show- 01") carry no title: the source's title is used, as Plex's was.
 func episodeNumbers(tvRoot, f string) (fileEp, bool) {
 	name := path.Base(f)
 	if e, ok := fileEpisode(name); ok {
@@ -36,6 +37,9 @@ func episodeNumbers(tvRoot, f string) (fileEp, bool) {
 	}
 	season := seasonFromFolders(tvRoot, f)
 	if m := episodeOnly.FindStringSubmatch(s); m != nil {
+		return fileEp{max(season, 1), atoi(m[1]), atoi(m[1]), ""}, true
+	}
+	if m := leadingNumber.FindStringSubmatch(s); m != nil { // '01 Introduction'
 		return fileEp{max(season, 1), atoi(m[1]), atoi(m[1]), ""}, true
 	}
 	if m := trailingNumber.FindStringSubmatch(bracketGroups.ReplaceAllString(s, "")); m != nil {

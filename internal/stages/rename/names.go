@@ -179,8 +179,17 @@ func words(text string) map[string]bool {
 	return out
 }
 
+// normTitle folds a title for comparison. Unlike rename_engine.norm it drops combining marks instead of splitting
+// the word at them: TMDB gives native names ('Shōgun') where Plex gave ASCII ones, and 'sho gun' would fail the
+// same-show guard against 'Shogun.2024.S01E01'.
 func normTitle(text string) string {
-	return strings.Trim(nonAlnumRe.ReplaceAllString(strings.ToLower(norm.NFKD.String(text)), " "), " ")
+	text = strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Mn, r) {
+			return -1
+		}
+		return r
+	}, norm.NFKD.String(text))
+	return strings.Trim(nonAlnumRe.ReplaceAllString(strings.ToLower(text), " "), " ")
 }
 
 func titlesAgree(a, b string) bool {
