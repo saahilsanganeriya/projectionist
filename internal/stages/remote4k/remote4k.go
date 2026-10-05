@@ -1,11 +1,17 @@
-// Package remote4k makes ~14 Mbps 4K copies of the films in the owner's Plex playlist "Remote 4K", so 4K fits the
-// home upload (port of scripts/remote4k.py).
+// Package remote4k makes ~14 Mbps 4K copies of the films the owner lists as "Remote 4K", so 4K fits the home
+// upload (port of scripts/remote4k.py).
+//
+// The request list is the union of the Plex playlist and any Jellyfin playlist or collection of that name. The apps
+// only say WHICH films; every fact about the files (resolution, bitrate, Dolby Vision profile, audio) comes from
+// ffprobe of the film's folder. Each app's half is bounded by list_timeout: an app that is slow (both stall during
+// library scans) or unreachable empties its half for that run, with a warning, and never fails the run.
 //
 // One film at a time on the GPU (jellyfin-ffmpeg, hevc_qsv, the source's colour tags and HDR10 metadata kept),
 // paused while anyone but the owner is watching. The copy lands beside the original as
 // "<folder name> - 2160p 14Mbps.mkv", which Plex and Jellyfin list as another version of the film. Skipped:
 // non-movies, films that already have a 4K version at or under 20 Mbps, and Dolby Vision profile 5 sources (no
-// HDR10 base layer to keep). Never overwrites. Progress: STATUS.txt; history: the events table.
+// HDR10 base layer to keep). Never overwrites. Progress: STATUS.txt; history: the events table. Plex notices the
+// copy through its filesystem events; Jellyfin is told, best effort (its own scheduled scan is the fallback).
 //
 // The encode writes into a work dir on the same btrfs subvolume as the library, so publishing the copy is one
 // atomic no-overwrite rename (a reflink clone only if the folder is on another subvolume).
@@ -16,7 +22,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,98 +40,184 @@ import (
 const name = "remote4k"
 
 type Options struct {
-	Playlist       string `toml:"playlist"`
-	Label          string `toml:"label"`
-	SmallKbps      int    `toml:"small_kbps"` // a 4K version at or under this already fits the upload
-	WorkDir        string `toml:"work_dir"`   // must be on the library's subvolume (same share)
-	StatusFile     string `toml:"status_file"`
-	DefaultSection int    `toml:"default_section"` // Movies, when an item does not name its section
+	Playlist    string        `toml:"playlist"` // Plex playlist, Jellyfin playlist or Jellyfin collection
+	Label       string        `toml:"label"`
+	SmallKbps   int           `toml:"small_kbps"` // a 4K version at or under this already fits the upload
+	WorkDir     string        `toml:"work_dir"`   // must be on the library's subvolume (same share)
+	StatusFile  string        `toml:"status_file"`
+	ListTimeout time.Duration `toml:"list_timeout"` // each app's half of the list is given up after this
 }
 
 func defaults() Options {
 	return Options{
-		Playlist:       "Remote 4K",
-		Label:          "2160p 14Mbps",
-		SmallKbps:      20000,
-		WorkDir:        "/volume1/media/.projectionist/remote4k",
-		StatusFile:     "/volume1/PlexMediaServer/remote4k/STATUS.txt",
-		DefaultSection: 4,
+		Playlist:    "Remote 4K",
+		Label:       "2160p 14Mbps",
+		SmallKbps:   20000,
+		WorkDir:     "/volume1/media/.projectionist/remote4k",
+		StatusFile:  "/volume1/PlexMediaServer/remote4k/STATUS.txt",
+		ListTimeout: 5 * time.Second,
 	}
 }
 
-// Plex playlist JSON, only the fields used.
-type media struct {
-	VideoResolution string `json:"videoResolution"`
-	Bitrate         int    `json:"bitrate"`  // kbps
-	Duration        int64  `json:"duration"` // ms
-	AudioCodec      string `json:"audioCodec"`
-	AudioChannels   *int   `json:"audioChannels"`
-	Part            []struct {
-		File string `json:"file"`
-	} `json:"Part"`
+// request is one film someone listed. Folder is "" for an item that is not a movie; Key names it in the history.
+type request struct{ Key, Folder string }
+
+func movieRequest(file string) request {
+	return request{Key: filepath.Base(filepath.Dir(file)), Folder: filepath.Dir(file)}
 }
 
-type item struct {
-	Type             string  `json:"type"`
-	Title            string  `json:"title"`
-	Year             int     `json:"year"`
-	LibrarySectionID int     `json:"librarySectionID"`
-	Media            []media `json:"Media"`
-}
-
-type job struct {
-	Title   string
-	Source  media
-	Folder  string
-	Section int
-}
-
-type skip struct{ Title, Reason string }
-
-// plan picks, per playlist item, the 4K source to shrink, or why not. Items already holding a small 4K version
-// are neither jobs nor skips: they are done.
-func plan(items []item, smallKbps, defaultSection int) (jobs []job, skips []skip) {
-	for _, it := range items {
-		title := fmt.Sprintf("%s (%d)", it.Title, it.Year)
-		var uhd []media
-		for _, m := range it.Media {
-			if m.VideoResolution == "4k" {
-				uhd = append(uhd, m)
-			}
-		}
-		if it.Type != "movie" || len(uhd) == 0 {
-			skips = append(skips, skip{title, "not a 4K movie"})
-			continue
-		}
-		small := false
-		for _, m := range uhd {
-			small = small || m.Bitrate <= smallKbps
-		}
-		if small {
-			continue
-		}
-		src := uhd[0]
-		for _, m := range uhd[1:] {
-			if m.Bitrate > src.Bitrate {
-				src = m
-			}
-		}
-		if len(src.Part) == 0 {
-			skips = append(skips, skip{title, "Plex lists no file"})
-			continue
-		}
-		section := it.LibrarySectionID
-		if section == 0 {
-			section = defaultSection
-		}
-		jobs = append(jobs, job{Title: title, Source: src, Folder: filepath.Dir(src.Part[0].File), Section: section})
+// plexRequests reads the owner's Plex playlist. Only the file paths are used.
+func plexRequests(ctx context.Context, env *stage.Env, opt Options) ([]request, error) {
+	var lists struct {
+		Metadata []struct {
+			RatingKey string `json:"ratingKey"`
+			Title     string `json:"title"`
+		} `json:"Metadata"`
 	}
-	return jobs, skips
+	if err := env.Plex.GetJSON(ctx, "/playlists?playlistType=video", &lists); err != nil {
+		return nil, err
+	}
+	var out []request
+	for _, l := range lists.Metadata {
+		if l.Title != opt.Playlist {
+			continue
+		}
+		var items struct {
+			Metadata []struct {
+				Type  string `json:"type"`
+				Title string `json:"title"`
+				Year  int    `json:"year"`
+				Media []struct {
+					Part []struct {
+						File string `json:"file"`
+					} `json:"Part"`
+				} `json:"Media"`
+			} `json:"Metadata"`
+		}
+		if err := env.Plex.GetJSON(ctx, "/playlists/"+l.RatingKey+"/items", &items); err != nil {
+			return nil, err
+		}
+		for _, it := range items.Metadata {
+			if it.Type == "movie" && len(it.Media) > 0 && len(it.Media[0].Part) > 0 {
+				out = append(out, movieRequest(it.Media[0].Part[0].File))
+			} else {
+				out = append(out, request{Key: fmt.Sprintf("%s (%d)", it.Title, it.Year)})
+			}
+		}
+	}
+	return out, nil
+}
+
+// jellyfinRequests reads every Jellyfin playlist and collection named opt.Playlist.
+func jellyfinRequests(ctx context.Context, env *stage.Env, opt Options) ([]request, error) {
+	type item struct {
+		ID             string `json:"Id"`
+		Name           string `json:"Name"`
+		Type           string `json:"Type"`
+		Path           string `json:"Path"`
+		ProductionYear int    `json:"ProductionYear"`
+	}
+	var lists []item
+	// One type per query: on the NAS, Jellyfin answers Playlist or BoxSet alone in under 1.5 s, both at once in 34-40 s.
+	for _, kind := range []string{"Playlist", "BoxSet"} {
+		var page struct{ Items []item }
+		if err := env.Jellyfin.GetJSON(ctx, "/Items?Recursive=true&IncludeItemTypes="+kind, &page); err != nil {
+			return nil, err
+		}
+		lists = append(lists, page.Items...)
+	}
+	var out []request
+	for _, l := range lists {
+		if l.Name != opt.Playlist {
+			continue
+		}
+		var items struct{ Items []item }
+		if err := env.Jellyfin.GetJSON(ctx, "/Items?ParentId="+l.ID+"&Fields=Path", &items); err != nil {
+			return nil, err
+		}
+		for _, it := range items.Items {
+			if it.Type == "Movie" && it.Path != "" {
+				out = append(out, movieRequest(it.Path))
+			} else {
+				out = append(out, request{Key: fmt.Sprintf("%s (%d)", it.Name, it.ProductionYear)})
+			}
+		}
+	}
+	return out, nil
+}
+
+// version is one video file in a film's folder, as ffprobe sees it.
+type version struct {
+	Path string
+	Info probe.Info
+}
+
+var videoExt = map[string]bool{".mkv": true, ".mp4": true, ".m4v": true, ".avi": true, ".ts": true, ".m2ts": true, ".mov": true}
+
+// versions probes the video files directly in folder. Extras live in subfolders, and dot files are in-flight copies.
+func versions(ctx context.Context, env *stage.Env, folder string) ([]version, error) {
+	entries, err := os.ReadDir(folder)
+	if err != nil {
+		return nil, err
+	}
+	var out []version
+	for _, e := range entries {
+		if !e.Type().IsRegular() || strings.HasPrefix(e.Name(), ".") || !videoExt[strings.ToLower(filepath.Ext(e.Name()))] {
+			continue
+		}
+		path := filepath.Join(folder, e.Name())
+		info, err := env.Probe.Probe(ctx, path)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, version{path, info})
+	}
+	return out, nil
+}
+
+// kbps is the file's overall bitrate; from size and duration when the container does not state it.
+func kbps(i probe.Info) int {
+	if i.BitRate > 0 {
+		return int(i.BitRate / 1000)
+	}
+	if i.Duration > 0 {
+		return int(float64(i.Size) * 8 / i.Duration / 1000)
+	}
+	return 0
+}
+
+// pick chooses the 4K version to shrink: the highest bitrate. done means a 4K version already fits the upload;
+// otherwise a non-empty reason says why the film is skipped. 4K is judged by width, so 3840x1600 scope counts.
+func pick(vs []version, smallKbps int) (src version, reason string, done bool) {
+	var uhd []version
+	for _, v := range vs {
+		if v.Info.Video != nil && v.Info.Video.Width >= 3200 {
+			uhd = append(uhd, v)
+		}
+	}
+	if len(uhd) == 0 {
+		return version{}, "not a 4K movie", false
+	}
+	for _, v := range uhd {
+		if kbps(v.Info) <= smallKbps {
+			return version{}, "", true
+		}
+	}
+	src = uhd[0]
+	for _, v := range uhd[1:] {
+		if kbps(v.Info) > kbps(src.Info) {
+			src = v
+		}
+	}
+	if src.Info.Video.DVProfile == 5 {
+		return version{}, "Dolby Vision profile 5", false
+	}
+	return src, "", false
 }
 
 // ffmpegArgs is the encode: GPU decode + hevc_qsv at 14 Mbps (20 Mbps peaks), first audio track (copied when the
 // TV can play it, else 640k E-AC-3 down to 5.1), all subtitles copied, colour tags carried over.
-func ffmpegArgs(ff config.FFmpeg, src, work, progress string, v *probe.Video, m media) []string {
+func ffmpegArgs(ff config.FFmpeg, src, work, progress string, v *probe.Video, a probe.Audio) []string {
 	args := []string{"-hide_banner", "-loglevel", "error", "-init_hw_device", "vaapi=va:" + ff.Device,
 		"-init_hw_device", "qsv=qs@va", "-filter_hw_device", "qs", "-hwaccel", "qsv", "-hwaccel_output_format", "qsv",
 		"-i", src, "-map", "0:v:0", "-map", "0:a:0", "-map", "0:s?",
@@ -141,16 +232,12 @@ func ffmpegArgs(ff config.FFmpeg, src, work, progress string, v *probe.Video, m 
 			args = append(args, c[0], c[1])
 		}
 	}
-	switch m.AudioCodec {
+	switch a.Codec {
 	case "aac", "ac3", "eac3":
 		args = append(args, "-c:a:0", "copy")
 	default:
 		args = append(args, "-c:a:0", "eac3", "-b:a:0", "640k")
-		channels := 2 // Plex omits audioChannels for some files; the Python defaulted to stereo
-		if m.AudioChannels != nil {
-			channels = *m.AudioChannels
-		}
-		if channels > 6 {
+		if a.Channels > 6 {
 			args = append(args, "-ac:a:0", "6")
 		}
 	}
@@ -166,37 +253,58 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if err := env.Options(&opt); err != nil {
 		return err
 	}
-	var lists struct {
-		Metadata []struct {
-			RatingKey string `json:"ratingKey"`
-			Title     string `json:"title"`
-		} `json:"Metadata"`
-	}
-	if err := env.Plex.GetJSON(ctx, "/playlists?playlistType=video", &lists); err != nil {
-		return err
-	}
-	var items struct {
-		Metadata []item `json:"Metadata"`
-	}
-	for _, l := range lists.Metadata {
-		if l.Title == opt.Playlist {
-			if err := env.Plex.GetJSON(ctx, "/playlists/"+l.RatingKey+"/items", &items); err != nil {
-				return err
-			}
-			break
+	var requests []request
+	for _, app := range []struct {
+		name string
+		list func(context.Context, *stage.Env, Options) ([]request, error)
+	}{{"plex", plexRequests}, {"jellyfin", jellyfinRequests}} {
+		lctx, cancel := context.WithTimeout(ctx, opt.ListTimeout)
+		got, err := app.list(lctx, env, opt)
+		cancel()
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
+		if err != nil {
+			env.Log.Warn("request list unavailable this run", "event", "list_unavailable", "app", app.name, "err", err)
+			rep.Count("list_unavailable", 1)
+			continue
+		}
+		requests = append(requests, got...)
 	}
-	jobs, skips := plan(items.Metadata, opt.SmallKbps, opt.DefaultSection)
-	for _, s := range skips {
-		record(ctx, env, rep, s.Title, "skip", map[string]any{"reason": s.Reason})
-	}
-	for _, j := range jobs {
-		if err := encode(ctx, env, opt, rep, j); err != nil {
+	seen := map[request]bool{}
+	handled := 0
+	for _, r := range requests {
+		if seen[r] {
+			continue
+		}
+		seen[r] = true
+		if r.Folder == "" {
+			record(ctx, env, rep, r.Key, "skip", map[string]any{"reason": "not a 4K movie"})
+			continue
+		}
+		vs, err := versions(ctx, env, r.Folder)
+		if errors.Is(err, os.ErrNotExist) { // a list can lag behind a rename
+			record(ctx, env, rep, r.Key, "skip", map[string]any{"reason": "folder missing"})
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		src, reason, done := pick(vs, opt.SmallKbps)
+		if reason != "" {
+			record(ctx, env, rep, r.Key, "skip", map[string]any{"reason": reason})
+		}
+		if done || reason != "" {
+			continue
+		}
+		handled++
+		if err := encode(ctx, env, opt, rep, r, src); err != nil {
 			return err
 		}
 	}
-	status(env, opt, fmt.Sprintf("idle; %d film(s) handled this run; add films to the Plex playlist '%s'", len(jobs), opt.Playlist))
-	rep.Summary = fmt.Sprintf("%d film(s) handled", len(jobs))
+	rep.Count("requested", len(seen))
+	status(env, opt, fmt.Sprintf("idle; %d film(s) handled this run; list films as '%s' in Plex or Jellyfin", handled, opt.Playlist))
+	rep.Summary = fmt.Sprintf("%d film(s) requested, %d handled", len(seen), handled)
 	return nil
 }
 
@@ -250,23 +358,15 @@ func progressPercent(progress []byte, durationMS int64) float64 {
 	return 100 * float64(us/1000) / math.Max(1, float64(durationMS))
 }
 
-func encode(ctx context.Context, env *stage.Env, opt Options, rep *stage.Report, j job) error {
-	src := j.Source.Part[0].File
-	out := filepath.Join(j.Folder, filepath.Base(j.Folder)+" - "+opt.Label+".mkv")
-	if _, err := os.Lstat(out); err == nil {
+func encode(ctx context.Context, env *stage.Env, opt Options, rep *stage.Report, r request, v version) error {
+	src, title := v.Path, r.Key
+	out := filepath.Join(r.Folder, filepath.Base(r.Folder)+" - "+opt.Label+".mkv")
+	if _, err := os.Lstat(out); err == nil { // a copy whose bitrate probes above small_kbps is still done
 		return nil
 	}
-	info, err := env.Probe.Probe(ctx, src)
-	if err != nil {
-		return err
-	}
-	if info.Video == nil {
-		record(ctx, env, rep, j.Title, "skip", map[string]any{"reason": "no video stream"})
-		return nil
-	}
-	if info.Video.DVProfile == 5 {
-		record(ctx, env, rep, j.Title, "skip", map[string]any{"reason": "Dolby Vision profile 5"})
-		return nil
+	var audio probe.Audio
+	if len(v.Info.Audio) > 0 {
+		audio = v.Info.Audio[0] // what -map 0:a:0 selects
 	}
 	if err := os.MkdirAll(opt.WorkDir, 0o755); err != nil { // no chmod: a chmod strips the Synology ACL
 		return err
@@ -274,7 +374,7 @@ func encode(ctx context.Context, env *stage.Env, opt Options, rep *stage.Report,
 	work, progress := filepath.Join(opt.WorkDir, "work.mkv"), filepath.Join(opt.WorkDir, "progress.txt")
 	os.Remove(progress)
 	started := env.Now()
-	cmd := exec.CommandContext(ctx, env.FFmpeg.FFmpegPath(), ffmpegArgs(env.FFmpeg, src, work, progress, info.Video, j.Source)...)
+	cmd := exec.CommandContext(ctx, env.FFmpeg.FFmpegPath(), ffmpegArgs(env.FFmpeg, src, work, progress, v.Info.Video, audio)...)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -300,43 +400,40 @@ supervise:
 			}
 			cmd.Process.Signal(sig)
 			paused = busy
-			env.Log.Info("encode paused", "event", "encode_pause", "item", j.Title, "paused", paused, "others", others, "err", err)
+			env.Log.Info("encode paused", "event", "encode_pause", "item", title, "paused", paused, "others", others, "err", err)
 		}
 		raw, _ := os.ReadFile(progress)
 		note := ""
 		if paused {
 			note = "(paused: someone is watching)"
 		}
-		status(env, opt, fmt.Sprintf("%s: %.0f%% %s", j.Title, progressPercent(raw, j.Source.Duration), note))
+		status(env, opt, fmt.Sprintf("%s: %.0f%% %s", title, progressPercent(raw, int64(v.Info.Duration*1000)), note))
 	}
 	if waitErr != nil {
 		os.Remove(work)
 		if ctx.Err() != nil {
 			return ctx.Err() // shutting down; the next run starts this film again
 		}
-		record(ctx, env, rep, j.Title, "failed", map[string]any{"exit": cmd.ProcessState.ExitCode()})
+		record(ctx, env, rep, title, "failed", map[string]any{"exit": cmd.ProcessState.ExitCode()})
 		return nil
 	}
 	made, err := env.Probe.Probe(ctx, work)
 	if err != nil {
-		return fmt.Errorf("%s: encoded copy unreadable: %w", j.Title, err)
+		return fmt.Errorf("%s: encoded copy unreadable: %w", title, err)
 	}
 	if err := publish(work, out, src); err != nil {
-		return fmt.Errorf("%s: %w", j.Title, err)
+		return fmt.Errorf("%s: %w", title, err)
 	}
-	if err := env.Plex.Do(ctx, "GET", fmt.Sprintf("/library/sections/%d/refresh?path=%s", j.Section, quote(j.Folder))); err != nil {
-		return err
-	}
-	if err := env.Jellyfin.MediaUpdated(ctx, j.Folder); err != nil {
-		return err
+	if err := env.Jellyfin.MediaUpdated(ctx, r.Folder); err != nil {
+		env.Log.Warn("Jellyfin not told about the copy", "event", "jellyfin_notify_failed", "item", title, "err", err)
 	}
 	pixFmt := ""
 	if made.Video != nil {
 		pixFmt = made.Video.PixFmt
 	}
-	record(ctx, env, rep, j.Title, "made", map[string]any{
+	record(ctx, env, rep, title, "made", map[string]any{
 		"hours": math.Round(env.Now().Sub(started).Hours()*10) / 10, "gb": math.Round(float64(made.Size)/1e8) / 10,
-		"source_mbps": j.Source.Bitrate / 1000, "pix_fmt": pixFmt,
+		"source_mbps": kbps(v.Info) / 1000, "pix_fmt": pixFmt,
 	})
 	return nil
 }
@@ -368,9 +465,4 @@ func publish(work, out, src string) error {
 		return err
 	}
 	return fsx.SyncDir(filepath.Dir(out))
-}
-
-// quote escapes a path for a query string like Python's urllib.parse.quote: everything but unreserved and "/".
-func quote(path string) string {
-	return strings.ReplaceAll(strings.ReplaceAll(url.QueryEscape(path), "+", "%20"), "%2F", "/")
 }

@@ -4,6 +4,10 @@
 // transcode not on the GPU and on Plex's "no hardware decode accelerator" log line; once a day, when nobody is
 // watching, encodes a 5 s sample on the GPU with Plex's transcoder and with jellyfin-ffmpeg.
 // AV1 sources are the known exception: the J4125 cannot decode AV1, so only the encode side must be on the GPU.
+//
+// Plex settings are read from Preferences.xml, never the API. The two Plex calls left (writing a pin back, listing
+// Plex's sessions) are bounded by plex_timeout and never fail the run: a pin that cannot be written back raises the
+// "GPU pin lost" alert, and missing sessions only cost this run's Plex CPU-transcode check.
 package gpuguard
 
 import (
@@ -48,6 +52,7 @@ type Options struct {
 	Sample         string        `toml:"sample"`      // 5 s HEVC 10-bit 1080p clip, readable by the Plex user
 	SelfTestEvery  time.Duration `toml:"self_test_every"`
 	LegacyState    string        `toml:"legacy_state"` // gpu_guard.state.json; imported once when the store has no state
+	PlexTimeout    time.Duration `toml:"plex_timeout"` // bound on each Plex API call
 }
 
 func defaults() Options {
@@ -62,6 +67,7 @@ func defaults() Options {
 		PlexGroups:     []int{297536, 999, 937},
 		Sample:         "/volume1/PlexMediaServer/scripts/gpu_sample.mkv",
 		SelfTestEvery:  24 * time.Hour,
+		PlexTimeout:    5 * time.Second,
 	}
 }
 
@@ -100,10 +106,11 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if err != nil {
 		return err
 	}
-	if err := pinSettings(ctx, env, opt, rep); err != nil {
+	drifted, err := pinSettings(ctx, env, opt, rep)
+	if err != nil {
 		return err
 	}
-	playing, err := checkLive(ctx, env, &st, rep)
+	playing, err := checkLive(ctx, env, opt, &st, rep)
 	if err != nil {
 		return err
 	}
@@ -111,14 +118,20 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 		return err
 	}
 	now := env.Now()
+	tested := "not due"
 	if selfTestDue(playing, st.LastSelfTest, now, opt.SelfTestEvery) {
 		run := s.Exec
 		if run == nil {
 			run = execRun
 		}
-		selfTest(ctx, env, opt, run, rep)
+		tested = selfTest(ctx, env, opt, run, rep)
 		st.LastSelfTest = float64(now.UnixNano()) / 1e9
 	}
+	pins := "GPU pins intact"
+	if drifted > 0 {
+		pins = fmt.Sprintf("%d GPU pin(s) had drifted", drifted)
+	}
+	rep.Summary = fmt.Sprintf("%s; %d playing; self-test %s", pins, playing, tested)
 	return env.Store.PutJSON(context.WithoutCancel(ctx), "gpu-guard", "state", st)
 }
 
@@ -164,35 +177,43 @@ func jellyfinDrift(enc map[string]any) map[string]any {
 	return drift
 }
 
-func pinSettings(ctx context.Context, env *stage.Env, opt Options, rep *stage.Report) error {
+// pinSettings repairs drifted pins and returns how many had drifted.
+func pinSettings(ctx context.Context, env *stage.Env, opt Options, rep *stage.Report) (int, error) {
 	prefs, err := env.Plex.Prefs()
 	if err != nil {
-		return err
+		return 0, err
 	}
-	for _, p := range plexDrift(prefs, plexPins(opt.PlexDevice)) {
-		if err := env.Plex.Do(ctx, "PUT", "/:/prefs?"+p.key+"="+url.QueryEscape(p.want)); err != nil {
-			return err
-		}
+	plexDrifted := plexDrift(prefs, plexPins(opt.PlexDevice))
+	for _, p := range plexDrifted {
 		have, ok := prefs[p.key]
 		if !ok {
 			have = "unset"
+		}
+		pctx, cancel := context.WithTimeout(ctx, opt.PlexTimeout)
+		err := env.Plex.Do(pctx, "PUT", "/:/prefs?"+p.key+"="+url.QueryEscape(p.want))
+		cancel()
+		if err != nil {
+			rep.Alert("GPU pin lost: Plex %s is %q, want %q, and setting it back failed: %v", p.key, have, p.want, err)
+			continue
 		}
 		rep.Alert("Plex %s was %q; set back to %q", p.key, have, p.want)
 	}
 	var enc map[string]any
 	if err := env.Jellyfin.GetJSON(ctx, "/System/Configuration/encoding", &enc); err != nil {
-		return err
+		return 0, err
 	}
-	if drift := jellyfinDrift(enc); len(drift) > 0 {
+	drift := jellyfinDrift(enc)
+	if len(drift) > 0 {
 		for k, v := range jellyfinPins {
 			enc[k] = v
 		}
 		if err := env.Jellyfin.PostJSON(ctx, "/System/Configuration/encoding", enc, nil); err != nil {
-			return err
+			return 0, err
 		}
 		rep.Alert("Jellyfin encoding drifted %v; set back to GPU (QSV)", drift)
 	}
-	return nil
+	env.Log.Info("GPU pins checked", "event", "pins_checked", "plex_drifted", len(plexDrifted), "jellyfin_drifted", len(drift))
+	return len(plexDrifted) + len(drift), nil
 }
 
 // liveAlerts decides, for the sessions playing now, which transcodes run off the GPU. seen holds session keys
@@ -244,10 +265,15 @@ func remember(seen map[string]bool) []string {
 	return keys
 }
 
-func checkLive(ctx context.Context, env *stage.Env, st *State, rep *stage.Report) (int, error) {
-	px, err := env.Plex.Sessions(ctx)
+// checkLive alerts on CPU transcodes and returns how many sessions are playing. Plex's sessions are best effort:
+// when Plex cannot answer, its sessions count as none, so a Plex that is always slow cannot stop the daily
+// self-test, which is a 5 s encode that moves no files.
+func checkLive(ctx context.Context, env *stage.Env, opt Options, st *State, rep *stage.Report) (int, error) {
+	pctx, cancel := context.WithTimeout(ctx, opt.PlexTimeout)
+	px, err := env.Plex.Sessions(pctx)
+	cancel()
 	if err != nil {
-		return 0, err
+		env.Log.Warn("Plex sessions unavailable; checking Jellyfin only", "event", "plex_unavailable", "err", err)
 	}
 	jf, err := env.Jellyfin.Sessions(ctx, gpuSessionWindow)
 	if err != nil {
@@ -363,14 +389,16 @@ func selfTestCommands(ctx context.Context, env *stage.Env, opt Options) (map[str
 	return map[string]*exec.Cmd{"plex": plexCmd, "jellyfin": jfCmd}, nil
 }
 
-func selfTest(ctx context.Context, env *stage.Env, opt Options, run Runner, rep *stage.Report) {
+// selfTest encodes the sample with both apps' encoders and says "passed" or "failed" (alerts carry the detail).
+func selfTest(ctx context.Context, env *stage.Env, opt Options, run Runner, rep *stage.Report) string {
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Minute) // two encodes of a 5 s clip; the Python allowed 120 s each
 	defer cancel()
 	cmds, err := selfTestCommands(ctx, env, opt)
 	if err != nil {
 		rep.Alert("GPU self-test could not start: %v", err)
-		return
+		return "failed"
 	}
+	result := "passed"
 	for _, app := range []string{"plex", "jellyfin"} {
 		code, stderr, err := run(ctx, cmds[app])
 		if err != nil {
@@ -381,8 +409,10 @@ func selfTest(ctx context.Context, env *stage.Env, opt Options, run Runner, rep 
 		if !passed {
 			lines := strings.Split(strings.TrimSpace(stderr), "\n")
 			rep.Alert("%s GPU self-test failed (exit %d): %q", app, code, lines[len(lines)-1])
+			result = "failed"
 		}
 	}
+	return result
 }
 
 func execRun(_ context.Context, cmd *exec.Cmd) (int, string, error) {

@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"projectionist/internal/config"
+	"projectionist/internal/fanart"
 	"projectionist/internal/jellyfin"
 	"projectionist/internal/plex"
 	"projectionist/internal/probe"
 	"projectionist/internal/store"
+	"projectionist/internal/tmdb"
 	"projectionist/internal/viewers"
 )
 
@@ -38,11 +40,16 @@ type Env struct {
 	Jellyfin *jellyfin.Client
 	Viewers  *viewers.Gate
 	Probe    *probe.Prober
+	TMDB     *tmdb.Client   // the only source of identity, episodes, collections and external ids; one per process
+	Fanart   *fanart.Client // community artwork, keyed by TMDB/IMDb id (films) or TVDB id (shows)
 	FFmpeg   config.FFmpeg
 	Now      func() time.Time // UTC
 	Loc      *time.Location   // config timezone: only for text the owner reads (status files)
 	// Options decodes this stage's own keys from its [stages.<name>] table into v (call it at the top of Run).
 	Options func(v any) error
+	// Trigger asks the scheduler to run the named stage soon (inside its window); repeated triggers coalesce into
+	// one run. False when that stage is not scheduled (disabled, or a one-off `projectionist run`).
+	Trigger func(stage string) bool
 }
 
 // Report is filled in by Run. Alerts survive a returned error, so a stage can raise alerts and then fail.

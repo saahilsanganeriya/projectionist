@@ -21,6 +21,8 @@ const (
 	PlexToken       = "test-plex-token"
 	PlexFriendToken = "test-plex-friend-token" // a shared user's token: fake Plex takes it for watch-state writes only
 	JellyfinKey     = "test-jellyfin-key"
+	TMDBToken       = "test-tmdb-token"
+	FanartKey       = "test-fanart-key"
 )
 
 type Call struct {
@@ -120,4 +122,25 @@ func Jellyfin(t testing.TB) (*Server, *jellyfin.Client) {
 		t.Fatal(err)
 	}
 	return s, jellyfin.New(s.URL, key, 5*time.Second)
+}
+
+// TMDB starts a fake TMDB v3 API that accepts only the bearer TMDBToken; it returns the server and a token file.
+func TMDB(t testing.TB) (*Server, string) {
+	s := newServer(t, func(r *http.Request) bool { return r.Header.Get("Authorization") == "Bearer "+TMDBToken })
+	return s, secretFile(t, "tmdb_read_token", TMDBToken)
+}
+
+// Fanart starts a fake fanart.tv API that accepts only FanartKey in the api-key header; it returns the server and
+// a key file.
+func Fanart(t testing.TB) (*Server, string) {
+	s := newServer(t, func(r *http.Request) bool { return r.Header.Get("api-key") == FanartKey })
+	return s, secretFile(t, "fanart_api_key", FanartKey)
+}
+
+func secretFile(t testing.TB, name, secret string) string {
+	path := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(path, []byte(secret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

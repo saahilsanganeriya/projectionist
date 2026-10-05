@@ -1,6 +1,8 @@
 // Package plex is a small Plex Media Server client. Plex's API shares one SQLite database with its scanner and
-// stalls during scans, so stages use it only for what has no file-based source: live sessions, preference writes,
-// and scan requests. Settings are read from Preferences.xml directly (ReadPrefs).
+// stalls during scans, so it is a sink, never a data source: stages use it for writes of state that lives in Plex
+// (preferences, posters, collections), live sessions, and the owner's request lists, each call bounded by a short
+// deadline that never fails a run. Settings are read from Preferences.xml directly (ReadPrefs). No stage asks Plex
+// to rescan: its filesystem events see every change.
 package plex
 
 import (
@@ -114,7 +116,7 @@ func (c *Client) send(ctx context.Context, tok, method, rawURL, accept string, f
 	return raw, nil
 }
 
-// Do sends a request whose answer does not matter (PUT /:/prefs, scan requests).
+// Do sends a request whose answer does not matter (PUT /:/prefs).
 func (c *Client) Do(ctx context.Context, method, path string) error {
 	_, err := c.do(ctx, method, path, "")
 	return err
