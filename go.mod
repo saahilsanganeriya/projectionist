@@ -6,6 +6,7 @@ require (
 	github.com/BurntSushi/toml v1.6.0
 	golang.org/x/image v0.46.0
 	golang.org/x/sys v0.48.0
+	golang.org/x/text v0.41.0
 	modernc.org/sqlite v1.60.1
 )
 

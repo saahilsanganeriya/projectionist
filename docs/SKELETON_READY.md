@@ -23,6 +23,8 @@ type Env struct {
 	Jellyfin *jellyfin.Client
 	Viewers  *viewers.Gate
 	Probe    *probe.Prober
+	TMDB     *tmdb.Client   // direct TMDB v3; one per process (shared rate limit and cache)
+	Fanart   *fanart.Client // direct fanart.tv
 	FFmpeg   config.FFmpeg // .FFmpegPath(), .FFprobePath(), .Device
 	Now      func() time.Time // UTC
 	Loc      *time.Location   // config timezone, only for owner-facing text (status files)
@@ -42,19 +44,20 @@ raised before the error are kept.
 |---|---|
 | `internal/stage` | the interface above |
 | `internal/config` | TOML loader; `Schedule(name)`, `StageOptions(name, &v)`, `ParseWindow` |
-| `internal/store` | SQLite (WAL): `StartRun/FinishRun/LastRun`, `GetJSON/PutJSON(stage, key)`, `AddEvent/LastEvent(stage, item)`, `DB()` for your own tables. Name them `<stage>_*` and create them with `CREATE TABLE IF NOT EXISTS` |
+| `internal/store` | SQLite (WAL): `StartRun/FinishRun/LastRun`, `GetJSON/PutJSON(stage, key)`, `AddEvent/LastEvent(stage, item)`, `CacheGet/CachePut/CachePrune` (the `http_cache` the TMDB and fanart.tv clients use), `DB()` for your own tables. Name them `<stage>_*` and create them with `CREATE TABLE IF NOT EXISTS` |
 | `internal/scheduler` | per-stage cadence + window, `Runner.RunOnce` (also used by `projectionist run <stage>`) |
 | `internal/viewers` | the pause rule: `Gate.Count`, `Gate.WaitIdle(ctx)` before moving files; poll `Gate.Count` every `Gate.Poll` to SIGSTOP/SIGCONT a long process (see remote4k). Owners never block; an error counts as busy |
-| `internal/plex` | `Prefs()` / `ReadPrefs(path)` (file, no API), `Sessions`, `GetJSON` (unwraps MediaContainer), `Do(method, path)`, `Send(method, path, contentType, body)`. Token read from Preferences.xml on every request and sent as a header. Use the API only where no file source exists |
+| `internal/plex` | `Prefs()` / `ReadPrefs(path)` (file, no API), `Sessions`, `GetJSON` (unwraps MediaContainer), `Do(method, path)`. Token read from Preferences.xml on every request and sent as a header. A sink only (see architecture.md, "Plex and Jellyfin"): bound every call with a short context deadline and never fail a run on it |
+| `internal/tmdb` | `Search(ctx, tmdb.Movie\|tmdb.TV, query, year)`, `Details(ctx, kind, id)` (collection, external ids, seasons), `Episodes(ctx, showID, season)` (0 = specials), `Images` / `SeasonImages` (language, votes; optional language filter), `ImageURL(path, size)`. `ErrNotFound`, `ErrNoCredentials`. Rate limit, retries and the 24 h cache are inside; use `env.TMDB`, never a second client |
+| `internal/fanart` | `Movie(ctx, tmdbOrIMDbID)`, `TV(ctx, tvdbID)`: one flat list of images with type, language, likes, season and size; no art is an empty list |
 | `internal/jellyfin` | `GetJSON`, `PostJSON`, `PostBody(path, contentType, body)`, `Sessions(activeWithin)`, `MediaUpdated(paths...)`. Key read from a file on every request |
 | `internal/probe` | `Prober.Probe(ctx, path) (Info, error)`: ffprobe JSON → codec, profile, bit depth, HDR10/HLG/Dolby Vision + dv_profile, size, fps, bitrate, audio and subtitle tracks, duration. Cached in `probe_cache` keyed by (path, size, mtime_ns). `Parse(raw)` is pure, for tests |
 | `internal/library` | `ParseMovie(path)` / `ParseEpisode(path)` (and `ParseMovieFolder` / `ParseShowFolder` / `ParseSeasonFolder` for folder names): identity (`{tmdb-N}`, `{imdb-ttN}`, `{tvdb-N}`), year, label, season, episode range, read from the naming scheme |
-| `internal/tmdb` | `Client.Get(ctx, path, query, &v)`: TMDB v3 directly (bearer for a v4 token, `api_key` for a v3 key; URLs never in errors), `ErrNotFound` on 404, 429/5xx retried |
 | `internal/llm` | Claude on the Anthropic API directly: `Messages`, `CreateBatch`/`Batch`/`BatchResults` (half price), `Latest(ctx, "haiku")` for a `family:latest` alias (cache it a day), `PriceOf(model).Cost(usage, batch)` for a budget. A POST that may have been processed is never retried and fails with `ErrUnknownOutcome` (count it as billed). Key read per request |
 | `internal/fsx` | `RenameNoReplace` (renameat2 RENAME_NOREPLACE; link+unlink fallback for files), `Clone` (FICLONE reflink, byte-copy fallback, never overwrites), `SyncDir` (one fsync per unit) |
 | `internal/obs` | `NewLogger` (UTC, key=value or JSON), `Metrics` (Prometheus text) |
 | `internal/server` | `/health` (503 while any stage's latest run is alert/error) and `/metrics` |
-| `internal/fake` | `fake.NewEnv(t, prefs)` → a full `stage.Env` (fake Plex + Jellyfin with no sessions, temp store, 5 ms viewer poll); `h.SetOptions(toml)`, `h.Script(t, "ffprobe"|"ffmpeg", body)` for stand-in binaries, `h.Now` to move the clock. Lower level: `fake.Plex(t, prefs)`, `fake.Jellyfin(t)`, `srv.Handle(method, path, status, body)`, `srv.HandleFunc`, `srv.Calls(method, path)`. A test in package X that imports `fake` must be `package X_test` when `fake` imports X |
+| `internal/fake` | `fake.NewEnv(t, prefs)` → a full `stage.Env` (fake Plex + Jellyfin with no sessions, fake TMDB `h.TMDB` and fanart.tv `h.Fanart` answering 404 until a route is registered, temp store, 5 ms viewer poll); `h.SetOptions(toml)`, `h.Script(t, "ffprobe"|"ffmpeg", body)` for stand-in binaries, `h.Now` to move the clock. Lower level: `fake.Plex(t, prefs)`, `fake.Jellyfin(t)`, `srv.Handle(method, path, status, body)`, `srv.HandleFunc`, `srv.Calls(method, path)`. A test in package X that imports `fake` must be `package X_test` when `fake` imports X |
 
 ## Build and run
 
