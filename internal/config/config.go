@@ -18,6 +18,8 @@ type Config struct {
 	Plex     Plex     `toml:"plex"`
 	Jellyfin Jellyfin `toml:"jellyfin"`
 	FFmpeg   FFmpeg   `toml:"ffmpeg"`
+	TMDB     TMDB     `toml:"tmdb"`
+	Fanart   Fanart   `toml:"fanart"`
 
 	Stages map[string]toml.Primitive `toml:"stages"`
 
@@ -40,6 +42,18 @@ type Jellyfin struct {
 	URL     string        `toml:"url"`
 	KeyFile string        `toml:"key_file"` // API key file, mounted read-only
 	Timeout time.Duration `toml:"timeout"`
+}
+
+// TMDB and Fanart name the secret files of the two online sources; the clients read them on every request.
+type TMDB struct {
+	ReadTokenFile string        `toml:"read_token_file"` // v4 read-access token, preferred
+	APIKeyFile    string        `toml:"api_key_file"`    // v3 key, used only when the token file is missing or empty
+	CacheTTL      time.Duration `toml:"cache_ttl"`
+}
+
+type Fanart struct {
+	APIKeyFile string        `toml:"api_key_file"`
+	CacheTTL   time.Duration `toml:"cache_ttl"`
 }
 
 type FFmpeg struct {
@@ -66,6 +80,8 @@ func Load(path string) (*Config, error) {
 		Plex:     Plex{URL: "http://127.0.0.1:32400", Timeout: 20 * time.Second},
 		Jellyfin: Jellyfin{URL: "http://127.0.0.1:8096", Timeout: 20 * time.Second},
 		FFmpeg:   FFmpeg{Dir: "/usr/lib/jellyfin-ffmpeg", Device: "/dev/dri/renderD128"},
+		TMDB:     TMDB{ReadTokenFile: "/run/secrets/tmdb_read_token", APIKeyFile: "/run/secrets/tmdb_api_key", CacheTTL: 24 * time.Hour},
+		Fanart:   Fanart{APIKeyFile: "/run/secrets/fanart_api_key", CacheTTL: 24 * time.Hour},
 	}
 	md, err := toml.DecodeFile(path, &cfg)
 	if err != nil {
