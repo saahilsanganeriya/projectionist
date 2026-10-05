@@ -57,8 +57,9 @@ default_section = 4
 # Real-time trigger: inotify on the library and finished downloads. A top-level folder (a movie, a show, a download)
 # that changed and then stayed quiet for `quiet` triggers each stage in `trigger`; each is a reconciler that finds its
 # own work. One run = one `sweep` period (walk every root, then follow events), so `every` must be <= `sweep`: the next
-# period then starts at once, and a failed start retries after `every`. Needs ~3,300 of root's 8,192 inotify watches
-# (measured 2026-10-05); past the limit it alerts and the sweep covers the rest.
+# period then starts at once, and a failed start retries after `every`. One watch per folder: 3,278 for these roots
+# (2026-10-05, `find` with the ignore rules below), root's other processes hold 90 of fs.inotify.max_user_watches=8192;
+# past the limit it alerts and the sweep covers the rest.
 [stages.watcher]
 every   = "1m"
 sweep   = "15m"
