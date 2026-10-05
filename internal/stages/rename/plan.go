@@ -723,10 +723,6 @@ func (p *planner) planRoot(root string, videos *videoPlan, files []string, speci
 			}
 			continue
 		}
-		if staying[f] {
-			ops = append(ops, Op{"misc", "leave", f, "", "subtitle of a video left where it is"})
-			continue
-		}
 		if s, ok := subs[f]; ok {
 			op := "leave"
 			switch {
@@ -795,6 +791,8 @@ func (p *planner) planRoot(root string, videos *videoPlan, files []string, speci
 				// a name the apps cannot read ('Season 3 Episode 1-'): SxxEyy in a folder of its own show
 				ops = append(ops, Op{"isolate:" + mine.show, "move", f, dst, "episode no source lists: a name the apps read"})
 			}
+		case subExt[ext] && staying[f]:
+			ops = append(ops, Op{unitOrMisc, "leave", f, "", "subtitle of a video left where it is"})
 		case subExt[ext]:
 			ops = append(ops, Op{unitOrMisc, "archive", f, p.archive + "/subtitles/" + rootName + "/" + strings.Join(rel, "/"), "subtitle with no matching video"})
 		default:
