@@ -345,7 +345,8 @@ func (r *run) readFeed(ctx context.Context) error {
 		return err
 	}
 	// A rating's time decides which source's rating is his latest (see wants): an entry's is when it was logged,
-	// until a read finds the rating changed, which can only be after a films grid page showed the old one.
+	// until a read finds its rating changed; then it is that read's, so the edit beats a films grid page read in
+	// between, which still showed the old rating.
 	now := r.env.Now().Format(store.TimeFormat)
 	for _, e := range entries {
 		if e.Slug == "" {
