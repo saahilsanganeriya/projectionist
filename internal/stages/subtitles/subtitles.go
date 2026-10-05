@@ -1,42 +1,42 @@
 // Package subtitles keeps an English text subtitle beside every movie and episode (port of scripts/sub_stats.py and
 // scripts/subfetch2.py, made cheap-first). It is a reconciler: each run walks the library and, for each video still
-// lacking an English sidecar, does only the missing step, and reads the video only where nothing cheaper will do.
+// lacking an English sidecar, does only the missing step, and reads as little of the video as the step allows. Nothing
+// is written whose timing was not checked.
 //
 //	embedded English text track       -> skipped: the players show it, so nothing is fetched and nothing read
 //	else candidates from the providers (Gestdown, SITEC, Subdl with a key; OpenSubtitles legacy and .com last), best
-//	first, skipping any already rejected for this file:
-//	  release-matched                  -> written WITHOUT reading the video once cheapCheck passes: an OpenSubtitles
+//	first, skipping any already rejected for this file, and per title the first route that succeeds:
+//	  a. release-matched               -> written WITHOUT reading the video once cheapCheck passes: an OpenSubtitles
 //	                                      file-hash match, or a subtitle naming the file's original release group
-//	  quick mode (careful is the default), also:
-//	    any plausible candidate        -> written WITHOUT reading the video once cheapCheck passes, release matches
-//	                                      first, then by rank: labelled with this title and naming no other episode
-//	                                      or edition; a special only when its original name carries its S00Exx
-//	    an English VobSub sidecar      -> the check is a fit to <video>.en.idx's caption starts (its text only), not
-//	                                      cheapCheck; the subtitle is written retimed onto them
-//	  otherwise                        -> the alignment queue
-//	the queue, while nobody but the owner watches, at most align_per_day titles in any 24 h (quick mode: only inside
-//	align_window, the night, and a run outside it asks the scheduler for one at its opening), best first, each candidate
-//	downloaded only once the one before it failed:
+//	  sampled mode (the default) only:
+//	  b. an English VobSub sidecar     -> each plausible candidate fitted to <video>.en.idx's caption starts (its text
+//	                                      only) and written retimed onto them; still no read of the video
+//	  c. sampled fit                   -> plausible candidates fitted to K short windows of the video (its English
+//	                                      image track's caption starts, else the voice band of its audio) and written
+//	                                      retimed only when every window has evidence and agrees (sampled.go)
+//	  d. otherwise                     -> the alignment queue
+//	the queue, while nobody but the owner watches, at most align_per_day titles in any 24 h (sampled mode: only inside
+//	align_window, the night; a run outside it, or inside it with the day's cap spent, asks the scheduler for a run when
+//	it may align next), best first, each candidate downloaded only once the one before it failed:
 //	  English PGS/VobSub track         -> cue starts fitted to its caption starts (that stream alone demuxed); one
 //	                                      that does not fit is rescued if alass's alignment to the speech does
 //	  else                             -> alass aligns the candidate to the speech in the audio
 //	accepted                           -> <video>.en.srt, else .eng.srt: created O_EXCL, never overwritten
 //
-// OpenSubtitles is searched only once no other provider's release-matched subtitle passed, and only its hash match is
-// used, unless no other provider has any candidate (then the queue may try its others); while it is out it holds back
-// only a title no other provider has a candidate for. In careful mode nothing is written unverified: a queued title
-// waits until it is aligned. Quick mode writes a plausible candidate whose timing nothing checked beyond its length and
-// stated frame rate, and that file is final: never overwritten, and its video no longer lacks a subtitle, so no later
-// run looks at it again. The duration, frame rate and tracks come from the probe cache, else the .details note (ffprobe
-// runs only for a video that has neither); the original release name from that note, else the rename logs. Three titles
-// at a time look for a release match; the queue aligns one at a time, and an alignment counts against align_per_day
-// only once it is about to read the video. While anyone but the owner is watching no title starts, and every running
-// ffmpeg/alass is stopped. Every attempt is an event, each verdict with the bytes read from the video; a title that got
-// no subtitle is tried again after retry_after, then after 2, 4 and 8 times it, and a queued title is searched again
-// for a release match on the same schedule. A title is recorded only once TMDB and every provider it needs answered
-// (and alass ran, where it is needed); else it is deferred, not recorded, and an alert names the cause (a spent
-// download quota is routine and only logged). Each run also refreshes sub_stats.py's TSV over the whole library.
-// Jellyfin hears of each new sidecar through a queue kept in the store; Plex watches the disk.
+// Careful mode is the rollback: routes a and d only, and the queue aligns at any hour. OpenSubtitles is searched only
+// once no other provider's release-matched subtitle passed, and only its hash match is downloaded before the queue,
+// unless no other provider has any candidate (then the queue may try its others); while it is out it holds back only a
+// title no other provider has a candidate for. The duration, frame rate and tracks come from the probe cache, else the
+// .details note (ffprobe runs only for a video that has neither, or once the sampled fit needs its stream indexes); the
+// original release name from that note, else the rename logs. Three titles at a time look for a subtitle, and one at a
+// time reads its windows; the queue aligns one at a time, and an alignment counts against align_per_day only once it
+// is about to read the whole video. While anyone but the owner is watching no title starts, and every running
+// ffmpeg/ffprobe/alass is stopped. Every attempt is an event, each verdict with the bytes read from the video (and of
+// those, from the disk); a title that got no subtitle is tried again after retry_after, then after 2, 4 and 8 times it,
+// and a queued title is searched again on the same schedule. A title is recorded only once TMDB and every provider it
+// needs answered (and alass ran, where it is needed); else it is deferred, not recorded, and an alert names the cause
+// (a spent download quota is routine and only logged). Each run also refreshes sub_stats.py's TSV over the whole
+// library. Jellyfin hears of each new sidecar through a queue kept in the store; Plex watches the disk.
 package subtitles
 
 import (
@@ -93,11 +93,14 @@ type Options struct {
 	// subfetch2.py's OUT folder: its quota.csv and downloads.csv seed the OpenSubtitles quota once, at cutover.
 	LegacyQuota string `toml:"legacy_quota"`
 	AlignPerDay int    `toml:"align_per_day"` // queued titles aligned in any 24 h; each reads its video once or twice
-	// careful (the default): only a release match is written unaligned, and the queue aligns at any hour. quick: a
-	// downloaded subtitle that passes the cheap check is written even when it was not made for this release (its
-	// timing unverified, for good), and the queue aligns only inside align_window (HH:MM-HH:MM, config timezone).
+	// sampled (the default): also the .en.idx fit and the sampled fit before the queue, which aligns only inside
+	// align_window (HH:MM-HH:MM, config timezone). careful, the rollback: only a release match before the queue, which
+	// aligns at any hour.
 	Mode        string `toml:"mode"`
 	AlignWindow string `toml:"align_window"`
+	// The sampled fit reads sample_windows stretches of sample_length each, spread over the runtime.
+	SampleWindows int           `toml:"sample_windows"`
+	SampleLength  time.Duration `toml:"sample_length"`
 	// Rename logs, oldest first: the original release name of a video whose .details note does not give one.
 	UndoLogs []string `toml:"undo_logs"`
 }
@@ -113,8 +116,10 @@ func defaults() Options {
 		Providers:   []string{"gestdown", "sitec", "subdl", "opensubtitles", "opensubtitles-com"},
 		LegacyQuota: "/volume1/PlexMediaServer/subtitle-downloads",
 		AlignPerDay: 20,
-		Mode:        "careful",
-		AlignWindow: "01:00-07:00",
+		Mode:          "sampled",
+		AlignWindow:   "01:00-07:00",
+		SampleWindows: 4,
+		SampleLength:  90 * time.Second,
 		UndoLogs: []string{"/volume1/PlexMediaServer/rename/undo.tsv", "/volume1/PlexMediaServer/rename/undo_auto.tsv",
 			"/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv",
 			"/volume1/media/.projectionist/rename/undo.tsv"},
@@ -169,8 +174,9 @@ type title struct {
 	englishAudio, englishImage, englishText bool
 	release                                 string // the original release names, space-joined (rank's input)
 	origin                                  origin
-	read                                    int64      // bytes read from the video by the stage and its helpers
-	idx                                     *reference // quick mode: the caption starts of its English VobSub sidecar
+	read, disk                              int64         // bytes read from the video by the stage and its helpers; disk: of those, from the disk
+	idx                                     *reference    // sampled mode: the caption starts of its English VobSub sidecar
+	sampling                                time.Duration // the sampled fit's time on this title: its reads and fits
 }
 
 type run struct {
@@ -184,8 +190,9 @@ type run struct {
 	written   int
 	alerted   map[string]bool
 	alassDown bool                   // alass failed on a title this run: the titles behind it wait for the next run
-	window    config.Window          // quick mode: when the queue may align
+	window    config.Window          // sampled mode: when the queue may align
 	pools     map[string][]Candidate // titles queued this run: their candidates, so the queue need not search again
+	reading   sync.Mutex             // one title at a time reads its windows
 
 	jf     sync.Mutex // the Jellyfin queue
 	pushed time.Time
@@ -196,8 +203,11 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if err := env.Options(&opt); err != nil {
 		return err
 	}
-	if opt.Mode != "quick" && opt.Mode != "careful" {
-		return fmt.Errorf("subtitles: mode %q: want quick or careful", opt.Mode)
+	if opt.Mode != "sampled" && opt.Mode != "careful" {
+		return fmt.Errorf("subtitles: mode %q: want sampled or careful", opt.Mode)
+	}
+	if opt.SampleWindows < 2 || opt.SampleLength < 30*time.Second {
+		return fmt.Errorf("subtitles: sample_windows %d, sample_length %v: want at least 2 windows of 30 s", opt.SampleWindows, opt.SampleLength)
 	}
 	window, err := config.ParseWindow(opt.AlignWindow)
 	if err != nil {
@@ -246,11 +256,7 @@ feed:
 	err = r.workQueue(ctx, titles)
 	r.tellJellyfin(ctx, "", true)
 	r.summarise(ctx, len(titles), len(due))
-	// Quick mode outside its window: the cadence alone may reach the window late or not at all. Never inside it,
-	// where the next opening is now: a capped queue would be run again at once, over and over.
-	if rep.Counts["queue_waiting"] > 0 && !r.alignNow() {
-		rep.Wake = window.Next(env.Now(), env.Loc)
-	}
+	rep.Wake = r.wake(ctx)
 	if err != nil {
 		return err
 	}
@@ -726,10 +732,10 @@ func (r *run) record(ctx context.Context, t *title, o outcome) {
 		return
 	case "release_matched":
 		r.count("written_release_matched")
-	case "best_match":
-		r.count("written_best_match")
 	case "idx_kept", "idx_retimed":
 		r.count("written_idx")
+	case "sampled":
+		r.count("written_sampled")
 	case "kept", "retimed", "rescued":
 		r.count("written_aligned")
 	}
@@ -739,7 +745,10 @@ func (r *run) record(ctx context.Context, t *title, o outcome) {
 	if o.wrote {
 		r.count(fmt.Sprint("provider_hits_", o.fields["provider"]))
 	}
-	o.fields["video_bytes"], o.fields["ffprobe"] = t.read, t.ffprobed
+	o.fields["video_bytes"], o.fields["disk_bytes"], o.fields["ffprobe"] = t.read, t.disk, t.ffprobed
+	if t.sampling > 0 {
+		o.fields["sample_ms"] = t.sampling.Milliseconds()
+	}
 	r.event(ctx, t.path, o)
 	db := r.env.Store.DB()
 	now := r.env.Now().UTC().Format(store.TimeFormat)
@@ -767,9 +776,10 @@ func (r *run) record(ctx context.Context, t *title, o outcome) {
 	}
 }
 
-// fetch is the cheap route: the providers' candidates, any release-matched one written once cheapCheck passes, and
-// otherwise the candidates an alignment may try ("queued"). The video is read only for OpenSubtitles' file hash
-// (128 KiB), and only when OpenSubtitles is about to be searched.
+// fetch is routes a-c: the providers' candidates, a release-matched one written once cheapCheck passes or (sampled
+// mode) a plausible one that fits the title's .en.idx; then (sampled mode) the sampled fit; otherwise the candidates an
+// alignment may try ("queued"). Before the sampled fit the video is read only for OpenSubtitles' file hash (128 KiB),
+// and only when OpenSubtitles is about to be searched.
 func (r *run) fetch(ctx context.Context, t *title) outcome {
 	q, err := r.query(t)
 	if err != nil {
@@ -796,7 +806,7 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	if err != nil {
 		return outcome{result: "error", detail: err.Error()}
 	}
-	if r.quick() {
+	if r.sampled() {
 		t.idx = vobsubReference(t.path, t.durHi)
 	}
 	// A title is recorded only once every provider has answered its search and let its candidates be tried; while one
@@ -842,7 +852,7 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 			r.alertParked(p, t.path, err)
 		}
 		cands = order(cands, t.release)
-		if r.quick() { // a subtitle made for this release before any other, however popular
+		if r.sampled() { // a subtitle made for this release before any other, however popular
 			sort.SliceStable(cands, func(i, j int) bool { return t.releaseMatched(cands[i]) && !t.releaseMatched(cands[j]) })
 		}
 		found += len(cands)
@@ -853,8 +863,8 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 			}
 			matched := t.releaseMatched(c)
 			try := matched
-			if r.quick() { // OpenSubtitles' downloads (180 a day, 8 min apart) go only to its hash match, as in careful mode
-				try = (matched || !last && t.plausible(c)) && t.specialSure()
+			if t.idx != nil { // the .idx checks any plausible one; OpenSubtitles' downloads (180 a day) go only to its hash match
+				try = t.sampleable(c)
 			}
 			if rejected[c.key()] == "" && tried < maxTries && try {
 				tried++
@@ -871,14 +881,17 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 					r.event(ctx, t.path, outcome{result: "download_failed", detail: err.Error(), fields: attempt})
 					continue
 				}
-				out, result, why := r.check(ctx, t, c, txt, matched, attempt)
+				out, result, why := r.check(ctx, t, c, txt, attempt)
 				if why == "" {
 					return r.write(ctx, t, []byte(out), result, attempt)
 				}
-				if err := r.env.Store.CachePut(ctx, keptAs+c.key(), []byte(txt), r.env.Now()); err != nil {
-					r.env.Log.Warn("refused candidate not kept: its alignment downloads it again", "event", "store_error", "item", t.path, "err", err)
+				r.keep(ctx, t, c, txt)
+				status, route := "rejected_cheap", "cheap"
+				if t.idx != nil {
+					status, route = "rejected_idx", "idx"
 				}
-				r.event(ctx, t.path, outcome{result: "rejected_cheap", detail: why, fields: attempt})
+				rejected[c.key()] = route // the sampled fit skips what the .idx refused
+				r.event(ctx, t.path, outcome{result: status, detail: why, fields: attempt})
 			}
 			if !last || cheaper == 0 || c.HashMatch && c.ours {
 				pool = append(pool, c)
@@ -895,6 +908,11 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	case len(pool) == 0: // no download, no video read
 		return outcome{result: "no_aligned_candidate", detail: "every candidate was rejected for this file before"}
 	}
+	if r.sampled() {
+		if o, ok := r.sampledFit(ctx, t, pool, rejected); ok {
+			return o
+		}
+	}
 	var best []string // why it was not release-matched: the group sought, and what the best candidates name
 	for _, c := range pool[:min(len(pool), 5)] {
 		best = append(best, c.provider.Name()+": "+strings.TrimSpace(c.Release+" "+c.FileName))
@@ -903,10 +921,104 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 		fields: map[string]any{"group": t.origin.group, "candidates": best}}
 }
 
-// check is the test a downloaded candidate passes to be written without reading the video: in quick mode, a fit to the
-// title's English VobSub captions where it has them (retimed onto them); else cheapCheck. It returns the text to write
-// and the result, or why the candidate fails.
-func (r *run) check(ctx context.Context, t *title, c Candidate, txt string, matched bool, attempt map[string]any) (string, string, string) {
+// sampleable tells whether a verified route before the queue (.idx or sampled fit) may download c: made for this
+// release or plausible, a special only when sure, and from OpenSubtitles only its hash match (180 downloads a day, 8
+// minutes apart, are kept for those and the capped queue).
+func (t *title) sampleable(c Candidate) bool {
+	return (t.releaseMatched(c) || t.plausible(c)) && t.specialSure() && (!metered(c.provider) || c.HashMatch && c.ours)
+}
+
+// sampledFit is route c: the pool's sampleable candidates downloaded one at a time, best first, each fitted to the
+// video's windows, read once as the first download arrives (a refused download costs no read); the first that fits is
+// written retimed. ok=false sends the title to the queue: nothing fitted, or the windows could not judge.
+func (r *run) sampledFit(ctx context.Context, t *title, pool []Candidate, rejected map[string]string) (outcome, bool) {
+	var smp *sampler
+	defer func() {
+		if smp != nil {
+			t.sampling += r.env.Now().Sub(smp.started)
+		}
+	}()
+	tried := 0
+	for _, c := range pool {
+		if tried == maxTries || rejected[c.key()] == "idx" || rejected[c.key()] == "sampled" || !t.sampleable(c) {
+			continue
+		}
+		tried++
+		attempt := map[string]any{"provider": c.Source, "candidate": c.Release + " " + c.FileName, "id": c.key(), "file": t.key}
+		txt, err := r.download(ctx, c)
+		switch {
+		case errors.Is(err, errParked):
+			r.alertParked(c.provider, t.path, err)
+			continue
+		case ctx.Err() != nil:
+			return outcome{result: "deferred"}, true
+		case err != nil:
+			r.event(ctx, t.path, outcome{result: "download_failed", detail: err.Error(), fields: attempt})
+			continue
+		}
+		r.keep(ctx, t, c, txt)
+		if smp == nil {
+			if err := r.probe(ctx, t); err != nil {
+				return outcome{result: "error", detail: err.Error()}, true
+			}
+			var why string
+			if smp, why = r.newSampler(t); smp == nil {
+				r.event(ctx, t.path, outcome{result: "sampled_skipped", detail: why})
+				return outcome{}, false
+			}
+			r.reading.Lock()
+			why, err = smp.readAll(ctx)
+			r.reading.Unlock()
+			switch {
+			case ctx.Err() != nil:
+				return outcome{result: "deferred"}, true
+			case err != nil || why != "":
+				r.event(ctx, t.path, outcome{result: "sampled_skipped", detail: cmp.Or(why, fmt.Sprint(err)),
+					fields: map[string]any{"video_bytes": smp.read, "disk_bytes": smp.disk}})
+				return outcome{}, false
+			}
+		}
+		fit := fitSamples(cues(txt), smp.samples)
+		attempt["reference"], attempt["ratio"], attempt["offset_ms"] = smp.label(), fit.Ratio, math.Round(fit.Offset*1000)
+		attempt["window_offsets_ms"], attempt["evidence"] = rounded(fit.Offsets, 1000, 1), rounded(fit.Evidence, 10, 0.1)
+		attempt["score"], attempt["runner_up"], attempt["windows"] = math.Round(fit.Score), math.Round(fit.RunnerUp), smp.starts()
+		attempt["sample_bytes"], attempt["sample_disk_bytes"] = smp.read, smp.disk
+		out := txt
+		if fit.Ratio != 1 || fit.Offset != 0 {
+			out = retime(txt, fit.Ratio, fit.Offset)
+		}
+		if fit.Refused == "" && !sane(cues(out), t.info.Duration) {
+			fit.Refused = "the retimed cues do not fit the video's length"
+		}
+		if fit.Refused != "" {
+			r.event(ctx, t.path, outcome{result: "rejected_sampled", detail: fit.Refused, fields: attempt})
+			continue
+		}
+		return r.write(ctx, t, []byte(out), "sampled", attempt), true
+	}
+	return outcome{}, false
+}
+
+// rounded is each x times scale, rounded to a whole number, times unit: offsets in whole ms, evidence to tenths.
+func rounded(xs []float64, scale, unit float64) []float64 {
+	out := make([]float64, len(xs))
+	for i, x := range xs {
+		out[i] = math.Round(x*scale) * unit
+	}
+	return out
+}
+
+// keep stores a downloaded candidate a route refused, so the next route takes it from the store, not the provider.
+func (r *run) keep(ctx context.Context, t *title, c Candidate, txt string) {
+	if err := r.env.Store.CachePut(ctx, keptAs+c.key(), []byte(txt), r.env.Now()); err != nil {
+		r.env.Log.Warn("refused candidate not kept: the next route downloads it again", "event", "store_error", "item", t.path, "err", err)
+	}
+}
+
+// check is the test a downloaded candidate passes to be written without reading the video: a fit to the title's
+// English VobSub captions where it has them (sampled mode; retimed onto them), else, for a release match, cheapCheck.
+// It returns the text to write and the result, or why the candidate fails.
+func (r *run) check(ctx context.Context, t *title, c Candidate, txt string, attempt map[string]any) (string, string, string) {
 	if t.idx != nil {
 		out, result, ok := r.fit(ctx, t.idx, txt, attempt)
 		if !ok || !sane(cues(out), t.durHi) {
@@ -918,15 +1030,11 @@ func (r *run) check(ctx context.Context, t *title, c Candidate, txt string, matc
 	if why := cheapCheck(cues(txt), t.durLo, t.durHi, t.fps, subFPS(c)); why != "" {
 		return "", "", why
 	}
-	if !matched {
-		attempt["reference"] = "cheap_check"
-		return txt, "best_match", ""
-	}
 	attempt["reference"] = "release"
 	return txt, "release_matched", ""
 }
 
-func (r *run) quick() bool { return r.opt.Mode == "quick" }
+func (r *run) sampled() bool { return r.opt.Mode == "sampled" }
 
 // download is c's text with OpenSubtitles' ads stripped: from the store when the cheap route downloaded it before (a
 // release match cheapCheck refused), else from its provider.
@@ -941,25 +1049,28 @@ func (r *run) download(ctx context.Context, c Candidate) (string, error) {
 	return stripAds(txt), nil
 }
 
-// rejected are the candidates (provider:id) rejected for this very file before: "aligned" when an alignment or the
-// length check rejected one (never tried again), "cheap" when only cheapCheck did (an alignment may still try it).
+// rejected are the candidates (provider:id) rejected for this very file before, by the furthest route that refused
+// them: "aligned" (an alignment or its length check: never tried again), "sampled" (the sampled fit), "idx" (the .idx
+// fit), "cheap" (cheapCheck). Each route skips what it or a later one refused; the queue tries all but "aligned".
 func (r *run) rejected(ctx context.Context, path, key string) (map[string]string, error) {
 	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT json_extract(fields, '$.id'), status FROM events WHERE stage=? AND item=?
-		AND status IN ('rejected_misaligned', 'rejected_length', 'rejected_cheap') AND json_extract(fields, '$.file')=?`, name, path, key)
+		AND status IN ('rejected_misaligned', 'rejected_length', 'rejected_sampled', 'rejected_idx', 'rejected_cheap')
+		AND json_extract(fields, '$.file')=?`, name, path, key)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	route := map[string]string{"rejected_misaligned": "aligned", "rejected_length": "aligned", "rejected_sampled": "sampled",
+		"rejected_idx": "idx", "rejected_cheap": "cheap"}
+	order := []string{"", "cheap", "idx", "sampled", "aligned"}
 	out := map[string]string{}
 	for rows.Next() {
 		var id, status string
 		if err := rows.Scan(&id, &status); err != nil {
 			return nil, err
 		}
-		if status != "rejected_cheap" {
-			out[id] = "aligned"
-		} else if out[id] == "" {
-			out[id] = "cheap"
+		if slices.Index(order, route[status]) > slices.Index(order, out[id]) {
+			out[id] = route[status]
 		}
 	}
 	return out, rows.Err()
@@ -985,7 +1096,7 @@ func (r *run) query(t *title) (Query, error) {
 
 // ---- the alignment queue ----
 
-// workQueue aligns queued titles, best first, while nobody but the owner watches and align_per_day allows (in quick
+// workQueue aligns queued titles, best first, while nobody but the owner watches and align_per_day allows (in sampled
 // mode, also only inside align_window); a title keeps its place until its alignment ends in a sidecar or a verdict.
 // A queued title first gets another look for a release match (a subtitle may have been added since), unless this run
 // queued it.
@@ -1051,8 +1162,31 @@ func (r *run) workQueue(ctx context.Context, lacking []*title) error {
 	return nil
 }
 
-// alignNow: careful mode aligns at any hour, quick mode only inside align_window in the config timezone.
-func (r *run) alignNow() bool { return !r.quick() || r.window.Contains(r.env.Now(), r.env.Loc) }
+// alignNow: careful mode aligns at any hour, sampled mode only inside align_window in the config timezone.
+func (r *run) alignNow() bool { return !r.sampled() || r.window.Contains(r.env.Now(), r.env.Loc) }
+
+// wake is when the scheduler should run the stage again for the queue, sooner than its cadence (zero: no need). In
+// sampled mode, with titles waiting: outside the window, its opening; inside it with the day's cap spent, the moment the
+// oldest alignment counted leaves the 24 h, if the window is still open then. The cadence alone (6 h) may land after
+// the window closes and lose the night.
+func (r *run) wake(ctx context.Context) time.Time {
+	ctx = context.WithoutCancel(ctx)
+	if !r.sampled() || r.rep.Counts["queue_waiting"] == 0 {
+		return time.Time{}
+	}
+	now := r.env.Now()
+	if !r.alignNow() {
+		return r.window.Next(now, r.env.Loc)
+	}
+	starts, err := r.alignments(ctx)
+	if err != nil || len(starts) == 0 || len(starts) < r.opt.AlignPerDay {
+		return time.Time{}
+	}
+	if slot := slices.MinFunc(starts, time.Time.Compare).Add(24 * time.Hour); slot.Before(r.window.Close(now, r.env.Loc)) {
+		return slot
+	}
+	return time.Time{}
+}
 
 // alignments are the start times of the alignments in the last 24 h, kept in the store so no restart exceeds the cap.
 func (r *run) alignments(ctx context.Context) ([]time.Time, error) {
@@ -1151,15 +1285,15 @@ func (r *run) summarise(ctx context.Context, lacking, due int) {
 		}
 	}
 	slices.Sort(hits)
-	r.rep.Summary = fmt.Sprintf("%s mode: %d sidecar(s) written: %d release-matched, %d best match after the cheap check, "+
-		"%d fitted to a VobSub sidecar, %d aligned; %d queued, %d waiting in the queue; alignments %d of %d in 24 h; "+
+	r.rep.Summary = fmt.Sprintf("%s mode: %d sidecar(s) written: %d release-matched, %d fitted to a VobSub sidecar, "+
+		"%d by the sampled fit, %d aligned; %d queued, %d waiting in the queue; alignments %d of %d in 24 h; "+
 		"provider hits %s; %d title(s) lacked a sidecar, %d of them carry an English text track, %d were due",
-		r.opt.Mode, r.written, c["written_release_matched"], c["written_best_match"], c["written_idx"], c["written_aligned"],
+		r.opt.Mode, r.written, c["written_release_matched"], c["written_idx"], c["written_sampled"], c["written_aligned"],
 		c["queued"], waiting, len(starts), r.opt.AlignPerDay, cmp.Or(strings.Join(hits, " "), "none"), lacking, c["embedded_text"], due)
 }
 
 // reference is the timing a candidate must line up with: an English image track's caption starts (from the video, or
-// in quick mode from a VobSub sidecar's text), else alass's speech segments of the default audio track.
+// in sampled mode from a VobSub sidecar's text), else alass's speech segments of the default audio track.
 type reference struct {
 	label    string // "pgs" | "idx" | "alass" | "" (none)
 	why      string
@@ -1465,8 +1599,8 @@ func writeSidecar(base string, data []byte) (string, error) {
 // ---- side effects shared by the workers ----
 
 // cmd runs a helper at idle CPU and the lowest best-effort I/O priority in its own process group (so alass's ffmpeg
-// runs so too and dies with it) and returns its stdout; the bytes it and its children read (rchar, Linux) are added to
-// t's when t is the video it reads. The group is stopped while anyone but the owner is watching (an unknown count
+// runs so too and dies with it) and returns its stdout; the bytes it and its children read (rchar and, of those, from
+// the disk, read_bytes; Linux) are added to t's when t is the video it reads. The group is stopped while anyone but the owner is watching (an unknown count
 // counts as watching), checked every viewer-gate poll, and continued once they stop.
 func (r *run) cmd(ctx context.Context, t *title, bin string, args ...string) ([]byte, error) {
 	c := exec.CommandContext(ctx, bin, args...)
@@ -1481,9 +1615,10 @@ func (r *run) cmd(ctx context.Context, t *title, bin string, args ...string) ([]
 	idle(c.Process.Pid)
 	done := make(chan error, 1)
 	go func() {
-		read := exitedRead(c.Process.Pid) // before Wait reaps it, while its /proc/<pid>/io still exists
+		read, disk := exitedRead(c.Process.Pid) // before Wait reaps it, while its /proc/<pid>/io still exists
 		if t != nil {
 			t.read += read
+			t.disk += disk
 		}
 		done <- c.Wait()
 	}()

@@ -50,7 +50,7 @@ type fixture struct {
 	hashIMDb string // when set, Ran's file hash finds a subtitle labelled with this IMDb id
 	hashText string // that subtitle (default: another film's timing)
 	ranHash  string
-	mode     string // the stage's mode; the tests written before quick mode existed run careful mode
+	mode     string // the stage's mode; the tests of the routes careful mode shares run careful mode
 }
 
 func (f *fixture) path(rel string) string { return filepath.Join(f.lib, rel) }
@@ -857,56 +857,50 @@ func idxStream(lang string, ts []float64) string {
 	return b
 }
 
-// Catches quick mode reading or aligning the video for a subtitle the cheap check passed, or writing one it should not.
-// Gestdown serves CtrlHD's subtitle (popular, 3 s late) and NTb's; neither is made for a KILLERS release, so the more
-// popular one is written once the cheap check passes, with no byte of the video read and nothing run on it; a subtitle
-// made for the file's release goes first though another is more popular (here rank sees "hd" as the group, which CtrlHD
-// carries); one that fails the cheap check queues the title. A VobSub sidecar's English stream (after a Spanish one
-// and a forced English one) is the timing: CtrlHD's is retimed onto it although the cheap check would fail it, and
-// nothing that misses another cut's captions is written though it passes the cheap check; an .idx with a caption after
-// the video's end is no timing at all (left from a longer cut), so the cheap check decides. Nothing is written for an
-// episode whose original name names another one, nor for a special whose original name lacks its S00Exx.
-func TestRunQuickWritesWithoutReadingTheVideo(t *testing.T) {
+// Catches the .idx route reading the video or writing what it should not, and careful mode using it at all. A VobSub
+// sidecar's English stream (after a Spanish one and a forced English one) is the timing: CtrlHD's subtitle, popular and
+// 3 s late, is retimed onto it with no byte of the video read; another cut's captions refuse both candidates, and then
+// the sampled fit has none left to read for; an .idx with a caption after the video's end is no timing at all (left
+// from a longer cut). An episode whose original name names another one, or a special whose name lacks its S00Exx, has
+// no candidate any verified route may try: queued, the video unread. Careful mode never opens the .idx.
+func TestRunIdxFit(t *testing.T) {
 	special := "TV/Show (2008) {tmdb-1}/Season 00/Show (2008) - S00E01 - Special.mkv"
 	vobsub := "# VobSub index file, v7 (do not modify this line!)\ntime offset: 0\n"
+	fits := idxStream("es", otherTimes()) + idxStream("en", captionTimes()[:10]) + idxStream("en", captionTimes())
 	for _, c := range []struct {
-		why, rel, original, length, idx string
-		want, id                        string
+		why, mode, rel, original, idx string
+		want, id                      string
+		read                          bool
 	}{
-		{"the popular one", show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", "0h 45m", "", "best_match", "gestdown:c"},
-		{"the release's own first", show, "Show.S01E01.x264-HD (WEB NTb).mkv", "0h 45m", "", "release_matched", "gestdown:n"},
-		{"cheap check fails", show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", "0h 50m", "", "queued", ""},
-		{"fitted to the .idx", show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", "0h 50m",
-			idxStream("es", otherTimes()) + idxStream("en", captionTimes()[:10]) + idxStream("en", captionTimes()), "idx_retimed", "gestdown:c"},
-		{"the .idx of another cut", show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", "0h 45m", idxStream("en", otherTimes()), "queued", ""},
-		{"the .idx of a longer cut", show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", "0h 50m",
-			idxStream("en", append(captionTimes(), 3100)), "queued", ""}, // a caption after the 3060 s video ends
-		{"named another episode", show, "Show.S01E02.720p.HDTV.x264-KILLERS.mkv", "0h 45m", "", "queued", ""},
-		{"a special named so", special, "Show.S00E01.720p.HDTV.x264-KILLERS.mkv", "0h 45m", "", "best_match", "gestdown:c"},
-		{"a special not named so", special, "Show.Christmas.Special.720p.HDTV.x264-KILLERS.mkv", "0h 45m", "", "queued", ""},
+		{"fitted to the .idx", "sampled", show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", fits, "idx_retimed", "gestdown:c", false},
+		{"the .idx of another cut", "sampled", show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", idxStream("en", otherTimes()), "queued", "", false},
+		{"the .idx of a longer cut", "sampled", show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", idxStream("en", append(captionTimes(), 3100)), "queued", "", true},
+		{"named another episode", "sampled", show, "Show.S01E02.720p.HDTV.x264-KILLERS.mkv", fits, "queued", "", false},
+		{"a special not named so", "sampled", special, "Show.Christmas.Special.720p.HDTV.x264-KILLERS.mkv", fits, "queued", "", false},
+		{"careful mode", "careful", show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", fits, "queued", "", false},
 	} {
 		f := newFixture(t)
-		f.mode = "quick"
+		f.mode = c.mode
 		f.gestdownNTb(t)
 		f.options(`providers = ["gestdown"]` + "\nalign_per_day = 0")
 		if c.rel == special {
 			os.MkdirAll(filepath.Dir(f.path(special)), 0o755)
 			os.WriteFile(f.path(special), []byte("special"), 0o644)
 		}
-		f.note(c.rel, c.original, "none", c.length)
-		if c.idx != "" {
-			os.WriteFile(strings.TrimSuffix(f.path(c.rel), ".mkv")+".en.idx", []byte(vobsub+c.idx), 0o644)
-		}
-		rep := f.run(t)
+		f.note(c.rel, c.original, "none", "0h 50m") // 0h 50m: the cheap check fails both candidates
+		os.WriteFile(strings.TrimSuffix(f.path(c.rel), ".mkv")+".en.idx", []byte(vobsub+c.idx), 0o644)
+		f.run(t)
 		fields := f.verdict(c.rel, c.want)
 		_, err := os.Stat(strings.TrimSuffix(f.path(c.rel), ".mkv") + ".en.srt")
 		probed, _ := os.ReadFile(filepath.Join(f.h.Env.FFmpeg.Dir, "ffprobe.calls"))
 		helpers, _ := os.ReadFile(filepath.Join(f.h.Env.FFmpeg.Dir, "helper.calls"))
 		touched := strings.Contains(string(probed)+string(helpers), filepath.Base(c.rel))
-		if got := f.outcomes()[f.path(c.rel)]; got != c.want || touched || fields["video_bytes"] != 0.0 || (err == nil) != (c.id != "") ||
-			c.id != "" && fields["id"] != c.id || c.want == "best_match" && rep.Counts["written_best_match"] != 1 {
-			t.Errorf("%s: %q (want %q), fields %v (want id %q, 0 bytes), sidecar %v, ffprobe/helpers ran on it %v, counts %v",
-				c.why, got, c.want, fields, c.id, err == nil, touched, rep.Counts)
+		var idxEvents int
+		f.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM events WHERE status LIKE '%idx%'`).Scan(&idxEvents)
+		if got := f.outcomes()[f.path(c.rel)]; got != c.want || touched != c.read || (err == nil) != (c.id != "") ||
+			c.id != "" && fields["id"] != c.id || c.mode == "careful" && idxEvents != 0 {
+			t.Errorf("%s: %q (want %q), fields %v (want id %q), sidecar %v, video opened %v (want %v), %d .idx events",
+				c.why, got, c.want, fields, c.id, err == nil, touched, c.read, idxEvents)
 		}
 		if ms, _ := fields["ref_median_ms"].(float64); c.want == "idx_retimed" && math.Abs(ms) > 210 { // the fit's 0.1 s bins
 			t.Errorf("%s: written %v ms from the .idx captions; want within 210", c.why, fields["ref_median_ms"])
@@ -914,13 +908,13 @@ func TestRunQuickWritesWithoutReadingTheVideo(t *testing.T) {
 	}
 }
 
-// Catches quick mode's queue aligning outside its night window, the window read in UTC rather than the config
+// Catches sampled mode's queue aligning outside its night window, the window read in UTC rather than the config
 // timezone, or an alignment starting after the window closed while a guest kept it waiting; a run outside the window
 // that leaves a title queued not asking the scheduler for a run at the window's opening (01:00 Pacific), one with an
-// empty queue asking, or a run inside the window with the day's cap spent asking (the opening is now: it would rerun at
-// once, forever); and the window applied to careful mode, which aligns at any hour.
-func TestRunQuickQueueOnlyAtNight(t *testing.T) {
-	for _, mode := range []string{"quick", "careful"} {
+// empty queue asking, or one inside the window with the day's cap spent asking for a slot after the window closes;
+// and the window applied to careful mode, which aligns at any hour.
+func TestRunSampledQueueOnlyAtNight(t *testing.T) {
+	for _, mode := range []string{"sampled", "careful"} {
 		f := newFixture(t)
 		f.mode = mode
 		f.gestdownNTb(t)
@@ -956,7 +950,7 @@ func TestRunQuickQueueOnlyAtNight(t *testing.T) {
 			continue
 		}
 		if want := time.Date(2026, 10, 5, 8, 0, 0, 0, time.UTC); !wake.Equal(want) { // 01:00 PDT
-			t.Errorf("quick mode at 23:00 with Show queued asked to wake at %v, want %v", wake, want)
+			t.Errorf("sampled mode at 23:00 with Show queued asked to wake at %v, want %v", wake, want)
 		}
 		late := aligned(time.Date(2026, 10, 5, 13, 50, 0, 0, time.UTC), time.Date(2026, 10, 5, 14, 5, 0, 0, time.UTC)) // 06:50, a guest until 07:10
 		spent := make([]time.Time, 20)
@@ -964,27 +958,67 @@ func TestRunQuickQueueOnlyAtNight(t *testing.T) {
 			spent[i] = time.Date(2026, 10, 6, 8, 30, 0, 0, time.UTC) // 01:30, the day's 20
 		}
 		f.h.Env.Store.PutJSON(context.Background(), name, "alignments", spent)
-		if aligned(time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC), time.Time{}) || !wake.IsZero() { // 02:00
-			t.Errorf("quick mode at 02:00 with the cap spent: aligned %v, wake %v; want neither", f.outcomes()[f.path(show)], wake)
+		if aligned(time.Date(2026, 10, 6, 9, 0, 0, 0, time.UTC), time.Time{}) || !wake.IsZero() { // 02:00: a slot only at 01:30 tomorrow
+			t.Errorf("sampled mode at 02:00 with the cap spent: aligned %v, wake %v; want neither", f.outcomes()[f.path(show)], wake)
 		}
 		f.h.Env.Store.PutJSON(context.Background(), name, "alignments", []time.Time{})
 		night := aligned(time.Date(2026, 10, 6, 9, 30, 0, 0, time.UTC), time.Time{}) // 02:30
 		if evening || late || !night {
-			t.Errorf("quick mode aligned Show at 23:00 %v, after a guest kept it past 07:00 %v, at 02:30 %v; want only at 02:30", evening, late, night)
+			t.Errorf("sampled mode aligned Show at 23:00 %v, after a guest kept it past 07:00 %v, at 02:30 %v; want only at 02:30", evening, late, night)
 		}
 		if aligned(time.Date(2026, 10, 7, 5, 0, 0, 0, time.UTC), time.Time{}); !wake.IsZero() { // 22:00, nothing queued
-			t.Errorf("quick mode at 22:00 with an empty queue asked to wake at %v; want no wake", wake)
+			t.Errorf("sampled mode at 22:00 with an empty queue asked to wake at %v; want no wake", wake)
 		}
 	}
 }
 
-// Catches a mode or window other than the stage knows run as some default instead of refused, and a table with no
-// mode running quick mode, whose subtitles nothing verified, instead of careful (until the owner picks).
+// Catches the lost night (the reviewer's repro): the day's 20 alignments ran at 01:05-04:15 PDT, and tonight's run at
+// 01:00 finds the cap spent with titles waiting; without a wake the 6 h cadence next runs at 07:00, after the window,
+// and every night repeats it. The run must ask for 01:05, when the oldest counted alignment leaves the 24 h; at 06:55
+// with the oldest from 07:10 yesterday (before a switch from careful mode) no slot opens before 07:00, so no wake.
+func TestRunSampledWakesForTheNextSlot(t *testing.T) {
+	la, _ := time.LoadLocation("America/Los_Angeles")
+	pdt := func(day, h, m int) time.Time { return time.Date(2026, 10, day, h, m, 0, 0, la) }
+	for _, c := range []struct {
+		why   string
+		first time.Time // the oldest of 20 alignments, 10 minutes apart
+		at    time.Time
+		want  time.Time
+	}{
+		{"the lost night", pdt(5, 1, 5), pdt(6, 1, 0), pdt(6, 1, 5)},
+		{"no slot before 07:00", pdt(5, 7, 10), pdt(6, 6, 55), time.Time{}},
+	} {
+		f := newFixture(t)
+		f.mode = "sampled"
+		f.gestdownNTb(t)
+		f.options(`providers = ["gestdown"]` + "\nalign_per_day = 20")
+		f.note(show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", "none", "0h 50m")
+		f.h.Env.Loc = la
+		var starts []time.Time
+		for i := range 20 {
+			starts = append(starts, c.first.Add(time.Duration(i)*10*time.Minute).UTC())
+		}
+		f.h.Env.Store.PutJSON(context.Background(), name, "alignments", starts)
+		f.h.Now = c.at.UTC()
+		rep := f.run(t)
+		if !rep.Wake.Equal(c.want) || f.outcomes()[f.path(show)] != "queued" || rep.Counts["cap_used"] != 20 {
+			t.Errorf("%s: wake %v, Show %q, %d alignments in 24 h; want wake %v, Show still queued, 20", c.why, rep.Wake, f.outcomes()[f.path(show)],
+				rep.Counts["cap_used"], c.want)
+		}
+	}
+}
+
+// Catches a mode or window other than the stage knows run as some default instead of refused (quick mode, which wrote
+// unverified subtitles, is gone), sample settings too small to judge accepted, and a table with no mode running
+// anything but sampled mode.
 func TestRunModeOptions(t *testing.T) {
 	for _, c := range []struct{ options, wantErr, wantSummary string }{
-		{"", "", "careful mode:"},
-		{`mode = "fast"`, `mode "fast"`, ""},
+		{"", "", "sampled mode:"},
+		{`mode = "careful"`, "", "careful mode:"},
+		{`mode = "quick"`, `mode "quick"`, ""},
 		{`align_window = "1am-7am"`, "align_window", ""},
+		{`sample_windows = 1`, "sample_windows", ""},
+		{`sample_length = "10s"`, "sample_length", ""},
 	} {
 		f := newFixture(t)
 		f.h.SetOptions(`roots = ["` + f.path("Movies") + `"]` + "\nstats_file = \"" + filepath.Join(f.dir, "s.tsv") + "\"\nproviders = []\n" + c.options)
@@ -997,17 +1031,17 @@ func TestRunModeOptions(t *testing.T) {
 	}
 }
 
-// Catches quick mode spending OpenSubtitles' downloads (180 a day, 8 minutes apart) during the search on anything but
+// Catches sampled mode spending OpenSubtitles' downloads (180 a day, 8 minutes apart) before the queue on anything but
 // its hash match: beside Gestdown's candidates its episode match is neither tried nor queued, and for a title only it
 // has candidates for (Ran, a film; Show once Gestdown is not listed) they are queued untried, so the capped queue alone
 // spends them. Ran's, 2.5 s late, would pass the cheap check.
-func TestRunQuickSparesOpenSubtitles(t *testing.T) {
+func TestRunSampledSparesOpenSubtitles(t *testing.T) {
 	for _, c := range []struct{ providers, length, want string }{
 		{`["opensubtitles", "gestdown"]`, "0h 50m", "2 candidate(s)"}, // Gestdown's two fail the cheap check
 		{`["opensubtitles"]`, "0h 45m", "1 candidate(s)"},
 	} {
 		f := newFixture(t)
-		f.mode = "quick"
+		f.mode = "sampled"
 		f.gestdownNTb(t)
 		f.options(`providers = ` + c.providers + "\nalign_per_day = 0")
 		f.note(show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", "none", c.length)

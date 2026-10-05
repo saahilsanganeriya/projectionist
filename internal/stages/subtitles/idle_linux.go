@@ -17,21 +17,23 @@ func idle(pgid int) {
 }
 
 // exitedRead waits for pid to exit without reaping it and returns the bytes it read (rchar of /proc/<pid>/io, which
-// includes the children it reaped): an upper bound on what it read from the video, pipes from its children included.
-func exitedRead(pid int) int64 {
+// includes the children it reaped: an upper bound on what it read from the video, pipes from its children included)
+// and, of those, the bytes the disk served (read_bytes: what the page cache did not hold).
+func exitedRead(pid int) (rchar, readBytes int64) {
 	var info unix.Siginfo
 	if unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT, nil) != nil {
-		return 0
+		return 0, 0
 	}
 	raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/io")
 	if err != nil {
-		return 0
+		return 0, 0
 	}
 	for _, line := range bytes.Split(raw, []byte("\n")) {
 		if v, ok := bytes.CutPrefix(line, []byte("rchar: ")); ok {
-			n, _ := strconv.ParseInt(string(v), 10, 64)
-			return n
+			rchar, _ = strconv.ParseInt(string(v), 10, 64)
+		} else if v, ok := bytes.CutPrefix(line, []byte("read_bytes: ")); ok {
+			readBytes, _ = strconv.ParseInt(string(v), 10, 64)
 		}
 	}
-	return 0
+	return rchar, readBytes
 }

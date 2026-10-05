@@ -173,9 +173,9 @@ Audio 1:         eng · AAC · 5.1
 	}
 }
 
-// Catches quick mode writing, unaligned, a subtitle that says it is for something else: labelled with another title,
-// naming another episode, or naming another edition than the file's (none where the file names one, or one where the
-// file names none). A subtitle for this episode that names no release at all is plausible.
+// Catches a verified route (the .idx or the sampled fit) spending a download on a subtitle that says it is for something
+// else: labelled with another title, naming another episode, or naming another edition than the file's (none where the
+// file names one, or one where the file names none). A subtitle for this episode that names no release is plausible.
 func TestPlausible(t *testing.T) {
 	for _, c := range []struct {
 		why, original string

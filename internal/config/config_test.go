@@ -72,3 +72,25 @@ func TestWindowContains(t *testing.T) {
 		}
 	}
 }
+
+// Catches a window's close taken from the wrong day: today's end for a window that wraps past midnight and was entered
+// last night, or tomorrow's for one still open this morning.
+func TestWindowClose(t *testing.T) {
+	la, _ := time.LoadLocation("America/Los_Angeles")
+	night, _ := ParseWindow("23:00-02:00")
+	early, _ := ParseWindow("01:00-07:00")
+	for _, c := range []struct {
+		w        Window
+		at, want string
+	}{
+		{early, "2026-10-06T08:00:00Z", "2026-10-06T14:00:00Z"}, // 01:00 PDT: closes at 07:00 PDT
+		{night, "2026-10-05T06:30:00Z", "2026-10-05T09:00:00Z"}, // 23:30 PDT: closes at 02:00 the next morning
+		{night, "2026-10-05T08:30:00Z", "2026-10-05T09:00:00Z"}, // 01:30 PDT: closes this morning
+	} {
+		at, _ := time.Parse(time.RFC3339, c.at)
+		want, _ := time.Parse(time.RFC3339, c.want)
+		if got := c.w.Close(at, la); !got.Equal(want) {
+			t.Errorf("%+v.Close(%s) = %v, want %v", c.w, c.at, got.UTC(), c.want)
+		}
+	}
+}

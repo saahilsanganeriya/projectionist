@@ -191,3 +191,17 @@ func (w Window) Next(t time.Time, loc *time.Location) time.Time {
 	}
 	return open
 }
+
+// Close is when the window holding t (any zone) closes, evaluated in loc; t must be inside it. Zero for a window that is
+// always open.
+func (w Window) Close(t time.Time, loc *time.Location) time.Time {
+	if !w.Set {
+		return time.Time{}
+	}
+	lt := t.In(loc)
+	end := time.Date(lt.Year(), lt.Month(), lt.Day(), int(w.End/time.Hour), int(w.End%time.Hour/time.Minute), 0, 0, loc)
+	if !end.After(t) {
+		end = end.AddDate(0, 0, 1)
+	}
+	return end
+}

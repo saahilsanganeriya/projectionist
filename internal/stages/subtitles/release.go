@@ -214,17 +214,17 @@ func (t *title) releaseMatched(c Candidate) bool {
 	return false
 }
 
-// plausible tells whether quick mode may write c unaligned although it was not made for this release: labelled with
-// this title (this film, this episode), naming the file's edition and no other, and, for an episode, neither c's names
-// nor the file's original name naming another episode.
+// plausible tells whether c is worth a verified route's download though it was not made for this release: labelled
+// with this title (this film, this episode), naming the file's edition and no other, and, for an episode, neither c's
+// names nor the file's original name naming another episode.
 func (t *title) plausible(c Candidate) bool {
 	r, ep := parseRelease(c.Release+" "+c.FileName), sxe(t.season, t.episode)
 	return c.ours && r.editions == t.origin.rel.editions &&
 		(t.show == "" || (r.sxe == "" || r.sxe == ep) && (t.origin.rel.sxe == "" || t.origin.rel.sxe == ep))
 }
 
-// specialSure: TMDB and the subtitle sites number a show's specials (season 0) each their own way, so quick mode
-// writes a special's subtitle unaligned only when the file's original name carries the same SxxEyy.
+// specialSure: TMDB and the subtitle sites number a show's specials (season 0) each their own way, so the routes before
+// the queue try a special's subtitles only when the file's original name carries the same SxxEyy.
 func (t *title) specialSure() bool {
 	return t.show == "" || t.season != 0 || t.origin.rel.sxe == sxe(0, t.episode)
 }
