@@ -678,9 +678,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if err := probeAll(ctx, env, opt.ProbeWorkers, s.videos); err != nil {
 		return err
 	}
-	if err := env.Store.PutJSON(ctx, name, "killed", countKills(s.videos, lastKills)); err != nil {
-		return err
-	}
+	kills := countKills(s.videos, lastKills)
 	unsettled, notProbed := 0, 0
 	for _, v := range s.videos {
 		switch {
@@ -725,6 +723,9 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 
 	text := report(env, started, opt.MaxListed, s, shows, notProbed, unsettled+held, prev, hadPrev)
 	if err := writeReport(opt.Report, text); err != nil {
+		return err
+	}
+	if err := env.Store.PutJSON(ctx, name, "killed", kills); err != nil {
 		return err
 	}
 	if save {
