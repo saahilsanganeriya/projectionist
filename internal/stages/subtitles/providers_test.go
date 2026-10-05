@@ -273,8 +273,8 @@ func TestDotCom(t *testing.T) {
 		switch r.URL.Path {
 		case "/subtitles":
 			query = r.URL.RawQuery
-			w.Write([]byte(`{"data":[{"attributes":{"release":"two-cd","files":[{"file_id":1},{"file_id":2}]}},` +
-				`{"attributes":{"release":"mt","machine_translated":true,"files":[{"file_id":3}]}},` +
+			w.Write([]byte(`{"data":[{"attributes":{"release":"two-cd","files":[{"file_id":1},{"file_id":2}],"feature_details":{"season_number":1,"episode_number":2}}},` +
+				`{"attributes":{"release":"mt","machine_translated":true,"files":[{"file_id":3}],"feature_details":{"season_number":1,"episode_number":2}}},` +
 				`{"attributes":{"release":"Show.S01E02","moviehash_match":true,"files":[{"file_id":4,"file_name":"a.srt"}],` +
 				`"feature_details":{"season_number":1,"episode_number":2}}}]}`))
 		case "/download":
