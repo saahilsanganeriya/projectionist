@@ -55,11 +55,11 @@ const (
 	minLines   = 6
 	quietLines = 8
 	// Speech evidence: a window's onset score at the joint offset must stand minZ deviations above its scores over all
-	// 24,000 offsets searched. On the calibration windows (11 titles
-	// with known timing, 5 variants each, and 154 wrong subtitles: other films and other cuts) no wrong subtitle passed
-	// at any threshold from 2.0 up, since its windows peak at different offsets; a correct one's windows with dialogue
-	// scored 3.0-8.5, and those without, under 3.
-	minZ        = 3.0
+	// 24,000 offsets searched. On the calibration windows (11 titles with known timing, 5 variants each, and 154 wrong
+	// subtitles: other films and other cuts) no wrong subtitle passed at any threshold from 2.0 up, since its windows
+	// peak at different offsets. In the first NAS gate run (3.0), the three speech writes whose weakest window scored
+	// 3.0-3.5 held both writes whole-file alass disputed; the bar is 3.5, so a speech window must stand clear.
+	minZ        = 3.5
 	quietSpeech = 0.2
 	// The onset score compares the voice band's level in the edgeSpan after a cue's start with the edgeSpan before it
 	// (clipped at edgeClip dB): high where cues begin as someone starts talking. It finds the offset; the overlap of

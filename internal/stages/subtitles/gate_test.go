@@ -19,7 +19,9 @@ package subtitles
 // "alass <audio stream>") with the same two -> sync.tsv: a written sidecar's offset from an independent whole-file
 // reference (the complete caption track, or alass's whole-file alignment to the audio) at the start, middle and end;
 // GATE_FIT (id, video, candidate file) with GATE_FFMPEG_DIR -> fit.tsv and fit/<id>.srt: the sampled fit of that very
-// candidate (the stage's own reads of the windows), and the retimed text when the fit holds.
+// candidate (the stage's own reads of the windows), and the retimed text when the fit holds; GATE_LOCAL (id, video,
+// sidecar) -> local.tsv: a written sidecar's own best offset (speech onsets, ratio 1) in ten 90 s windows at 5, 15 ...
+// 95 % of the runtime, each with its z: where it sits beyond the four windows the fit read.
 
 import (
 	"context"
@@ -389,4 +391,52 @@ func TestGateFit(t *testing.T) {
 		}
 	}
 	gateWrite(t, "fit.tsv", b.String())
+}
+
+// TestGateLocal reads ten speech windows across the whole runtime and reports, per window, the offset a written
+// sidecar's cue starts would need to land on the speech onsets there (0 = in sync) and how far that peak stands out.
+func TestGateLocal(t *testing.T) {
+	lines := gateLines(t, "GATE_LOCAL")
+	h := fake.NewEnv(t, nil)
+	h.Env.FFmpeg = config.FFmpeg{Dir: os.Getenv("GATE_FFMPEG_DIR")}
+	prober, err := probe.NewProber(h.Env.FFmpeg.FFprobePath(), h.Env.Store.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &run{env: h.Env, opt: Options{SampleWindows: 4, SampleLength: 90 * time.Second}, rep: &stage.Report{}, alerted: map[string]bool{}}
+	var b strings.Builder
+	b.WriteString("id\tposition\toffset_ms\tz\n")
+	for _, line := range lines {
+		f := strings.Split(line, "\t")
+		info, err := prober.Probe(context.Background(), f[1])
+		if err != nil {
+			t.Errorf("%s: %v", f[0], err)
+			continue
+		}
+		info.Subtitles = nil // the speech, whatever tracks the file has
+		smp, why := r.newSampler(&title{path: f[1], info: info})
+		if smp == nil {
+			t.Errorf("%s: %s", f[0], why)
+			continue
+		}
+		var wins []sampleWindow
+		for q := 0.05; q < 1; q += 0.1 {
+			wins = append(wins, sampleWindow{q*info.Duration - 45, 90})
+		}
+		got, why, err := smp.readWindows(context.Background(), wins)
+		if err != nil || why != "" {
+			t.Errorf("%s: %s %v", f[0], why, err)
+			continue
+		}
+		raw, _ := os.ReadFile(f[2])
+		spans := cues(string(raw))
+		n := int(math.Round(2 * sampleShift / frame))
+		for i, s := range got {
+			scores := onsetScores(spans, s, 1, n)
+			own, _ := plateau(scores)
+			o := refine(spans, []sample{s}, 1, binOffset(own))
+			fmt.Fprintf(&b, "%s\t%.0f%%\t%.0f\t%.1f\n", f[0], 100*(0.05+0.1*float64(i)), o*1000, peakZ(scores, own))
+		}
+	}
+	gateWrite(t, "local.tsv", b.String())
 }

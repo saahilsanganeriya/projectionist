@@ -77,9 +77,9 @@ Rust earns a crate when a stage needs a library only Rust has, or when a profile
 win on a stage's critical path. The first case is subtitle sync to the speech in the audio (voice-activity
 detection plus split-aware alignment), which the subtitles stage's alignment queue needs for titles without an English
 image track, and to rescue a downloaded subtitle whose timing the image track rejects (a cut or a drift the caption
-fit cannot follow); a subtitle made for the file's own release (in quick mode, which is opt-in, also any plausible
-subtitle that passes the cheap check, or fits an English `.en.idx` sidecar's caption times) is written without it, and
-without reading the video:
+fit cannot follow). A subtitle made for the file's own release, or one that fits an English `.en.idx` sidecar's caption
+times, is written without it and without reading the video; one the sampled fit (four short windows of the video, its
+voice-activity detection a level-onset score in Go) places is written without it too:
 [alass](https://github.com/kaegi/alass), built from a pinned commit as a static musl binary in the image
 (`/usr/local/bin/alass`) and exec'd by the stage.
 
