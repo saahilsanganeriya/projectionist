@@ -11,3 +11,5 @@ func freeBytes(path string) (int64, error) {
 	}
 	return int64(st.Bavail) * int64(st.Bsize), nil
 }
+
+const noatime = 0

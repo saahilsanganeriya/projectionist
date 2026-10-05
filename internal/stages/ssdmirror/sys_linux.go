@@ -24,3 +24,5 @@ func freeBytes(path string) (int64, error) {
 	}
 	return int64(st.Bavail) * size, nil
 }
+
+const noatime = unix.O_NOATIME

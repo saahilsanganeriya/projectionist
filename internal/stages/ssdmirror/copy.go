@@ -35,6 +35,7 @@ type progress struct {
 	Copied  int64     `json:"copied"` // written this run
 	Current string    `json:"current,omitempty"`
 	Paused  bool      `json:"paused,omitempty"`
+	PastCut int       `json:"past_cut,omitempty"` // films on the SSD after the A→Z cut: kept, no longer updated
 	Started time.Time `json:"started"`
 	Orphans []string  `json:"orphans,omitempty"` // SSD files whose library twin is gone and that match no archived copy
 }
@@ -133,9 +134,10 @@ func (m *mirror) copyFile(a action) error {
 			return err
 		} else if ok {
 			off = fi.Size()
+			m.prog.Bytes -= off
 		}
 	}
-	in, err := os.Open(a.src)
+	in, err := openRead(a.src)
 	if err != nil {
 		return err
 	}
@@ -211,6 +213,7 @@ func (m *mirror) settle(a action, have int64, tmp string) (done bool, err error)
 			return false, err
 		}
 		if same {
+			m.prog.Bytes -= a.size
 			return true, os.Chtimes(a.dst, a.mtime, a.mtime)
 		}
 	case have < a.size:
@@ -414,6 +417,9 @@ func (m *mirror) status() {
 	if p.Paused {
 		b.WriteString("paused:  someone other than the owner is watching\n")
 	}
+	if p.PastCut > 0 {
+		fmt.Fprintf(&b, "past cut: %d film(s) on the SSD after the last one that fits are kept but no longer updated\n", p.PastCut)
+	}
 	if len(p.Orphans) > 0 {
 		fmt.Fprintf(&b, "kept:    %d SSD file(s) whose library twin is gone and that match no archived copy:\n", len(p.Orphans))
 		for _, o := range p.Orphans {
@@ -441,7 +447,7 @@ func sampled(a, b string, n, window int64) (bool, error) {
 
 func equalRange(a, b string, off, n int64) (bool, error) {
 	read := func(p string) ([]byte, error) {
-		f, err := os.Open(p)
+		f, err := openRead(p)
 		if err != nil {
 			return nil, err
 		}
@@ -466,12 +472,12 @@ func equalRange(a, b string, off, n int64) (bool, error) {
 
 // equalFiles compares two whole files, paced and gated like a copy (it reads as much).
 func (m *mirror) equalFiles(a, b string) (bool, error) {
-	fa, err := os.Open(a)
+	fa, err := openRead(a)
 	if err != nil {
 		return false, err
 	}
 	defer fa.Close()
-	fb, err := os.Open(b)
+	fb, err := openRead(b)
 	if err != nil {
 		return false, err
 	}
@@ -495,6 +501,16 @@ func (m *mirror) equalFiles(a, b string) (bool, error) {
 			return false, err
 		}
 	}
+}
+
+// openRead opens without updating the access time: on btrfs an atime write is a metadata copy-on-write, on the SSD a
+// directory-entry write. O_NOATIME needs file ownership or CAP_FOWNER, hence the fallback.
+func openRead(p string) (*os.File, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|noatime, 0)
+	if errors.Is(err, syscall.EPERM) {
+		return os.Open(p)
+	}
+	return f, err
 }
 
 // pacer holds bulk reads to rate bytes/s on the injected clock.

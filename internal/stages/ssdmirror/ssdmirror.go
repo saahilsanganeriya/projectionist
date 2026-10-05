@@ -161,7 +161,7 @@ func budgetPlan(films []string, libBytes, ssdBytes map[string]int64, free, margi
 	var plan []planned
 	for _, f := range films {
 		need := max(0, libBytes[f]-ssdBytes[fold(f)])
-		if need > budget {
+		if need > budget && need > 0 { // a film already complete costs nothing, even once free space is under the margin
 			break
 		}
 		budget -= need
@@ -348,12 +348,23 @@ func (m *mirror) run() error {
 	for n, files := range ssd {
 		ssdBytes[fold(n)] += total(files)
 	}
-	plan := budgetPlan(m.eligible(lib), libBytes, ssdBytes, free, int64(opt.MarginGB*1e9))
-	acts, err := diff(opt, lib, ssd, plan)
+	films := m.eligible(lib)
+	safe := make(tree, len(films)) // what the SSD can hold: only these may be matched, renamed to or copied
+	for _, f := range films {
+		safe[f] = lib[f]
+	}
+	plan := budgetPlan(films, libBytes, ssdBytes, free, int64(opt.MarginGB*1e9))
+	acts, err := diff(opt, safe, ssd, plan)
 	if err != nil {
 		return err
 	}
 	m.prog = progress{State: "running", Films: len(plan), Started: m.env.Now()}
+	for _, f := range films[len(plan):] {
+		if ssdBytes[fold(f)] > 0 {
+			m.prog.PastCut++
+		}
+	}
+	m.rep.Count("past_cut", m.prog.PastCut)
 	if len(plan) > 0 {
 		m.prog.First, m.prog.Last = plan[0].film, plan[len(plan)-1].film
 	}
