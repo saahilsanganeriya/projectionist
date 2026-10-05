@@ -51,16 +51,22 @@ func TestClassify(t *testing.T) {
 }
 
 // Catches: a trigger in the middle of a long copy (the busy check), one trigger per file instead of one per folder,
-// a trigger for noise (.part, .DS_Store, @eaDir) next to the media, and the first sweep triggering what already exists.
+// a trigger for noise (.part, .DS_Store, @eaDir) next to the media, the first sweep triggering what already exists,
+// and watches spent on @eaDir and .details folders (one per movie: they would double the library's need).
 func TestQuietFolderTriggersOnce(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newRig(t, 100)
 		old := "Movies/Old (2001) {tmdb-1}"
 		r.put(old+"/Old (2001) {tmdb-1}.mkv", 10)
 		r.put(old+"/@eaDir/thumb.jpg", 1)
+		r.put(old+"/.details/Old (2001) {tmdb-1}.txt", 1)
 		r.put("TV/Show (2008) {tmdb-2}/Season 01/Show (2008) - S01E01 - Pilot.mkv", 10)
 		finish := r.start()
 		synctest.Wait()
+		want := []string{"Movies", old, "TV", "TV/Show (2008) {tmdb-2}", "TV/Show (2008) {tmdb-2}/Season 01", "complete"}
+		if got := r.src.watched(r.dir); !slices.Equal(got, want) {
+			t.Fatalf("watches = %q, want %q (one per folder, none for @eaDir or .details)", got, want)
+		}
 
 		// An SMB-style copy: the file appears, grows for four minutes with no event, then is closed at 04:04.
 		movie := "Movies/New (2020) {tmdb-3}"
@@ -157,6 +163,17 @@ func (f *fakeSource) Add(dir string) error {
 func (f *fakeSource) Events() <-chan []event { return f.ch }
 func (f *fakeSource) Len() int               { f.mu.Lock(); defer f.mu.Unlock(); return len(f.dirs) }
 func (f *fakeSource) Close() error           { return nil }
+
+func (f *fakeSource) watched(base string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for d := range f.dirs {
+		out = append(out, strings.TrimPrefix(d, base+"/"))
+	}
+	slices.Sort(out)
+	return out
+}
 
 type rig struct {
 	t     *testing.T
