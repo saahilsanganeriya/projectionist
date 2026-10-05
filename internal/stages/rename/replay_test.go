@@ -225,7 +225,7 @@ func TestReplayPortMatchesPython(t *testing.T) {
 	writeLines(t, "port-diffs.tsv", diffs)
 	same := len(want) - countPrefix(diffs, "PY\t") - countPrefix(diffs, "MISSING\t")
 	t.Logf("port check: %d/%d rows identical (%.3f%%), %d extra, %d unit clashes, %d problems, %d unplanned",
-		same, len(want), 100*float64(same)/float64(len(want)), countPrefix(diffs, "EXTRA\t"), unitClash, len(plan.Problems), len(plan.Unplanned))
+		same, len(want), 100*float64(same)/float64(len(want)), countPrefix(diffs, "EXTRA\t"), unitClash, len(check(plan.Ops, in.Files)), len(plan.Unplanned))
 	if len(diffs) > 0 {
 		for _, d := range diffs[:min(len(diffs), 40)] {
 			t.Log(d)

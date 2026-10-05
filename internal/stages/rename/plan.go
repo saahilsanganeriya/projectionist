@@ -55,11 +55,11 @@ type Op struct{ Unit, Op, Src, Dst, Reason string }
 
 type Review struct{ Unit, Item, Issue string }
 
+// Plan is the planner's output; check(Ops, Files) says which units are unsafe to run.
 type Plan struct {
 	Ops       []Op
 	Review    []Review
-	Problems  map[string][]string // unit → reasons it must not run (collisions, existing targets, bad names)
-	Unplanned []string            // files no op covers (a planner gap; never acted on)
+	Unplanned []string // files no op covers (a planner gap; never acted on)
 }
 
 // needsFacts starts the reason of a video left because its label needs a resolution the input lacks.
@@ -247,7 +247,7 @@ func Build(in *Input) Plan {
 	ops = append(ops, specialT.ops()...)
 	ops = append(ops, p.planRoot(p.tv, shows, tfiles, specialT.by)...)
 
-	plan := Plan{Ops: ops, Review: append(mreview, treview...), Problems: check(ops, in.Files)}
+	plan := Plan{Ops: ops, Review: append(mreview, treview...)}
 	accounted := map[string]bool{}
 	for _, o := range ops {
 		accounted[o.Src] = true
