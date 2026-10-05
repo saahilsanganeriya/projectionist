@@ -2,48 +2,50 @@ package remote4k
 
 import (
 	"context"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"projectionist/internal/config"
 	"projectionist/internal/fake"
+	"projectionist/internal/jellyfin"
+	"projectionist/internal/plex"
 	"projectionist/internal/probe"
 	"projectionist/internal/stage"
 )
 
-func ptr(n int) *int { return &n }
-
-func uhd(kbps int, file string) media {
-	m := media{VideoResolution: "4k", Bitrate: kbps}
-	m.Part = append(m.Part, struct {
-		File string `json:"file"`
-	}{file})
-	return m
+func uhd(path string, width int, kbps int64, dv int) version {
+	return version{path, probe.Info{BitRate: kbps * 1000, Video: &probe.Video{Width: width, DVProfile: dv}}}
 }
 
-// Catches: encoding a film that already fits the upload, a TV item, or the smaller of two 4K sources.
-func TestPlan(t *testing.T) {
-	items := []item{
-		{Type: "movie", Title: "Heat", Year: 1995, LibrarySectionID: 4, Media: []media{
-			{VideoResolution: "1080", Bitrate: 9000}, uhd(48000, "/m/Heat (1995) {tmdb-949}/a.mkv"), uhd(61000, "/m/Heat (1995) {tmdb-949}/b.mkv")}},
-		{Type: "movie", Title: "Ran", Year: 1985, Media: []media{uhd(70000, "/m/Ran/r.mkv"), uhd(18000, "/m/Ran/small.mkv")}},
-		{Type: "movie", Title: "Clerks", Year: 1994, Media: []media{{VideoResolution: "1080", Bitrate: 5000}}},
-		{Type: "episode", Title: "Pilot", Year: 2008, Media: []media{uhd(40000, "/tv/x.mkv")}},
-		{Type: "movie", Title: "Dune", Year: 2021, Media: []media{uhd(20000, "/m/Dune/d.mkv")}},
+// Catches: encoding a film that already fits the upload, a 1080p-only film, the smaller of two 4K sources (also
+// when only size and duration give a bitrate), a scope (3840x1600) source missed, or a DV5 source encoded.
+func TestPick(t *testing.T) {
+	sized := version{"sized", probe.Info{Size: 45e9, Duration: 6000, Video: &probe.Video{Width: 3840}}} // 60000 kbps
+	cases := []struct {
+		name       string
+		vs         []version
+		wantSrc    string
+		wantReason string
+		wantDone   bool
+	}{
+		{"1080p only", []version{uhd("hd", 1920, 9000, 0)}, "", "not a 4K movie", false},
+		{"highest-bitrate 4K", []version{uhd("hd", 1920, 9000, 0), uhd("a", 3840, 48000, 0), uhd("b", 3840, 61000, 0)}, "b", "", false},
+		{"scope 4K", []version{{"scope", probe.Info{BitRate: 7e7, Video: &probe.Video{Width: 3840, Height: 1600}}}}, "scope", "", false},
+		{"small 4K exists", []version{uhd("big", 3840, 70000, 0), uhd("small", 3840, 18000, 0)}, "", "", true},
+		{"bitrate from size and duration", []version{uhd("a", 3840, 48000, 0), sized}, "sized", "", false},
+		{"Dolby Vision profile 5", []version{uhd("dv5", 3840, 70000, 5)}, "", "Dolby Vision profile 5", false},
 	}
-	jobs, skips := plan(items, 20000, 4)
-	if len(jobs) != 1 || jobs[0].Title != "Heat (1995)" || jobs[0].Source.Bitrate != 61000 ||
-		jobs[0].Folder != "/m/Heat (1995) {tmdb-949}" || jobs[0].Section != 4 {
-		t.Fatalf("jobs = %+v", jobs)
-	}
-	want := []skip{{"Clerks (1994)", "not a 4K movie"}, {"Pilot (2008)", "not a 4K movie"}}
-	if !reflect.DeepEqual(skips, want) {
-		t.Fatalf("skips = %+v", skips)
+	for _, c := range cases {
+		src, reason, done := pick(c.vs, 20000)
+		if src.Path != c.wantSrc || reason != c.wantReason || done != c.wantDone {
+			t.Errorf("%s: pick = %q %q %v; want %q %q %v", c.name, src.Path, reason, done, c.wantSrc, c.wantReason, c.wantDone)
+		}
 	}
 }
 
@@ -55,17 +57,17 @@ func TestFFmpegArgs(t *testing.T) {
 	cases := []struct {
 		name    string
 		v       *probe.Video
-		m       media
+		a       probe.Audio
 		want    []string
 		without []string
 	}{
-		{"10-bit HDR, TrueHD 7.1", hdr, media{AudioCodec: "truehd", AudioChannels: ptr(8)},
+		{"10-bit HDR, TrueHD 7.1", hdr, probe.Audio{Codec: "truehd", Channels: 8},
 			[]string{"-profile:v main10", "-color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc", "-c:a:0 eac3 -b:a:0 640k -ac:a:0 6"}, nil},
-		{"DTS 5.1 keeps channels", hdr, media{AudioCodec: "dca", AudioChannels: ptr(6)}, []string{"-c:a:0 eac3 -b:a:0 640k -c:s"}, []string{"-ac:a:0"}},
-		{"8-bit SDR, E-AC-3", sdr, media{AudioCodec: "eac3", AudioChannels: ptr(6)}, []string{"-profile:v main ", "-c:a:0 copy"}, []string{"-color_trc"}},
+		{"DTS 5.1 keeps channels", hdr, probe.Audio{Codec: "dts", Channels: 6}, []string{"-c:a:0 eac3 -b:a:0 640k -c:s"}, []string{"-ac:a:0"}},
+		{"8-bit SDR, E-AC-3", sdr, probe.Audio{Codec: "eac3", Channels: 6}, []string{"-profile:v main ", "-c:a:0 copy"}, []string{"-color_trc"}},
 	}
 	for _, c := range cases {
-		got := strings.Join(ffmpegArgs(ff, "/src.mkv", "/w/work.mkv", "/w/p.txt", c.v, c.m), " ")
+		got := strings.Join(ffmpegArgs(ff, "/src.mkv", "/w/work.mkv", "/w/p.txt", c.v, c.a), " ")
 		for _, w := range append(c.want, "-c:v hevc_qsv -b:v 14M -maxrate 20M -bufsize 28M", "-map 0:v:0 -map 0:a:0 -map 0:s?", "-y /w/work.mkv") {
 			if !strings.Contains(got, w) {
 				t.Errorf("%s: missing %q in %s", c.name, w, got)
@@ -79,23 +81,19 @@ func TestFFmpegArgs(t *testing.T) {
 	}
 }
 
-// Catches: a folder name with & ( ) { } breaking Plex's scan request (must match Python's urllib quote).
-func TestQuote(t *testing.T) {
-	got := quote("/volume1/media/Movies/Fast & Furious (2009) {tmdb-13804}")
-	if want := "/volume1/Plex%20Media/Movies/Fast%20%26%20Furious%20%282009%29%20%7Btmdb-13804%7D"; got != want {
-		t.Fatalf("quote = %s", got)
-	}
-}
-
-// Catches, end to end against fake Plex/Jellyfin: the copy not landing under the scheme's name, an encode that
-// keeps running while a guest watches (it must be SIGSTOPped, then resumed), Plex/Jellyfin not told, a DV5 source
-// encoded, and a rerun re-encoding a film that is already done.
+// Catches, end to end against fake Plex/Jellyfin: a Jellyfin playlist or collection named "Remote 4K" ignored (or
+// another collection obeyed, or both asked for in the one query the live server cannot answer in time), a film
+// listed in both apps handled twice, a stale or non-movie entry failing the run, the copy not landing under the
+// scheme's name, an encode that keeps running while a guest watches (it must be SIGSTOPped, then resumed),
+// Jellyfin not told (or its failed notify failing the run and losing the history), Plex asked to rescan, a DV5
+// source encoded, and a rerun re-encoding a film that is already done.
 func TestRunEndToEnd(t *testing.T) {
 	h := fake.NewEnv(t, nil)
 	lib := t.TempDir()
 	heat := filepath.Join(lib, "Heat (1995) {tmdb-949}")
 	ran := filepath.Join(lib, "Ran (1985) {tmdb-11645}")
-	for _, d := range []string{heat, ran} {
+	clerks := filepath.Join(lib, "Clerks (1994) {tmdb-2292}")
+	for _, d := range []string{heat, ran, clerks} {
 		os.MkdirAll(d, 0o755)
 		os.WriteFile(filepath.Join(d, filepath.Base(d)+".mkv"), []byte("source"), 0o644)
 	}
@@ -117,15 +115,40 @@ echo out_time_ms=6612000000 > "$progress"; echo encoded > "$prev"
 
 	h.Plex.Handle("GET", "/playlists", 200, `{"MediaContainer":{"Metadata":[{"ratingKey":"9","title":"Other"},{"ratingKey":"77","title":"Remote 4K"}]}}`)
 	h.Plex.Handle("GET", "/playlists/77/items", 200, `{"MediaContainer":{"Metadata":[
- {"type":"movie","title":"Heat","year":1995,"librarySectionID":4,"Media":[{"videoResolution":"4k","bitrate":61000,"duration":6612480,"audioCodec":"truehd","audioChannels":8,"Part":[{"file":"`+heat+`/Heat (1995) {tmdb-949}.mkv"}]}]},
- {"type":"movie","title":"Ran","year":1985,"librarySectionID":4,"Media":[{"videoResolution":"4k","bitrate":70000,"duration":9600000,"audioCodec":"aac","Part":[{"file":"`+ran+`/Ran (1985) {tmdb-11645}.mkv"}]}]}]}}`)
-	h.Plex.Handle("GET", "/library/sections/4/refresh", 200, "")
-	h.Jellyfin.Handle("POST", "/Library/Media/Updated", 204, "")
+ {"type":"movie","title":"Ran","year":1985,"Media":[{"Part":[{"file":"`+ran+`/Ran (1985) {tmdb-11645}.mkv"}]}]},
+ {"type":"movie","title":"Gone","year":2001,"Media":[{"Part":[{"file":"`+lib+`/Gone (2001) {tmdb-1}/Gone (2001) {tmdb-1}.mkv"}]}]}]}}`)
+	children := map[string]string{
+		"p1": `{"Items":[{"Name":"Ran","Type":"Movie","Path":"` + ran + `/Ran (1985) {tmdb-11645}.mkv"},{"Name":"Pilot","Type":"Episode","ProductionYear":2008,"Path":"/tv/x.mkv"}]}`,
+		"c1": `{"Items":[{"Name":"Heat","Type":"Movie","Path":"` + heat + `/Heat (1995) {tmdb-949}.mkv"}]}`,
+		"c2": `{"Items":[{"Name":"Clerks","Type":"Movie","Path":"` + clerks + `/Clerks (1994) {tmdb-2292}.mkv"}]}`,
+	}
+	lists := map[string]string{
+		"Playlist": `{"Items":[{"Id":"p1","Name":"Remote 4K","Type":"Playlist"}]}`,
+		"BoxSet":   `{"Items":[{"Id":"c1","Name":"Remote 4K","Type":"BoxSet"},{"Id":"c2","Name":"Other","Type":"BoxSet"}]}`,
+	}
+	h.Jellyfin.HandleFunc("GET", "/Items", func(w http.ResponseWriter, r *http.Request) {
+		if id := r.URL.Query().Get("ParentId"); id != "" {
+			io.WriteString(w, children[id])
+			return
+		}
+		body, ok := lists[r.URL.Query().Get("IncludeItemTypes")]
+		if !ok { // e.g. "Playlist,BoxSet": the live server takes 34-40 s on that, past any client's patience
+			http.Error(w, "combined type query", http.StatusGatewayTimeout)
+			return
+		}
+		io.WriteString(w, body)
+	})
+	h.Jellyfin.Handle("POST", "/Library/Media/Updated", 500, "") // a failing notify must not fail the run
 	done := make(chan error, 1)
 	var rep stage.Report
 	go func() { done <- (Stage{}).Run(context.Background(), h.Env, &rep) }()
 
 	waitFor(t, "encoder started", func() bool {
+		select {
+		case err := <-done:
+			t.Fatalf("run ended before encoding Heat: err=%v counts=%v", err, rep.Counts)
+		default:
+		}
 		pid, _ := os.ReadFile(filepath.Join(ffdir, "pid"))
 		return len(pid) > 0
 	})
@@ -154,18 +177,22 @@ echo out_time_ms=6612000000 > "$progress"; echo encoded > "$prev"
 	if left, _ := filepath.Glob(filepath.Join(work, "*.mkv")); len(left) != 0 {
 		t.Fatalf("work files left behind: %v", left)
 	}
-	refresh := h.Plex.Calls("GET", "/library/sections/4/refresh")
-	if len(refresh) != 1 || refresh[0].RawQuery != "path="+quote(heat) {
-		t.Fatalf("plex refresh = %+v", refresh)
+	if _, err := os.Stat(filepath.Join(clerks, "Clerks (1994) {tmdb-2292} - 2160p 14Mbps.mkv")); !os.IsNotExist(err) {
+		t.Fatal("a film from another collection was encoded")
+	}
+	if refresh := h.Plex.Calls("GET", "/library/sections/4/refresh"); len(refresh) != 0 {
+		t.Fatalf("plex asked to rescan: %+v", refresh)
 	}
 	if upd := h.Jellyfin.Calls("POST", "/Library/Media/Updated"); len(upd) != 1 || !strings.Contains(string(upd[0].Body), `"Path":"`+heat+`"`) {
 		t.Fatalf("jellyfin update = %+v", upd)
 	}
-	if rep.Counts["made"] != 1 || rep.Counts["skip"] != 1 {
+	if rep.Counts["made"] != 1 || rep.Counts["skip"] != 3 || rep.Counts["requested"] != 4 {
 		t.Fatalf("counts = %v", rep.Counts)
 	}
-	if status, fields, ok, _ := h.Env.Store.LastEvent(context.Background(), name, "Ran (1985)"); !ok || status != "skip" || fields["reason"] != "Dolby Vision profile 5" {
-		t.Fatalf("Ran history = %s %v", status, fields)
+	for item, reason := range map[string]string{"Ran (1985) {tmdb-11645}": "Dolby Vision profile 5", "Gone (2001) {tmdb-1}": "folder missing", "Pilot (2008)": "not a 4K movie"} {
+		if status, fields, ok, _ := h.Env.Store.LastEvent(context.Background(), name, item); !ok || status != "skip" || fields["reason"] != reason {
+			t.Errorf("%s history = %s %v; want skip %q", item, status, fields, reason)
+		}
 	}
 
 	var again stage.Report
@@ -175,6 +202,60 @@ echo out_time_ms=6612000000 > "$progress"; echo encoded > "$prev"
 	if runs, _ := os.ReadFile(filepath.Join(ffdir, "runs")); strings.Count(string(runs), "run") != 1 {
 		t.Fatalf("encoder ran %d times; a finished film must not be re-encoded", strings.Count(string(runs), "run"))
 	}
+}
+
+// Catches: a slow app (Plex or Jellyfin) failing or hanging the run instead of leaving its half of the list empty
+// while the other half is still worked through.
+func TestSlowAppLeavesItsHalfEmpty(t *testing.T) {
+	for _, slow := range []string{"plex", "jellyfin"} {
+		h := fake.NewEnv(t, nil)
+		release := make(chan struct{})
+		hang := func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		}
+		h.Plex.Handle("GET", "/playlists", 200, `{"MediaContainer":{"Metadata":[{"ratingKey":"77","title":"Remote 4K"}]}}`)
+		h.Plex.Handle("GET", "/playlists/77/items", 200, `{"MediaContainer":{"Metadata":[{"type":"episode","title":"Pilot","year":2008}]}}`)
+		h.Jellyfin.HandleFunc("GET", "/Items", func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.URL.Query().Get("ParentId") == "p1":
+				io.WriteString(w, `{"Items":[{"Name":"Pilot","Type":"Episode","ProductionYear":2009}]}`)
+			case r.URL.Query().Get("IncludeItemTypes") == "Playlist":
+				io.WriteString(w, `{"Items":[{"Id":"p1","Name":"Remote 4K","Type":"Playlist"}]}`)
+			default:
+				io.WriteString(w, `{"Items":[]}`)
+			}
+		})
+		if slow == "plex" {
+			h.Plex.HandleFunc("GET", "/playlists", hang)
+		} else {
+			h.Jellyfin.HandleFunc("GET", "/Items", hang)
+		}
+		t.Cleanup(func() { close(release) }) // runs before the servers' own cleanup, so Close does not wait on hang
+		h.Env.Plex = plex.New(h.Plex.URL, h.PrefsPath, time.Hour)
+		h.Env.Jellyfin = jellyfin.New(h.Jellyfin.URL, writeKey(t), time.Hour)
+		h.SetOptions(`list_timeout = "20ms"
+status_file = "` + filepath.Join(t.TempDir(), "STATUS.txt") + `"`)
+		var rep stage.Report
+		done := make(chan error, 1)
+		go func() { done <- (Stage{}).Run(context.Background(), h.Env, &rep) }()
+		select {
+		case err := <-done:
+			if err != nil || rep.Counts["requested"] != 1 || rep.Counts["list_unavailable"] != 1 {
+				t.Errorf("%s hanging: err=%v counts=%v; want the other app's one request and one unavailable list", slow, err, rep.Counts)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("run hung on a slow %s: the list_timeout bound is missing", slow)
+		}
+	}
+}
+
+func writeKey(t *testing.T) string {
+	path := filepath.Join(t.TempDir(), "jellyfin_key")
+	os.WriteFile(path, []byte(fake.JellyfinKey), 0o600)
+	return path
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {

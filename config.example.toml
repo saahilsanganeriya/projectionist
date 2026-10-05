@@ -24,6 +24,17 @@ timeout  = "20s"
 dir    = "/usr/lib/jellyfin-ffmpeg" # inside the image; same build as the Jellyfin container
 device = "/dev/dri/renderD128"
 
+# The online sources: identity, episodes, collections, external ids and images come from TMDB directly, artwork
+# also from fanart.tv. Plex and Jellyfin are never asked. Responses are cached in state_db for cache_ttl.
+[tmdb]
+read_token_file = "/run/secrets/tmdb_read_token" # v4 read-access token, sent as a bearer
+api_key_file    = "/run/secrets/tmdb_api_key"    # v3 key, used only when the token file is missing or empty
+cache_ttl       = "24h"
+
+[fanart]
+api_key_file = "/run/secrets/fanart_api_key"
+cache_ttl    = "24h"
+
 # One table per stage. Common keys: enabled (default true when the table exists), every, window ("HH:MM-HH:MM",
 # in timezone, may wrap midnight). Everything else in the table belongs to the stage.
 # [stages.example]
@@ -43,16 +54,18 @@ plex_groups     = [297536, 999, 937] # 937 = videodriver, owner of /dev/dri/rend
 sample          = "/volume1/PlexMediaServer/scripts/gpu_sample.mkv"
 self_test_every = "24h"
 legacy_state    = "/volume1/PlexMediaServer/scripts/gpu_guard.state.json" # imported once at cutover
+plex_timeout    = "5s" # each Plex API call; a slower Plex never fails the run
 
-# Small 4K copies of the films in the Plex playlist "Remote 4K"; replaces scripts/remote4k.py (DSM task 9).
+# Small 4K copies of the films listed as "Remote 4K" (Plex playlist, Jellyfin playlist or Jellyfin collection);
+# replaces scripts/remote4k.py (DSM task 9).
 [stages.remote4k]
-every           = "15m"
-playlist        = "Remote 4K"
-label           = "2160p 14Mbps"
-small_kbps      = 20000
-work_dir        = "/volume1/media/.projectionist/remote4k" # same share as the library: publish = one rename
-status_file     = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
-default_section = 4
+every        = "15m"
+playlist     = "Remote 4K"
+label        = "2160p 14Mbps"
+small_kbps   = 20000
+work_dir     = "/volume1/media/.projectionist/remote4k" # same share as the library: publish = one rename
+status_file  = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
+list_timeout = "5s" # an app slower than this leaves its half of the list empty for that run
 
 # Keeps "<dir>/.details/<video>.txt" true for every video in the scheme, from ffprobe and the rename logs;
 # replaces rename/write_details_files.py. Bounds are per run; probed and scanned files are cached.
@@ -72,3 +85,31 @@ peak_above_kbps   = 20000
 retry_unreadable  = "24h"
 # notes_root      = "/volume1/PlexMediaServer/projectionist-test/details/notes" # dry run: notes into a mirror tree
 # paths_file      = "/path/to/list.txt"                                          # only these videos
+
+# The USB SSD (exFAT) as a mirror of Movies A→Z, as many as fit; replaces ssd-copy/fill.py. Idle I/O priority, capped,
+# paused while anyone but the owner is watching. Nothing on the SSD is overwritten, or deleted without proof.
+[stages.ssdmirror]
+every           = "6h"
+source          = "/volume1/media/Movies"
+target          = "/volumeUSB1/usbshare1-2/Movies"             # never created: absent means the SSD is not mounted
+library_archive = "/volume1/media/_archive"               # an SSD file is deleted only when byte-identical to one here
+ssd_archive     = "/volumeUSB1/usbshare1-2/_archive/ssdmirror" # stale SSD copies move here (on the SSD)
+margin_gb       = 15                                           # free space always left on the SSD (decimal GB)
+mbps            = 50                                           # cap on bulk reads, MB/s
+io_class        = "idle"                                       # copies yield all disk time; "best-effort" = fill.py's nice 19
+status_file     = "/volume1/PlexMediaServer/ssd-copy/PROGRESS.txt"
+
+# Real-time trigger: inotify on the library and finished downloads. A top-level folder (a movie, a show, a download)
+# that changed and then stayed quiet for `quiet` triggers each stage in `trigger`; each is a reconciler that finds its
+# own work. One run = one `sweep` period (walk every root, then follow events), so `every` must be <= `sweep`: the next
+# period then starts at once, and a failed start retries after `every`. One watch per folder: 3,278 for these roots
+# (2026-10-05, `find` with the ignore rules below), root's other processes hold 90 of fs.inotify.max_user_watches=8192;
+# past the limit it alerts and the sweep covers the rest.
+[stages.watcher]
+every   = "1m"
+sweep   = "15m"
+quiet   = "3m" # long SMB/rsync copies keep a folder busy; it triggers this long after the last change
+roots   = ["/volume1/media/Movies", "/volume1/media/TV", "/volume1/media/_downloads/complete"]
+trigger = ["rename", "details", "subtitles", "posters", "collections", "jfsync"]
+ignore  = ["@eaDir", "#recycle", "#snapshot", "_archive", "_assets"] # never watched or counted; dot folders (.details) too
+partial_suffixes = [".part", ".!qB"] # in-progress files (and dot files): keep a folder busy, never trigger on their own
