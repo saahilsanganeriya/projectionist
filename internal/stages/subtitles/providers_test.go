@@ -135,7 +135,9 @@ func TestLegacySearchEpisode(t *testing.T) {
 }
 
 // Catches: Retry-After ignored, a provider retried forever while it is down (it must be parked for the run after six
-// attempts and then refuse without a request), and a quota page saved as a subtitle instead of parking the provider.
+// attempts and then refuse without a request); the download quota in any of its forms (a page instead of gzip, the
+// 404 "IP ... exceeded" deny page, the day's last download per its header) not parking the legacy API, which then
+// threatens a firewall block, or a plain 404 taken for it; and downloads failing in a row not parking the provider.
 func TestPacerBackoffAndParking(t *testing.T) {
 	var mu sync.Mutex
 	calls := map[string]int{}
@@ -156,6 +158,15 @@ func TestPacerBackoffAndParking(t *testing.T) {
 			w.WriteHeader(503)
 		case "/quota":
 			w.Write([]byte("<html>download limit reached</html>"))
+		case "/denied":
+			w.WriteHeader(404)
+			w.Write([]byte("<html>subs_subtitle d IP: 192.0.2.1 exceeded. If you will continue trying to download, your IP will be blocked</html>"))
+		case "/last":
+			w.Header().Set("Download-Quota", "1")
+			w.Write(gz("1\n00:00:01,000 --> 00:00:02,000\nhi\n"))
+		case "/gone":
+			w.WriteHeader(404)
+			w.Write([]byte("<html>Not Found</html>"))
 		}
 	}))
 	defer srv.Close()
@@ -175,13 +186,20 @@ func TestPacerBackoffAndParking(t *testing.T) {
 		t.Errorf("parked provider still called: err %v, %d calls", err, calls["/busy"])
 	}
 
-	o := &legacy{base: srv.URL, userAgent: userAgent, hc: srv.Client(), pace: testPacer(&recorder{})}
-	_, err := o.Download(context.Background(), Candidate{link: srv.URL + "/quota"})
-	if !errors.Is(err, errQuota) {
-		t.Fatalf("quota page: err %v", err)
+	for path, quota := range map[string]bool{"/quota": true, "/denied": true, "/last": true, "/gone": false} {
+		o := &legacy{base: srv.URL, userAgent: userAgent, hc: srv.Client(), pace: testPacer(&recorder{})}
+		_, first := o.Download(context.Background(), Candidate{link: srv.URL + path})
+		_, again := o.Download(context.Background(), Candidate{link: srv.URL + path})
+		if errors.Is(again, errQuota) != quota || quota && calls[path] != 1 {
+			t.Errorf("%s: %v then %v after %d calls; want the quota %v", path, first, again, calls[path], quota)
+		}
 	}
-	if _, err := o.Download(context.Background(), Candidate{link: srv.URL + "/quota"}); !errors.Is(err, errParked) || calls["/quota"] != 1 {
-		t.Errorf("after the quota page: err %v, %d calls", err, calls["/quota"])
+
+	b, gone := testPacer(&recorder{}), errors.New("HTTP 404")
+	for i, err := range []error{gone, gone, gone, nil, gone, gone, gone, gone} {
+		if tripped := b.downloaded(err); tripped != (i == 7) {
+			t.Errorf("download %d (%v): parked %v; want parked at the 4th failure in a row", i, err, tripped)
+		}
 	}
 }
 

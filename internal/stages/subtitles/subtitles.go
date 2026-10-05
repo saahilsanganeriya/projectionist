@@ -567,6 +567,12 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 			r.alertParked(c.provider, t.path, err)
 			continue
 		}
+		if ctx.Err() != nil {
+			return outcome{result: "deferred"}
+		}
+		if c.provider.pacer().downloaded(err) { // parked now; this title is still recorded, so it cannot trip every run
+			r.alertParked(c.provider, t.path, err)
+		}
 		if err != nil {
 			r.event(ctx, t.path, outcome{result: "download_failed", detail: err.Error(), fields: attempt})
 			continue

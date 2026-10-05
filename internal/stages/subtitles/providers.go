@@ -187,6 +187,7 @@ type pacer struct {
 	next   time.Time
 	gap    time.Duration
 	parked error
+	failed int // downloads failed in a row
 	now    func() time.Time
 	sleep  func(context.Context, time.Duration) error
 }
@@ -210,36 +211,58 @@ func (p *pacer) park(err error) {
 	}
 }
 
-// do sends req (rebuilt per attempt) at most once per gap across all workers. 429, 5xx and network errors back off
-// exponentially with jitter (Retry-After wins), six attempts in all; after that the provider is parked. A 2xx
-// response is returned to the caller, any other status as an error.
+// downloaded notes a download's result. Failures in a row as many as a title's tries are the provider's, not the
+// files' (every legacy link answered 404 once the quota was spent): the provider is parked and true is returned.
+func (p *pacer) downloaded(err error) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if err == nil {
+		p.failed = 0
+		return false
+	}
+	p.failed++
+	if p.failed >= maxTries && p.parked == nil {
+		p.parked = err
+		return true
+	}
+	return false
+}
+
 func (p *pacer) do(ctx context.Context, hc *http.Client, req func() (*http.Request, error)) ([]byte, error) {
+	body, _, err := p.doH(ctx, hc, req)
+	return body, err
+}
+
+// doH sends req (rebuilt per attempt) at most once per gap across all workers. 429, 5xx and network errors back off
+// exponentially with jitter (Retry-After wins), six attempts in all; after that the provider is parked. A 2xx
+// response's body and header are returned to the caller, any other status as a *statusError.
+func (p *pacer) doH(ctx context.Context, hc *http.Client, req func() (*http.Request, error)) ([]byte, http.Header, error) {
 	const attempts = 6
 	var last error
 	for attempt := 0; attempt < attempts; attempt++ {
 		p.mu.Lock()
 		if p.parked != nil {
 			p.mu.Unlock()
-			return nil, fmt.Errorf("%w: %w", errParked, p.parked)
+			return nil, nil, fmt.Errorf("%w: %w", errParked, p.parked)
 		}
 		wait := p.next.Sub(p.now())
 		p.next = p.now().Add(max(wait, 0) + p.gap)
 		p.mu.Unlock()
 		if wait > 0 {
 			if err := p.sleep(ctx, wait); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		r, err := req()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		backoff := min(15*time.Minute, 10*time.Second<<attempt)
 		backoff = backoff/2 + rand.N(backoff/2)
 		resp, err := hc.Do(r.WithContext(ctx))
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, ctx.Err()
+				return nil, nil, ctx.Err()
 			}
 			var ue *url.Error
 			if errors.As(err, &ue) {
@@ -253,27 +276,30 @@ func (p *pacer) do(ctx context.Context, hc *http.Client, req func() (*http.Reque
 			case rerr != nil:
 				last = rerr
 			case resp.StatusCode/100 == 2:
-				return body, nil
+				return body, resp.Header, nil
 			case resp.StatusCode == 429 || resp.StatusCode/100 == 5:
 				last = fmt.Errorf("HTTP %d", resp.StatusCode)
 				if s, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && s > 0 {
 					backoff = time.Duration(s) * time.Second
 				}
 			default:
-				return nil, &statusError{resp.StatusCode}
+				return nil, nil, &statusError{resp.StatusCode, body}
 			}
 		}
 		if attempt < attempts-1 {
 			if err := p.sleep(ctx, backoff); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
 	p.park(last)
-	return nil, fmt.Errorf("%w: %w", errParked, last)
+	return nil, nil, fmt.Errorf("%w: %w", errParked, last)
 }
 
-type statusError struct{ code int }
+type statusError struct {
+	code int
+	body []byte
+}
 
 func (e *statusError) Error() string { return fmt.Sprintf("HTTP %d", e.code) }
 
@@ -320,8 +346,8 @@ type legacy struct {
 func (o *legacy) Name() string  { return "opensubtitles" }
 func (o *legacy) pacer() *pacer { return o.pace }
 
-func (o *legacy) get(ctx context.Context, link string) ([]byte, error) {
-	return o.pace.do(ctx, o.hc, func() (*http.Request, error) {
+func (o *legacy) get(ctx context.Context, link string) ([]byte, http.Header, error) {
+	return o.pace.doH(ctx, o.hc, func() (*http.Request, error) {
 		r, err := http.NewRequest(http.MethodGet, link, nil)
 		if err == nil {
 			r.Header.Set("User-Agent", o.userAgent)
@@ -335,7 +361,7 @@ func (o *legacy) get(ctx context.Context, link string) ([]byte, error) {
 func (o *legacy) search(ctx context.Context, q Query, source string, params ...string) ([]Candidate, error) {
 	params = append(params, "sublanguageid-eng")
 	sort.Strings(params)
-	body, err := o.get(ctx, o.base+strings.Join(params, "/"))
+	body, _, err := o.get(ctx, o.base+strings.Join(params, "/"))
 	var se *statusError
 	if errors.As(err, &se) && se.code/100 == 3 {
 		return nil, nil // a search the API rewrites (season 0, an unpadded IMDb id) is redirected to host "_": nothing
@@ -406,16 +432,22 @@ func (o *legacy) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	return kept, nil
 }
 
-// Download fetches the gzip file. A page instead of gzip, or HTTP 407, is the download quota: park the provider.
+// Download fetches the gzip file. The download quota (200 a day, counted down in the download-quota header) parks the
+// provider: after the last download the header allows, or on the API's deny page, which since 2026-10-05 is HTTP 404
+// "IP ... exceeded" (else a 407, or any page instead of gzip). Past the deny page the API threatens a firewall block.
 func (o *legacy) Download(ctx context.Context, c Candidate) (string, error) {
-	body, err := o.get(ctx, c.link)
+	body, h, err := o.get(ctx, c.link)
 	var se *statusError
-	if errors.As(err, &se) && se.code == 407 || err == nil && !bytes.HasPrefix(body, []byte{0x1f, 0x8b}) {
+	denied := errors.As(err, &se) && (se.code == 407 || se.code == 404 && bytes.Contains(bytes.ToLower(se.body), []byte("exceeded")))
+	if denied || err == nil && !bytes.HasPrefix(body, []byte{0x1f, 0x8b}) {
 		o.pace.park(errQuota)
 		return "", fmt.Errorf("%w: %w", errParked, errQuota)
 	}
 	if err != nil {
 		return "", err
+	}
+	if left, err := strconv.Atoi(h.Get("Download-Quota")); err == nil && left <= 1 {
+		o.pace.park(errQuota) // that was the day's last: stop before the deny page
 	}
 	zr, err := gzip.NewReader(bytes.NewReader(body))
 	if err != nil {
