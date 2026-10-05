@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -25,37 +26,54 @@ import (
 // ---- addressing: the one listing per app per day that maps app item ids to library identity ----
 
 type addresses struct {
-	At      time.Time           `json:"at"`
-	Users   map[string]string   `json:"users"`   // account / user name → the app's id for it
-	Targets map[string][]string `json:"targets"` // app item id → the watch items it holds
+	At       time.Time           `json:"at"`      // when Users and Targets were listed; zero: never
+	Tried    time.Time           `json:"tried"`   // the last attempt, successful or not
+	Failures int                 `json:"fails"`   // consecutive failed attempts
+	Users    map[string]string   `json:"users"`   // account / user name → the app's id for it
+	Targets  map[string][]string `json:"targets"` // app item id → the watch items it holds
 }
 
-// address is the app's cached addressing, refreshed when older than address_every. nil means the app has never
-// answered, so its writes and its events wait.
-func (s *syncer) address(ctx context.Context, app string) *addresses {
-	var cached addresses
-	found, err := s.env.Store.GetJSON(ctx, name, "address."+app, &cached)
-	if err == nil && found && s.env.Now().Sub(cached.At) < s.opt.AddressEvery {
-		return &cached
+func (s *syncer) loadAddress(ctx context.Context, app string) (*addresses, error) {
+	var a addresses
+	_, err := s.env.Store.GetJSON(ctx, name, "address."+app, &a)
+	return &a, err
+}
+
+// due says whether an app's listing is to be refreshed: daily; after a failure, with backoff (30 min doubling up to
+// address_every); sooner when something newer than the listing could not be placed in it (an item added since),
+// but never twice within 30 min.
+func (s *syncer) due(a *addresses, unplaced bool) bool {
+	now := s.env.Now()
+	switch {
+	case a.Failures > 0:
+		return !now.Before(a.Tried.Add(backoff(relistFloor, a.Failures, s.opt.AddressEvery)))
+	case a.At.IsZero():
+		return true
 	}
+	return now.Sub(a.At) >= s.opt.AddressEvery || (unplaced && now.Sub(a.Tried) >= relistFloor)
+}
+
+// refresh lists the app again. A failed listing keeps the previous one, which the next runs go on using.
+func (s *syncer) refresh(ctx context.Context, app string, old *addresses) *addresses {
 	list := s.listJellyfin
 	if app == plexApp {
 		list = s.listPlex
 	}
-	fresh := addresses{At: s.env.Now(), Users: map[string]string{}, Targets: map[string][]string{}}
-	if err := list(ctx, &fresh); err != nil {
-		s.env.Log.Warn("addressing failed", "event", "address_failed", "app", app, "err", err)
+	now := s.env.Now()
+	next := &addresses{At: now, Tried: now, Users: map[string]string{}, Targets: map[string][]string{}}
+	if err := list(ctx, next); err != nil {
+		s.env.Log.Warn("addressing failed", "event", "address_failed", "app", app, "attempt", old.Failures+1, "err", err)
 		s.rep.Count("address_failed."+app, 1)
-		if found {
-			return &cached
-		}
-		return nil
+		kept := *old
+		kept.Tried, kept.Failures = now, old.Failures+1
+		next = &kept
+	} else {
+		s.env.Log.Info("app addressed", "event", "addressed", "app", app, "items", len(next.Targets))
 	}
-	if err := s.env.Store.PutJSON(ctx, name, "address."+app, fresh); err != nil {
+	if err := s.env.Store.PutJSON(ctx, name, "address."+app, next); err != nil {
 		s.env.Log.Warn("address cache write failed", "event", "store_error", "err", err)
 	}
-	s.env.Log.Info("app addressed", "event", "addressed", "app", app, "items", len(fresh.Targets))
-	return &fresh
+	return next
 }
 
 func (s *syncer) listPlex(ctx context.Context, a *addresses) error {
@@ -143,16 +161,31 @@ func (Stage) Hooks(env *stage.Env) map[string]http.Handler {
 	}
 }
 
-type parser func(r *http.Request, opt Options, now time.Time) (e watch.Event, ok bool, err error)
+type parser func(r *http.Request, opt Options, now time.Time) (watch.Event, dropped, error)
+
+// dropped says why a pushed event is not recorded. Routine drops (kinds this stage does not use, such as Plex's
+// media.pause or Jellyfin's progress saves every few seconds) log at debug, the rest at info: an account or section
+// that matches nothing in config would otherwise lose every play without a trace.
+type dropped struct {
+	reason  string
+	routine bool
+}
 
 func hook(env *stage.Env, opt Options, parse parser) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		e, ok, err := parse(r, opt, env.Now())
+		e, drop, err := parse(r, opt, env.Now())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if ok {
+		if drop.reason != "" {
+			level := slog.LevelInfo
+			if drop.routine {
+				level = slog.LevelDebug
+			}
+			env.Log.Log(r.Context(), level, "watch event dropped", "event", "watch_event_dropped", "hook", r.URL.Path,
+				"reason", drop.reason)
+		} else {
 			if err := record(r.Context(), env.Store.DB(), e); err != nil {
 				env.Log.Error("watch event not recorded", "event", "store_error", "ref", e.Ref, "err", err)
 				http.Error(w, "store", http.StatusInternalServerError)
@@ -173,20 +206,20 @@ func record(ctx context.Context, db *sql.DB, e watch.Event) error {
 	return applySink(ctx, db, app, e.Person, id, e)
 }
 
-func parsePlex(r *http.Request, opt Options, now time.Time) (watch.Event, bool, error) {
+func parsePlex(r *http.Request, opt Options, now time.Time) (watch.Event, dropped, error) {
 	mr, err := r.MultipartReader()
 	if err != nil {
-		return watch.Event{}, false, fmt.Errorf("plex webhook: %w", err)
+		return watch.Event{}, dropped{}, fmt.Errorf("plex webhook: %w", err)
 	}
 	var raw []byte
 	for raw == nil {
 		part, err := mr.NextPart()
 		if err != nil {
-			return watch.Event{}, false, fmt.Errorf("plex webhook: no payload part: %w", err)
+			return watch.Event{}, dropped{}, fmt.Errorf("plex webhook: no payload part: %w", err)
 		}
 		if part.FormName() == "payload" { // the other part is a thumbnail
 			if raw, err = io.ReadAll(io.LimitReader(part, 1<<20)); err != nil {
-				return watch.Event{}, false, err
+				return watch.Event{}, dropped{}, err
 			}
 		}
 	}
@@ -194,7 +227,8 @@ func parsePlex(r *http.Request, opt Options, now time.Time) (watch.Event, bool, 
 		Event   string   `json:"event"`
 		Rating  *float64 `json:"rating"`
 		Account struct {
-			Title string `json:"title"`
+			ID    json.Number `json:"id"`
+			Title string      `json:"title"`
 		} `json:"Account"`
 		Metadata struct {
 			RatingKey  string      `json:"ratingKey"`
@@ -206,23 +240,17 @@ func parsePlex(r *http.Request, opt Options, now time.Time) (watch.Event, bool, 
 		} `json:"Metadata"`
 	}
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return watch.Event{}, false, fmt.Errorf("plex webhook: %w", err)
+		return watch.Event{}, dropped{}, fmt.Errorf("plex webhook: %w", err)
 	}
-	person, mapped := opt.person(plexApp, p.Account.Title)
 	md := p.Metadata
-	section := md.Section.String()
-	if !mapped || md.RatingKey == "" || (md.Type != "movie" && md.Type != "episode") ||
-		(section != strconv.Itoa(opt.MoviesSection) && section != strconv.Itoa(opt.TVSection)) {
-		return watch.Event{}, false, nil
-	}
-	e := watch.Event{Person: person, Ref: plexApp + ":" + md.RatingKey, Source: "plex-webhook", At: now}
+	e := watch.Event{Ref: plexApp + ":" + md.RatingKey, Source: "plex-webhook", At: now}
 	switch p.Event {
 	case "media.scrobble":
 		e.Kind = watch.Finished
 	case "media.stop":
 		// A stop follows the scrobble too; the last tenth belongs to the scrobble.
 		if md.ViewOffset <= 0 || (md.Duration > 0 && md.ViewOffset*10 >= md.Duration*9) {
-			return watch.Event{}, false, nil
+			return watch.Event{}, dropped{"stop at the start or in the last tenth", true}, nil
 		}
 		e.Kind, e.PositionMs = watch.Stopped, md.ViewOffset
 	case "media.rate":
@@ -234,12 +262,24 @@ func parsePlex(r *http.Request, opt Options, now time.Time) (watch.Event, bool, 
 			e.Rating = nil
 		}
 	default:
-		return watch.Event{}, false, nil
+		return watch.Event{}, dropped{"event " + p.Event, true}, nil
 	}
-	return e, true, nil
+	var mapped bool
+	section := md.Section.String()
+	switch e.Person, mapped = opt.person(plexApp, p.Account.Title); {
+	case md.Type != "movie" && md.Type != "episode":
+		return watch.Event{}, dropped{"type " + md.Type, true}, nil
+	case !mapped:
+		return watch.Event{}, dropped{fmt.Sprintf("account %q (id %s) is in no users entry", p.Account.Title, p.Account.ID), false}, nil
+	case section != strconv.Itoa(opt.MoviesSection) && section != strconv.Itoa(opt.TVSection):
+		return watch.Event{}, dropped{"section " + section + " is neither movies_section nor tv_section", false}, nil
+	case md.RatingKey == "":
+		return watch.Event{}, dropped{"no ratingKey", false}, nil
+	}
+	return e, dropped{}, nil
 }
 
-func parseJellyfin(r *http.Request, opt Options, now time.Time) (watch.Event, bool, error) {
+func parseJellyfin(r *http.Request, opt Options, now time.Time) (watch.Event, dropped, error) {
 	var p struct {
 		NotificationType, NotificationUsername, ItemID, ItemType, SaveReason string
 		Played                                                               bool
@@ -248,14 +288,10 @@ func parseJellyfin(r *http.Request, opt Options, now time.Time) (watch.Event, bo
 		Rating                                                               *float64
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&p); err != nil {
-		return watch.Event{}, false, fmt.Errorf("jellyfin webhook: %w", err)
-	}
-	person, mapped := opt.person(jellyfinApp, p.NotificationUsername)
-	if !mapped || p.NotificationType != "UserDataSaved" || p.ItemID == "" || (p.ItemType != "Movie" && p.ItemType != "Episode") {
-		return watch.Event{}, false, nil
+		return watch.Event{}, dropped{}, fmt.Errorf("jellyfin webhook: %w", err)
 	}
 	id := strings.ToLower(strings.ReplaceAll(p.ItemID, "-", "")) // the plugin may send dashed GUIDs; the API never does
-	e := watch.Event{Person: person, Ref: jellyfinApp + ":" + id, Source: "jellyfin-webhook", At: now,
+	e := watch.Event{Ref: jellyfinApp + ":" + id, Source: "jellyfin-webhook", At: now,
 		Played: p.Played, Plays: p.PlayCount, PositionMs: p.PlaybackPositionTicks / 10_000, Rating: p.Rating}
 	switch p.SaveReason {
 	case "PlaybackFinished": // a stop: completed (played, position reset) or part-way (played untouched)
@@ -265,16 +301,29 @@ func parseJellyfin(r *http.Request, opt Options, now time.Time) (watch.Event, bo
 		case e.Played:
 			e.Kind = watch.Snapshot
 		default:
-			return watch.Event{}, false, nil // stopped in the first minutes: Jellyfin keeps nothing
+			return watch.Event{}, dropped{"stopped in the first minutes (Jellyfin keeps nothing)", true}, nil
 		}
-	case "TogglePlayed", "UpdateUserData": // mark (un)played, or an API write such as this stage's own
+	case "TogglePlayed": // marked played or unplayed
 		e.Kind = watch.Snapshot
 	case "UpdateUserRating":
 		e.Kind = watch.Rated
-	default: // PlaybackStart; PlaybackProgress arrives every few seconds and the stop carries its final state
-		return watch.Event{}, false, nil
+	default:
+		// UpdateUserData is an API write, this stage's own above all: its echo of a multi-episode item would mark
+		// every episode of the file. PlaybackStart; PlaybackProgress arrives every few seconds, the stop carries it.
+		return watch.Event{}, dropped{"save reason " + p.SaveReason, true}, nil
 	}
-	return e, true, nil
+	var mapped bool
+	switch e.Person, mapped = opt.person(jellyfinApp, p.NotificationUsername); {
+	case p.NotificationType != "UserDataSaved":
+		return watch.Event{}, dropped{"notification " + p.NotificationType, true}, nil
+	case p.ItemType != "Movie" && p.ItemType != "Episode":
+		return watch.Event{}, dropped{"type " + p.ItemType, true}, nil
+	case !mapped:
+		return watch.Event{}, dropped{fmt.Sprintf("user %q is in no users entry", p.NotificationUsername), false}, nil
+	case id == "":
+		return watch.Event{}, dropped{"no ItemId", false}, nil
+	}
+	return e, dropped{}, nil
 }
 
 // ---- one-time migrations of the history that existed only inside an app ----
@@ -285,27 +334,50 @@ type migrated struct {
 	Events int       `json:"events"`
 }
 
-// backfillPlex imports the mapped accounts' watch rows from the newest Plex database backup copy (never the live
-// DB), once.
+// migrated says whether a person's history in an app has been imported, and remembers the answer for the run.
+func (s *syncer) migrated(ctx context.Context, app, person string) (bool, error) {
+	var m migrated
+	found, err := s.env.Store.GetJSON(ctx, name, "migrated."+app+"."+person, &m)
+	s.ready[app+"/"+person] = found
+	return found, err
+}
+
+func (s *syncer) markMigrated(ctx context.Context, app, person, from string, events int) error {
+	s.ready[app+"/"+person] = true
+	return s.env.Store.PutJSON(ctx, name, "migrated."+app+"."+person, migrated{From: from, At: s.env.Now(), Events: events})
+}
+
+// backfillPlex imports, once per person, the mapped accounts' watch rows from the newest Plex database backup copy
+// (never the live DB). A copy that cannot be read is retried every run; until then that person's Plex writes wait.
 func (s *syncer) backfillPlex(ctx context.Context) error {
-	var done migrated
-	if found, err := s.env.Store.GetJSON(ctx, name, "migrated."+plexApp, &done); err != nil || found {
-		return err
-	}
-	file, err := newestBackup(s.opt.PlexBackups)
-	if err != nil {
-		s.rep.Alert("no Plex database backup to import watch history from: %v", err)
-		return nil
-	}
+	var todo []User
 	var accounts []any
 	for _, u := range s.opt.Users {
-		accounts = append(accounts, u.Plex)
+		done, err := s.migrated(ctx, plexApp, u.Name)
+		if err != nil {
+			return err
+		}
+		if !done {
+			todo, accounts = append(todo, u), append(accounts, u.Plex)
+		}
 	}
-	rows, err := readPlexBackup(ctx, file, accounts, s.opt.MoviesSection, s.opt.TVSection)
+	if len(todo) == 0 {
+		return nil
+	}
+	file, taken, err := newestBackup(s.opt.PlexBackups)
+	var rows []backupRow
+	if err == nil {
+		rows, err = readPlexBackup(ctx, file, accounts, s.opt.MoviesSection, s.opt.TVSection)
+	}
 	if err != nil {
-		return fmt.Errorf("plex backup %s: %w", file, err)
+		s.rep.Alert("Plex watch history not imported, so Plex writes wait: %v", err)
+		return nil
 	}
-	n := 0
+	if age := s.env.Now().Sub(taken); age > freshBackup {
+		s.rep.Alert("Plex watch history imported from %s, taken %s ago: plays since then are not in the record "+
+			"(take a fresh copy with backup_plex_db.sh just before the first run)", file, age.Round(time.Minute))
+	}
+	events := map[string]int{}
 	for _, r := range rows {
 		person, _ := s.opt.person(plexApp, r.account)
 		e := history(r.plays > 0, r.plays, r.positionMs, r.rating)
@@ -314,10 +386,15 @@ func (s *syncer) backfillPlex(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		n += added
+		events[person] += added
 	}
-	s.env.Log.Info("plex history imported", "event", "migrated", "app", plexApp, "from", file, "rows", len(rows), "events", n)
-	return s.env.Store.PutJSON(ctx, name, "migrated."+plexApp, migrated{From: file, At: s.env.Now(), Events: n})
+	s.env.Log.Info("plex history imported", "event", "migrated", "app", plexApp, "from", file, "rows", len(rows))
+	for _, u := range todo {
+		if err := s.markMigrated(ctx, plexApp, u.Name, file, events[u.Name]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // history is the event for one migrated row. An item the app never saw finished becomes a stop (or a rating), not a
@@ -359,23 +436,23 @@ type backupRow struct {
 	at                       time.Time
 }
 
-// newestBackup is the newest Plex library database copy below dir (not the blobs database).
-func newestBackup(dir string) (string, error) {
+// newestBackup is the newest Plex library database copy below dir (not the blobs database), and when it was taken.
+func newestBackup(dir string) (string, time.Time, error) {
 	var best string
-	var bestTime time.Time
+	var taken time.Time
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".db") || strings.Contains(d.Name(), "blobs") {
 			return err
 		}
-		if info, err := d.Info(); err == nil && info.ModTime().After(bestTime) {
-			best, bestTime = path, info.ModTime()
+		if info, err := d.Info(); err == nil && info.ModTime().After(taken) {
+			best, taken = path, info.ModTime()
 		}
 		return nil
 	})
 	if err == nil && best == "" {
 		err = errors.New("no *.db file in " + dir)
 	}
-	return best, err
+	return best, taken, err
 }
 
 func readPlexBackup(ctx context.Context, file string, accounts []any, movies, tv int) ([]backupRow, error) {
@@ -412,19 +489,20 @@ func readPlexBackup(ctx context.Context, file string, accounts []any, movies, tv
 	return out, rows.Err()
 }
 
-// backfillJellyfin imports the mapped users' played and resumable items from Jellyfin, once.
+// backfillJellyfin imports, once per person, the user's played and resumable items from Jellyfin. A user Jellyfin
+// does not have yet is imported once it exists.
 func (s *syncer) backfillJellyfin(ctx context.Context, addr *addresses) error {
-	var done migrated
-	if found, err := s.env.Store.GetJSON(ctx, name, "migrated."+jellyfinApp, &done); err != nil || found {
-		return err
-	}
 	jf := s.env.Jellyfin.WithTimeout(s.opt.ListTimeout)
-	n := 0
 	for _, u := range s.opt.Users {
+		done, err := s.migrated(ctx, jellyfinApp, u.Name)
+		if err != nil {
+			return err
+		}
 		userID, ok := addr.Users[u.Jellyfin]
-		if !ok {
+		if done || !ok {
 			continue
 		}
+		n := 0
 		for _, filter := range []string{"isPlayed=true", "filters=IsResumable"} {
 			var list struct {
 				Items []struct {
@@ -439,7 +517,7 @@ func (s *syncer) backfillJellyfin(ctx context.Context, addr *addresses) error {
 				}
 			}
 			if err := jf.GetJSON(ctx, "/Items?userId="+userID+"&Recursive=true&IncludeItemTypes=Movie,Episode&Fields=Path&enableImages=false&"+filter, &list); err != nil {
-				s.env.Log.Warn("jellyfin history import failed", "event", "migrate_failed", "err", err)
+				s.env.Log.Warn("jellyfin history import failed", "event", "migrate_failed", "person", u.Name, "err", err)
 				return nil // retried next run: nothing marks it done
 			}
 			for _, it := range list.Items {
@@ -454,9 +532,12 @@ func (s *syncer) backfillJellyfin(ctx context.Context, addr *addresses) error {
 				n += added
 			}
 		}
+		s.env.Log.Info("jellyfin history imported", "event", "migrated", "app", jellyfinApp, "person", u.Name, "events", n)
+		if err := s.markMigrated(ctx, jellyfinApp, u.Name, "jellyfin", n); err != nil {
+			return err
+		}
 	}
-	s.env.Log.Info("jellyfin history imported", "event", "migrated", "app", jellyfinApp, "events", n)
-	return s.env.Store.PutJSON(ctx, name, "migrated."+jellyfinApp, migrated{From: "jellyfin", At: s.env.Now(), Events: n})
+	return nil
 }
 
 // ---- plex.tv: the webhook registration and friends' server tokens ----
