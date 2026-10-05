@@ -68,7 +68,8 @@ type Stage struct{}
 
 func (Stage) Name() string { return name }
 
-// skipDirs are never planned: Synology thumbnails, the recycle bin, and Plex's own optimized copies.
+// skipDirs are never planned: Synology thumbnails, the recycle bin, and Plex's own optimized copies. A folder holding
+// one looks empty to the scan; emptied() re-reads the disk before a folder is removed.
 var skipDirs = set("@eaDir", "#recycle", "Plex Versions")
 
 var partialExt = set(".!qb", ".part", ".partial", ".crdownload", ".tmp") // a folder holding one is still downloading
@@ -111,7 +112,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	writeReview(env, opt.ReviewFile, review)
 	touched, err := apply(ctx, env, rep, opt, units)
 	if err == nil {
-		sweep(env, rep, opt, lib)
+		err = sweep(env, rep, opt, lib)
 	}
 	if opt.Notify {
 		pushJellyfin(ctx, env, opt, touched)
@@ -163,7 +164,7 @@ func scan(root string, settled time.Time) (*library, error) {
 				return nil
 			}
 			if d.IsDir() && skipDirs[d.Name()] {
-				return filepath.SkipDir // a folder holding one looks empty here; prune re-checks the disk
+				return filepath.SkipDir
 			}
 			info, err := d.Info()
 			if err != nil {
@@ -556,7 +557,7 @@ func apply(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, 
 		return touched, err
 	}
 	defer logf.Close()
-	x := &executor{undo: logf, roots: libraryRoots(opt.Root), now: env.Now, stats: map[string]int{}}
+	x := newExec(opt.Root, logf, env.Now)
 	defer func() {
 		for k, v := range x.stats {
 			rep.Count(k, v)
@@ -584,15 +585,36 @@ func apply(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, 
 	return touched, nil
 }
 
-// sweep removes settled folders left holding only clutter (apply_ops.py --sweep), re-checking each on disk.
-func sweep(env *stage.Env, rep *stage.Report, opt Options, lib *library) {
-	x := &executor{roots: libraryRoots(opt.Root), now: env.Now, stats: map[string]int{}}
+// sweep removes settled folders left holding only clutter (apply_ops.py --sweep); their clutter is archived under
+// one logged unit, re-checked on disk.
+func sweep(env *stage.Env, rep *stage.Report, opt Options, lib *library) error {
+	var dirs []string
 	for _, d := range lib.shells {
-		if !lib.busy[lib.top(d)] && lexists(d) {
-			x.prune(d)
+		if !lib.busy[lib.top(d)] {
+			dirs = append(dirs, d)
 		}
 	}
+	x := newExec(opt.Root, nil, env.Now)
+	emptied := x.emptied(dirs, nil, nil) // the disk decides: a folder holding a recycle bin is not a shell
+	if len(emptied) == 0 {
+		return nil
+	}
+	logf, err := os.OpenFile(opt.UndoLog, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
+	if err != nil {
+		return err
+	}
+	defer logf.Close()
+	x.undo = logf
+	ops := x.clutterOps(emptied)
+	if err := x.logIntents("sweep", ops); err != nil {
+		return err
+	}
+	if err := x.finishEmptied(ops, emptied, map[string]bool{}); err != nil {
+		return err
+	}
 	rep.Count("swept", x.stats["pruned"])
+	_, err = logf.WriteString(undoRow(env.Now(), "unit-done", "", "", "sweep"))
+	return err
 }
 
 func libraryRoots(root string) []string {
@@ -615,7 +637,7 @@ func undo(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options) e
 	}
 	defer logf.Close()
 	wanted := set(opt.UndoUnits...)
-	x := &executor{undo: logf, roots: libraryRoots(opt.Root), now: env.Now, stats: map[string]int{}}
+	x := newExec(opt.Root, logf, env.Now)
 	notUndone, err := x.undoUnits(ctx, rows, wanted, map[string]bool{})
 	for k, v := range x.stats {
 		rep.Count(k, v)

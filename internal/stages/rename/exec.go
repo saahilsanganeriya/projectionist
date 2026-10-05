@@ -3,9 +3,10 @@ package rename
 // The executor (port of apply_ops.py): one unit (a film or a show) at a time.
 //
 //	1 decide each op against the disk: done already (src gone, dst there), missing, target taken, twin not identical
-//	2 write the unit's intents to the undo log and fsync it once
-//	3 act: deletes, then videos, then the rest; mkdir (no chmod: it strips the Synology ACL), renameat2 NOREPLACE
-//	4 fsync every touched folder once; prune folders left holding only clutter; append "unit-done"
+//	2 foresee the folders the unit empties; their clutter (.DS_Store, @eaDir) is archived too, never deleted
+//	3 write the unit's intents to the undo log and fsync it once
+//	4 act: deletes, then videos, then the rest; mkdir (no chmod: it strips the Synology ACL), renameat2 NOREPLACE
+//	5 archive the clutter, remove the emptied folders, fsync every touched folder once; append "unit-done"
 //
 // A unit stops at its first error and stays half-done; the next run re-plans from the disk and finishes it. The
 // undo log keeps apply_ops.py's format (ts, op, src, dst, unit) so either tool can read the other's log.
@@ -40,9 +41,14 @@ type undoFile interface {
 
 type executor struct {
 	undo  undoFile
+	media string   // the share: clutter goes to <media>/_archive/clutter/<its path>
 	roots []string // library roots a prune never removes, nor climbs above
 	now   func() time.Time
 	stats map[string]int
+}
+
+func newExec(media string, undo undoFile, now func() time.Time) *executor {
+	return &executor{undo: undo, media: media, roots: libraryRoots(media), now: now, stats: map[string]int{}}
 }
 
 func (x *executor) count(kind string) { x.stats[kind]++ }
@@ -108,18 +114,19 @@ func (x *executor) runUnit(ctx context.Context, unit string, ops []Op, touched m
 	if len(todo) == 0 {
 		return nil
 	}
-	var intents strings.Builder
-	at := x.now()
+	gone, srcDirs := map[string]bool{}, map[string]bool{}
+	var landing []string
 	for _, o := range todo {
-		intents.WriteString(undoRow(at, o.Op, o.Src, o.Dst, unit))
+		gone[o.Src], srcDirs[path.Dir(o.Src)] = true, true
+		if o.Op != "delete" {
+			landing = append(landing, o.Dst)
+		}
 	}
-	if _, err := x.undo.WriteString(intents.String()); err != nil {
-		return fmt.Errorf("undo log: %w", err)
+	emptied := x.emptied(sortedKeys(srcDirs), gone, landing)
+	sweepOps := x.clutterOps(emptied)
+	if err := x.logIntents(unit, append(todo, sweepOps...)); err != nil {
+		return err
 	}
-	if err := x.undo.Sync(); err != nil { // the log is durable before anything moves: one fsync per unit
-		return fmt.Errorf("undo log: %w", err)
-	}
-	left := map[string]bool{}
 	for _, o := range todo {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -140,7 +147,128 @@ func (x *executor) runUnit(ctx context.Context, unit string, ops []Op, touched m
 			x.count(o.Op + "d") // moved / archived
 		}
 		touched[path.Dir(o.Src)] = true
-		left[path.Dir(o.Src)] = true
+	}
+	if err := x.finishEmptied(sweepOps, emptied, touched); err != nil {
+		return err
+	}
+	_, err := x.undo.WriteString(undoRow(x.now(), "unit-done", "", "", unit))
+	return err
+}
+
+// logIntents writes ops to the undo log and fsyncs it: the log is durable before anything moves (one fsync per unit).
+func (x *executor) logIntents(unit string, ops []Op) error {
+	var b strings.Builder
+	at := x.now()
+	for _, o := range ops {
+		b.WriteString(undoRow(at, o.Op, o.Src, o.Dst, unit))
+	}
+	if _, err := x.undo.WriteString(b.String()); err != nil {
+		return fmt.Errorf("undo log: %w", err)
+	}
+	if err := x.undo.Sync(); err != nil {
+		return fmt.Errorf("undo log: %w", err)
+	}
+	return nil
+}
+
+func (x *executor) isRoot(d string) bool {
+	for _, r := range x.roots {
+		if d == r {
+			return true
+		}
+	}
+	return false
+}
+
+func (x *executor) underRoot(d string) bool {
+	for _, r := range x.roots {
+		if strings.HasPrefix(d, r+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func isClutter(name string) bool { return clutter[name] || name == "@eaDir" }
+
+// emptied lists, deepest first, the folders at or above dirs that will hold nothing but clutter once the paths in
+// gone have left, unless something lands inside them. Library roots are never emptied.
+func (x *executor) emptied(dirs []string, gone map[string]bool, landing []string) []string {
+	memo := map[string]bool{}
+	var empty func(d string) bool
+	empty = func(d string) bool {
+		if v, seen := memo[d]; seen {
+			return v
+		}
+		memo[d] = false
+		if x.isRoot(d) || !x.underRoot(d) {
+			return false
+		}
+		for _, l := range landing {
+			if strings.HasPrefix(l, d+"/") {
+				return false
+			}
+		}
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			return false
+		}
+		for _, e := range entries {
+			p := d + "/" + e.Name()
+			if !isClutter(e.Name()) && !gone[p] && !(e.IsDir() && empty(p)) {
+				return false
+			}
+		}
+		memo[d] = true
+		return true
+	}
+	for _, d := range dirs {
+		for ; empty(d); d = path.Dir(d) {
+		}
+	}
+	var out []string
+	for d, v := range memo {
+		if v {
+			out = append(out, d)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return len(out[i]) > len(out[j]) || (len(out[i]) == len(out[j]) && out[i] < out[j])
+	})
+	return out
+}
+
+// clutterOps archives the clutter of each emptied folder: archive-not-delete covers .DS_Store and thumbnails too.
+func (x *executor) clutterOps(emptied []string) []Op {
+	var ops []Op
+	for _, d := range emptied {
+		entries, _ := os.ReadDir(d)
+		for _, e := range entries {
+			if isClutter(e.Name()) {
+				src := d + "/" + e.Name()
+				ops = append(ops, Op{Op: "archive", Src: src, Dst: x.media + "/_archive/clutter/" + strings.TrimPrefix(src, x.media+"/")})
+			}
+		}
+	}
+	return ops
+}
+
+// finishEmptied moves the clutter out, removes the emptied folders (deepest first) and fsyncs every touched folder.
+// A folder that gained an entry meanwhile simply stays.
+func (x *executor) finishEmptied(clutterOps []Op, emptied []string, touched map[string]bool) error {
+	for _, o := range clutterOps {
+		if err := mkdirs(path.Dir(o.Dst), touched); err != nil {
+			return err
+		}
+		if err := fsx.RenameNoReplace(o.Src, o.Dst); err == nil {
+			touched[path.Dir(o.Dst)] = true
+		}
+	}
+	for _, d := range emptied {
+		if os.Remove(d) == nil { // rmdir: only an empty folder goes; it stays in touched so Jellyfin hears it is gone
+			touched[path.Dir(d)] = true
+			x.count("pruned")
+		}
 	}
 	for dir := range touched {
 		if lexists(dir) {
@@ -149,13 +277,7 @@ func (x *executor) runUnit(ctx context.Context, unit string, ops []Op, touched m
 			}
 		}
 	}
-	dirs := sortedKeys(left)
-	sort.SliceStable(dirs, func(i, j int) bool { return len(dirs[i]) > len(dirs[j]) })
-	for _, d := range dirs {
-		x.prune(d)
-	}
-	_, err := x.undo.WriteString(undoRow(x.now(), "unit-done", "", "", unit))
-	return err
+	return nil
 }
 
 // mkdirs creates dir and its missing parents. Each new folder takes its parent's owner (chown keeps the Synology ACL
@@ -226,37 +348,9 @@ func identical(ctx context.Context, a, b string) (bool, error) {
 	}
 }
 
-// prune removes folder and its parents while they hold nothing but clutter (Synology @eaDir thumbnails, .DS_Store),
-// never a library root and never above one.
-func (x *executor) prune(folder string) {
-	for {
-		under := false
-		for _, r := range x.roots {
-			if folder == r {
-				return
-			}
-			under = under || strings.HasPrefix(folder, r+"/")
-		}
-		if !under {
-			return
-		}
-		entries, err := os.ReadDir(folder)
-		if err != nil {
-			return
-		}
-		for _, e := range entries {
-			if !clutter[e.Name()] && e.Name() != "@eaDir" {
-				return
-			}
-		}
-		for _, e := range entries {
-			if err := os.RemoveAll(path.Join(folder, e.Name())); err != nil {
-				return
-			}
-		}
-		if os.Remove(folder) != nil {
-			return
-		}
+// rmdirUp removes folder and its parents while they are empty (undo's leftovers), never a library root nor above one.
+func (x *executor) rmdirUp(folder string) {
+	for !x.isRoot(folder) && x.underRoot(folder) && os.Remove(folder) == nil {
 		x.count("pruned")
 		folder = path.Dir(folder)
 	}
@@ -315,7 +409,7 @@ func (x *executor) undoUnits(ctx context.Context, rows []undoEntry, wanted map[s
 		}
 		touched[path.Dir(r.src)], touched[path.Dir(r.dst)] = true, true
 		x.count("undone")
-		x.prune(path.Dir(r.dst))
+		x.rmdirUp(path.Dir(r.dst))
 	}
 	for dir := range touched {
 		if lexists(dir) {

@@ -113,6 +113,7 @@ aligned_log = ""`, root, l.undoLog, l.review, keyFile, srv.URL))
 	write(t, filepath.Join(movies, "Heat.1995.1080p.BluRay.x264-GRP", "Heat.1995.1080p.BluRay.x264-GRP.mkv"), "film")
 	write(t, filepath.Join(movies, "Heat.1995.1080p.BluRay.x264-GRP", "Heat.1995.1080p.BluRay.x264-GRP.srt"), englishSRT(120))
 	write(t, filepath.Join(movies, "Heat.1995.1080p.BluRay.x264-GRP", "SITEA.txt"), "ad")
+	write(t, filepath.Join(movies, "Heat.1995.1080p.BluRay.x264-GRP", "@eaDir", "x.jpg"), "thumbnail")
 	write(t, filepath.Join(movies, "Mystery.2001.mkv"), "unmatched")
 	write(t, filepath.Join(movies, "Gone.2010", "@eaDir", "thumb.jpg"), "a shell left by an earlier move")
 	write(t, filepath.Join(movies, "Gone.2010", ".DS_Store"), "")
@@ -138,16 +139,12 @@ func (l *library4test) run(t *testing.T) stage.Report {
 // Catches, end to end: a new film or show not reaching its scheme name (TMDB identity, episode titles, subtitle
 // language from its text, junk archived, the emptied folder pruned), an ambiguous TMDB match being renamed instead of
 // listed for review, junk archived out of a folder whose video waits for review, an episode already named being
-// renamed to TMDB's spelling, an empty shell (only @eaDir/.DS_Store) left behind or a recycle bin swept, Jellyfin not
-// told, a second run changing anything, and undo not restoring the tree.
+// renamed to TMDB's spelling, an empty shell (only @eaDir/.DS_Store) left behind or a recycle bin swept, clutter
+// deleted instead of archived, Jellyfin not told, a second run changing anything, and undo not restoring the tree
+// exactly (clutter included).
 func TestRunNewArrivalsThenUndo(t *testing.T) {
 	l := newLibrary(t)
-	var before []string // what undo must restore: everything but the empty shell, which is swept for good
-	for _, p := range tree(t, l.root) {
-		if !strings.HasPrefix(p, "Movies/Gone.2010/") {
-			before = append(before, p)
-		}
-	}
+	before := tree(t, l.root)
 	l.run(t)
 
 	want := []string{
@@ -161,6 +158,9 @@ func TestRunNewArrivalsThenUndo(t *testing.T) {
 		"TV/Show (2019) {tmdb-77}/Season 01/Show (2019) - S01E01 - Pilot.mkv",
 		"TV/Show (2019) {tmdb-77}/Season 01/Show (2019) - S01E02 - Second.mkv",
 		"TV/Show (2019) {tmdb-77}/Season 01/Show (2019) - S01E03 - Wait For It.mkv",
+		"_archive/clutter/Movies/Gone.2010/.DS_Store", // a shell's clutter is archived, never deleted
+		"_archive/clutter/Movies/Gone.2010/@eaDir/thumb.jpg",
+		"_archive/clutter/Movies/Heat.1995.1080p.BluRay.x264-GRP/@eaDir/x.jpg",
 		"_archive/junk/Movies/Heat.1995.1080p.BluRay.x264-GRP/SITEA.txt",
 		"_needs-review.txt",
 	}

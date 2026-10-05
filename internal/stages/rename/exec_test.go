@@ -19,7 +19,7 @@ type countingLog struct {
 func (c *countingLog) Sync() error { c.syncs++; return nil }
 
 func newExecutor(root string, log undoFile) *executor {
-	return &executor{undo: log, roots: libraryRoots(root), now: func() time.Time { return time.Unix(0, 0) }, stats: map[string]int{}}
+	return newExec(root, log, func() time.Time { return time.Unix(0, 0) })
 }
 
 // Catches the executor's refusals: overwriting a file already at a video's target (the unit must stop with
