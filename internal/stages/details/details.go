@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -145,6 +146,22 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) (err er
 	if err != nil {
 		return err
 	}
+	rows, err := loadRows(ctx, db)
+	if err != nil {
+		return err
+	}
+	walked := make(map[string]bool, len(videos))
+	for _, v := range videos {
+		walked[v.path] = true
+	}
+	// A rename keeps a file's size and mtime: a row whose path is gone and whose (size, mtime) reappears under a new
+	// path is the same bytes, so its probe, peak scan and verdicts follow the file instead of being redone.
+	renamed := map[[2]int64]string{}
+	for path, row := range rows {
+		if !walked[path] {
+			renamed[[2]int64{row.Size, row.MTime}] = path
+		}
+	}
 	full := opt.PathsFile == ""
 	if !full {
 		if videos, err = only(videos, opt.PathsFile); err != nil {
@@ -152,26 +169,31 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) (err er
 		}
 	}
 	sort.SliceStable(videos, func(i, j int) bool { return videos[i].mtime > videos[j].mtime }) // new arrivals first
-	rows, err := loadRows(ctx, db)
-	if err != nil {
-		return err
-	}
 
 	r := &run{env: env, opt: opt, rep: rep, db: db, orig: orig, subtitles: subtitles,
-		probes: opt.MaxProbes, peaks: opt.MaxPeakScans, decodes: opt.MaxDecodeChecks, heavyOK: true,
+		probes: opt.MaxProbes, peaks: opt.MaxPeakScans, decodes: opt.MaxDecodeChecks,
 		tick: func() (<-chan time.Time, func()) { t := time.NewTicker(env.Viewers.Poll); return t.C, t.Stop }}
 	defer func() { // on every return: a verdict saved before an early return is still raised
 		if aerr := r.raiseAlerts(context.WithoutCancel(ctx)); err == nil {
 			err = aerr
 		}
 	}()
-	seen := map[string]bool{}
 	for _, v := range videos {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		seen[v.path] = true
-		if err := r.one(ctx, v, rows[v.path]); err != nil {
+		row := rows[v.path]
+		if from, ok := renamed[[2]int64{v.size, v.mtime}]; ok && row == nil {
+			delete(renamed, [2]int64{v.size, v.mtime})
+			if err := env.Probe.Moved(ctx, from, v.path); err != nil {
+				return err
+			}
+			moved := *rows[from]
+			moved.NoteSHA, moved.NoteSize, moved.NoteMTime = "", 0, 0 // its note is the one beside the new name
+			row = &moved
+			rep.Count("renamed", 1)
+		}
+		if err := r.one(ctx, v, row); err != nil {
 			return err
 		}
 	}
@@ -180,30 +202,35 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) (err er
 			return ctx.Err()
 		}
 		before := *p.row
-		if err := r.heavyFacts(ctx, p.v, p.info, p.row); err != nil {
-			return err
+		err := r.heavyFacts(ctx, p.v, p.info, p.row)
+		if err == nil && *p.row != before {
+			// A verdict is saved only once its note is written, and note refuses a video that moved mid-check: a
+			// decode that failed because its file moved away is never kept or announced.
+			err = r.note(p.v, render(p.v, p.info, r.original(p.v.path), r.sidecarsOf(p.v.path), p.row), p.row)
+			if err == nil {
+				err = r.save(ctx, p.v.path, p.row)
+			}
 		}
-		if *p.row != before {
-			if err := r.note(p.v, render(p.v, p.info, r.original(p.v.path), r.sidecarsOf(p.v.path), p.row), p.row); err != nil {
-				return err
-			}
-			if err := r.save(ctx, p.v.path, p.row); err != nil {
-				return err
-			}
+		if err := r.skipVanished(err); err != nil {
+			return err
 		}
 	}
 	if full {
 		for path := range rows {
-			if !seen[path] {
-				if _, err := db.ExecContext(ctx, `DELETE FROM details_files WHERE path=?`, path); err != nil {
-					return err
-				}
+			if walked[path] {
+				continue
+			}
+			if _, err := db.ExecContext(ctx, `DELETE FROM details_files WHERE path=?`, path); err != nil {
+				return err
+			}
+			if err := env.Probe.Forget(ctx, path); err != nil { // a no-op for a renamed file, whose row moved
+				return err
 			}
 		}
 	}
 	c := rep.Counts
-	rep.Summary = fmt.Sprintf("%d videos: %d notes written, %d probed (%d deferred), %d unreadable, %d peak scans, %d decode checks (%d not clean), %d heavy deferred",
-		len(videos), c["written"], c["probed"], c["probe_deferred"], c["unreadable"], c["peak_scanned"], c["decode_checked"], c["not_clean"], c["heavy_deferred"])
+	rep.Summary = fmt.Sprintf("%d videos: %d notes written, %d probed (%d deferred, %d killed), %d renamed, %d vanished, %d unreadable, %d peak scans, %d decode checks (%d not clean), %d heavy deferred",
+		len(videos), c["written"], c["probed"], c["probe_deferred"], c["probe_failed"], c["renamed"], c["vanished"], c["unreadable"], c["peak_scanned"], c["decode_checked"], c["not_clean"], c["heavy_deferred"])
 	return nil
 }
 
@@ -215,10 +242,49 @@ type run struct {
 	orig      map[string]string
 	subtitles map[string][]string // dir → the subtitle files in it, from the walk
 
-	probes, peaks, decodes int  // what is left of this run's bounds
-	heavyOK                bool // false once a guest was seen: heavy work waits for a later run
+	probes, peaks, decodes int       // what is left of this run's bounds
+	guestSeen              bool      // probes and heavy work wait for a later run
+	askedAt                time.Time // the probes' last viewer check, on the stage clock
 	queue                  []pending
 	tick                   func() (<-chan time.Time, func()) // the viewer re-check during heavy work, and its stop
+}
+
+// errVanished: the video moved or changed since the walk. Nothing is written or saved for it; the next run's walk
+// finds it under its new name.
+var errVanished = errors.New("video moved or changed since the walk")
+
+func vanished(v video) bool {
+	st, err := os.Lstat(v.path) // as the walk's DirEntry.Info
+	return err != nil || st.Size() != v.size || st.ModTime().UnixNano() != v.mtime
+}
+
+func (r *run) skipVanished(err error) error {
+	if errors.Is(err, errVanished) {
+		r.rep.Count("vanished", 1)
+		return nil
+	}
+	return err
+}
+
+// guestWatching asks the viewer gate before a cold probe (a 4 MiB read for H.264/HEVC, frames for HDR), at most once
+// per poll period on the stage clock; an unknown count counts as a guest. Once a guest is seen, probes and heavy
+// work wait for a later run.
+func (r *run) guestWatching(ctx context.Context) bool {
+	if now := r.env.Now(); !r.guestSeen && now.Sub(r.askedAt) >= r.env.Viewers.Poll {
+		r.askedAt = now
+		if n, err := r.env.Viewers.Count(ctx); err != nil || n > 0 {
+			r.env.Log.Info("probes deferred", "event", "probe_deferred", "others", n, "err", err)
+			r.guestSeen = true
+		}
+	}
+	return r.guestSeen
+}
+
+// transient is a probe failure that says nothing about the file: ffprobe killed by a signal, which is how the
+// Prober's timeout ends it. Such a file is probed again next run, not judged unreadable.
+func transient(err error) bool {
+	var ee *exec.ExitError
+	return errors.As(err, &ee) && ee.ExitCode() == -1
 }
 
 // pending is a video whose heavy facts are missing, queued behind the notes pass.
@@ -237,20 +303,17 @@ func (r *run) one(ctx context.Context, v video, row *fileRow) error {
 		row = &fileRow{Size: v.size, MTime: v.mtime} // new or changed file: earlier verdicts (and note state) no longer apply
 	}
 	before := *row
-	info, ok, err := r.env.Probe.Lookup(ctx, v.path)
+	info, cached, err := r.env.Probe.Lookup(ctx, v.path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil // moved away since the walk
+		return r.skipVanished(errVanished)
 	}
 	if err != nil {
 		return err
 	}
-	if !ok {
-		retry := row.Status == "unreadable" && r.env.Now().Sub(row.CheckedAt) < r.opt.RetryUnreadable
-		switch {
-		case retry:
-			r.rep.Count("unreadable", 1)
-			return nil
-		case r.probes <= 0:
+	// An unreadable verdict stands, unprobed, until its retry time.
+	stands := !cached && row.Status == "unreadable" && r.env.Now().Sub(row.CheckedAt) < r.opt.RetryUnreadable
+	if !cached && !stands {
+		if r.probes <= 0 || r.guestWatching(ctx) {
 			r.rep.Count("probe_deferred", 1)
 			return nil
 		}
@@ -260,26 +323,37 @@ func (r *run) one(ctx context.Context, v video, row *fileRow) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		if transient(err) {
+			r.env.Log.Warn("probe killed, retried next run", "event", "probe_failed", "item", v.path, "err", err)
+			r.rep.Count("probe_failed", 1)
+			return nil
+		}
 	}
-	if err == nil && info.Video == nil {
+	if err == nil && !stands && info.Video == nil {
 		err = errors.New("no video stream")
 	}
-	if err != nil {
-		if row.Status != "unreadable" {
-			r.env.Log.Warn("video unreadable", "event", "video_unreadable", "item", v.path, "err", err)
-		}
+	switch {
+	case err != nil:
 		row.Status, row.Error, row.CheckedAt = "unreadable", err.Error(), r.env.Now()
-		r.rep.Count("unreadable", 1)
-		if err := r.note(v, renderUnreadable(v, r.original(v.path), row.Error), row); err != nil { // replaces a note on the file's previous version
-			return err
-		}
-		return r.save(ctx, v.path, row)
-	}
-	if row.Status != "ok" {
+	case !stands && row.Status != "ok":
 		row.Status, row.Error, row.CheckedAt = "ok", "", r.env.Now()
 	}
+	if row.Status == "unreadable" {
+		// Replaces a note on the file's previous version. A probe that failed because the file moved stops here.
+		if err := r.note(v, renderUnreadable(v, r.original(v.path), row.Error), row); err != nil {
+			return r.skipVanished(err)
+		}
+		if before.Status != "unreadable" {
+			r.env.Log.Warn("video unreadable", "event", "video_unreadable", "item", v.path, "err", row.Error)
+		}
+		r.rep.Count("unreadable", 1)
+		if *row != before {
+			return r.save(ctx, v.path, row)
+		}
+		return nil
+	}
 	if err := r.note(v, render(v, info, r.original(v.path), r.sidecarsOf(v.path), row), row); err != nil {
-		return err
+		return r.skipVanished(err)
 	}
 	if (r.needsPeak(info, row) || !row.Clean.Valid) && len(r.queue) < r.opt.MaxPeakScans+r.opt.MaxDecodeChecks {
 		r.queue = append(r.queue, pending{v, info, row})
@@ -291,8 +365,13 @@ func (r *run) one(ctx context.Context, v video, row *fileRow) error {
 }
 
 // note makes the video's note say text. When text is what the row says was last written and the note still has
-// that size and mtime, a stat suffices; otherwise the note is read, compared and rewritten if needed.
+// that size and mtime, a stat suffices; otherwise the note is read, compared and rewritten if needed. It refuses
+// (errVanished) a video that moved or changed since the walk: the rename stage moves files while probes and heavy
+// work run, and a note written then is an orphan. Every verdict is saved after its note, so this check guards both.
 func (r *run) note(v video, text string, row *fileRow) error {
+	if vanished(v) {
+		return errVanished
+	}
 	sum := sha256.Sum256([]byte(text))
 	sha := hex.EncodeToString(sum[:])
 	path := notePath(r.opt, v.path)
@@ -300,11 +379,15 @@ func (r *run) note(v video, text string, row *fileRow) error {
 	if err == nil && sha == row.NoteSHA && st.Size() == row.NoteSize && st.ModTime().UnixNano() == row.NoteMTime {
 		return nil
 	}
-	written, err := writeNote(path, text)
-	if err != nil {
-		return err
-	}
-	if written {
+	if old, err := os.ReadFile(path); err != nil || string(old) != text {
+		if r.opt.NotesRoot != "" {
+			if err := os.MkdirAll(filepath.Dir(filepath.Dir(path)), 0o755); err != nil { // the dry run's mirror
+				return err
+			}
+		}
+		if err := writeNote(path, text); err != nil {
+			return err
+		}
 		r.rep.Count("written", 1)
 		r.env.Log.Debug("note written", "event", "note_written", "item", v.path)
 	}
@@ -318,7 +401,7 @@ func (r *run) note(v video, text string, row *fileRow) error {
 // heavyFacts fills in the peak bitrate (big files only) and the decode check, within this run's bounds.
 func (r *run) heavyFacts(ctx context.Context, v video, info probe.Info, row *fileRow) error {
 	if r.needsPeak(info, row) && r.peaks > 0 {
-		if !r.heavyOK {
+		if r.guestSeen {
 			r.rep.Count("heavy_deferred", 1)
 		} else {
 			r.peaks--
@@ -330,7 +413,7 @@ func (r *run) heavyFacts(ctx context.Context, v video, info probe.Info, row *fil
 			})
 			switch {
 			case !done && err == nil:
-				r.heavyOK = false
+				r.guestSeen = true
 				r.rep.Count("heavy_deferred", 1)
 			case err != nil && ctx.Err() != nil:
 				return ctx.Err()
@@ -345,7 +428,7 @@ func (r *run) heavyFacts(ctx context.Context, v video, info probe.Info, row *fil
 		}
 	}
 	if !row.Clean.Valid && r.decodes > 0 {
-		if !r.heavyOK {
+		if r.guestSeen {
 			r.rep.Count("heavy_deferred", 1)
 			return nil
 		}
@@ -358,10 +441,10 @@ func (r *run) heavyFacts(ctx context.Context, v video, info probe.Info, row *fil
 		})
 		switch {
 		case !done && err == nil:
-			r.heavyOK = false
+			r.guestSeen = true
 			r.rep.Count("heavy_deferred", 1)
-		case err != nil && gone(v.path):
-			return nil // moved away since the walk (a missing ffmpeg is an ErrNotExist too, and must fail)
+		case err != nil && vanished(v):
+			return errVanished // a missing ffmpeg is an ErrNotExist too, and must fail
 		case err != nil:
 			return err // the decoder could not be run at all, or the stage is stopping
 		default:
@@ -443,11 +526,6 @@ func (r *run) raiseAlerts(ctx context.Context) error {
 	}
 	_, err = r.db.ExecContext(ctx, `UPDATE details_files SET alerted = `+verdictSQL+` WHERE alerted != `+verdictSQL)
 	return err
-}
-
-func gone(path string) bool {
-	_, err := os.Stat(path)
-	return errors.Is(err, fs.ErrNotExist)
 }
 
 func (r *run) original(path string) string {
@@ -630,20 +708,20 @@ func notePath(opt Options, videoPath string) string {
 	return filepath.Join(dir, ".details", filepath.Base(videoPath)+".txt")
 }
 
-// writeNote replaces the note only when its text changed: a temp file in .details, then one rename. The folder
-// is made with a plain mkdir, which inherits the share's Synology ACL (a chmod would strip it).
-func writeNote(path, text string) (written bool, err error) {
-	if old, err := os.ReadFile(path); err == nil && string(old) == text {
-		return false, nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return false, err
+// writeNote replaces the note: a temp file in .details, then one rename. .details is made with a plain mkdir, which
+// inherits the share's Synology ACL (a chmod would strip it), and never its parent: a video folder that is gone
+// was moved, and is not rebuilt in the library to hold a note (errVanished).
+func writeNote(path, text string) error {
+	if err := os.Mkdir(filepath.Dir(path), 0o755); errors.Is(err, fs.ErrNotExist) {
+		return errVanished
+	} else if err != nil && !errors.Is(err, fs.ErrExist) {
+		return err
 	}
 	tmp := path + ".tmp"
 	os.Remove(tmp) // left by a run that died mid-write
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 	if err != nil {
-		return false, err
+		return err
 	}
 	_, err = f.WriteString(text)
 	if cerr := f.Close(); err == nil {
@@ -654,9 +732,8 @@ func writeNote(path, text string) (written bool, err error) {
 	}
 	if err != nil {
 		os.Remove(tmp)
-		return false, err
 	}
-	return true, nil
+	return err
 }
 
 func first(s []string, n int) []string {

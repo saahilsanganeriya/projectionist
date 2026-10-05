@@ -233,7 +233,7 @@ func row(t *testing.T, env *stage.Env, path string) (status, errText string) {
 // lost across two moves, another version's sidecar listed, a stale temp file blocking a write, a note left stale
 // when its text changes (a new sidecar) or when someone edits it, correct notes rewritten after the note state is
 // lost, an SDR file probed for frames or a file under
-// 20 Mb/s peak-scanned, stale rows kept for deleted files, and a paths_file run processing other videos or
+// 20 Mb/s peak-scanned, stale rows (details_files, probe_cache) kept for deleted files, and a paths_file run processing other videos or
 // deleting their rows.
 func TestRunReconciles(t *testing.T) {
 	h := newEnv(t)
@@ -320,8 +320,10 @@ cat "`+fixture+`"
 	if probes() != 7 || !strings.Contains(strings.Join(last[len(last)-2:], "\n"), heat) || len(rep.Alerts) != 0 {
 		t.Fatalf("run 3: probes %d (want Heat re-probed after its change and Broken retried; the audio-only probe is cached), alerts %v", probes(), rep.Alerts)
 	}
-	if status, _ := row(t, h.Env, extra); status != "" {
-		t.Fatal("row kept for a deleted file")
+	var cached int
+	h.Env.Store.DB().QueryRow(`SELECT count(*) FROM probe_cache WHERE path = ?`, extra).Scan(&cached)
+	if status, _ := row(t, h.Env, extra); status != "" || cached != 0 {
+		t.Fatalf("rows kept for a deleted file: details_files status %q, %d probe_cache rows", status, cached)
 	}
 	if strings.Contains(string(log), "-show_frames") || strings.Contains(string(log), "packet=") {
 		t.Fatal("an SDR file was frame-probed, or a 15.7 Mb/s file peak-scanned")
@@ -367,7 +369,10 @@ func TestHeavyWorkWaitsForGuests(t *testing.T) {
 esac
 `)
 	h.Script(t, "ffmpeg", `echo "$*" >> "`+dir+`/decodes"; echo frame=120; echo progress=end`+"\n")
-	h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []\npeak_above_kbps = 10000", l.root))
+	options := fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []\npeak_above_kbps = 10000", l.root)
+	h.SetOptions(options + "\nmax_peak_scans = 0\nmax_decode_checks = 0")
+	runOnce(t, h.Env) // probed while nobody watches
+	h.SetOptions(options)
 	var guest atomic.Bool
 	h.Plex.HandleFunc("GET", "/status/sessions", func(w http.ResponseWriter, _ *http.Request) {
 		if guest.Load() {
@@ -383,9 +388,10 @@ esac
 	}
 
 	guest.Store(true)
+	asked := len(h.Plex.Calls("GET", "/status/sessions"))
 	rep := runOnce(t, h.Env)
 	if read("scans") != "" || read("decodes") != "" || rep.Counts["heavy_deferred"] != 2 || strings.Contains(note(), "Peak bitrate") ||
-		len(h.Plex.Calls("GET", "/status/sessions")) != 1 {
+		len(h.Plex.Calls("GET", "/status/sessions")) != asked+1 {
 		t.Fatalf("guest watching: scans %q decodes %q counts %v", read("scans"), read("decodes"), rep.Counts)
 	}
 
@@ -402,11 +408,11 @@ esac
 	}
 
 	os.WriteFile(heat, []byte("video, re-muxed"), 0o644)
-	h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []\npeak_above_kbps = 10000\nmax_peak_scans = 0", l.root))
+	h.SetOptions(options + "\nmax_peak_scans = 0")
 	if runOnce(t, h.Env); strings.Count(read("scans"), "scan") != 1 {
 		t.Fatal("max_peak_scans = 0 still scanned")
 	}
-	h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []\npeak_above_kbps = 10000", l.root))
+	h.SetOptions(options)
 	if runOnce(t, h.Env); strings.Count(read("scans"), "scan") != 2 {
 		t.Fatal("a changed file kept its old peak")
 	}
@@ -527,20 +533,68 @@ func TestDecodeCheck(t *testing.T) {
 	}
 }
 
-// Catches: a run failing because the rename stage moved a video away mid-run, either before its turn (lookup)
-// or between its probe and its decode check.
-func TestVanishedVideosAreSkipped(t *testing.T) {
-	h := newEnv(t)
-	l := lib{t, t.TempDir()}
-	newer := l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", 1)
-	older := l.add("Movies/Ran (1985) {tmdb-11645}/Ran (1985) {tmdb-11645}.mkv", 2)
-	fixture, _ := filepath.Abs("testdata/cronos_dtshdma.json")
-	h.Script(t, "ffprobe", fmt.Sprintf("rm -f %q %q\ncat %q\n", newer, older, fixture))
-	h.Script(t, "ffmpeg", "echo frame=120\n")
-	h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []", l.root))
-	if rep := runOnce(t, h.Env); rep.Counts["probed"] != 1 || rep.Counts["decode_checked"] != 0 {
-		t.Fatalf("counts %v", rep.Counts)
+// Catches: a video the rename stage moves mid-run leaving a trace under its old name or failing the run: its old
+// folder rebuilt to hold an orphan note (MkdirAll), an orphan note beside a file renamed within its folder, a probe or
+// decode that failed because the file moved saved as a verdict and announced ("newly unreadable", "newly failing
+// the decode check"), and a file gone before its turn, or before its decode check, failing the run. The move lands
+// inside each step that reads the file.
+func TestVideoMovedMidRun(t *testing.T) {
+	fixture, _ := filepath.Abs("testdata/cronos_dtshdma.json") // 15.7 Mb/s: peak-scanned at the threshold below
+	for _, c := range []struct {
+		name, probe, peak, decode string // shell run inside that step; $HEAT is Heat's folder, $RAN Ran's
+		renamedInFolder           bool
+	}{
+		{name: "gone before its turn", probe: `[ -d "$RAN" ] && mv "$RAN" "$RAN-moved"`},
+		{name: "during its probe, which fails", probe: `mv "$HEAT" "$HEAT-moved"; exit 1`},
+		{name: "renamed in its folder during its probe", probe: `mv "$HEAT/Heat (1995) {tmdb-949}.mkv" "$HEAT/Heat (1995) {tmdb-949} - 1080p.mkv"`, renamedInFolder: true},
+		{name: "during its peak scan", peak: `mv "$HEAT" "$HEAT-moved"`},
+		{name: "during its decode check", decode: `mv "$HEAT" "$HEAT-moved"; echo "No such file or directory" >&2; exit 1`},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newEnv(t)
+			l := lib{t, t.TempDir()}
+			heat := l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", 1)
+			ran := filepath.Join(l.root, "Movies", "Ran (1985) {tmdb-11645}")
+			if c.name == "gone before its turn" {
+				l.add("Movies/Ran (1985) {tmdb-11645}/Ran (1985) {tmdb-11645}.mkv", 2) // older, so its turn comes after Heat's probe
+			}
+			vars := fmt.Sprintf("HEAT=%q; RAN=%q\n", filepath.Dir(heat), ran)
+			h.Script(t, "ffprobe", vars+`case "$*" in *packet=*) `+or(c.peak)+`; echo "pts_time=N/A|dts_time=0.000|size=1000";;
+*Heat*) `+or(c.probe)+`; cat "`+fixture+`";; *) cat "`+fixture+`";; esac`+"\n")
+			h.Script(t, "ffmpeg", vars+or(c.decode)+"; echo frame=120\n")
+			h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []\npeak_above_kbps = 10000", l.root))
+			rep := runOnce(t, h.Env)
+			var bad int
+			h.Env.Store.DB().QueryRow(`SELECT count(*) FROM details_files WHERE status = 'unreadable' OR clean = 0`).Scan(&bad)
+			if len(rep.Alerts) != 0 || bad != 0 || rep.Counts["vanished"] != 1 || rep.Counts["unreadable"] != 0 {
+				t.Fatalf("alerts %v, %d bad verdicts, counts %v", rep.Alerts, bad, rep.Counts)
+			}
+			old := filepath.Dir(heat)
+			if c.name == "gone before its turn" {
+				old = ran
+			}
+			if _, err := os.Stat(old); !c.renamedInFolder && !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("the moved folder was rebuilt: stat %v", err)
+			}
+			if _, err := os.Stat(notePath(Options{}, heat)); c.renamedInFolder && !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("an orphan note beside the renamed file: stat %v", err)
+			}
+		})
 	}
+	gone := filepath.Join(t.TempDir(), "Heat (1995) {tmdb-949}")
+	if err := writeNote(filepath.Join(gone, ".details", "Heat.mkv.txt"), "x"); !errors.Is(err, errVanished) {
+		t.Fatalf("writeNote into a folder that is gone: %v", err)
+	}
+	if _, err := os.Stat(gone); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal("writeNote rebuilt a folder that is gone")
+	}
+}
+
+func or(cmd string) string {
+	if cmd == "" {
+		return ":"
+	}
+	return cmd
 }
 
 // Catches: a missing ffprobe marking every video unreadable, rename logs that cannot be read (a missing mount)
@@ -612,5 +666,108 @@ esac
 	runOnce(t, h.Env)
 	if got, _ := os.ReadFile(seen); string(got) != "yes\n" {
 		t.Fatal("Heat's peak scan ran before Ran's note was written")
+	}
+}
+
+// Catches: cold probes (a 4 MiB read each, up to 400 a run) started while a guest watches, a guest who starts
+// part-way through a run's probes not noticed until the next run, and the viewer count asked before every probe
+// instead of once per poll period.
+func TestColdProbesWaitForGuests(t *testing.T) {
+	h := newEnv(t) // viewer poll period: 1 h, so one check covers a run
+	l := lib{t, t.TempDir()}
+	add := func(names ...string) {
+		for _, n := range names {
+			l.add("Movies/"+n+"/"+n+".mkv", 1)
+		}
+	}
+	add("Heat (1995) {tmdb-949}", "Ran (1985) {tmdb-11645}", "Alien (1979) {tmdb-348}")
+	fixture, _ := filepath.Abs("testdata/cronos_dtshdma.json")
+	h.Script(t, "ffprobe", fmt.Sprintf("cat %q\n", fixture))
+	h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []\nmax_decode_checks = 0", l.root))
+	var asked, guestFrom atomic.Int32 // the ask number from which a guest is watching
+	h.Plex.HandleFunc("GET", "/status/sessions", func(w http.ResponseWriter, _ *http.Request) {
+		if asked.Add(1) >= guestFrom.Load() {
+			fmt.Fprint(w, `<MediaContainer size="1"><Video type="movie" title="Ran"><User title="guest"/></Video></MediaContainer>`)
+			return
+		}
+		fmt.Fprint(w, `<MediaContainer size="0"></MediaContainer>`)
+	})
+
+	guestFrom.Store(1)
+	if rep := runOnce(t, h.Env); rep.Counts["probed"] != 0 || rep.Counts["probe_deferred"] != 3 || asked.Load() != 1 {
+		t.Fatalf("guest watching: counts %v, asked %d", rep.Counts, asked.Load())
+	}
+	guestFrom.Store(100)
+	if rep := runOnce(t, h.Env); rep.Counts["probed"] != 3 || asked.Load() != 2 {
+		t.Fatalf("nobody watching: counts %v, asked %d (one ask per poll period)", rep.Counts, asked.Load())
+	}
+	add("Heat 2 (2026) {tmdb-2}", "Ran 2 (2026) {tmdb-3}")
+	h.Env.Viewers.Poll = 0
+	guestFrom.Store(4) // nobody at this run's first ask, a guest at its second
+	if rep := runOnce(t, h.Env); rep.Counts["probed"] != 1 || rep.Counts["probe_deferred"] != 1 {
+		t.Fatalf("guest arrived mid-run: counts %v", rep.Counts)
+	}
+}
+
+// Catches: an ffprobe killed by a signal (the Prober's 2-minute timeout ends it so) judged as an unreadable file:
+// its note replaced by an "Unreadable:" one and the owner alerted, when the next run reads it fine.
+func TestKilledProbeIsRetried(t *testing.T) {
+	h := newEnv(t)
+	l := lib{t, t.TempDir()}
+	heat := l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", 1)
+	h.Script(t, "ffprobe", "kill -9 $$\n")
+	h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []\nmax_decode_checks = 0", l.root))
+	rep := runOnce(t, h.Env)
+	if status, _ := row(t, h.Env, heat); status != "" || rep.Counts["probe_failed"] != 1 || len(rep.Alerts) != 0 {
+		t.Fatalf("killed probe: status %q, counts %v, alerts %v", status, rep.Counts, rep.Alerts)
+	}
+	fixture, _ := filepath.Abs("testdata/cronos_dtshdma.json")
+	h.Script(t, "ffprobe", fmt.Sprintf("cat %q\n", fixture))
+	if rep = runOnce(t, h.Env); rep.Counts["probed"] != 1 || rep.Counts["written"] != 1 {
+		t.Fatalf("next run: counts %v", rep.Counts)
+	}
+}
+
+// Catches: a pure rename (same bytes, so same size and mtime) costing a new probe, peak scan and decode check (up
+// to ~45 min for a big remux, after every library-wide rename pass), an unreadable file announced again under its
+// new name or left without a note there while its verdict stands, and probe_cache rows of old paths kept forever.
+func TestRenamedVideoKeepsItsFacts(t *testing.T) {
+	h := newEnv(t)
+	l := lib{t, t.TempDir()}
+	heat := l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", 1)
+	broken := l.add("Movies/Broken (2001) {tmdb-1}/Broken (2001) {tmdb-1}.mkv", 2)
+	dir := h.Env.FFmpeg.Dir
+	fixture, _ := filepath.Abs("testdata/cronos_dtshdma.json")
+	h.Script(t, "ffprobe", `echo "$*" >> "`+dir+`/calls"
+case "$*" in *Broken*) exit 1;; *packet=*) echo "pts_time=N/A|dts_time=0.000|size=1000";; *) cat "`+fixture+`";; esac`+"\n")
+	h.Script(t, "ffmpeg", `echo "$*" >> "`+dir+`/calls"; echo frame=120`+"\n")
+	h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []\npeak_above_kbps = 10000", l.root))
+	if rep := runOnce(t, h.Env); len(rep.Alerts) != 1 || rep.Counts["peak_scanned"] != 1 || rep.Counts["decode_checked"] != 1 {
+		t.Fatalf("first run: alerts %v counts %v", rep.Alerts, rep.Counts)
+	}
+	calls := func() string { raw, _ := os.ReadFile(filepath.Join(dir, "calls")); return string(raw) }
+	before := calls()
+	newHeat := filepath.Join(l.root, "Movies", "Heat (1995) {tmdb-950}", "Heat (1995) {tmdb-950}.mkv")
+	newBroken := filepath.Join(l.root, "Movies", "Broken (2002) {tmdb-1}", "Broken (2002) {tmdb-1}.mkv")
+	for _, mv := range [][2]string{{filepath.Dir(heat), filepath.Dir(newHeat)}, {filepath.Join(filepath.Dir(newHeat), filepath.Base(heat)), newHeat},
+		{filepath.Dir(broken), filepath.Dir(newBroken)}, {filepath.Join(filepath.Dir(newBroken), filepath.Base(broken)), newBroken}} {
+		if err := os.Rename(mv[0], mv[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rep := runOnce(t, h.Env)
+	note := func(p string) string { raw, _ := os.ReadFile(notePath(Options{}, p)); return string(raw) }
+	if calls() != before || len(rep.Alerts) != 0 || rep.Counts["renamed"] != 2 {
+		t.Fatalf("after the rename: alerts %v counts %v, new calls:\n%s", rep.Alerts, rep.Counts, strings.TrimPrefix(calls(), before))
+	}
+	if n := note(newHeat); !strings.Contains(n, "Peak bitrate:") || !strings.Contains(n, "Streams cleanly: yes") || !strings.Contains(note(newBroken), "Unreadable:") {
+		t.Fatalf("notes at the new names:\n%s\n%s", n, note(newBroken))
+	}
+	var stale int
+	var cachedPath string
+	h.Env.Store.DB().QueryRow(`SELECT count(*) FROM probe_cache WHERE path IN (?, ?)`, heat, broken).Scan(&stale)
+	h.Env.Store.DB().QueryRow(`SELECT json_extract(info, '$.path') FROM probe_cache WHERE path = ?`, newHeat).Scan(&cachedPath)
+	if status, _ := row(t, h.Env, heat); stale != 0 || status != "" || cachedPath != newHeat {
+		t.Fatalf("old paths kept: %d probe_cache rows, details_files status %q; cached info path %q", stale, status, cachedPath)
 	}
 }
