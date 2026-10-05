@@ -1,4 +1,4 @@
-//go:build proto
+//go:build calibrate
 
 package subtitles
 
@@ -14,10 +14,15 @@ import (
 	"testing"
 )
 
-// Prototype harness (build tag "proto"): PROTO=<dir> holds sampled/proto/<id>/ (path, windows, probe.json, subs.csv,
-// a<i>.pcm), quick/out and quick2/out (written sidecars), quick/spot/*.framecrc and quick/lib/**.en.idx.
+// Calibration harness, not a test (build tag "calibrate"): the evidence behind the sampled fit's thresholds. CALIBRATE=
+// <dir> holds what the NAS gave for 15 titles of the quick gate: sampled/proto/<id>/ (path, windows, probe.json, subs.csv:
+// the English image track's packets in the 4 windows), sampled/proto2/<id>/ (a<i>.pcm: each window's dialogue channel
+// as 16 kHz s16le, channels), quick/out and quick2/out (the subtitles quick mode wrote), quick/spot/*.framecrc (whole
+// caption tracks) and quick/lib/**.en.idx. A title's truth is its subtitle's whole-file caption fit. Run with
+//
+//	CALIBRATE=<dir> go test -tags calibrate -run TestCalibrate -v ./internal/stages/subtitles
 
-type protoTitle struct {
+type calibrationTitle struct {
 	name, stem string
 	dur        float64
 	windows    []sampleWindow
@@ -27,10 +32,10 @@ type protoTitle struct {
 	truth      []float64 // full caption starts
 }
 
-func loadProto(t *testing.T) []protoTitle {
-	root := os.Getenv("PROTO")
+func loadCalibration(t *testing.T) []calibrationTitle {
+	root := os.Getenv("CALIBRATE")
 	dirs, _ := filepath.Glob(filepath.Join(root, "sampled/proto2/*"))
-	var out []protoTitle
+	var out []calibrationTitle
 	for _, d := range dirs {
 		raw, _ := os.ReadFile(filepath.Join(d, "path"))
 		p := strings.TrimSpace(string(raw))
@@ -42,7 +47,7 @@ func loadProto(t *testing.T) []protoTitle {
 		}
 		b, _ := os.ReadFile(filepath.Join(d, "probe.json"))
 		json.Unmarshal(b, &pj)
-		pt := protoTitle{name: filepath.Base(p), stem: stem}
+		pt := calibrationTitle{name: filepath.Base(p), stem: stem}
 		pt.dur, _ = strconv.ParseFloat(pj.Format.Duration, 64)
 		wraw, _ := os.ReadFile(filepath.Join(d, "windows"))
 		for _, line := range strings.Split(strings.TrimSpace(string(wraw)), "\n") {
@@ -137,12 +142,12 @@ func truthFit(spans []span, truth []float64) (float64, float64, bool) {
 	return f.Ratio, pyMedian(matched(spans, truth, f.Ratio, f.Offset)), true
 }
 
-// TestProtoFit runs the production fit on every title's windows: its own candidate, synthetic variants of its
+// TestCalibrate runs the production fit on every title's windows: its own candidate, synthetic variants of its
 // truth-aligned text (shifted, PAL, 24 fps), another cut (the second half 4 s later), and every other title's
 // candidate (must be refused).
-func TestProtoFit(t *testing.T) {
-	titles := loadProto(t)
-	samplesOf := func(pt protoTitle, kind string) []sample {
+func TestCalibrate(t *testing.T) {
+	titles := loadCalibration(t)
+	samplesOf := func(pt calibrationTitle, kind string) []sample {
 		var smp []sample
 		for i, w := range pt.windows {
 			if kind == "captions" {
