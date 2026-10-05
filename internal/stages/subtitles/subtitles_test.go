@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -238,7 +239,11 @@ func TestRunWaitsWhileGuestsWatch(t *testing.T) {
 		done <- rep
 	}()
 	for range 3 {
-		<-polls
+		select {
+		case <-polls:
+		case <-done:
+			t.Fatal("the run finished without waiting for the guest to stop")
+		}
 	}
 	if n := f.requestCount(); n != 0 {
 		t.Fatalf("%d provider requests while a guest watched", n)
@@ -286,19 +291,29 @@ func TestHasEnglishSidecar(t *testing.T) {
 	}
 }
 
-// Catches alass output accepted when its shifts scatter (another cut or episode), or a uniform shift misread.
-func TestShifts(t *testing.T) {
-	var before, uniform, scattered []span
+// Catches alass output accepted when its shifts scatter (another cut or episode), or a uniform shift with alass's
+// frame-rate guess misread and the file kept unchanged.
+func TestAlassFit(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	dir := t.TempDir()
+	var cand, uniform, scattered strings.Builder
 	for i := range 40 {
 		s := float64(i * 30)
-		before = append(before, span{s, s + 2})
-		uniform = append(uniform, span{s*25/24 + 1.5, 0})
-		scattered = append(scattered, span{s + float64(i%3)*4, 0})
+		fmt.Fprintf(&cand, "%d\n%s --> %s\nline\n\n", i+1, stampOf(s), stampOf(s+2))
+		fmt.Fprintf(&uniform, "%d\n%s --> %s\nline\n\n", i+1, stampOf(s*25/24+1.5), stampOf(s*25/24+3.5))
+		fmt.Fprintf(&scattered, "%d\n%s --> %s\nline\n\n", i+1, stampOf(s+float64(i%3)*4), stampOf(s+float64(i%3)*4+2))
 	}
-	if med, agree, ok := shifts(before, uniform, 25.0/24); !ok || med != 1500 || agree != 1 {
-		t.Errorf("uniform: %v %v %v", med, agree, ok)
-	}
-	if _, agree, _ := shifts(before, scattered, 1); agree >= alassAgree {
-		t.Errorf("scattered shifts agree %.2f", agree)
+	os.WriteFile(filepath.Join(dir, "uniform"), []byte(uniform.String()), 0o644)
+	os.WriteFile(filepath.Join(dir, "scattered"), []byte(scattered.String()), 0o644)
+	alass := h.Script(t, "alass", `cp "`+dir+`/$(cat "`+dir+`/mode")" "$3"; echo "info: 'reference file FPS/input file FPS' ratio is 25/24"`+"\n")
+	r := &run{env: h.Env, opt: Options{Alass: alass}}
+	ref := reference{label: "alass", dir: dir, speech: filepath.Join(dir, "speech.srt")}
+	for mode, want := range map[string]bool{"uniform": true, "scattered": false} {
+		os.WriteFile(filepath.Join(dir, "mode"), []byte(mode), 0o644)
+		attempt := map[string]any{}
+		out, result, ok := r.fit(context.Background(), ref, cand.String(), attempt)
+		if ok != want || ok && (result != "retimed" || out != uniform.String() || attempt["offset_ms"] != 1500.0) {
+			t.Errorf("%s: ok %v result %q attempt %v", mode, ok, result, attempt)
+		}
 	}
 }
