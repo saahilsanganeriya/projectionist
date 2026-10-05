@@ -69,6 +69,15 @@ func (s *syncer) refresh(ctx context.Context, app string, old *addresses) *addre
 		next = &kept
 	} else {
 		s.env.Log.Info("app addressed", "event", "addressed", "app", app, "items", len(next.Targets))
+		if app == plexApp {
+			names := map[string]string{}
+			for name, id := range next.Users {
+				names[id] = name
+			}
+			if err := s.env.Store.PutJSON(ctx, name, "accounts.plex", names); err != nil {
+				s.env.Log.Warn("account names write failed", "event", "store_error", "err", err)
+			}
+		}
 	}
 	if err := s.env.Store.PutJSON(ctx, name, "address."+app, next); err != nil {
 		s.env.Log.Warn("address cache write failed", "event", "store_error", "err", err)
@@ -155,8 +164,15 @@ func (Stage) Hooks(env *stage.Env) map[string]http.Handler {
 		env.Log.Error("tables", "event", "store_error", "err", err)
 		return nil
 	}
+	plex := func(r *http.Request, opt Options, now time.Time) (watch.Event, dropped, error) {
+		names := map[string]string{} // Plex account id → its name on this server, from the last listing
+		if _, err := env.Store.GetJSON(r.Context(), name, "accounts.plex", &names); err != nil {
+			return watch.Event{}, dropped{}, err
+		}
+		return parsePlex(r, opt, now, names)
+	}
 	return map[string]http.Handler{
-		"POST /hooks/plex":     hook(env, opt, parsePlex),
+		"POST /hooks/plex":     hook(env, opt, plex),
 		"POST /hooks/jellyfin": hook(env, opt, parseJellyfin),
 	}
 }
@@ -206,7 +222,9 @@ func record(ctx context.Context, db *sql.DB, e watch.Event) error {
 	return applySink(ctx, db, app, e.Person, id, e)
 }
 
-func parsePlex(r *http.Request, opt Options, now time.Time) (watch.Event, dropped, error) {
+// parsePlex maps the account by its id where names knows it: the payload's title is not always the account's name
+// on the server (the owner's can be the plex.tv title), and only the server's name is in config.
+func parsePlex(r *http.Request, opt Options, now time.Time, names map[string]string) (watch.Event, dropped, error) {
 	mr, err := r.MultipartReader()
 	if err != nil {
 		return watch.Event{}, dropped{}, fmt.Errorf("plex webhook: %w", err)
@@ -264,9 +282,13 @@ func parsePlex(r *http.Request, opt Options, now time.Time) (watch.Event, droppe
 	default:
 		return watch.Event{}, dropped{"event " + p.Event, true}, nil
 	}
+	account := p.Account.Title
+	if n, ok := names[p.Account.ID.String()]; ok {
+		account = n
+	}
 	var mapped bool
 	section := md.Section.String()
-	switch e.Person, mapped = opt.person(plexApp, p.Account.Title); {
+	switch e.Person, mapped = opt.person(plexApp, account); {
 	case md.Type != "movie" && md.Type != "episode":
 		return watch.Event{}, dropped{"type " + md.Type, true}, nil
 	case !mapped:

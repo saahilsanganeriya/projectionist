@@ -19,6 +19,7 @@ import (
 
 	"projectionist/internal/fake"
 	"projectionist/internal/stage"
+	"projectionist/internal/watch"
 )
 
 const (
@@ -205,8 +206,9 @@ func plexPlay(event, account, key, extra string) string {
 // Catches: a dry run that writes; a state written back to the app it came from (Heat's re-created Plex item would
 // be scrobbled again, adding a play); the Plex history not counted as held (Clerks would be scrobbled again); a
 // friend's write sent with the owner's token; an existing plex.tv webhook dropped when ours is added; a rerun that
-// writes again; a pushed play not reaching the other app, or not counted as held by the app that pushed it; and a
-// state that knows only a resume point sent to Jellyfin as played=false, playcount=0 (it would unmark a play there).
+// writes again; a pushed play not reaching the other app, or not counted as held by the app that pushed it; the
+// owner's pushed play lost because its payload names him by his plex.tv title; and a state that knows only a resume
+// point sent to Jellyfin as played=false, playcount=0 (it would unmark a play there).
 func TestRunTwoWay(t *testing.T) {
 	h, w, options, _ := newHarness(t)
 	h.SetOptions(options + "apply = false\n")
@@ -248,7 +250,8 @@ func TestRunTwoWay(t *testing.T) {
 	}
 
 	h.Now = h.Now.Add(time.Hour)
-	push(h, plexApp, plexPlay("media.scrobble", "saahilsanganeriya", "11", ""))
+	// The owner's payload carries his plex.tv title, not his account name on the server: the id maps him.
+	push(h, plexApp, strings.Replace(plexPlay("media.scrobble", "Saahil S", "11", ""), `"title"`, `"id":1,"title"`, 1))
 	push(h, plexApp, plexPlay("media.stop", "roger", "15", `,"viewOffset":600000,"duration":6000000`))
 	run(t, h)
 	if got := strings.Join(w.since(done), "\n"); got != `/UserItems/b1/UserData?userId=u1 {"LastPlayedDate":"2026-10-05T07:00:00Z","PlayCount":1,"PlaybackPositionTicks":0,"Played":true}`+"\n"+
@@ -405,7 +408,9 @@ func TestParseHooks(t *testing.T) {
 	for _, c := range cases {
 		parse := parseJellyfin
 		if c.hook == plexApp {
-			parse = parsePlex
+			parse = func(r *http.Request, opt Options, now time.Time) (watch.Event, dropped, error) {
+				return parsePlex(r, opt, now, nil)
+			}
 		}
 		e, drop, err := parse(hookRequest(c.hook, c.payload), opt, time.Unix(0, 0))
 		got := "dropped: " + drop.reason
