@@ -206,17 +206,24 @@ func TestPlanSubtitles(t *testing.T) {
 		d + "Subs/4_English.srt": srtFacts("d", 12, 3000, 0), d + "Subs/5_English.srt": srtFacts("e", 1000, 75000, 0.3),
 		d + "Subs/6_Unknown.srt": {SHA1: "f", Cues: 800, Size: 50000, Script: "latin"},
 	}
-	in.Aligned["Heat.1995.en.srt"] = true
+	in.Aligned["2_English.srt"] = true // the aligner's copy is not the one beside the video: it still wins
 	h := "Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}"
 	expect(t, Build(in), map[string]string{
-		d + "Heat.1995.en.srt":   "move " + h + ".en.srt",
+		d + "Heat.1995.en.srt":   "move " + h + ".eng.srt",
 		d + "Subs/English.srt":   "archive _archive/subtitles/Movies/Heat.1995/Subs/English.srt",
-		d + "Subs/2_English.srt": "move " + h + ".eng.srt",
+		d + "Subs/2_English.srt": "move " + h + ".en.srt",
 		d + "Subs/5_English.srt": "move " + h + ".en.sdh.srt",
 		d + "Subs/3_English.srt": "archive _archive/subtitles/Movies/Heat.1995/Subs/3_English.srt",
 		d + "Subs/4_English.srt": "move " + h + ".en.forced.srt",
 		d + "Subs/6_Unknown.srt": "leave",
 	})
+
+	// identical bytes: the copy beside the video stays and inherits the other copy's flags
+	dup := newInput(map[string]int64{video: 9_000_000_000, d + "Heat.1995.en.srt": 70000, d + "Subs/English.forced.srt": 70000})
+	dup.Movies[video] = heat
+	dup.Subs[d+"Heat.1995.en.srt"], dup.Subs[d+"Subs/English.forced.srt"] = srtFacts("x", 900, 70000, 0), srtFacts("x", 900, 70000, 0)
+	expect(t, Build(dup), map[string]string{d + "Heat.1995.en.srt": "move " + h + ".en.forced.srt",
+		d + "Subs/English.forced.srt": "archive _archive/subtitles/Movies/Heat.1995/Subs/English.forced.srt"})
 
 	only := newInput(map[string]int64{video: 9_000_000_000, d + "Heat.1995.eng.sdh.srt": 70000})
 	only.Movies[video] = heat
