@@ -528,6 +528,31 @@ func TestMissingInputsFailTheRun(t *testing.T) {
 	}
 }
 
+// Catches: a bad verdict saved by a run that then returned early (a restart cancels it, the next file errors) never
+// announced, by that run or by the next one, which finds the verdict already set; a verdict announced again by
+// every run; and one left unannounced by a run that died before its end.
+func TestAlertsSurviveAnEarlyReturn(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	l := lib{t, t.TempDir()}
+	broken := l.add("Movies/Broken (2001) {tmdb-1}/Broken (2001) {tmdb-1}.mkv", 1)
+	l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", 2)
+	fixture, _ := filepath.Abs("testdata/cronos_dtshdma.json")
+	h.Script(t, "ffprobe", fmt.Sprintf("case \"$*\" in *Broken*) exit 1;; esac\ncat %q\n", fixture))
+	h.SetOptions(fmt.Sprintf("library = %q\nsections = [\"Movies\"]\nundo_logs = []", l.root))
+	var rep stage.Report // no ffmpeg yet: Heat's decode check fails the run after Broken's verdict was saved
+	if err := (Stage{}).Run(context.Background(), h.Env, &rep); err == nil || len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], broken) {
+		t.Fatalf("early return: err = %v, alerts %v", err, rep.Alerts)
+	}
+	h.Script(t, "ffmpeg", "echo frame=120\n")
+	if rep = runOnce(t, h.Env); len(rep.Alerts) != 0 || rep.Counts["decode_checked"] != 1 {
+		t.Fatalf("next run: alerts %v counts %v", rep.Alerts, rep.Counts)
+	}
+	h.Env.Store.DB().Exec(`UPDATE details_files SET alerted = '' WHERE path = ?`, broken) // as a run killed before its end leaves it
+	if rep = runOnce(t, h.Env); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "1 video(s) newly unreadable") {
+		t.Fatalf("after a killed run: alerts %v", rep.Alerts)
+	}
+}
+
 // Catches: heavy work done inline, file by file, so a long scan of one film holds back every later file's note
 // (a 50 GB remux scans for ~45 min on the busy NAS).
 func TestNotesComeBeforeHeavyWork(t *testing.T) {

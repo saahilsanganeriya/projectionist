@@ -83,6 +83,7 @@ const schema = `CREATE TABLE IF NOT EXISTS details_files (
   clean        INTEGER,                  -- 1 = start, middle and end decode cleanly; 0 = not; NULL = not checked
   clean_detail TEXT NOT NULL DEFAULT '',
   checked_at   TEXT NOT NULL,            -- when status was last decided (UTC)
+  alerted      TEXT NOT NULL DEFAULT '', -- the bad verdict last announced to the owner (see verdictSQL)
   note_sha     TEXT NOT NULL DEFAULT '', -- the note as last written or confirmed, and its size/mtime then:
   note_size    INTEGER NOT NULL DEFAULT 0, -- a run only stats a note whose text is unchanged (a read costs
   note_mtime   INTEGER NOT NULL DEFAULT 0  -- ~100x a stat on the busy NAS)
@@ -98,6 +99,7 @@ type fileRow struct {
 	Clean       sql.NullBool
 	CleanDetail string
 	CheckedAt   time.Time
+	Alerted     string
 	NoteSHA     string
 	NoteSize    int64
 	NoteMTime   int64
@@ -119,7 +121,7 @@ type Stage struct{}
 
 func (Stage) Name() string { return name }
 
-func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
+func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) (err error) {
 	opt := defaults()
 	if err := env.Options(&opt); err != nil {
 		return err
@@ -157,6 +159,11 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 
 	r := &run{env: env, opt: opt, rep: rep, db: db, orig: orig, subtitles: subtitles,
 		probes: opt.MaxProbes, peaks: opt.MaxPeakScans, decodes: opt.MaxDecodeChecks, heavyOK: true}
+	defer func() { // on every return: a verdict saved before an early return is still raised
+		if aerr := r.raiseAlerts(context.WithoutCancel(ctx)); err == nil {
+			err = aerr
+		}
+	}()
 	seen := map[string]bool{}
 	for _, v := range videos {
 		if ctx.Err() != nil {
@@ -193,14 +200,6 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 			}
 		}
 	}
-	for _, bad := range []struct {
-		what  string
-		paths []string
-	}{{"newly unreadable", r.newUnreadable}, {"newly failing the decode check", r.newUnclean}} {
-		if len(bad.paths) > 0 {
-			rep.Alert("%d video(s) %s (details_files): %s", len(bad.paths), bad.what, strings.Join(first(bad.paths, 5), "; "))
-		}
-	}
 	c := rep.Counts
 	rep.Summary = fmt.Sprintf("%d videos: %d notes written, %d probed (%d deferred), %d unreadable, %d peak scans, %d decode checks (%d not clean), %d heavy deferred",
 		len(videos), c["written"], c["probed"], c["probe_deferred"], c["unreadable"], c["peak_scanned"], c["decode_checked"], c["not_clean"], c["heavy_deferred"])
@@ -218,8 +217,6 @@ type run struct {
 	probes, peaks, decodes int  // what is left of this run's bounds
 	heavyOK                bool // false once a guest was seen: heavy work waits for a later run
 	queue                  []pending
-	newUnreadable          []string
-	newUnclean             []string
 }
 
 // pending is a video whose heavy facts are missing, queued behind the notes pass.
@@ -267,7 +264,6 @@ func (r *run) one(ctx context.Context, v video, row *fileRow) error {
 	}
 	if err != nil {
 		if row.Status != "unreadable" {
-			r.newUnreadable = append(r.newUnreadable, v.path)
 			r.env.Log.Warn("video unreadable", "event", "video_unreadable", "item", v.path, "err", err)
 		}
 		row.Status, row.Error, row.CheckedAt = "unreadable", err.Error(), r.env.Now()
@@ -370,7 +366,6 @@ func (r *run) heavyFacts(ctx context.Context, v video, info probe.Info, row *fil
 			row.Clean, row.CleanDetail = sql.NullBool{Bool: clean, Valid: true}, detail
 			r.rep.Count("decode_checked", 1)
 			if !clean {
-				r.newUnclean = append(r.newUnclean, v.path)
 				r.rep.Count("not_clean", 1)
 				r.env.Log.Warn("decode check failed", "event", "decode_unclean", "item", v.path, "detail", detail)
 			}
@@ -414,6 +409,40 @@ func (r *run) heavy(ctx context.Context, fn func(context.Context) error) (done b
 	return true, err
 }
 
+// verdictSQL names a details_files row's bad verdict (empty when it has none).
+const verdictSQL = `CASE WHEN status = 'unreadable' THEN 'unreadable' WHEN clean = 0 THEN 'unclean' ELSE '' END`
+
+// raiseAlerts tells the owner about each bad verdict once: rows whose verdict differs from the one last announced.
+// It reads the store, not this run's memory, so a verdict saved by a run that then stopped early is raised by that
+// run's deferred call, or by the next run when the process died outright. A row that recovers is reset, so a
+// relapse is announced again.
+func (r *run) raiseAlerts(ctx context.Context) error {
+	q, err := r.db.QueryContext(ctx, `SELECT path, `+verdictSQL+` FROM details_files WHERE `+verdictSQL+` NOT IN ('', alerted) ORDER BY path`)
+	if err != nil {
+		return err
+	}
+	paths := map[string][]string{}
+	for q.Next() {
+		var path, verdict string
+		if err := q.Scan(&path, &verdict); err != nil {
+			q.Close()
+			return err
+		}
+		paths[verdict] = append(paths[verdict], path)
+	}
+	q.Close()
+	if err := q.Err(); err != nil {
+		return err
+	}
+	for _, kind := range [][2]string{{"unreadable", "newly unreadable"}, {"unclean", "newly failing the decode check"}} {
+		if p := paths[kind[0]]; len(p) > 0 {
+			r.rep.Alert("%d video(s) %s (details_files): %s", len(p), kind[1], strings.Join(first(p, 5), "; "))
+		}
+	}
+	_, err = r.db.ExecContext(ctx, `UPDATE details_files SET alerted = `+verdictSQL+` WHERE alerted != `+verdictSQL)
+	return err
+}
+
 func gone(path string) bool {
 	_, err := os.Stat(path)
 	return errors.Is(err, fs.ErrNotExist)
@@ -442,19 +471,19 @@ func (r *run) sidecarsOf(path string) []string {
 
 func (r *run) save(ctx context.Context, path string, row *fileRow) error {
 	_, err := r.db.ExecContext(ctx, `INSERT INTO details_files(path, size, mtime_ns, status, error, peak_kbps, peak_at_s, clean, clean_detail, checked_at,
-		  note_sha, note_size, note_mtime)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		  alerted, note_sha, note_size, note_mtime)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime_ns=excluded.mtime_ns, status=excluded.status, error=excluded.error,
 		  peak_kbps=excluded.peak_kbps, peak_at_s=excluded.peak_at_s, clean=excluded.clean, clean_detail=excluded.clean_detail, checked_at=excluded.checked_at,
-		  note_sha=excluded.note_sha, note_size=excluded.note_size, note_mtime=excluded.note_mtime`,
+		  alerted=excluded.alerted, note_sha=excluded.note_sha, note_size=excluded.note_size, note_mtime=excluded.note_mtime`,
 		path, row.Size, row.MTime, row.Status, row.Error, row.PeakKbps, row.PeakAt, row.Clean, row.CleanDetail, row.CheckedAt.UTC().Format(time.RFC3339Nano),
-		row.NoteSHA, row.NoteSize, row.NoteMTime)
+		row.Alerted, row.NoteSHA, row.NoteSize, row.NoteMTime)
 	return err
 }
 
 func loadRows(ctx context.Context, db *sql.DB) (map[string]*fileRow, error) {
 	q, err := db.QueryContext(ctx, `SELECT path, size, mtime_ns, status, error, peak_kbps, peak_at_s, clean, clean_detail, checked_at,
-		note_sha, note_size, note_mtime FROM details_files`)
+		alerted, note_sha, note_size, note_mtime FROM details_files`)
 	if err != nil {
 		return nil, err
 	}
@@ -464,7 +493,7 @@ func loadRows(ctx context.Context, db *sql.DB) (map[string]*fileRow, error) {
 		var path, checked string
 		row := &fileRow{}
 		if err := q.Scan(&path, &row.Size, &row.MTime, &row.Status, &row.Error, &row.PeakKbps, &row.PeakAt, &row.Clean, &row.CleanDetail, &checked,
-			&row.NoteSHA, &row.NoteSize, &row.NoteMTime); err != nil {
+			&row.Alerted, &row.NoteSHA, &row.NoteSize, &row.NoteMTime); err != nil {
 			return nil, err
 		}
 		if row.CheckedAt, err = time.Parse(time.RFC3339Nano, checked); err != nil {
