@@ -162,7 +162,7 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 		q := r.URL.Query()
 		a.promoted = q.Get("metadataItemId") == "900" && q.Get("promotedToOwnHome") == "1" && q.Get("promotedToRecommended") == "1"
 	})
-	px.HandleFunc("PUT", "/:/scrobble", func(w http.ResponseWriter, r *http.Request) {
+	scrobble := func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		if a.failScrobble {
@@ -174,7 +174,9 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 			conn, _, _ := w.(http.Hijacker).Hijack()
 			conn.Close()
 		}
-	})
+	}
+	px.HandleFunc("PUT", "/:/scrobble", scrobble)
+	px.HandleFunc("GET", "/:/scrobble", scrobble) // Plex takes either method
 	px.HandleFunc("PUT", "/:/rate", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
@@ -301,7 +303,7 @@ func (w *world) run(t *testing.T, extra string) stage.Report {
 
 func writes(h *fake.Harness) int {
 	n := 0
-	for _, c := range [][]fake.Call{h.Plex.Calls("PUT", "/:/scrobble"), h.Plex.Calls("PUT", "/:/rate"), h.Plex.Calls("POST", "/library/collections"),
+	for _, c := range [][]fake.Call{h.Plex.Calls("PUT", "/:/scrobble"), h.Plex.Calls("GET", "/:/scrobble"), h.Plex.Calls("PUT", "/:/rate"), h.Plex.Calls("POST", "/library/collections"),
 		h.Plex.Calls("POST", "/hubs/sections/4/manage"), h.Jellyfin.Calls("POST", "/Collections")} {
 		n += len(c)
 	}
