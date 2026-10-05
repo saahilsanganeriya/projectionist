@@ -321,11 +321,14 @@ func TestRunProviderTrouble(t *testing.T) {
 		t.Errorf("searches refused: alerts %q, recorded %v; want one alert, Ran recorded, Clerks and Show deferred", rep.Alerts, got)
 	}
 
-	dead := newFixture(t)
+	dead := newFixture(t) // Ran alone: the run's last title trips the breaker, so no later search raises the alert
 	dead.dead = true
+	for _, rel := range []string{heat, clerks, show} {
+		os.Remove(dead.path(rel))
+	}
 	rep = dead.run(t)
-	if got := outcomes(dead); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "HTTP 404") || len(got) != 2 || got[dead.path(ran)] != "no_aligned_candidate" {
-		t.Errorf("dead links: alerts %q, recorded %v; want one alert, Ran recorded, Clerks and Show deferred", rep.Alerts, got)
+	if got := outcomes(dead); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "HTTP 404") || got[dead.path(ran)] != "no_aligned_candidate" {
+		t.Errorf("dead links: alerts %q, recorded %v; want one alert and Ran recorded", rep.Alerts, got)
 	}
 
 	noTMDB := newFixture(t)
