@@ -8,10 +8,12 @@ import (
 	"time"
 
 	"projectionist/internal/config"
+	"projectionist/internal/fanart"
 	"projectionist/internal/jellyfin"
 	"projectionist/internal/plex"
 	"projectionist/internal/probe"
 	"projectionist/internal/store"
+	"projectionist/internal/tmdb"
 	"projectionist/internal/viewers"
 )
 
@@ -31,6 +33,8 @@ type Env struct {
 	Jellyfin *jellyfin.Client
 	Viewers  *viewers.Gate
 	Probe    *probe.Prober
+	TMDB     *tmdb.Client   // the only source of identity, episodes, collections and external ids; one per process
+	Fanart   *fanart.Client // community artwork, keyed by TMDB/IMDb id (films) or TVDB id (shows)
 	FFmpeg   config.FFmpeg
 	Now      func() time.Time // UTC
 	Loc      *time.Location   // config timezone: only for text the owner reads (status files)

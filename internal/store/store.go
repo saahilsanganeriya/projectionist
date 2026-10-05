@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS events (
   fields TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_item ON events(stage, item, id);
+CREATE TABLE IF NOT EXISTS http_cache (
+  key        TEXT PRIMARY KEY,
+  body       BLOB NOT NULL,
+  fetched_at TEXT NOT NULL
+);
 `
 
 // TimeFormat is how every timestamp is stored: UTC, RFC 3339 with nanoseconds, so text order is time order.

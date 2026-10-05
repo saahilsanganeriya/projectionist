@@ -24,6 +24,17 @@ timeout  = "20s"
 dir    = "/usr/lib/jellyfin-ffmpeg" # inside the image; same build as the Jellyfin container
 device = "/dev/dri/renderD128"
 
+# The online sources: identity, episodes, collections, external ids and images come from TMDB directly, artwork
+# also from fanart.tv. Plex and Jellyfin are never asked. Responses are cached in state_db for cache_ttl.
+[tmdb]
+read_token_file = "/run/secrets/tmdb_read_token" # v4 read-access token, sent as a bearer
+api_key_file    = "/run/secrets/tmdb_api_key"    # v3 key, used only when the token file is missing or empty
+cache_ttl       = "24h"
+
+[fanart]
+api_key_file = "/run/secrets/fanart_api_key"
+cache_ttl    = "24h"
+
 # One table per stage. Common keys: enabled (default true when the table exists), every, window ("HH:MM-HH:MM",
 # in timezone, may wrap midnight). Everything else in the table belongs to the stage.
 # [stages.example]
