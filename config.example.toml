@@ -53,3 +53,17 @@ small_kbps      = 20000
 work_dir        = "/volume1/media/.projectionist/remote4k" # same share as the library: publish = one rename
 status_file     = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
 default_section = 4
+
+# An English text subtitle beside every movie and episode; replaces scripts/sub_stats.py and scripts/subfetch2.py.
+# Providers are called directly: OpenSubtitles' legacy REST API (no key), plus OpenSubtitles.com when
+# <secrets_dir>/opensubtitles_api_key exists. IMDb ids come from TMDB (<secrets_dir>/tmdb_read_token).
+[stages.subtitles]
+every       = "6h"
+roots       = ["/volume1/media/Movies", "/volume1/media/TV"]
+stats_file  = "/state/sub_stats.tsv" # sub_stats.py's TSV, rewritten each run (the rename planner reads it)
+retry_after = "168h"                 # a title that got no subtitle is searched again after this
+workers     = 3
+max_titles  = 0                      # per run; 0 = every due title
+secrets_dir = "/run/secrets"
+alass       = "/usr/local/bin/alass" # aligns to the audio when there is no English image track
+# output_dir = "/volume1/PlexMediaServer/projectionist-test/subtitles/out" # test runs: write sidecars here instead
