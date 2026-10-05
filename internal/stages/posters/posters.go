@@ -60,7 +60,8 @@ type Options struct {
 	PlexMovieSection int           `toml:"plex_movie_section"`
 	PlexTVSection    int           `toml:"plex_tv_section"`
 	SinkIndexEvery   time.Duration `toml:"sink_index_every"` // how often each app's item list is fetched
-	Mark             string        `toml:"mark"`             // EXIF ImageDescription on every uploaded image
+	SinkAlertAfter   time.Duration `toml:"sink_alert_after"` // an app whose listing fails this long raises an alert
+	Mark             string        `toml:"mark"`             // EXIF ImageDescription on the images the stage chose
 	AnthropicAPI     string        `toml:"anthropic_api"`
 	TMDBImages       string        `toml:"tmdb_images"`
 }
@@ -85,6 +86,7 @@ func defaults() Options {
 		PlexMovieSection: 4,
 		PlexTVSection:    2,
 		SinkIndexEvery:   24 * time.Hour,
+		SinkAlertAfter:   72 * time.Hour,
 		Mark:             "poster-curator 2026-10",
 		AnthropicAPI:     "https://api.anthropic.com",
 		TMDBImages:       "https://image.tmdb.org/t/p",
@@ -128,6 +130,7 @@ CREATE TABLE IF NOT EXISTS posters_sinks (
   sink       TEXT NOT NULL, -- jellyfin | plex
   url        TEXT NOT NULL, -- the candidate to show there
   state      TEXT NOT NULL, -- pending | uploaded (Plex: the lock is still to set) | done
+  target     TEXT NOT NULL, -- the app's item id the url went to ('' while pending)
   attempts   INTEGER NOT NULL,
   next_at    TEXT NOT NULL,
   last_error TEXT NOT NULL,
@@ -226,7 +229,7 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 		return err
 	}
 	if export := strings.Join([]string{opt.OwnerItems, opt.OwnerPosters, opt.OwnerBackupDB}, "\n"); imported.Export != export {
-		n, err := importOwners(ctx, db, opt.OwnerItems, opt.OwnerPosters, opt.OwnerBackupDB)
+		n, err := importOwners(ctx, db, opt.OwnerItems, opt.OwnerPosters, opt.OwnerBackupDB, opt.Mark)
 		if err != nil {
 			return fmt.Errorf("owner posters import: %w", err)
 		}

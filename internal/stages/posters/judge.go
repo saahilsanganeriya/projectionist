@@ -23,12 +23,13 @@ const systemPrompt = `You are the art director of a cinephile's film library. Yo
 each labelled with a letter. Score every candidate from 1 to 10 for how good it would look as this title's poster.
 
 Reward: a strong composition with a clear focal point; originality (not a collage of floating heads); typography that
-belongs to the design, or tasteful textless art; a mood true to the title; sharp, high-resolution artwork.
+belongs to the design, or tasteful textless art; a mood true to the title; clean, high-resolution artwork.
 
 Penalise: DVD or Blu-ray cover layouts; review quotes, award banners and credit blocks; text-heavy key art; air dates
 and "premieres" or "now streaming" lines; TV network or streaming-service logos; text in a language other than English
-or the title's own; watermarks; blurry, stretched or badly cropped images; art for a different title; and, for a
-season, art for the complete series or another season instead of this one.
+or the title's own; watermarks; low-resolution, pixelated, stretched or badly cropped images (deliberate soft focus or
+grain is a style, not a flaw); art for a different title; and, for a season, art for the complete series or another
+season instead of this one.
 
 Score near-duplicates (the same art cropped, resized or recoloured) the same. Answer with JSON only, in exactly this
 shape: {"scores": {"A": 7, "B": 4}, "reason": "<at most 15 words on why the best one wins>"}`
@@ -52,7 +53,10 @@ func setID(cands []Candidate) string {
 	return hex.EncodeToString(h.Sum(nil)[:8])
 }
 
-var errBudget = errors.New("posters: judge budget reached")
+var (
+	errBudget     = errors.New("posters: judge budget reached")
+	errBudgetHeld = errors.New("posters: judge budget held by calls in flight")
+)
 
 // judge decides every title whose candidate set has no verdict: without a call when the rule needs none, through
 // the Message Batches API for a backlog, and through the normal API for a few new arrivals.
@@ -420,16 +424,22 @@ func (r *run) lookup(ctx context.Context, byKey map[string]*row, key string) (*r
 
 // ---- the call ledger and the budget ----
 
-// reserve records a call before it is made, holding its worst-case cost against the budget until it finishes.
+// reserve records a call before it is made, holding its worst-case cost against the budget until it finishes. When
+// only what calls in flight hold fills the budget, it is errBudgetHeld: they settle below what they hold (a batch
+// request at about a third), and the title is judged on a later run.
 func (r *run) reserve(ctx context.Context, item, of, model, mode string, usd float64) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	spent, err := spentUSD(ctx, r.env.Store.DB())
-	if err != nil {
+	var settled, held float64
+	if err := r.env.Store.DB().QueryRowContext(ctx, `SELECT coalesce(sum(cost_usd), 0), coalesce(sum(reserved_usd), 0)
+		FROM posters_calls`).Scan(&settled, &held); err != nil {
 		return 0, err
 	}
-	if spent+usd > r.opt.BudgetUSD {
-		return 0, fmt.Errorf("%w: $%.4f of $%.2f spent or held", errBudget, spent, r.opt.BudgetUSD)
+	switch {
+	case settled+usd > r.opt.BudgetUSD:
+		return 0, fmt.Errorf("%w: $%.4f of $%.2f spent", errBudget, settled, r.opt.BudgetUSD)
+	case settled+held+usd > r.opt.BudgetUSD:
+		return 0, fmt.Errorf("%w: $%.4f spent and $%.4f held of $%.2f", errBudgetHeld, settled, held, r.opt.BudgetUSD)
 	}
 	res, err := r.env.Store.DB().ExecContext(context.WithoutCancel(ctx), `INSERT INTO posters_calls(at, item, of, model, mode,
 		batch_id, state, input_tokens, output_tokens, reserved_usd, cost_usd, llm_ms, error)
@@ -509,13 +519,20 @@ func spentUSD(ctx context.Context, db *sql.DB) (float64, error) {
 	return spent, err
 }
 
+// budgetHit alerts once when real spend has reached the budget; a budget only held by calls in flight is no alert.
 func (r *run) budgetHit(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if !r.budgetAlerted {
-		r.budgetAlerted = true
-		r.rep.Alert("%v; the rest waits until the budget is raised", err)
+	if r.budgetAlerted {
+		return
 	}
+	r.budgetAlerted = true
+	if errors.Is(err, errBudgetHeld) {
+		r.env.Log.Info("judging waits for calls in flight to settle", "event", "budget_held", "err", err)
+		r.rep.Count("budget_held", 1)
+		return
+	}
+	r.rep.Alert("%v; the rest waits until the budget is raised", err)
 }
 
 // model is the dated policy's choice at this run (env.LLM); a "family:latest" alias resolves once a day, keeping the

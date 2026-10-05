@@ -1,10 +1,12 @@
 package posters
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -103,9 +105,9 @@ const (
 //
 // A later export's upload or pick replaces the earlier entry (the owner's newer intent); its default never does: a
 // title Plex re-created during the rename shows its default poster again, but the owner's upload still stands.
-// Only an export taken before this stage's first upload says who chose a poster: after it, Plex lists this stage's
-// uploads as uploads too.
-func importOwners(ctx context.Context, db *sql.DB, itemsPath, postersDir, backupDB string) (int, error) {
+// Plex lists the stage's uploads as uploads too; an upload whose file carries the stage's mark (prepare) counts as a
+// default, so the earlier entry stands.
+func importOwners(ctx context.Context, db *sql.DB, itemsPath, postersDir, backupDB, mark string) (int, error) {
 	raw, err := os.ReadFile(itemsPath)
 	if err != nil {
 		return 0, err
@@ -184,9 +186,13 @@ func importOwners(ctx context.Context, db *sql.DB, itemsPath, postersDir, backup
 				keys = append(keys, key(season, id, *it.Index))
 			}
 		}
+		state := pr.state
+		if state == ownerUpload && carriesMark(file, mark) {
+			state = ownerDefault
+		}
 		for _, k := range keys { // one title listed twice: the owner's strongest intent wins
-			if old, dup := out[k]; !dup || rank[pr.state] > rank[old.state] {
-				out[k] = owned{file, pr.state, it.GUID}
+			if old, dup := out[k]; !dup || rank[state] > rank[old.state] {
+				out[k] = owned{file, state, it.GUID}
 			}
 		}
 	}
@@ -214,6 +220,19 @@ func parseIDs(ids []string) []library.ID {
 		}
 	}
 	return out
+}
+
+// carriesMark is whether the image at path starts with the EXIF ImageDescription mark() writes right after the
+// JPEG's first marker.
+func carriesMark(path, mark string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	head := make([]byte, 512)
+	n, _ := io.ReadFull(f, head)
+	return mark != "" && bytes.Contains(head[:n], append([]byte(mark), 0))
 }
 
 // posterLocked reads Plex's user_fields ("lockedFields=2|9&...") for field 9, the poster.

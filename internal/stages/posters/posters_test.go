@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -31,7 +32,8 @@ import (
 	"projectionist/internal/tmdb"
 )
 
-func init() { FetchDelay, llm.RetryDelay = zeroDelay, zeroDelay }
+// Pages of one item make every test list Jellyfin in more than one page.
+func init() { FetchDelay, llm.RetryDelay, jellyfinPage = zeroDelay, zeroDelay, 1 }
 
 func zeroDelay(int) time.Duration { return 0 }
 
@@ -241,9 +243,7 @@ tmdb_images = %q
 	}
 	w.h.Plex.Handle("PUT", "/library/sections/4/all", 200, "")
 	w.h.Plex.Handle("PUT", "/library/sections/2/all", 200, "")
-	w.h.Jellyfin.Handle("GET", "/Items", 200, `{"Items":[{"Id":"j1","Type":"Movie","ProviderIds":{"Tmdb":"1"}},
- {"Id":"j2","Type":"Movie","ProviderIds":{"Tmdb":"2"}},{"Id":"j3","Type":"Series","ProviderIds":{"Tmdb":"3"}},
- {"Id":"j31","Type":"Season","SeriesId":"j3","IndexNumber":1}]}`)
+	w.jellyfinLists(jellyfinItems)
 	for _, id := range []string{"j1", "j2", "j3", "j31"} {
 		w.h.Jellyfin.Handle("POST", "/Items/"+id+"/Images/Primary", 204, "")
 	}
@@ -251,6 +251,34 @@ tmdb_images = %q
 }
 
 func reply(rw http.ResponseWriter, body string) { rw.Write([]byte(body)) }
+
+const jellyfinItems = `{"Id":"j1","Type":"Movie","ProviderIds":{"Tmdb":"1"}}, {"Id":"j2","Type":"Movie","ProviderIds":{"Tmdb":"2"}},
+ {"Id":"j3","Type":"Series","ProviderIds":{"Tmdb":"3"}}, {"Id":"j31","Type":"Season","SeriesId":"j3","IndexNumber":1}`
+
+// jellyfinLists makes the fake Jellyfin list these items (JSON objects) only the way the real one answers during a
+// library scan: one type per request, in pages of at most jellyfinPage, without a total count; anything else is a 500.
+func (w *world) jellyfinLists(items string) {
+	var raw []json.RawMessage
+	var types []struct{ Type string }
+	json.Unmarshal([]byte("["+items+"]"), &raw)
+	json.Unmarshal([]byte("["+items+"]"), &types)
+	w.h.Jellyfin.HandleFunc("GET", "/Items", func(rw http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		start, _ := strconv.Atoi(q.Get("StartIndex"))
+		limit, err := strconv.Atoi(q.Get("Limit"))
+		if err != nil || limit > jellyfinPage || q.Get("EnableTotalRecordCount") != "false" || strings.Contains(q.Get("IncludeItemTypes"), ",") {
+			rw.WriteHeader(500)
+			return
+		}
+		var page []json.RawMessage
+		for i, it := range types {
+			if it.Type == q.Get("IncludeItemTypes") {
+				page = append(page, raw[i])
+			}
+		}
+		json.NewEncoder(rw).Encode(map[string]any{"Items": page[min(start, len(page)):min(start+limit, len(page))]})
+	})
+}
 
 const guest = `<MediaContainer size="1"><Video type="movie" title="X"><User title="roger"/></Video></MediaContainer>`
 
@@ -325,8 +353,9 @@ func TestRunEndToEnd(t *testing.T) {
 	}
 
 	// Plex gets the owner's upload too: a title Plex re-created during the rename no longer shows it.
-	if own := w.h.Plex.Calls("POST", "/library/metadata/102/posters"); len(own) != 1 || scoreOf(own[0].Body) != 3 {
-		t.Fatalf("the owner's (blue) upload went to Plex %d times, want once", len(own))
+	if own := w.h.Plex.Calls("POST", "/library/metadata/102/posters"); len(own) != 1 || scoreOf(own[0].Body) != 3 ||
+		bytes.Contains(own[0].Body, []byte("poster-curator")) {
+		t.Fatalf("the owner's (blue) upload went to Plex %d times; want once, without the stage's mark (a later export reads a marked upload as the stage's)", len(own))
 	}
 	up := w.h.Plex.Calls("POST", "/library/metadata/101/posters")
 	if len(up) != 1 || !bytes.Contains(up[0].Body, []byte("poster-curator 2026-10")) || scoreOf(up[0].Body) != 9 {
@@ -540,13 +569,83 @@ func TestOwnerPosterUnreadable(t *testing.T) {
 // next daily list.
 func TestWaitsForSink(t *testing.T) {
 	w := newWorld(t, "")
-	w.h.Jellyfin.Handle("GET", "/Items", 200, `{"Items":[]}`)
+	w.jellyfinLists(``)
 	w.run(t)
-	w.h.Jellyfin.Handle("GET", "/Items", 200, `{"Items":[{"Id":"j1","Type":"Movie","ProviderIds":{"Tmdb":"1"}}]}`)
+	w.jellyfinLists(`{"Id":"j1","Type":"Movie","ProviderIds":{"Tmdb":"1"}}`)
 	w.h.Now = w.h.Now.Add(25 * time.Hour)
 	w.run(t)
 	if n := len(w.h.Jellyfin.Calls("POST", "/Items/j1/Images/Primary")); n != 1 {
 		t.Fatalf("Alpha uploaded to Jellyfin %d times once Jellyfin listed it, want once", n)
+	}
+}
+
+// Catches: a title an app re-created under a new item after its poster went up (a rename gives Jellyfin a new id,
+// Plex re-creates items on some moves) never getting the poster again; the apps' item lists not fetched while no
+// upload is due; and a title whose item did not change uploaded again.
+func TestSinkItemRecreated(t *testing.T) {
+	w := newWorld(t, "")
+	w.run(t)
+	w.jellyfinLists(strings.Replace(jellyfinItems, `"Id":"j1"`, `"Id":"j1b"`, 1))
+	w.h.Jellyfin.Handle("POST", "/Items/j1b/Images/Primary", 204, "")
+	w.h.Plex.Handle("GET", "/library/sections/4/all", 200, `{"MediaContainer":{"Metadata":[{"ratingKey":"201","Guid":[{"id":"tmdb://1"}]},
+ {"ratingKey":"102","Guid":[{"id":"tmdb://2"}]}]}}`)
+	w.h.Plex.Handle("POST", "/library/metadata/201/posters", 200, "")
+	w.h.Now = w.h.Now.Add(25 * time.Hour)
+	w.run(t)
+	w.run(t)
+	jf, px := w.h.Jellyfin.Calls("POST", "/Items/j1b/Images/Primary"), w.h.Plex.Calls("POST", "/library/metadata/201/posters")
+	var locked bool
+	for _, c := range w.h.Plex.Calls("PUT", "/library/sections/4/all") {
+		locked = locked || c.RawQuery == "type=1&id=201&thumb.locked=1"
+	}
+	if len(jf) != 1 || len(px) != 1 || !locked || scoreOf(px[0].Body) != 9 {
+		t.Fatalf("Alpha re-created as Jellyfin j1b and Plex 201: %d and %d uploads (want 1 each, red), Plex lock %v", len(jf), len(px), locked)
+	}
+	if n, m := len(w.h.Jellyfin.Calls("POST", "/Items/j2/Images/Primary")), len(w.h.Plex.Calls("POST", "/library/metadata/102/posters")); n != 1 || m != 1 {
+		t.Fatalf("Beta, unchanged in both apps, uploaded %d times to Jellyfin and %d to Plex; want once each", n, m)
+	}
+}
+
+// Catches: an app whose item listing keeps failing (Jellyfin's stalls during a library scan) going without posters
+// with only a warning in the log; an alert before sink_alert_after has passed; and, after the app recovered, its next
+// failure alerting at once.
+func TestSinkDownAlerts(t *testing.T) {
+	w := newWorld(t, "")
+	w.h.Jellyfin.Handle("GET", "/Items", 500, "")
+	for _, c := range []struct {
+		after     time.Duration
+		wantAlert bool
+	}{{0, false}, {71 * time.Hour, false}, {time.Hour, true}} {
+		w.h.Now = w.h.Now.Add(c.after)
+		rep := w.run(t)
+		if alerted := len(rep.Alerts) == 1 && strings.Contains(rep.Alerts[0], "jellyfin has not listed"); alerted != c.wantAlert || len(rep.Alerts) > 1 {
+			t.Fatalf("Jellyfin unlistable, %v later: alerts %v; want an alert: %v", c.after, rep.Alerts, c.wantAlert)
+		}
+	}
+	w.jellyfinLists(jellyfinItems)
+	if rep := w.run(t); len(rep.Alerts) != 0 || len(w.h.Jellyfin.Calls("POST", "/Items/j1/Images/Primary")) != 1 {
+		t.Fatalf("Jellyfin listing again: alerts %v; want none, and Alpha's poster uploaded", rep.Alerts)
+	}
+	w.h.Jellyfin.Handle("GET", "/Items", 500, "")
+	w.h.Now = w.h.Now.Add(25 * time.Hour) // the day's listing is due again
+	if rep := w.run(t); len(rep.Alerts) != 0 {
+		t.Fatalf("Jellyfin failing again a day after it recovered: alerts %v; want none yet", rep.Alerts)
+	}
+}
+
+// Catches: a kept pick or Plex default re-uploaded without the stage's mark (the next export would read it as the
+// owner's upload, never to be replaced), and the owner's own upload marked (read as the stage's).
+func TestOwnersUploadUnmarked(t *testing.T) {
+	r := &run{owners: map[string]ownerPoster{"movie:tmdb-1": {"/p/1.jpg", ownerUpload}, "movie:tmdb-2": {"/p/2.jpg", ownerPick},
+		"movie:tmdb-3": {"/p/3.jpg", ownerDefault}}}
+	for _, c := range []struct {
+		item, url string
+		want      bool
+	}{{"movie:tmdb-1", "owner:/p/1.jpg", true}, {"movie:tmdb-1", "https://image.tmdb.org/t/p/original/x.jpg", false},
+		{"movie:tmdb-2", "owner:/p/2.jpg", false}, {"movie:tmdb-3", "owner:/p/3.jpg", false}} {
+		if got := r.ownersUpload(c.item, c.url); got != c.want {
+			t.Errorf("%s %s: the owner's upload %v, want %v", c.item, c.url, got, c.want)
+		}
 	}
 }
 
@@ -562,20 +661,21 @@ func TestEmptyPoolNotRefetched(t *testing.T) {
 	}
 }
 
-// Catches: a newer export (taken just before uploads are switched on) being ignored, so a poster the owner uploaded
-// after the pre-rename backup is replaced; and its default poster for a title Plex re-created erasing the owner's
-// earlier upload.
+// Catches: a newer export being ignored, so a poster the owner uploaded after the pre-rename backup is replaced; and
+// an upload in it that carries the stage's mark (the stage's own, which Plex lists as an upload too) or a default
+// for a title Plex re-created erasing the owner's earlier upload.
 func TestNewerOwnerExport(t *testing.T) {
 	w := newWorld(t, "dry_run = true\n")
 	w.run(t)
 	b2 := t.TempDir()
 	os.MkdirAll(filepath.Join(b2, "posters/movie"), 0o755)
 	os.WriteFile(filepath.Join(b2, "posters/movie/11.jpg"), poster("yellow"), 0o644)
-	os.WriteFile(filepath.Join(b2, "posters/movie/12.jpg"), poster("green"), 0o644)
+	stages, _ := mark(poster("green"), "poster-curator 2026-10")
+	os.WriteFile(filepath.Join(b2, "posters/movie/12.jpg"), stages, 0o644)
 	os.WriteFile(filepath.Join(b2, "items.json"), []byte(`[{"kind":"movie","ratingKey":"11","guid":"plex://movie/a","ids":["tmdb://1"]},
  {"kind":"movie","ratingKey":"12","guid":"plex://movie/b","ids":["tmdb://2"]}]`), 0o644)
 	plexDB(t, filepath.Join(b2, "plex.db"), `INSERT INTO metadata_items VALUES (11, 'plex://movie/a', 1, NULL, 'upload://posters/z', ''),
- (12, 'plex://movie/b', 1, NULL, '', '')`)
+ (12, 'plex://movie/b', 1, NULL, 'upload://posters/w', '')`)
 	w.h.SetOptions(strings.ReplaceAll(w.opts, w.backup, b2))
 	w.run(t)
 	alpha, beta := w.verdict(t, "movie:tmdb-1"), w.verdict(t, "movie:tmdb-2")
@@ -630,12 +730,26 @@ func TestMissingKeyStopsRun(t *testing.T) {
 	}
 }
 
-// Catches: a judge call made once the budget cannot hold its worst case.
-func TestBudgetStops(t *testing.T) {
-	w := newWorld(t, "budget_usd = 0.002\n")
-	rep := w.run(t)
-	if w.messages != 0 || len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], errBudget.Error()) {
-		t.Fatalf("%d calls, alerts %v; want none and one budget alert", w.messages, rep.Alerts)
+// Catches: a judge call made once the budget cannot hold its worst case; and an alert (/health 503, a DSM e-mail)
+// when only what a batch in flight holds fills the budget, as on the first enabled run (holds settle at about a
+// third, and the rest is judged later).
+func TestBudget(t *testing.T) {
+	for _, c := range []struct {
+		name, state, batch string
+		cost, held         float64
+		wantAlert          bool
+	}{{"spent", "done", "", 0.0499, 0, true}, {"held by a batch in flight", "pending", "bX", 0, 0.0499, false}} {
+		w := newWorld(t, "budget_usd = 0.05\ndry_run = true\n")
+		db := w.h.Env.Store.DB()
+		db.Exec(schema)
+		db.Exec(`INSERT INTO posters_calls(at, item, of, model, mode, batch_id, state, input_tokens, output_tokens, reserved_usd,
+			cost_usd, llm_ms, error) VALUES (?, 'show:tmdb-9', 'x', 'claude-sonnet-5-5', 'batch', ?, ?, 0, 0, ?, ?, 0, '')`,
+			stamp(w.h.Now), c.batch, c.state, c.held, c.cost)
+		rep := w.run(t)
+		alerted := len(rep.Alerts) == 1 && strings.Contains(rep.Alerts[0], errBudget.Error())
+		if w.messages != 0 || alerted != c.wantAlert || len(rep.Alerts) > 1 {
+			t.Errorf("%s: %d calls, alerts %v; want no call and a budget alert: %v", c.name, w.messages, rep.Alerts, c.wantAlert)
+		}
 	}
 }
 
@@ -665,14 +779,14 @@ func TestDecide(t *testing.T) {
 	}
 }
 
-// Catches: a season mapped to the wrong show, the owner's upload outranked by a duplicate default, and a poster
-// file missing from the export imported anyway.
+// Catches: a season mapped to the wrong show, the owner's upload outranked by a duplicate default, a poster file
+// missing from the export imported anyway, and an empty mark option reading every upload as the stage's.
 func TestImportOwners(t *testing.T) {
 	h := fake.NewEnv(t, nil)
 	dir := t.TempDir()
 	for _, f := range []string{"show/20.jpg", "season/21.jpg", "movie/30.jpg", "movie/31.jpg"} {
 		os.MkdirAll(filepath.Join(dir, filepath.Dir(f)), 0o755)
-		os.WriteFile(filepath.Join(dir, f), []byte("jpg"), 0o644)
+		os.WriteFile(filepath.Join(dir, f), []byte{0xFF, 0xD8, 0}, 0o644)
 	}
 	os.WriteFile(filepath.Join(dir, "items.json"), []byte(`[
  {"kind":"show","ratingKey":"20","guid":"g20","ids":["tmdb://7","tvdb://70"]},
@@ -685,7 +799,7 @@ func TestImportOwners(t *testing.T) {
  (32, 'g32', 1, NULL, 'upload://q', '')`)
 	db := h.Env.Store.DB()
 	db.Exec(schema)
-	if _, err := importOwners(context.Background(), db, filepath.Join(dir, "items.json"), dir, filepath.Join(dir, "plex.db")); err != nil {
+	if _, err := importOwners(context.Background(), db, filepath.Join(dir, "items.json"), dir, filepath.Join(dir, "plex.db"), ""); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := loadOwners(context.Background(), db)

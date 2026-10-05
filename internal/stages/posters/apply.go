@@ -19,6 +19,10 @@ import (
 // included: a title Plex re-created during the rename no longer shows the owner's poster, and the stage may not ask
 // Plex which it shows. Plex takes two calls, upload then lock: a row whose upload went through but whose lock failed
 // is "uploaded", and its retry only locks, so a retry never adds a second copy to Plex's metadata bundle.
+//
+// A row remembers the app item its poster went to, and an app that later lists the title under another item gets
+// the poster again: Jellyfin's item id is a hash of the path, so every folder or file rename re-creates the item,
+// and Plex re-creates items on some moves.
 
 const (
 	sinkPlex     = "plex"
@@ -38,9 +42,9 @@ func (r *run) enqueue(ctx context.Context, rows []*row) error {
 			continue
 		}
 		for _, s := range []string{sinkJellyfin, sinkPlex} {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO posters_sinks(item, sink, url, state, attempts, next_at, last_error)
-				VALUES (?, ?, ?, 'pending', 0, ?, '') ON CONFLICT(item, sink) DO UPDATE SET url=excluded.url, state='pending',
-				attempts=0, next_at=excluded.next_at, last_error='' WHERE posters_sinks.url != excluded.url`,
+			if _, err := tx.ExecContext(ctx, `INSERT INTO posters_sinks(item, sink, url, state, target, attempts, next_at, last_error)
+				VALUES (?, ?, ?, 'pending', '', 0, ?, '') ON CONFLICT(item, sink) DO UPDATE SET url=excluded.url, state='pending',
+				target='', attempts=0, next_at=excluded.next_at, last_error='' WHERE posters_sinks.url != excluded.url`,
 				it.Title.Key, s, it.Verdict.Choice, now); err != nil {
 				return err
 			}
@@ -54,9 +58,24 @@ type outboxRow struct {
 	Attempts               int
 }
 
-// apply drains the due outbox rows. The viewer gate is asked before each title's download and uploads: a guest
-// watching defers that title to a later run.
+// apply refreshes each app's item index when it is due, with or without uploads waiting, sends back to the outbox
+// every title the app now lists under another item, then drains the due rows. The viewer gate is asked before each
+// title's download and uploads: a guest watching defers that title to a later run.
 func (r *run) apply(ctx context.Context) error {
+	index := map[string]map[string]sinkItem{}
+	for _, s := range []string{sinkPlex, sinkJellyfin} {
+		idx, err := r.sinkIndex(ctx, s)
+		if herr := r.sinkHealth(ctx, s, err); herr != nil {
+			return herr
+		}
+		if err != nil {
+			continue // that app's rows wait for a later run
+		}
+		index[s] = idx
+		if err := r.repend(ctx, s, idx); err != nil {
+			return err
+		}
+	}
 	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT item, sink, url, state, attempts FROM posters_sinks
 		WHERE state IN ('pending', 'uploaded') AND next_at <= ? ORDER BY item, sink`, stamp(r.env.Now()))
 	if err != nil {
@@ -76,18 +95,6 @@ func (r *run) apply(ctx context.Context) error {
 		byItem[o.Item] = append(byItem[o.Item], o)
 	}
 	rows.Close()
-	if len(items) == 0 {
-		return nil
-	}
-	index := map[string]map[string]sinkItem{}
-	for _, s := range []string{sinkPlex, sinkJellyfin} {
-		idx, err := r.sinkIndex(ctx, s)
-		if err != nil {
-			r.env.Log.Warn("sink index", "event", "sink_unreachable", "sink", s, "err", err)
-			continue // that app's rows wait for a later run
-		}
-		index[s] = idx
-	}
 	parallel(ctx, r.opt.ApplyWorkers, items, func(item string) {
 		if r.guestsWatching(ctx) {
 			r.count("apply_deferred", 1)
@@ -107,7 +114,7 @@ func (r *run) apply(ctx context.Context) error {
 				img, ok := images[o.URL]
 				if !ok {
 					var err error
-					if img, err = r.prepare(ctx, o.URL); err != nil {
+					if img, err = r.prepare(ctx, o.URL, !r.ownersUpload(item, o.URL)); err != nil {
 						r.retryLater(ctx, o, err.Error(), backoff(o.Attempts))
 						continue
 					}
@@ -117,23 +124,84 @@ func (r *run) apply(ctx context.Context) error {
 					r.retryLater(ctx, o, err.Error(), backoff(o.Attempts))
 					continue
 				}
+				r.setState(ctx, o, "uploaded", target.ID)
 			}
 			if o.Sink == sinkPlex {
-				r.setState(ctx, o, "uploaded")
 				if err := r.env.Plex.Do(ctx, http.MethodPut, fmt.Sprintf("/library/sections/%d/all?type=%d&id=%s&thumb.locked=1",
 					target.Section, target.Type, target.ID)); err != nil {
 					r.retryLater(ctx, o, "lock: "+err.Error(), backoff(o.Attempts))
 					continue
 				}
 			}
-			r.setState(ctx, o, "done")
+			r.setState(ctx, o, "done", target.ID)
 			if err := r.env.Store.AddEvent(context.WithoutCancel(ctx), r.env.Now(), name, item, "applied",
-				map[string]any{"sink": o.Sink, "url": o.URL}); err != nil {
+				map[string]any{"sink": o.Sink, "url": o.URL, "target": target.ID}); err != nil {
 				r.env.Log.Error("event log", "event", "store_error", "err", err)
 			}
 			r.count("applied_"+o.Sink, 1)
 		}
 	})
+	return nil
+}
+
+// repend sends a delivered row back to the outbox when the app lists its title under another item than the one its
+// poster went to. A title the app no longer lists is left alone until it reappears.
+func (r *run) repend(ctx context.Context, sink string, idx map[string]sinkItem) error {
+	db := r.env.Store.DB()
+	rows, err := db.QueryContext(ctx, `SELECT item, target FROM posters_sinks WHERE sink=? AND state IN ('uploaded', 'done')`, sink)
+	if err != nil {
+		return err
+	}
+	var moved []string
+	for rows.Next() {
+		var item, target string
+		if err := rows.Scan(&item, &target); err != nil {
+			rows.Close()
+			return err
+		}
+		if now, ok := idx[item]; ok && now.ID != target {
+			moved = append(moved, item)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range moved {
+		if _, err := db.ExecContext(ctx, `UPDATE posters_sinks SET state='pending', target='', attempts=0, next_at=?, last_error=''
+			WHERE item=? AND sink=?`, stamp(r.env.Now()), item, sink); err != nil {
+			return err
+		}
+		r.env.Log.Info("app lists the title under a new item; its poster goes again", "event", "sink_item_moved", "item", item,
+			"sink", sink, "target", idx[item].ID)
+	}
+	r.count("moved_"+sink, len(moved))
+	return nil
+}
+
+// sinkHealth remembers since when an app's item listing has failed and alerts once that passes sink_alert_after: a
+// warning alone would let an app go without posters unseen (Jellyfin's listing stalls during a library scan).
+func (r *run) sinkHealth(ctx context.Context, sink string, listErr error) error {
+	var since time.Time
+	if _, err := r.env.Store.GetJSON(ctx, name, "down_"+sink, &since); err != nil {
+		return err
+	}
+	if listErr == nil {
+		if since.IsZero() {
+			return nil
+		}
+		return r.env.Store.PutJSON(ctx, name, "down_"+sink, time.Time{})
+	}
+	if since.IsZero() {
+		since = r.env.Now()
+		if err := r.env.Store.PutJSON(ctx, name, "down_"+sink, since); err != nil {
+			return err
+		}
+	}
+	r.env.Log.Warn("sink index", "event", "sink_unreachable", "sink", sink, "since", stamp(since), "err", listErr)
+	if r.env.Now().Sub(since) >= r.opt.SinkAlertAfter {
+		r.alert("posters: %s has not listed its items since %s (%v); its posters wait", sink, stamp(since), listErr)
+	}
 	return nil
 }
 
@@ -148,12 +216,19 @@ func (r *run) retryLater(ctx context.Context, o outboxRow, msg string, after tim
 	}
 }
 
-// setState records a row's progress; matching on url leaves alone a newer choice enqueued meanwhile.
-func (r *run) setState(ctx context.Context, o outboxRow, state string) {
-	if _, err := r.env.Store.DB().ExecContext(context.WithoutCancel(ctx), `UPDATE posters_sinks SET state=?, last_error=''
-		WHERE item=? AND sink=? AND url=?`, state, o.Item, o.Sink, o.URL); err != nil {
+// setState records a row's progress and the app item it went to; matching on url leaves alone a newer choice
+// enqueued meanwhile.
+func (r *run) setState(ctx context.Context, o outboxRow, state, target string) {
+	if _, err := r.env.Store.DB().ExecContext(context.WithoutCancel(ctx), `UPDATE posters_sinks SET state=?, target=?, last_error=''
+		WHERE item=? AND sink=? AND url=?`, state, target, o.Item, o.Sink, o.URL); err != nil {
 		r.env.Log.Error("outbox", "event", "store_error", "err", err)
 	}
+}
+
+// ownersUpload is whether u is the poster the owner uploaded for the title.
+func (r *run) ownersUpload(item, u string) bool {
+	p, ok := r.owners[item]
+	return ok && p.State == ownerUpload && u == "owner:"+p.File
 }
 
 func (r *run) upload(ctx context.Context, sink string, target sinkItem, img []byte) error {
@@ -164,8 +239,11 @@ func (r *run) upload(ctx context.Context, sink string, target sinkItem, img []by
 	return r.env.Plex.Send(ctx, http.MethodPost, "/library/metadata/"+target.ID+"/posters", "image/jpeg", img)
 }
 
-// prepare is the full-size image as a JPEG carrying the stage's EXIF mark, so anyone can tell its uploads apart.
-func (r *run) prepare(ctx context.Context, u string) ([]byte, error) {
+// prepare is the full-size image as a JPEG, carrying the stage's EXIF mark when marked. Plex lists every upload
+// alike, and its export keeps an upload's bytes, so the mark is how a later export tells the stage's uploads from
+// the owner's (importOwners). The owner's own upload therefore goes back unmarked; a kept pick or Plex default is
+// marked, or the next export would read it as his upload.
+func (r *run) prepare(ctx context.Context, u string, marked bool) ([]byte, error) {
 	b, err := r.original(ctx, u)
 	if err != nil {
 		return nil, err
@@ -180,6 +258,9 @@ func (r *run) prepare(ctx context.Context, u string) ([]byte, error) {
 			return nil, err
 		}
 		b = buf.Bytes()
+	}
+	if !marked {
+		return b, nil
 	}
 	return mark(b, r.opt.Mark)
 }
@@ -310,23 +391,39 @@ func (r *run) plexIndex(ctx context.Context) (map[string]sinkItem, error) {
 	return out, nil
 }
 
+// jellyfinPage is the most items one listing request asks for. Mid-scan (2026-10-05, NAS), one request for every
+// movie, show and season gave no answer in 60 s, while a page of 500 of one type took 4-13 s; the client's timeout
+// is 20 s.
+var jellyfinPage = 200
+
+// jellyfinIndex lists one type at a time, in pages, without a total count (which costs Jellyfin a second query). An
+// item missed between pages while the library changes is found by the next day's listing.
 func (r *run) jellyfinIndex(ctx context.Context) (map[string]sinkItem, error) {
-	var resp struct {
-		Items []struct {
-			ID          string            `json:"Id"`
-			Type        string            `json:"Type"`
-			ProviderIDs map[string]string `json:"ProviderIds"`
-			SeriesID    string            `json:"SeriesId"`
-			IndexNumber *int              `json:"IndexNumber"`
-		} `json:"Items"`
+	type item struct {
+		ID          string            `json:"Id"`
+		Type        string            `json:"Type"`
+		ProviderIDs map[string]string `json:"ProviderIds"`
+		SeriesID    string            `json:"SeriesId"`
+		IndexNumber *int              `json:"IndexNumber"`
 	}
-	if err := r.env.Jellyfin.GetJSON(ctx, "/Items?Recursive=true&IncludeItemTypes=Movie,Series,Season&Fields=ProviderIds"+
-		"&EnableImages=false&EnableUserData=false", &resp); err != nil {
-		return nil, err
+	var items []item
+	for _, typ := range []string{"Movie", "Series", "Season"} {
+		for start := 0; ; start += jellyfinPage {
+			var page struct{ Items []item }
+			if err := r.env.Jellyfin.GetJSON(ctx, fmt.Sprintf("/Items?Recursive=true&IncludeItemTypes=%s&Fields=ProviderIds"+
+				"&EnableImages=false&EnableUserData=false&EnableTotalRecordCount=false&StartIndex=%d&Limit=%d",
+				typ, start, jellyfinPage), &page); err != nil {
+				return nil, err
+			}
+			items = append(items, page.Items...)
+			if len(page.Items) < jellyfinPage {
+				break
+			}
+		}
 	}
 	out := map[string]sinkItem{}
 	seriesIDs := map[string][]library.ID{}
-	for _, it := range resp.Items {
+	for _, it := range items {
 		for src, val := range it.ProviderIDs {
 			id := library.ID{Source: strings.ToLower(src), Value: val}
 			switch it.Type {
@@ -338,7 +435,7 @@ func (r *run) jellyfinIndex(ctx context.Context) (map[string]sinkItem, error) {
 			}
 		}
 	}
-	for _, it := range resp.Items {
+	for _, it := range items {
 		if it.Type == "Season" && it.IndexNumber != nil {
 			for _, id := range seriesIDs[it.SeriesID] {
 				out[key(season, id, *it.IndexNumber)] = sinkItem{ID: it.ID}
