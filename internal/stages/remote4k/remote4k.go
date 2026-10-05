@@ -45,7 +45,7 @@ type Options struct {
 	SmallKbps   int           `toml:"small_kbps"` // a 4K version at or under this already fits the upload
 	WorkDir     string        `toml:"work_dir"`   // must be on the library's subvolume (same share)
 	StatusFile  string        `toml:"status_file"`
-	ListTimeout time.Duration `toml:"list_timeout"` // each app's half of the list is given up after this
+	ListTimeout time.Duration `toml:"list_timeout"` // each app's half of the list is given up after this, each request too
 }
 
 func defaults() Options {
@@ -55,7 +55,7 @@ func defaults() Options {
 		SmallKbps:   20000,
 		WorkDir:     "/volume1/media/.projectionist/remote4k",
 		StatusFile:  "/volume1/PlexMediaServer/remote4k/STATUS.txt",
-		ListTimeout: 5 * time.Second,
+		ListTimeout: 30 * time.Second, // a busy Plex took over 5 s to list in 4 runs on the NAS
 	}
 }
 
@@ -74,7 +74,8 @@ func plexRequests(ctx context.Context, env *stage.Env, opt Options) ([]request, 
 			Title     string `json:"title"`
 		} `json:"Metadata"`
 	}
-	if err := env.Plex.GetJSON(ctx, "/playlists?playlistType=video", &lists); err != nil {
+	px := env.Plex.WithTimeout(opt.ListTimeout) // not the shared client's shorter bound
+	if err := px.GetJSON(ctx, "/playlists?playlistType=video", &lists); err != nil {
 		return nil, err
 	}
 	var out []request
@@ -94,7 +95,7 @@ func plexRequests(ctx context.Context, env *stage.Env, opt Options) ([]request, 
 				} `json:"Media"`
 			} `json:"Metadata"`
 		}
-		if err := env.Plex.GetJSON(ctx, "/playlists/"+l.RatingKey+"/items", &items); err != nil {
+		if err := px.GetJSON(ctx, "/playlists/"+l.RatingKey+"/items", &items); err != nil {
 			return nil, err
 		}
 		for _, it := range items.Metadata {
@@ -118,10 +119,11 @@ func jellyfinRequests(ctx context.Context, env *stage.Env, opt Options) ([]reque
 		ProductionYear int    `json:"ProductionYear"`
 	}
 	var lists []item
+	jf := env.Jellyfin.WithTimeout(opt.ListTimeout)
 	// One type per query: on the NAS, Jellyfin answers Playlist or BoxSet alone in under 1.5 s, both at once in 34-40 s.
 	for _, kind := range []string{"Playlist", "BoxSet"} {
 		var page struct{ Items []item }
-		if err := env.Jellyfin.GetJSON(ctx, "/Items?Recursive=true&IncludeItemTypes="+kind, &page); err != nil {
+		if err := jf.GetJSON(ctx, "/Items?Recursive=true&IncludeItemTypes="+kind, &page); err != nil {
 			return nil, err
 		}
 		lists = append(lists, page.Items...)
@@ -132,7 +134,7 @@ func jellyfinRequests(ctx context.Context, env *stage.Env, opt Options) ([]reque
 			continue
 		}
 		var items struct{ Items []item }
-		if err := env.Jellyfin.GetJSON(ctx, "/Items?ParentId="+l.ID+"&Fields=Path", &items); err != nil {
+		if err := jf.GetJSON(ctx, "/Items?ParentId="+l.ID+"&Fields=Path", &items); err != nil {
 			return nil, err
 		}
 		for _, it := range items.Items {
