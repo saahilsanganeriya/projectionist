@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS watch_events (
   played      INTEGER NOT NULL,
   plays       INTEGER NOT NULL,
   position_ms INTEGER NOT NULL,
-  rating      REAL             -- 0–10; NULL: the event says nothing about the rating (Rated: clears it)
+  rating      REAL,            -- 0–10; NULL: the event says nothing about the rating (Rated: clears it)
+  played_at   TEXT NOT NULL DEFAULT '' -- when the viewing happened, if not at: a diary entry logged later; '' = at
 );
 CREATE INDEX IF NOT EXISTS watch_events_item ON watch_events(person, item, at);
 `
@@ -45,6 +46,10 @@ const (
 	Snapshot Kind = "state"    // a source's whole state: Played, Plays, PositionMs. Played=false unmarks a played item,
 	// so only a source that knows (an explicit "mark unplayed") sends one with Played=false.
 	Rated Kind = "rated" // Rating set; nil clears it
+	// Logged is a viewing logged in a diary, at the time he logged it: played, position back to 0, and at least Plays
+	// plays, the viewing's place among the film's logged viewings. A floor, not one more play: the play an app
+	// recorded for the same viewing (he watched in Plex, then logged it) is not counted twice.
+	Logged Kind = "logged"
 )
 
 type Event struct {
@@ -59,6 +64,7 @@ type Event struct {
 	Plays      int
 	PositionMs int64
 	Rating     *float64
+	PlayedAt   time.Time // when the viewing happened, if not At (zero): a diary entry carries its watched date
 }
 
 // State is one person's state for one item. A field nothing has said anything about is not known: a resume point
@@ -72,7 +78,7 @@ type State struct {
 	KnowsPosition bool      // PositionMs comes from an event (any kind but Rated)
 	At            time.Time // when the newest event that changed the state happened
 	Source        string    // that event's source, i.e. who wrote last
-	PlayedAt      time.Time // when the newest event that changed Played, Plays or PositionMs happened (not a rating)
+	PlayedAt      time.Time // the latest viewing among the events that changed Played, Plays or PositionMs (not a rating)
 }
 
 // Apply folds e into s. An event that changes nothing (an app echoing a state it was given) leaves At and Source
@@ -86,6 +92,8 @@ func (s State) Apply(e Event) State {
 		n.PositionMs, n.KnowsPosition = e.PositionMs, true
 	case Snapshot:
 		n.Played, n.Plays, n.PositionMs, n.KnowsPlay, n.KnowsPosition = e.Played, e.Plays, e.PositionMs, true, true
+	case Logged:
+		n.Played, n.Plays, n.PositionMs, n.KnowsPlay, n.KnowsPosition = true, max(s.Plays, e.Plays), 0, true, true
 	}
 	if e.Rating != nil || e.Kind == Rated {
 		n.Rating = e.Rating
@@ -96,7 +104,14 @@ func (s State) Apply(e Event) State {
 	n.At, n.Source = e.At, e.Source
 	if n.Played != s.Played || n.Plays != s.Plays || n.PositionMs != s.PositionMs || n.KnowsPlay != s.KnowsPlay ||
 		n.KnowsPosition != s.KnowsPosition {
-		n.PlayedAt = e.At
+		// The latest viewing, so a diary entry logged late never moves "last played" back to its watched date.
+		when := e.At
+		if !e.PlayedAt.IsZero() {
+			when = e.PlayedAt
+		}
+		if when.After(s.PlayedAt) {
+			n.PlayedAt = when
+		}
 	}
 	return n
 }
@@ -141,19 +156,44 @@ type Execer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 }
 
+// Open creates the table, or adds played_at to one made before it (ALTER TABLE ADD COLUMN with a constant default
+// rewrites nothing, so it is instant on the live record).
 func Open(ctx context.Context, db *sql.DB) error {
-	_, err := db.ExecContext(ctx, schema)
-	return err
+	if _, err := db.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	const hasPlayedAt = `SELECT count(*) FROM pragma_table_info('watch_events') WHERE name = 'played_at'`
+	var n int
+	if err := db.QueryRowContext(ctx, hasPlayedAt).Scan(&n); err != nil || n > 0 {
+		return err
+	}
+	// Checked again inside a write transaction: jfsync and letterboxd may open the record at the same moment.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := tx.QueryRowContext(ctx, hasPlayedAt).Scan(&n); err != nil || n > 0 {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE watch_events ADD COLUMN played_at TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Add appends e unless the identical event is already recorded, so an import that runs again adds nothing (a
 // repeated Finished would count a second play).
 func Add(ctx context.Context, db Execer, e Event) error {
+	playedAt := ""
+	if !e.PlayedAt.IsZero() {
+		playedAt = e.PlayedAt.UTC().Format(store.TimeFormat)
+	}
 	_, err := db.ExecContext(ctx, `INSERT INTO watch_events
-		(person, item, ref, source, at, kind, played, plays, position_ms, rating) SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10
+		(person, item, ref, source, at, kind, played, plays, position_ms, rating, played_at) SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11
 		WHERE NOT EXISTS (SELECT 1 FROM watch_events WHERE person = ?1 AND item = ?2 AND at = ?5 AND ref = ?3 AND
-		  source = ?4 AND kind = ?6 AND played = ?7 AND plays = ?8 AND position_ms = ?9 AND rating IS ?10)`,
-		e.Person, e.Item, e.Ref, e.Source, e.At.UTC().Format(store.TimeFormat), e.Kind, e.Played, e.Plays, e.PositionMs, e.Rating)
+		  source = ?4 AND kind = ?6 AND played = ?7 AND plays = ?8 AND position_ms = ?9 AND rating IS ?10 AND played_at = ?11)`,
+		e.Person, e.Item, e.Ref, e.Source, e.At.UTC().Format(store.TimeFormat), e.Kind, e.Played, e.Plays, e.PositionMs, e.Rating, playedAt)
 	return err
 }
 
@@ -191,8 +231,8 @@ func States(ctx context.Context, db *sql.DB) (map[Key]State, error) {
 }
 
 func query(ctx context.Context, db *sql.DB, where string) ([]Event, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, person, item, ref, source, at, kind, played, plays, position_ms, rating
-		FROM watch_events `+where)
+	rows, err := db.QueryContext(ctx, `SELECT id, person, item, ref, source, at, kind, played, plays, position_ms, rating,
+		played_at FROM watch_events `+where)
 	if err != nil {
 		return nil, err
 	}
@@ -200,13 +240,18 @@ func query(ctx context.Context, db *sql.DB, where string) ([]Event, error) {
 	var out []Event
 	for rows.Next() {
 		var e Event
-		var at string
+		var at, playedAt string
 		if err := rows.Scan(&e.ID, &e.Person, &e.Item, &e.Ref, &e.Source, &at, &e.Kind, &e.Played, &e.Plays, &e.PositionMs,
-			&e.Rating); err != nil {
+			&e.Rating, &playedAt); err != nil {
 			return nil, err
 		}
 		if e.At, err = time.Parse(store.TimeFormat, at); err != nil {
 			return nil, err
+		}
+		if playedAt != "" {
+			if e.PlayedAt, err = time.Parse(store.TimeFormat, playedAt); err != nil {
+				return nil, err
+			}
 		}
 		out = append(out, e)
 	}

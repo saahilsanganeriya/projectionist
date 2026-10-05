@@ -1,26 +1,25 @@
 package letterboxd
 
-// ---- desired state: Letterboxd facts → one want per TMDB film; want vs an app's state → the missing writes ----
+// ---- Letterboxd facts → the watch events his diary implies, and one want per TMDB film for the collections ----
 
 import (
 	"sort"
+	"strconv"
 	"time"
+
+	"projectionist/internal/library"
+	"projectionist/internal/watch"
 )
 
 // facts is everything known from Letterboxd, keyed by the sources' own references, before the TMDB join.
 type facts struct {
 	ex        *export              // nil when no export is on the NAS
 	entries   []rssEntry           // diary entries kept from the feed
-	seen      map[string]seenFilm  // slug → films grid observation
+	seen      map[string]bool      // slugs the films grid shows watched
 	watchlist *watchlistSnapshot   // last complete watchlist crawl; nil when never
 	lidSlug   map[string]string    // boxd.it code → slug ("" = not a film)
 	films     map[string]filmFacts // slug → film page facts
 	library   map[int]libraryFilm  // TMDB id → folder on disk
-}
-
-type seenFilm struct {
-	Rating int
-	At     time.Time
 }
 
 type watchlistSnapshot struct {
@@ -38,18 +37,14 @@ type libraryFilm struct {
 	Year  int
 }
 
-// want is the Letterboxd truth for one film (TMDB movie id).
+// want is what Letterboxd says of one film (TMDB movie id) that the Watchlist collections need.
 type want struct {
 	TMDB      int
 	Title     string
 	Year      int
 	Slug      string
 	InLibrary bool
-	Watched   bool
-	Plays     int    // diary entries, at least 1 when watched
-	Last      string // latest diary date (YYYY-MM-DD); "" when never logged
-	First     string // earliest diary date: the diary order
-	Rating    int    // half stars 1..10; 0 = unrated
+	Watched   bool // in his diary, on his watched films, or watched in the films grid
 	Watchlist bool
 }
 
@@ -141,20 +136,16 @@ func (f facts) diaryLID(r exportRow, filmLID map[titleYear]string) string {
 // films whose Letterboxd page names no TMDB movie (TV entries, missing ids).
 func (f facts) wants() (wants []want, missing []missingFilm, unresolved, other int) {
 	type agg struct {
-		slug      string
 		title     string
 		year      int
 		watched   bool
-		days      []string // one per viewing
-		rating    int
-		ratedAt   time.Time
 		watchlist bool
 	}
 	bySlug := map[string]*agg{}
 	get := func(slug string) *agg {
 		a := bySlug[slug]
 		if a == nil {
-			a = &agg{slug: slug}
+			a = &agg{}
 			bySlug[slug] = a
 		}
 		return a
@@ -167,42 +158,31 @@ func (f facts) wants() (wants []want, missing []missingFilm, unresolved, other i
 		}
 		return slug, ok && slug != ""
 	}
-	rate := func(a *agg, rating int, at time.Time) {
-		if rating > 0 && !at.Before(a.ratedAt) {
-			a.rating, a.ratedAt = rating, at
-		}
-	}
 	name := func(a *agg, title string, year int) {
 		if a.title == "" {
 			a.title, a.year = title, year
 		}
 	}
-
-	// Each diary viewing counts once, by its id: a feed entry replaces the export's row for the same viewing (whose
-	// date he may have corrected since), and adding a review later changes the guid's prefix, never its number.
-	type viewing struct{ slug, day string }
-	viewings := map[string]viewing{}
+	watched := func(slug, title string, year int) {
+		a := get(slug)
+		a.watched = true
+		name(a, title, year)
+	}
 	var watchlist []string
 	if f.ex != nil {
 		filmLID := f.exportFilmLIDs()
 		for _, r := range f.ex.Watched {
 			if slug, ok := slugFor(r.LID); ok {
-				a := get(slug)
-				a.watched = true
-				name(a, r.Title, r.Year)
+				watched(slug, r.Title, r.Year)
 			}
 		}
 		for _, r := range f.ex.Diary {
 			if slug, ok := slugFor(f.diaryLID(r, filmLID)); ok && r.Watched != "" {
-				viewings[viewingKey(r.LID)] = viewing{slug, r.Watched}
-				name(get(slug), r.Title, r.Year)
+				watched(slug, r.Title, r.Year)
 			}
 		}
 		for _, r := range f.ex.Ratings {
-			if slug, ok := slugFor(r.LID); ok {
-				at, _ := time.Parse(time.DateOnly, r.Date)
-				rate(get(slug), r.Rating, at)
-			}
+			slugFor(r.LID)
 		}
 		if f.watchlist == nil || !f.watchlist.At.After(f.ex.At) {
 			for _, r := range f.ex.Watchlist {
@@ -220,27 +200,16 @@ func (f facts) wants() (wants []want, missing []missingFilm, unresolved, other i
 		}
 	}
 	for _, e := range f.entries {
-		viewings[e.ID] = viewing{e.Slug, e.Watched}
-		a := get(e.Slug)
-		rate(a, e.Rating, e.RatedAt)
-		name(a, e.Title, e.Year)
+		watched(e.Slug, e.Title, e.Year)
 	}
-	for _, v := range viewings {
-		a := get(v.slug)
-		a.watched = true
-		a.days = append(a.days, v.day)
-	}
-	for slug, s := range f.seen {
-		a := get(slug)
-		a.watched = true
-		rate(a, s.Rating, s.At)
+	for slug := range f.seen {
+		get(slug).watched = true
 	}
 	for _, slug := range watchlist {
 		get(slug).watchlist = true
 	}
 
 	byTMDB := map[int]*want{}
-	ratedAt := map[int]time.Time{}
 	for _, slug := range sortedKeys(bySlug) {
 		a := bySlug[slug]
 		film, ok := f.films[slug]
@@ -257,25 +226,12 @@ func (f facts) wants() (wants []want, missing []missingFilm, unresolved, other i
 			w = &want{TMDB: film.TMDB, Slug: slug, Title: a.title, Year: a.year}
 			byTMDB[film.TMDB] = w
 		}
-		// Two Letterboxd slugs on one TMDB film (rare duplicates) merge: union of facts, the most recent rating.
+		// Two Letterboxd slugs on one TMDB film (rare duplicates) merge.
 		w.Watched = w.Watched || a.watched
 		w.Watchlist = w.Watchlist || a.watchlist
-		w.Plays += len(a.days)
-		for _, day := range a.days {
-			w.Last = max(w.Last, day)
-			if w.First == "" || day < w.First {
-				w.First = day
-			}
-		}
-		if a.rating > 0 && !a.ratedAt.Before(ratedAt[film.TMDB]) {
-			w.Rating, ratedAt[film.TMDB] = a.rating, a.ratedAt
-		}
 	}
 	for _, id := range sortedKeys(byTMDB) {
 		w := byTMDB[id]
-		if w.Watched {
-			w.Plays = max(w.Plays, 1)
-		}
 		if lib, ok := f.library[id]; ok {
 			w.InLibrary, w.Title, w.Year = true, lib.Title, lib.Year
 		} else if w.Watchlist {
@@ -292,85 +248,102 @@ func (f facts) wants() (wants []want, missing []missingFilm, unresolved, other i
 	return wants, missing, len(unresolvedRefs), other
 }
 
-// diaryScope is the first n library films in diary order (earliest viewing first); n <= 0 means every film.
-func diaryScope(wants []want, n int) map[int]bool {
-	var logged []want
-	for _, w := range wants {
-		if w.InLibrary && w.First != "" {
-			logged = append(logged, w)
+// events is the watch record his diary implies for person. Each viewing is one Logged event at the time he logged
+// it, played on its watched date (noon in loc), with at least as many plays as viewings of the film logged by then;
+// each rating is one Rated event at the time it was set. Viewings are matched by id across the export and the feed,
+// and every one known counts toward the plays, but with history false only the entries he logged after since become
+// events. history true adds the export (its diary, the films marked watched without one, its ratings) and every entry
+// in the feed: the backlog, which Plex shows his friends.
+func (f facts) events(person string, loc *time.Location, history bool, since time.Time) []watch.Event {
+	noon := func(day string) time.Time {
+		d, err := time.ParseInLocation(time.DateOnly, day, loc)
+		if err != nil {
+			return time.Time{}
+		}
+		return d.Add(12 * time.Hour).UTC()
+	}
+	movie := func(slug string) (int, bool) {
+		film, ok := f.films[slug]
+		return film.TMDB, ok && film.Kind == "movie" && film.TMDB > 0
+	}
+	event := func(tmdb int, ref string, kind watch.Kind, at time.Time) watch.Event {
+		return watch.Event{Person: person, Item: watch.MovieItem(library.ID{Source: "tmdb", Value: strconv.Itoa(tmdb)}),
+			Ref: name + ":" + ref, Source: name, At: at, Kind: kind}
+	}
+	type viewing struct {
+		id, slug, day string
+		logged        time.Time
+	}
+	viewings := map[string]viewing{} // the feed's entry replaces the export's row for the same viewing
+	if f.ex != nil {
+		filmLID := f.exportFilmLIDs()
+		for _, r := range f.ex.Diary {
+			if slug := f.lidSlug[f.diaryLID(r, filmLID)]; slug != "" && r.Watched != "" {
+				id := viewingKey(r.LID)
+				viewings[id] = viewing{id, slug, r.Watched, noon(r.Date)}
+			}
 		}
 	}
-	sort.SliceStable(logged, func(i, j int) bool {
-		if logged[i].First != logged[j].First {
-			return logged[i].First < logged[j].First
-		}
-		return logged[i].TMDB < logged[j].TMDB
-	})
-	scope := map[int]bool{}
-	for i, w := range logged {
-		if n > 0 && i >= n {
-			break
-		}
-		scope[w.TMDB] = true
+	for _, e := range f.entries {
+		viewings[e.ID] = viewing{e.ID, e.Slug, e.Watched, e.LoggedAt}
 	}
-	if n <= 0 {
-		for _, w := range wants {
-			scope[w.TMDB] = true
+	byFilm := map[int][]viewing{}
+	for _, v := range viewings {
+		if tmdb, ok := movie(v.slug); ok {
+			byFilm[tmdb] = append(byFilm[tmdb], v)
 		}
 	}
-	return scope
+	var out []watch.Event
+	for _, tmdb := range sortedKeys(byFilm) {
+		vs := byFilm[tmdb]
+		sort.Slice(vs, func(i, j int) bool {
+			if !vs[i].logged.Equal(vs[j].logged) {
+				return vs[i].logged.Before(vs[j].logged)
+			}
+			return vs[i].id < vs[j].id
+		})
+		for i, v := range vs {
+			if history || v.logged.After(since) {
+				e := event(tmdb, v.id, watch.Logged, v.logged)
+				e.Plays, e.PlayedAt = i+1, noon(v.day)
+				out = append(out, e)
+			}
+		}
+	}
+	rated := func(tmdb int, ref string, at time.Time, halfStars int) {
+		e := event(tmdb, ref, watch.Rated, at)
+		rating := float64(halfStars) // Plex and Jellyfin rate 0-10, as half stars count
+		e.Rating = &rating
+		out = append(out, e)
+	}
+	for _, e := range f.entries {
+		if tmdb, ok := movie(e.Slug); ok && e.Rating > 0 && (history || e.LoggedAt.After(since)) {
+			rated(tmdb, e.ID, e.RatedAt, e.Rating)
+		}
+	}
+	if history && f.ex != nil {
+		for _, r := range f.ex.Watched {
+			if tmdb, ok := movie(f.lidSlug[r.LID]); ok && len(byFilm[tmdb]) == 0 {
+				e := event(tmdb, "film-"+r.LID, watch.Logged, noon(r.Date))
+				e.Plays = 1
+				out = append(out, e)
+			}
+		}
+		for _, r := range f.ex.Ratings {
+			if tmdb, ok := movie(f.lidSlug[r.LID]); ok && r.Rating > 0 {
+				rated(tmdb, "film-"+r.LID, noon(r.Date), r.Rating)
+			}
+		}
+	}
+	return out
 }
 
 // have is one app's state for one film: a row of letterboxd_sink.
 type have struct {
 	Item   string // Plex ratingKey, Jellyfin item id, or plex.tv metadata id
-	Plays  int
 	Played bool   // the app shows it watched: a Plex view; Jellyfin's own flag, set past 90 % (its count rises at the start)
-	Rating int    // 1..10; 0 = unrated
-	Last   string // last played (YYYY-MM-DD, config time zone); "" = never or unknown
 	Member bool   // in the Watchlist collection / on the plex.tv watchlist
 	Added  bool   // put there by this stage, so this stage may take it out again
-}
-
-// update is the writes one film needs in one app. Play counts and last-played dates only ever rise, a film is only
-// ever marked watched, and a rating is only ever set: nothing here can unwatch a film or clear a rating.
-type update struct {
-	TMDB      int
-	Item      string
-	Title     string
-	FromPlays int
-	Plays     int    // target play count; equal to FromPlays when the count is right
-	Played    bool   // mark it watched (a Plex scrobble does; Jellyfin keeps the mark apart from its count)
-	Rating    int    // target rating; 0 = leave it
-	Last      string // target last-played date; "" = leave it
-}
-
-// planFilms returns the updates for the films in scope that the app holds. setsLast is whether the app can take a
-// last-played date (Jellyfin can, Plex cannot).
-func planFilms(wants []want, haves map[int]have, scope map[int]bool, setsLast bool) (ups []update, unmatched int) {
-	for _, w := range wants {
-		if !w.InLibrary || !scope[w.TMDB] {
-			continue
-		}
-		h, ok := haves[w.TMDB]
-		if !ok || h.Item == "" {
-			if w.Watched || w.Rating > 0 {
-				unmatched++
-			}
-			continue
-		}
-		u := update{TMDB: w.TMDB, Item: h.Item, Title: w.Title, FromPlays: h.Plays, Plays: max(h.Plays, w.Plays), Played: w.Watched && !h.Played}
-		if w.Rating > 0 && w.Rating != h.Rating {
-			u.Rating = w.Rating
-		}
-		if setsLast && w.Last > h.Last {
-			u.Last = w.Last
-		}
-		if u.Plays != u.FromPlays || u.Played || u.Rating != 0 || u.Last != "" {
-			ups = append(ups, u)
-		}
-	}
-	return ups, unmatched
 }
 
 // planMembers diffs a membership (a collection, the plex.tv watchlist) against the desired set. It removes only

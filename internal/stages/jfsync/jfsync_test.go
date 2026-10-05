@@ -701,19 +701,21 @@ func TestParseHooks(t *testing.T) {
 	}
 }
 
-// Catches: a Plex view another stage added (letterboxd scrobbling his diary) unknown here, so his Jellyfin play of
-// that viewing, once it reaches the record, is scrobbled again: a second view nobody can remove.
-func TestPlayHeldByAnotherStageIsNotScrobbledAgain(t *testing.T) {
-	h, w, _, _ := newHarness(t)
-	run(t, h)
-	if err := HoldPlexPlay(context.Background(), h.Env.Store.DB(), "saahil", "movie/tmdb-11645"); err != nil {
+// Catches: watch state recorded for a person no users entry names (the letterboxd stage's person spelled otherwise)
+// reaching neither app with nothing said, and a person who has an entry alerted about.
+func TestRecordedPersonWithoutUsersEntryAlerts(t *testing.T) {
+	h, _, _, _ := newHarness(t)
+	ctx, db := context.Background(), h.Env.Store.DB()
+	if err := watch.Open(ctx, db); err != nil {
 		t.Fatal(err)
 	}
-	done := len(w.since(0))
-	h.Now = h.Now.Add(time.Hour) // he finishes Ran in Jellyfin; letterboxd already scrobbled it from his diary
-	push(h, jellyfinApp, `{"NotificationType":"UserDataSaved","NotificationUsername":"saahil","ItemId":"b1","ItemType":"Movie","SaveReason":"PlaybackFinished","Played":true,"PlayCount":1,"PlaybackPositionTicks":0}`)
-	run(t, h)
-	if got := strings.Join(w.since(done), "\n"); strings.Contains(got, "/:/scrobble") {
-		t.Errorf("a play another stage put in Plex scrobbled again:\n%s", got)
+	for _, person := range []string{"Saahil", "saahil"} {
+		if err := watch.Add(ctx, db, watch.Event{Person: person, Item: "movie/tmdb-11645", Ref: "letterboxd:1", Source: "letterboxd",
+			At: h.Now, Kind: watch.Logged, Plays: 1}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rep := run(t, h); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], `state for "Saahil" (1 items)`) {
+		t.Errorf("alerts %q, want one naming Saahil", rep.Alerts)
 	}
 }

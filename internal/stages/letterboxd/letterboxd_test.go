@@ -2,11 +2,13 @@ package letterboxd
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -20,6 +22,8 @@ import (
 	"projectionist/internal/fake"
 	"projectionist/internal/lbpace"
 	"projectionist/internal/stage"
+	"projectionist/internal/stages/jfsync"
+	"projectionist/internal/store"
 )
 
 // ---- a fake Letterboxd (letterboxd.com + boxd.it on one server) serving the captured pages ----
@@ -83,9 +87,10 @@ func newLetterboxd(t *testing.T) *fakeLetterboxd {
 	return lb
 }
 
-// ringItem is a diary entry for The Ring (TMDB 565, watched 2026-10-04, ★★★★).
+// ringItem is a diary entry for The Ring (TMDB 565, watched 2026-10-04, ★★★★), logged at 07:00Z, an hour after the
+// world's first run.
 const ringItem = `<item> <title>The Ring, 2002</title> <link>https://letterboxd.com/saahilsan/film/the-ring-2002/</link>` +
-	` <guid isPermaLink="false">letterboxd-watch-1530000000</guid> <pubDate>Mon, 5 Oct 2026 19:00:00 +1300</pubDate>` +
+	` <guid isPermaLink="false">letterboxd-watch-1530000000</guid> <pubDate>Mon, 5 Oct 2026 20:00:00 +1300</pubDate>` +
 	` <letterboxd:watchedDate>2026-10-04</letterboxd:watchedDate> <letterboxd:rewatch>No</letterboxd:rewatch>` +
 	` <letterboxd:filmTitle>The Ring</letterboxd:filmTitle> <letterboxd:filmYear>2002</letterboxd:filmYear>` +
 	` <letterboxd:memberRating>4.0</letterboxd:memberRating> <tmdb:movieId>565</tmdb:movieId> </item>`
@@ -148,12 +153,10 @@ type plexFilm struct {
 }
 
 type jfFilm struct {
-	tmdb, plays       int
-	played, favourite bool
-	rating            *float64
-	last              string
-	pct               float64 // resume point, percent of the runtime
-	ticks             int64   // resume point
+	tmdb, plays int
+	played      bool
+	rating      *float64
+	last        string
 }
 
 type apps struct {
@@ -161,20 +164,21 @@ type apps struct {
 	plex             map[string]*plexFilm // ratingKey →
 	collection       []string
 	promoted         bool
-	failScrobble     bool
-	failRate         map[string]bool // ratingKey → /:/rate answers 500
 	loseCreateAnswer bool
-	dropScrobble     bool               // count the view, then drop the connection: the answer is lost
 	jf               map[string]*jfFilm // item id →
 	jfSet            []string
-	jfBodies         []string
-	listed           func() // called, under mu, once a whole-section Plex listing is answered
+	failJFSet        bool // Jellyfin's collection calls answer 500
+}
+
+// libraryPath is where both apps hold a film: the library's naming scheme, which jfsync addresses items by.
+func libraryPath(tmdb int) string {
+	return fmt.Sprintf("/m/Film (2000) {tmdb-%d}/Film (2000) {tmdb-%d}.mkv", tmdb, tmdb)
 }
 
 func setupApps(t *testing.T, h *fake.Harness) *apps {
 	a := &apps{
 		plex: map[string]*plexFilm{"10": {tmdb: 718032, views: 1}, "20": {tmdb: 419704}, "30": {tmdb: 565}, "40": {tmdb: 1248832, views: 5, rating: 8}},
-		jf: map[string]*jfFilm{"j10": {tmdb: 718032, favourite: true}, "j20": {tmdb: 419704}, "j30": {tmdb: 565},
+		jf: map[string]*jfFilm{"j10": {tmdb: 718032}, "j20": {tmdb: 419704}, "j30": {tmdb: 565},
 			"j40": {tmdb: 1248832, plays: 7, played: true, rating: ptr(8.0), last: "2026-10-04T21:00:00Z"}},
 	}
 	px, jf := h.Plex, h.Jellyfin
@@ -191,20 +195,11 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 			}
 			// Real Plex sends both "guid" (a string) and "Guid" (a list); Go's case-insensitive keys must not mix them.
 			md = append(md, map[string]any{"ratingKey": k, "guid": "plex://movie/" + k, "viewCount": f.views, "userRating": f.rating,
-				"Guid": []map[string]string{{"id": "imdb://tt0"}, {"id": fmt.Sprintf("tmdb://%d", f.tmdb)}}})
+				"Guid":  []map[string]string{{"id": "imdb://tt0"}, {"id": fmt.Sprintf("tmdb://%d", f.tmdb)}},
+				"Media": []map[string]any{{"Part": []map[string]string{{"file": libraryPath(f.tmdb)}}}}})
 		}
 		reply(w, map[string]any{"totalSize": len(md), "Metadata": md})
-		if a.listed != nil && r.URL.Query().Get("collection") == "" {
-			a.listed()
-		}
 	})
-	for k := range a.plex {
-		px.HandleFunc("GET", "/library/metadata/"+k, func(w http.ResponseWriter, r *http.Request) {
-			a.mu.Lock()
-			defer a.mu.Unlock()
-			reply(w, map[string]any{"Metadata": []map[string]any{{"ratingKey": k, "viewCount": a.plex[k].views}}})
-		})
-	}
 	px.HandleFunc("GET", "/library/sections/4/collections", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
@@ -256,36 +251,28 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 		a.promoted = q.Get("metadataItemId") == "900" && q.Get("promotedToOwnHome") == "1" && q.Get("promotedToRecommended") == "1" &&
 			q.Get("promotedToSharedHome") == "0" // his watchlist is not for the Home of everyone he shares with
 	})
-	scrobble := func(w http.ResponseWriter, r *http.Request) {
+	// Watch state: jfsync's writes (this stage sends none).
+	px.HandleFunc("GET", "/:/scrobble", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		if a.failScrobble {
-			http.Error(w, "busy", 500)
-			return
-		}
 		a.plex[r.URL.Query().Get("key")].views++
-		if a.dropScrobble {
-			conn, _, _ := w.(http.Hijacker).Hijack()
-			conn.Close()
-		}
-	}
-	px.HandleFunc("PUT", "/:/scrobble", scrobble)
-	px.HandleFunc("GET", "/:/scrobble", scrobble) // Plex takes either method
+	})
+	px.HandleFunc("GET", "/:/unscrobble", func(w http.ResponseWriter, r *http.Request) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		a.plex[r.URL.Query().Get("key")].views = 0
+	})
+	px.HandleFunc("GET", "/:/progress", func(http.ResponseWriter, *http.Request) {})
 	px.HandleFunc("PUT", "/:/rate", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		if a.failRate[r.URL.Query().Get("key")] {
-			http.Error(w, "busy", 500)
-			return
-		}
 		fmt.Sscan(r.URL.Query().Get("rating"), &a.plex[r.URL.Query().Get("key")].rating)
 	})
 
 	jf.Handle("GET", "/Users", 200, `[{"Id":"u2","Name":"roger"},{"Id":"u1","Name":"saahil"}]`)
 	item := func(id string, f *jfFilm) map[string]any {
-		return map[string]any{"Id": id, "Name": id, "Path": fmt.Sprintf("/m/Film (2000) {tmdb-%d}/Film (2000) {tmdb-%d}.mkv", f.tmdb, f.tmdb),
-			"UserData": map[string]any{"PlayCount": f.plays, "Played": f.played, "IsFavorite": f.favourite, "Rating": f.rating, "LastPlayedDate": f.last,
-				"PlayedPercentage": f.pct, "PlaybackPositionTicks": f.ticks}}
+		return map[string]any{"Id": id, "Name": id, "Path": libraryPath(f.tmdb),
+			"UserData": map[string]any{"PlayCount": f.plays, "Played": f.played, "Rating": f.rating, "LastPlayedDate": f.last}}
 	}
 	jf.HandleFunc("GET", "/Items", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
@@ -293,6 +280,10 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 		q := r.URL.Query()
 		out := []map[string]any{}
 		switch {
+		case q.Get("userId") == "" && q.Get("IncludeItemTypes") == "Movie,Episode": // jfsync's listing of the library
+			for _, id := range sortedKeys(a.jf) {
+				out = append(out, item(id, a.jf[id]))
+			}
 		case q.Get("userId") != "u1":
 			http.Error(w, "wrong user", 400)
 			return
@@ -310,13 +301,21 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 		json.NewEncoder(w).Encode(map[string]any{"Items": out})
 	})
 	for id := range a.jf {
+		jf.HandleFunc("GET", "/UserItems/"+id+"/UserData", func(w http.ResponseWriter, r *http.Request) {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			json.NewEncoder(w).Encode(item(id, a.jf[id])["UserData"])
+		})
 		jf.HandleFunc("POST", "/UserItems/"+id+"/UserData", func(w http.ResponseWriter, r *http.Request) {
 			a.mu.Lock()
 			defer a.mu.Unlock()
-			raw, _ := io.ReadAll(r.Body)
-			a.jfBodies = append(a.jfBodies, string(raw))
-			var body jfUserData
-			json.Unmarshal(raw, &body)
+			var body struct {
+				Played         *bool
+				PlayCount      *int
+				Rating         *float64
+				LastPlayedDate *string
+			}
+			json.NewDecoder(r.Body).Decode(&body)
 			f := a.jf[id]
 			if body.Played != nil {
 				f.played = *body.Played
@@ -330,20 +329,25 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 			if body.LastPlayedDate != nil {
 				f.last = *body.LastPlayedDate
 			}
-			if body.PlaybackPositionTicks != nil {
-				f.ticks = *body.PlaybackPositionTicks
-			}
 		})
 	}
 	jf.HandleFunc("POST", "/Collections", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
+		if a.failJFSet {
+			http.Error(w, "busy", http.StatusInternalServerError)
+			return
+		}
 		a.jfSet = strings.Split(r.URL.Query().Get("ids"), ",")
 		io.WriteString(w, `{"Id":"c1"}`)
 	})
 	jf.HandleFunc("DELETE", "/Collections/c1/Items", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
+		if a.failJFSet {
+			http.Error(w, "busy", http.StatusInternalServerError)
+			return
+		}
 		gone := strings.Split(r.URL.Query().Get("ids"), ",")
 		a.jfSet = slices.DeleteFunc(a.jfSet, func(id string) bool { return slices.Contains(gone, id) })
 	})
@@ -433,26 +437,38 @@ func (w *world) run(t *testing.T, extra string) stage.Report {
 	return rep
 }
 
+// writes counts every write either app was sent.
 func writes(h *fake.Harness) int {
-	n := 0
-	for _, c := range [][]fake.Call{h.Plex.Calls("PUT", "/:/scrobble"), h.Plex.Calls("GET", "/:/scrobble"), h.Plex.Calls("PUT", "/:/rate"), h.Plex.Calls("POST", "/library/collections"),
-		h.Plex.Calls("PUT", "/library/collections/900/items"), h.Plex.Calls("POST", "/hubs/sections/4/manage"), h.Jellyfin.Calls("POST", "/Collections"),
-		h.Jellyfin.Calls("DELETE", "/Collections/c1/Items")} {
+	n := watchWrites(h)
+	for _, c := range [][]fake.Call{h.Plex.Calls("POST", "/library/collections"), h.Plex.Calls("PUT", "/library/collections/900/items"),
+		h.Plex.Calls("POST", "/hubs/sections/4/manage"), h.Jellyfin.Calls("POST", "/Collections"), h.Jellyfin.Calls("DELETE", "/Collections/c1/Items")} {
 		n += len(c)
 	}
 	for _, k := range []string{"10", "20", "30", "40"} {
-		n += len(h.Plex.Calls("DELETE", "/library/collections/900/items/"+k)) + len(h.Jellyfin.Calls("POST", "/UserItems/j"+k+"/UserData"))
+		n += len(h.Plex.Calls("DELETE", "/library/collections/900/items/"+k))
+	}
+	return n
+}
+
+// watchWrites counts the watch-state writes either app was sent: jfsync's alone, never this stage's.
+func watchWrites(h *fake.Harness) int {
+	n := 0
+	for _, c := range [][]fake.Call{h.Plex.Calls("GET", "/:/scrobble"), h.Plex.Calls("PUT", "/:/scrobble"), h.Plex.Calls("GET", "/:/unscrobble"),
+		h.Plex.Calls("GET", "/:/progress"), h.Plex.Calls("PUT", "/:/rate")} {
+		n += len(c)
+	}
+	for _, k := range []string{"j10", "j20", "j30", "j40"} {
+		n += len(h.Jellyfin.Calls("POST", "/UserItems/"+k+"/UserData"))
 	}
 	return n
 }
 
 // Catches, end to end against a fake Letterboxd and stateful fake Plex/Jellyfin: a dry run that writes, a wrong
-// diff count in any category, a play count lowered or a viewing counted twice (export + feed), a Jellyfin write
-// that resets favourites, a Plex play count set without scrobbles, the Watchlist collection not created or not on
-// Home, a Letterboxd request that does not wait its 2 s on the shared limiter, or one for a page it has cached, a
-// second run (or a run after the daily re-read) writing anything, the snapshot read in a run that then writes
-// being stored with an older time (so the app is paged again next run), and the collection put back on his Home
-// after he took it off.
+// count of planned collection writes, this stage writing any watch state (jfsync is its one writer), the Watchlist
+// collection not created or not on Home, a Letterboxd request that does not wait its 2 s on the shared limiter, or
+// one for a page it has cached, a second run (or a run after the daily re-read) writing anything, the snapshot read in
+// a run that then writes being stored with an older time (so the app is paged again next run), and the collection put
+// back on his Home after he took it off.
 func TestRunEndToEnd(t *testing.T) {
 	w := newWorld(t)
 	dry := w.run(t, "dry_run = true\n")
@@ -462,8 +478,7 @@ func TestRunEndToEnd(t *testing.T) {
 	if _, err := os.Stat(w.missing); !os.IsNotExist(err) {
 		t.Fatalf("dry run wrote the missing file: %v", err)
 	}
-	for k, v := range map[string]int{"plex.watched": 1, "plex.plays": 1, "plex.rating": 2, "plex.collection_add": 1, "plex.home_promote": 1,
-		"jellyfin.watched": 2, "jellyfin.rating": 2, "jellyfin.last_played": 2, "jellyfin.collection_add": 1, "missing_films": 1, "unresolved": 0} {
+	for k, v := range map[string]int{"plex.collection_add": 1, "plex.home_promote": 1, "jellyfin.collection_add": 1, "missing_films": 1, "unresolved": 0} {
 		if dry.Counts[k] != v {
 			t.Errorf("dry run %s = %d, want %d (all: %v)", k, dry.Counts[k], v, dry.Counts)
 		}
@@ -481,28 +496,11 @@ func TestRunEndToEnd(t *testing.T) {
 	w.h.Now = w.h.Now.Add(25 * time.Hour) // the apply's own Plex read is due, so its time must survive the create and promotion
 	w.run(t, "")
 	a := w.apps
-	if f := a.plex["10"]; f.views != 3 || f.rating != 10 {
-		t.Errorf("plex Licorice Pizza = %+v, want 3 views (scrobbled from 1), rating 10", f)
-	}
-	if f := a.plex["20"]; f.views != 2 || f.rating != 9 {
-		t.Errorf("plex Ad Astra = %+v, want 2 views, the feed's newer rating 9", f)
-	}
-	if f := a.plex["40"]; f.views != 5 || f.rating != 8 {
-		t.Errorf("plex Digger = %+v, want untouched", f)
+	if n := watchWrites(w.h); n != 0 {
+		t.Errorf("letterboxd sent %d watch-state writes; jfsync is their one writer", n)
 	}
 	if len(a.collection) != 1 || a.collection[0] != "30" || !a.promoted {
 		t.Errorf("plex collection = %v promoted=%v", a.collection, a.promoted)
-	}
-	if f := a.jf["j10"]; f.plays != 3 || !f.played || *f.rating != 10 || f.last != "2024-01-26T20:00:00Z" || !f.favourite {
-		t.Errorf("jellyfin Licorice Pizza = %+v (rating %v)", f, *f.rating)
-	}
-	if f := a.jf["j40"]; f.plays != 7 || f.last != "2026-10-04T21:00:00Z" {
-		t.Errorf("jellyfin Digger lowered: %+v", f)
-	}
-	for _, b := range a.jfBodies {
-		if strings.Contains(b, "IsFavorite") || strings.Contains(b, "Likes") {
-			t.Errorf("jellyfin body touches fields it does not own: %s", b)
-		}
 	}
 	if len(a.jfSet) != 1 || a.jfSet[0] != "j30" {
 		t.Errorf("jellyfin collection = %v", a.jfSet)
@@ -541,36 +539,188 @@ func TestRunEndToEnd(t *testing.T) {
 	}
 }
 
-// Catches: a Cloudflare-blocked watchlist page shrinking the watchlist (the export's must stand), the blocked
-// kind retried inside its backoff, a failed Plex scrobble either failing the run or leaving the play recorded
-// as done (it must be retried next run), and a feed blocked for days without an alert.
-func TestRunSurvivesBlocksAndFailures(t *testing.T) {
+// diaryEvents lists this stage's events in the watch record, oldest first.
+func diaryEvents(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var lines []string
+	err := query(context.Background(), db, `SELECT kind, item, ref, at, plays, played_at, coalesce(rating, 0) FROM watch_events
+		WHERE source = 'letterboxd' AND person = 'saahil' ORDER BY id`, func(rows *sql.Rows) error {
+		var kind, item, ref, at, playedAt string
+		var plays int
+		var rating float64
+		if err := rows.Scan(&kind, &item, &ref, &at, &plays, &playedAt, &rating); err != nil {
+			return err
+		}
+		day := func(s string) string {
+			if ts, err := time.Parse(store.TimeFormat, s); err == nil {
+				return ts.Format(time.RFC3339)
+			}
+			return s
+		}
+		lines = append(lines, fmt.Sprintf("%s %s %s %s plays=%d played=%s rating=%g", kind, item, ref, day(at), plays, day(playedAt), rating))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// Catches, through the feed and the record: the entries he logged before the stage first ran recorded (history is
+// off by default, and his Plex history and ratings are visible to friends); a later entry not recorded, recorded by a
+// dry run, or recorded again on a later run, also when he adds a review to it (the guid turns letterboxd-watch-<id>
+// into letterboxd-review-<id>) and against a feed row stored under the whole guid before this key; the deploy time
+// moving with each run; and a rating he edits not recorded at the time of the edit.
+func TestDiaryBecomesEvents(t *testing.T) {
+	w := newWorld(t)
+	db := w.h.Env.Store.DB()
+	w.run(t, "") // the feed's three entries were logged before this first run
+	if got := diaryEvents(t, db); got != "" {
+		t.Fatalf("entries logged before the first run recorded:\n%s", got)
+	}
+	w.lb.logRing()
+	w.h.Now = w.h.Now.Add(2 * time.Hour)
+	if dry := w.run(t, "dry_run = true\n"); dry.Counts["events.logged"] != 1 || diaryEvents(t, db) != "" {
+		t.Fatalf("dry run: counts %v, recorded\n%s", dry.Counts, diaryEvents(t, db))
+	}
+	w.run(t, "")
+	ring := "logged movie/tmdb-565 letterboxd:1530000000 2026-10-05T07:00:00Z plays=1 played=2026-10-04T19:00:00Z rating=0\n" +
+		"rated movie/tmdb-565 letterboxd:1530000000 2026-10-05T07:00:00Z plays=0 played= rating=8"
+	if got := diaryEvents(t, db); got != ring {
+		t.Fatalf("after The Ring was logged:\n%s\nwant\n%s", got, ring)
+	}
+	if _, err := db.Exec(`UPDATE letterboxd_entry SET id='letterboxd-watch-1530000000' WHERE id='1530000000'`); err != nil {
+		t.Fatal(err) // the row as stages before the viewing-id key stored it
+	}
+	w.lb.editFeed("letterboxd-watch-1530000000", "letterboxd-review-1530000000") // he adds a review
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	if rep := w.run(t, ""); diaryEvents(t, db) != ring || rep.Counts["events.logged"]+rep.Counts["events.rated"] != 0 {
+		t.Errorf("a review added to the entry: counts %v, record\n%s", rep.Counts, diaryEvents(t, db))
+	}
+	w.lb.editFeed("<letterboxd:memberRating>4.0<", "<letterboxd:memberRating>3.5<") // he edits the entry to ★★★½
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	w.run(t, "")
+	if got, want := diaryEvents(t, db), ring+"\nrated movie/tmdb-565 letterboxd:1530000000 2026-10-05T09:00:00Z plays=0 played= rating=7"; got != want {
+		t.Errorf("after the rating edit:\n%s\nwant\n%s", got, want)
+	}
+}
+
+// Catches the round-5 loop (the reviewer's repro, both stages on one set of fake apps): he marks a film he logged on
+// Letterboxd unplayed in Jellyfin; jfsync carries that to Plex; the next day Letterboxd, still saying watched, must
+// not make it watched again, as the stage did when it wrote Plex itself (Plex flipped daily, and each scrobble put
+// the film in his friends' feeds). A newer diary entry must: the last event wins. Also: jfsync not taking the
+// viewing's watched date as Jellyfin's last played, and a rewatch's plays not counting the first viewing.
+func TestUnplayedInJellyfinStaysUnplayed(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	backups := t.TempDir() // jfsync seeds what Plex holds from a backup copy; this one has his account and no plays
+	bdb, err := sql.Open("sqlite", filepath.Join(backups, "pre.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bdb.Exec(`CREATE TABLE accounts (id INTEGER PRIMARY KEY, name TEXT);
+		CREATE TABLE metadata_items (id INTEGER PRIMARY KEY, guid TEXT, metadata_type INTEGER, library_section_id INTEGER, "index" INTEGER, deleted_at INTEGER);
+		CREATE TABLE metadata_item_settings (id INTEGER PRIMARY KEY, account_id INTEGER, guid TEXT, rating REAL, view_offset INTEGER, view_count INTEGER, last_viewed_at INTEGER, updated_at INTEGER);
+		CREATE TABLE media_items (id INTEGER PRIMARY KEY, metadata_item_id INTEGER, deleted_at INTEGER);
+		CREATE TABLE media_parts (id INTEGER PRIMARY KEY, media_item_id INTEGER, file TEXT);
+		INSERT INTO accounts VALUES (1, 'saahilsanganeriya')`); err != nil {
+		t.Fatal(err)
+	}
+	bdb.Close()
+	os.Chtimes(filepath.Join(backups, "pre.db"), w.h.Now, w.h.Now)
+	w.h.Plex.Handle("GET", "/accounts", 200, `{"MediaContainer":{"Account":[{"id":1,"name":"saahilsanganeriya"}]}}`)
+	w.h.Plex.Handle("GET", "/library/sections/2/all", 200, `{"MediaContainer":{"Metadata":[]}}`)
+	jfOpts := fmt.Sprintf("plex_backups = %q\nwebhook_url = \"\"\nusers = [{ name = \"saahil\", plex = \"saahilsanganeriya\", jellyfin = \"saahil\" }]\n", backups)
+	jfsyncRun := func() {
+		t.Helper()
+		w.h.SetOptions(jfOpts)
+		if err := (jfsync.Stage{}).Run(ctx, w.h.Env, &stage.Report{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	letterboxdRun := func() {
+		t.Helper()
+		before := watchWrites(w.h)
+		if w.run(t, ""); watchWrites(w.h) != before {
+			t.Fatalf("letterboxd wrote watch state")
+		}
+	}
+	calls := func(path string) int { // Plex calls for The Ring
+		n := 0
+		for _, c := range w.h.Plex.Calls("GET", path) {
+			if q, _ := url.ParseQuery(c.RawQuery); q.Get("key") == "30" {
+				n++
+			}
+		}
+		return n
+	}
+	ring := func() (int, jfFilm) {
+		w.apps.mu.Lock()
+		defer w.apps.mu.Unlock()
+		return w.apps.plex["30"].views, *w.apps.jf["j30"]
+	}
+
+	letterboxdRun() // the deploy
+	w.lb.logRing()  // The Ring, watched 4 Oct, logged 07:00Z
+	w.h.Now = w.h.Now.Add(2 * time.Hour)
+	letterboxdRun()
+	jfsyncRun()
+	if views, jf := ring(); views != 1 || !jf.played || jf.plays != 1 || jf.last != "2026-10-04T19:00:00Z" {
+		t.Fatalf("after the diary entry: Plex views %d, Jellyfin %+v; want 1, and played once on 4 Oct (noon PDT)", views, jf)
+	}
+
+	w.h.Now = w.h.Now.Add(time.Hour) // he marks it unplayed in Jellyfin
+	w.apps.mu.Lock()
+	w.apps.jf["j30"].played, w.apps.jf["j30"].plays = false, 0
+	w.apps.mu.Unlock()
+	w.h.SetOptions(jfOpts)
+	rec := httptest.NewRecorder()
+	(jfsync.Stage{}).Hooks(w.h.Env)["POST /hooks/jellyfin"].ServeHTTP(rec, httptest.NewRequest("POST", "/hooks/jellyfin", strings.NewReader(
+		`{"NotificationType":"UserDataSaved","NotificationUsername":"saahil","ItemId":"j30","ItemType":"Movie","SaveReason":"TogglePlayed","Played":false}`)))
+	jfsyncRun()
+	if views, _ := ring(); rec.Code != http.StatusNoContent || views != 0 || calls("/:/unscrobble") != 1 {
+		t.Fatalf("after the unplayed (hook %d): Plex views %d, unscrobbles %d; want 0 and 1", rec.Code, views, calls("/:/unscrobble"))
+	}
+
+	for range 2 { // the next days: Letterboxd still says watched
+		w.h.Now = w.h.Now.Add(25 * time.Hour)
+		letterboxdRun()
+		jfsyncRun()
+	}
+	if views, jf := ring(); views != 0 || jf.played || calls("/:/scrobble") != 1 || calls("/:/unscrobble") != 1 {
+		t.Fatalf("two days later: Plex views %d (%d scrobbles, %d unscrobbles), Jellyfin %+v; want it left unplayed",
+			views, calls("/:/scrobble"), calls("/:/unscrobble"), jf)
+	}
+
+	rewatch := strings.NewReplacer("1530000000", "1530000009", "Mon, 5 Oct 2026 20:00:00 +1300", "Thu, 8 Oct 2026 00:30:00 +1300",
+		">2026-10-04<", ">2026-10-06<").Replace(ringItem)
+	w.lb.editFeed("<channel>", "<channel>"+rewatch) // a rewatch on 6 Oct, logged after the unplayed
+	w.h.Now = w.h.Now.Add(time.Hour)
+	letterboxdRun()
+	jfsyncRun()
+	if views, jf := ring(); views != 1 || !jf.played || jf.plays != 2 || jf.last != "2026-10-06T19:00:00Z" {
+		t.Errorf("after a newer diary entry: Plex views %d, Jellyfin %+v; want watched, 2 plays, last 6 Oct", views, jf)
+	}
+}
+
+// Catches: a Cloudflare-blocked watchlist page shrinking the watchlist (the export's must stand), the blocked kind
+// retried inside its backoff, a stuck crawl not starting over at page 1 the next day, and a feed blocked for days
+// without an alert.
+func TestRunSurvivesBlocks(t *testing.T) {
 	w := newWorld(t)
 	w.lb.challenge["/saahilsan/watchlist/page/2/"] = true
-	w.apps.failScrobble = true
-	rep := w.run(t, "")
-	if rep.Counts["challenged.watchlist"] != 1 || rep.Counts["plex.failed"] == 0 {
+	if rep := w.run(t, ""); rep.Counts["challenged.watchlist"] != 1 {
 		t.Fatalf("counts = %v", rep.Counts)
 	}
 	if text, _ := os.ReadFile(w.missing); !strings.Contains(string(text), "Okja (2017)") {
 		t.Errorf("incomplete crawl replaced the export watchlist: %q", text)
 	}
-	if w.apps.plex["10"].views != 1 {
-		t.Errorf("views changed despite failures: %d", w.apps.plex["10"].views)
-	}
-	if !slices.Contains(w.sleeps, 2*time.Second) || !slices.Contains(w.sleeps, 4*time.Second) {
-		t.Errorf("no 2 s / 4 s retry backoff: %v", w.sleeps)
-	}
 
-	w.apps.failScrobble = false
 	w.lb.challenge = map[string]bool{}
 	hits := w.lb.hits["/saahilsan/watchlist/page/2/"]
-	rep = w.run(t, "")
+	rep := w.run(t, "")
 	if rep.Counts["backed_off.watchlist"] != 1 || w.lb.hits["/saahilsan/watchlist/page/2/"] != hits {
 		t.Errorf("watchlist fetched inside its backoff: counts %v", rep.Counts)
-	}
-	if w.apps.plex["10"].views != 3 || w.apps.plex["20"].views != 2 {
-		t.Errorf("failed scrobbles not retried: %d, %d", w.apps.plex["10"].views, w.apps.plex["20"].views)
 	}
 	if len(rep.Alerts) != 0 {
 		t.Errorf("alerts with a fresh feed: %v", rep.Alerts)
@@ -589,22 +739,6 @@ func TestRunSurvivesBlocksAndFailures(t *testing.T) {
 	rep = w.run(t, "")
 	if !slices.ContainsFunc(rep.Alerts, func(a string) bool { return strings.Contains(a, "feed unread") }) {
 		t.Errorf("no alert after the feed went unread past %v: %v", feedStale, rep.Alerts)
-	}
-}
-
-// Catches: a scrobble whose answer was lost (Plex counted the view; the reply never came) retried or recounted,
-// which would push the play count past the diary for good, since nothing may ever lower it.
-func TestLostScrobbleAnswerNeverRepeats(t *testing.T) {
-	w := newWorld(t)
-	w.apps.dropScrobble = true
-	rep := w.run(t, "")
-	if rep.Counts["plex.unconfirmed"] != 2 || w.apps.plex["10"].views != 2 || w.apps.plex["20"].views != 1 {
-		t.Fatalf("views %d, %d; counts %v", w.apps.plex["10"].views, w.apps.plex["20"].views, rep.Counts)
-	}
-	w.apps.dropScrobble = false
-	w.run(t, "")
-	if w.apps.plex["10"].views != 3 || w.apps.plex["20"].views != 2 {
-		t.Errorf("views after the next run = %d, %d; want exactly 3 and 2", w.apps.plex["10"].views, w.apps.plex["20"].views)
 	}
 }
 
@@ -671,13 +805,11 @@ func TestCollectionCreateAnswerLost(t *testing.T) {
 	}
 }
 
-// Catches: a film he watched in Plex and then logged on Letterboxd being scrobbled again from a listing read
-// before he watched it (a second view that could never be taken back), a watched film left in either app's
-// Watchlist collection (before these fakes had DELETE routes, both removal calls could be wrong and every test
-// still passed), an existing collection's members misread (every film taken for one, so none is ever added),
-// a film he put there himself taken out, and a removal overwriting the same film's just-written rating in the
-// stored row, so the next run pages Plex again.
-func TestWatchedInPlexThenLogged(t *testing.T) {
+// Catches: a watchlist film he watched in Plex and then logged left in either app's Watchlist collection (before
+// these fakes had DELETE routes, both removal calls could be wrong and every test still passed), an existing
+// collection's members misread (every film taken for one, so none is ever added), a film he put there himself taken
+// out, this stage adding a Plex view for the logged viewing, and the run after paging Plex again.
+func TestWatchedFilmLeavesTheCollections(t *testing.T) {
 	w := newWorld(t)
 	w.apps.collection = []string{"40"} // his Watchlist already exists, holding Digger, which he put there and has watched
 	w.run(t, "")                       // The Ring is on his watchlist, unwatched: in both Watchlist collections
@@ -690,19 +822,105 @@ func TestWatchedInPlexThenLogged(t *testing.T) {
 	w.lb.logRing() // ...and logs it on Letterboxd
 	w.h.Now = w.h.Now.Add(30 * time.Minute)
 	rep := w.run(t, "")
-	if v := w.apps.plex["30"].views; v != 1 || rep.Counts["plex.scrobbles"] != 0 {
-		t.Errorf("one viewing became %d Plex views (counts %v)", v, rep.Counts)
+	if v := w.apps.plex["30"].views; v != 1 || watchWrites(w.h) != 0 {
+		t.Errorf("one viewing became %d Plex views (%d watch-state writes)", v, watchWrites(w.h))
 	}
 	if strings.Join(w.apps.collection, ",") != "40" || slices.Contains(w.apps.jfSet, "j30") {
 		t.Errorf("collections: plex %v (want only his own 40), jellyfin %v (counts %v)", w.apps.collection, w.apps.jfSet, rep.Counts)
-	}
-	if f := w.apps.jf["j30"]; !f.played || f.plays != 1 {
-		t.Errorf("jellyfin The Ring = %+v, want played once", f)
 	}
 	w.h.Now = w.h.Now.Add(time.Minute)
 	before := writes(w.h)
 	if again := w.run(t, ""); writes(w.h) != before || again.Counts["plex.snapshot"] != 0 {
 		t.Errorf("the run after made %d writes (counts %v)", writes(w.h)-before, again.Counts)
+	}
+}
+
+// Catches, on Jellyfin's Watchlist collection: a write that keeps failing re-paging the app every run (a film may
+// force one full read a day), a film inside that day written from an older listing, a dry run's read keeping the
+// apply after it from reading again, idempotent calls not retried 2 s and 4 s apart, a film whose writes failed in 3
+// runs in a row still written, the owner told of it more than once, and a film the app lists anew never tried again.
+func TestFailingWritesRereadOncePerDayThenPark(t *testing.T) {
+	w := newWorld(t)
+	w.apps.failJFSet = true
+	creates := func() int { return len(w.h.Jellyfin.Calls("POST", "/Collections")) }
+	w.run(t, "dry_run = true\n")
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	if rep := w.run(t, "dry_run = true\n"); rep.Counts["jellyfin.snapshot"] != 1 {
+		t.Fatalf("setup: a dry run whose plan has work reads Jellyfin again: %v", rep.Counts)
+	}
+	for i, step := range []struct {
+		after                         time.Duration
+		reads, creates, alerts, parks int
+	}{
+		{30 * time.Minute, 1, 3, 0, 0}, // a read now, the dry runs' notwithstanding; the create tried 3 times
+		{30 * time.Minute, 0, 0, 0, 0}, // a read within the day: the write waits for the next one
+		{25 * time.Hour, 1, 3, 0, 0},   // the daily read: the second failed run
+		{25 * time.Hour, 1, 3, 1, 0},   // the third: parked, he is told
+		{30 * time.Minute, 0, 0, 0, 1},
+		{25 * time.Hour, 1, 0, 0, 1}, // parked still after the daily read
+	} {
+		w.h.Now = w.h.Now.Add(step.after)
+		before := creates()
+		rep := w.run(t, "")
+		if rep.Counts["jellyfin.snapshot"] != step.reads || creates()-before != step.creates || len(rep.Alerts) != step.alerts ||
+			rep.Counts["jellyfin.parked"] != step.parks {
+			t.Errorf("run %d: %d reads, %d creates, alerts %q (counts %v); want %d, %d, %d alerts, %d parked", i+1,
+				rep.Counts["jellyfin.snapshot"], creates()-before, rep.Alerts, rep.Counts, step.reads, step.creates, step.alerts, step.parks)
+		}
+	}
+	if !slices.Contains(w.sleeps, 2*time.Second) || !slices.Contains(w.sleeps, 4*time.Second) {
+		t.Errorf("no 2 s / 4 s retry backoff: %v", w.sleeps)
+	}
+	w.apps.mu.Lock()
+	w.apps.jf["j31"], w.apps.failJFSet = w.apps.jf["j30"], false // Jellyfin lists The Ring anew: worth trying again
+	delete(w.apps.jf, "j30")
+	w.apps.mu.Unlock()
+	w.h.Now = w.h.Now.Add(25 * time.Hour)
+	if rep := w.run(t, ""); strings.Join(w.apps.jfSet, ",") != "j31" {
+		t.Errorf("after Jellyfin listed The Ring anew: its Watchlist %v (counts %v)", w.apps.jfSet, rep.Counts)
+	}
+}
+
+// Catches: failures that are not in a row parking a film. The Ring's add fails in two runs, then lands; when he
+// watches it and its removal fails once, that is one failed run, not a third.
+func TestFailuresParkOnlyInARow(t *testing.T) {
+	w := newWorld(t)
+	w.apps.failJFSet = true
+	w.run(t, "")
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	w.run(t, "") // a forced read, and the second failed run
+	w.apps.failJFSet = false
+	w.h.Now = w.h.Now.Add(25 * time.Hour)
+	w.run(t, "") // the daily read: the add lands
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	w.run(t, "") // nothing left to do for The Ring
+	w.apps.failJFSet = true
+	w.lb.logRing() // he watches it: it must leave the collection
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	if rep := w.run(t, ""); len(rep.Alerts) != 0 || rep.Counts["jellyfin.failed"] != 1 {
+		t.Errorf("one failed run after a success parked the film: alerts %v (counts %v)", rep.Alerts, rep.Counts)
+	}
+}
+
+// Catches: a diary entry he deleted (a double log) not dropped, or dropped without telling him its play stays in
+// the watch record; an entry that only fell off the bottom of the feed taken for deleted; and one deleted before it
+// was ever recorded (logged before the stage first ran) alerted.
+func TestDeletedDiaryEntryIsRetracted(t *testing.T) {
+	w := newWorld(t)
+	db := w.h.Env.Store.DB()
+	w.lb.logRing()
+	w.lb.editFeed("<channel>", "<channel>"+strings.Replace(ringItem, "letterboxd-watch-1530000000", "letterboxd-watch-1530000001", 1)) // logged twice by mistake
+	w.run(t, "")
+	w.lb.dropItem("letterboxd-watch-1530000001")  // he deletes the double log,
+	w.lb.dropItem("letterboxd-watch-1522858910")  // and The Fox and the Hound's entry, logged before the stage first ran;
+	w.lb.dropItem("letterboxd-review-1208848714") // Ad Astra, the oldest entry, falls off the bottom of the feed
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	rep := w.run(t, "")
+	var kept string
+	db.QueryRow(`SELECT group_concat(id, ',') FROM (SELECT id FROM letterboxd_entry ORDER BY id)`).Scan(&kept)
+	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "The Ring") || strings.Contains(rep.Alerts[0], "Fox") ||
+		kept != "1208848714,1519797680,1530000000" {
+		t.Errorf("alerts = %q, entries kept %s; want one naming The Ring only, and Ad Astra, Digger and the first Ring kept", rep.Alerts, kept)
 	}
 }
 
@@ -766,100 +984,6 @@ func TestSlowPlexEndsItsPartOfTheRun(t *testing.T) {
 	}
 }
 
-// Catches: a viewing counted twice when he adds a review to it (the feed guid turns letterboxd-watch-<id> into
-// letterboxd-review-<id>), also against a feed row stored under the whole guid before this key, and an edited
-// watched date that never reaches Jellyfin's last played. Nothing may lower a play count, so a second view stays.
-func TestEditedDiaryEntryIsOneViewing(t *testing.T) {
-	w := newWorld(t)
-	w.lb.logRing()
-	w.run(t, "")
-	// The row as stages before the viewing-id key stored it.
-	if _, err := w.h.Env.Store.DB().Exec(`UPDATE letterboxd_entry SET id='letterboxd-watch-1530000000' WHERE id='1530000000'`); err != nil {
-		t.Fatal(err)
-	}
-	w.lb.editFeed("letterboxd-watch-1530000000", "letterboxd-review-1530000000") // he adds a review
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	rep := w.run(t, "")
-	if v, p := w.apps.plex["30"].views, w.apps.jf["j30"].plays; v != 1 || p != 1 {
-		t.Errorf("one viewing with a review added: Plex views %d, Jellyfin plays %d, want 1 and 1 (counts %v)", v, p, rep.Counts)
-	}
-	w.lb.editFeed("<letterboxd:watchedDate>2026-10-04<", "<letterboxd:watchedDate>2026-10-05<") // he corrects the date
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	w.run(t, "")
-	if f := w.apps.jf["j30"]; f.plays != 1 || f.last != "2026-10-05T19:00:00Z" || w.apps.plex["30"].views != 1 {
-		t.Errorf("edited watched date: jellyfin %+v, Plex views %d; want 1 play last played 2026-10-05 noon PT, 1 view", f, w.apps.plex["30"].views)
-	}
-}
-
-// Catches: a write that keeps failing re-paging Plex every run (a film may force one full re-read a day), a film
-// inside that day scrobbled or moved in or out of a collection from an older listing (only a rating, safe to send
-// twice, may be), a dry run's re-read keeping the apply after it from reading again, a film whose writes failed
-// in 3 runs in a row still written, the owner told of it more than once, and deferred writes never landing.
-func TestFailingWritesRereadOncePerDayThenPark(t *testing.T) {
-	w := newWorld(t)
-	w.apps.failRate = map[string]bool{"10": true, "20": true}
-	rates := func() int { return len(w.h.Plex.Calls("PUT", "/:/rate")) }
-	step := func(d time.Duration, extra string) stage.Report {
-		w.h.Now = w.h.Now.Add(d)
-		return w.run(t, extra)
-	}
-	step(0, "dry_run = true\n")
-	if rep := step(30*time.Minute, "dry_run = true\n"); rep.Counts["plex.snapshot"] != 1 {
-		t.Fatalf("setup: a dry run whose plan has work reads Plex again: %v", rep.Counts)
-	}
-	rep := step(30*time.Minute, "") // scrobbles land, both ratings fail
-	if rep.Counts["plex.snapshot"] != 1 || w.apps.plex["10"].views != 3 || w.apps.plex["20"].views != 2 {
-		t.Errorf("apply after a dry run: Plex read %d times, views %d and %d; want a read and 3, 2 (counts %v)",
-			rep.Counts["plex.snapshot"], w.apps.plex["10"].views, w.apps.plex["20"].views, rep.Counts)
-	}
-
-	w.lb.logRing() // The Ring, put in the Watchlist collection by the run before, is watched and logged
-	rep = step(30*time.Minute, "")
-	if f := w.apps.plex["30"]; rep.Counts["plex.snapshot"] != 0 || f.views != 0 || !slices.Contains(w.apps.collection, "30") || f.rating != 8 || len(rep.Alerts) != 0 {
-		t.Errorf("a day of a re-read: Plex read %d times, The Ring %+v in %v, alerts %v; want no read, no scrobble, kept, rated 8, none (counts %v)",
-			rep.Counts["plex.snapshot"], f, w.apps.collection, rep.Alerts, rep.Counts)
-	}
-	if rep = step(30*time.Minute, ""); len(rep.Alerts) != 1 { // the third run with failed ratings
-		t.Errorf("parking alerts = %v, want one", rep.Alerts)
-	}
-	before := rates()
-	if rep = step(30*time.Minute, ""); rates() != before || len(rep.Alerts) != 0 || rep.Counts["plex.parked"] != 2 {
-		t.Errorf("parked films: %d more rate calls, alerts %v (counts %v)", rates()-before, rep.Alerts, rep.Counts)
-	}
-
-	w.apps.mu.Lock()
-	w.apps.plex["21"] = w.apps.plex["20"] // Plex re-indexes Ad Astra under a new ratingKey: worth trying again
-	delete(w.apps.plex, "20")
-	w.apps.mu.Unlock()
-	before = rates()
-	rep = step(25*time.Hour, "") // the daily read: The Ring's deferred writes land; Licorice Pizza stays parked
-	if w.apps.plex["30"].views != 1 || slices.Contains(w.apps.collection, "30") || rates()-before != 1 || w.apps.plex["21"].rating != 9 {
-		t.Errorf("after the daily read: The Ring views %d, collection %v, %d rate calls, Ad Astra rating %d; want 1, out, 1, 9 (counts %v)",
-			w.apps.plex["30"].views, w.apps.collection, rates()-before, w.apps.plex["21"].rating, rep.Counts)
-	}
-}
-
-// Catches: failures that are not in a row parking a film. Ad Astra's writes fail in two runs, then succeed; when a
-// later rating change fails once, that is one failed run, not a third.
-func TestFailuresParkOnlyInARow(t *testing.T) {
-	w := newWorld(t)
-	w.apps.failRate = map[string]bool{"20": true}
-	w.run(t, "")
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	w.run(t, "") // a forced read, and the second failed run
-	w.apps.failRate = nil
-	w.h.Now = w.h.Now.Add(25 * time.Hour)
-	w.run(t, "") // the daily read: the rating lands
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	w.run(t, "") // nothing left to do for Ad Astra
-	w.apps.failRate = map[string]bool{"20": true}
-	w.lb.editFeed("<letterboxd:memberRating>4.5<", "<letterboxd:memberRating>4.0<") // he re-rates it
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	if rep := w.run(t, ""); len(rep.Alerts) != 0 || rep.Counts["plex.failed"] != 1 {
-		t.Errorf("one failed run after a success parked the film: alerts %v (counts %v)", rep.Alerts, rep.Counts)
-	}
-}
-
 // Catches: plex.tv's watchlist listing read outside r.call, so neither the run budget nor the breaker covers it
 // and a slow plex.tv holds the run open.
 func TestPlexTVInsideRunBudget(t *testing.T) {
@@ -867,24 +991,6 @@ func TestPlexTVInsideRunBudget(t *testing.T) {
 	rep := w.run(t, fmt.Sprintf("plex_watchlist = true\ndiscover_url = %q\nrun_budget = \"0s\"\n", w.h.Plex.URL))
 	if n := len(w.h.Plex.Calls("GET", "/library/sections/watchlist/all")); n != 0 || rep.Counts["out_of_time"] == 0 {
 		t.Errorf("%d plex.tv listing calls with the run budget spent (counts %v)", n, rep.Counts)
-	}
-}
-
-// Catches: a film Letterboxd says he watched left unplayed in Jellyfin because its play count already matches the
-// diary (Jellyfin counts a play when playback starts, and marks it played only past 90 %), and a watchlist film he
-// only sampled in Jellyfin left out of its Watchlist collection while it is in Plex's.
-func TestJellyfinStartedIsNotWatched(t *testing.T) {
-	w := newWorld(t)
-	w.apps.jf["j30"].plays = 1 // he started The Ring in Jellyfin and stopped before the end
-	w.run(t, "")
-	if !slices.Contains(w.apps.collection, "30") || !slices.Contains(w.apps.jfSet, "j30") {
-		t.Errorf("a sampled watchlist film: Watchlist collections plex %v, jellyfin %v; want The Ring in both", w.apps.collection, w.apps.jfSet)
-	}
-	w.lb.logRing() // ...then watched it in a cinema and logged it
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	rep := w.run(t, "")
-	if f := w.apps.jf["j30"]; !f.played || f.plays != 1 || slices.Contains(w.apps.jfSet, "j30") {
-		t.Errorf("Letterboxd says watched: Jellyfin The Ring %+v, in its Watchlist %v; want played, 1 play, out (counts %v)", f, w.apps.jfSet, rep.Counts)
 	}
 }
 
@@ -907,49 +1013,6 @@ func TestEmptyWatchlistPageIsRefused(t *testing.T) {
 	w.run(t, "")
 	if text, _ := os.ReadFile(w.missing); slices.Contains(w.apps.collection, "30") || slices.Contains(w.apps.jfSet, "j30") || !strings.Contains(string(text), "(0)") {
 		t.Errorf("an emptied watchlist not synced: Watchlist plex %v, jellyfin %v, missing file %q", w.apps.collection, w.apps.jfSet, text)
-	}
-}
-
-// Catches: a rating he edits on a diary entry losing to the films grid's earlier sight of his old rating, because
-// the entry's rating kept the time it was logged instead of the time it changed.
-func TestEditedRatingBeatsOlderGridRating(t *testing.T) {
-	w := newWorld(t)
-	w.run(t, "")                                                                    // the films grid shows Digger at ★★★★ (seen now); the feed logged it at ★★★★ on 2 Oct
-	w.lb.editFeed("<letterboxd:memberRating>4.0<", "<letterboxd:memberRating>3.5<") // he edits that entry to ★★★½
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	rep := w.run(t, "")
-	if p, j := w.apps.plex["40"].rating, w.apps.jf["j40"].rating; p != 7 || *j != 7 {
-		t.Errorf("edited diary rating: Plex %d, Jellyfin %v; want 7 and 7 (counts %v)", p, *j, rep.Counts)
-	}
-}
-
-// Catches: a diary entry he deleted (a double log) still counted, so Jellyfin, which had not indexed the film when
-// it was logged, is later given the deleted viewing as a play; the owner not told that Plex, which counted it,
-// keeps it (counts are never lowered); and an entry that only fell off the bottom of the feed taken for deleted.
-func TestDeletedDiaryEntryIsRetracted(t *testing.T) {
-	w := newWorld(t)
-	w.lb.logRing()
-	w.lb.editFeed("<channel>", "<channel>"+strings.Replace(ringItem, "letterboxd-watch-1530000000", "letterboxd-watch-1530000001", 1)) // logged twice by mistake
-	w.apps.mu.Lock()
-	ring := w.apps.jf["j30"]
-	delete(w.apps.jf, "j30") // Jellyfin has not indexed The Ring yet
-	w.apps.mu.Unlock()
-	w.run(t, "")
-
-	w.lb.dropItem("letterboxd-watch-1530000001")  // he deletes the double log...
-	w.lb.dropItem("letterboxd-review-1208848714") // ...and Ad Astra, the oldest entry, falls off the bottom of the feed
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	rep := w.run(t, "")
-	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "The Ring") || strings.Contains(rep.Alerts[0], "Ad Astra") {
-		t.Errorf("alerts = %q, want one, naming The Ring only (counts %v)", rep.Alerts, rep.Counts)
-	}
-	w.apps.mu.Lock()
-	w.apps.jf["j30"] = ring // Jellyfin indexes it; its daily read finds it
-	w.apps.mu.Unlock()
-	w.h.Now = w.h.Now.Add(25 * time.Hour)
-	w.run(t, "")
-	if f := w.apps.jf["j30"]; f.plays != 1 || !f.played || w.apps.plex["30"].views != 2 {
-		t.Errorf("after the double log was deleted: Jellyfin %+v, Plex views %d; want 1 play, played, and Plex's 2 views kept", f, w.apps.plex["30"].views)
 	}
 }
 
@@ -1079,40 +1142,6 @@ func TestLastingRefusalsAlert(t *testing.T) {
 	}
 }
 
-// Catches the reviewer's double view, with jfsync writing Plex views too (a view can never be taken back): a view
-// jfsync adds after this stage's listing read (carrying his Jellyfin play of the film) scrobbled again on that
-// listing's count; and jfsync not told of a view this stage adds, so that when his Jellyfin play of the same viewing
-// reaches its record (resolved once its daily listing has the film) it scrobbles that viewing too.
-func TestOneViewingIsOnePlexViewWithJFSync(t *testing.T) {
-	t.Run("jfsync scrobbles after the listing read", func(t *testing.T) {
-		w := newWorld(t)
-		w.apps.listed = func() { w.apps.plex["30"].views = 1 }
-		w.lb.logRing()
-		rep := w.run(t, "")
-		if v := w.apps.plex["30"].views; v != 1 || rep.Counts["plex.viewed_since_read"] != 1 {
-			t.Errorf("one viewing became %d Plex views (counts %v)", v, rep.Counts)
-		}
-	})
-	t.Run("the count cannot be read now", func(t *testing.T) {
-		w := newWorld(t)
-		w.h.Plex.Handle("GET", "/library/metadata/30", http.StatusInternalServerError, "")
-		w.lb.logRing()
-		if rep := w.run(t, ""); w.apps.plex["30"].views != 0 || rep.Counts["plex.failed"] != 1 {
-			t.Errorf("The Ring scrobbled to %d views without its count read now (counts %v)", w.apps.plex["30"].views, rep.Counts)
-		}
-	})
-	t.Run("jfsync learns of the viewing later", func(t *testing.T) {
-		w := newWorld(t)
-		w.lb.logRing()
-		w.run(t, "")
-		var played, knows bool
-		err := w.h.Env.Store.DB().QueryRow(`SELECT played, knows_play FROM jfsync_sink WHERE app='plex' AND person='saahil' AND item='movie/tmdb-565'`).Scan(&played, &knows)
-		if err != nil || !played || !knows || w.apps.plex["30"].views != 1 {
-			t.Errorf("after scrobbling The Ring (%d views): jfsync believes Plex holds played=%v known=%v (%v), want both", w.apps.plex["30"].views, played, knows, err)
-		}
-	})
-}
-
 // Catches: a state DB made before letterboxd_sink.played and letterboxd_entry.rated_at failing every run with "no
 // such column" (CREATE TABLE IF NOT EXISTS leaves an older table as it is), and the added columns left unfilled: a
 // stored rating with no time (no later run could read it) and a Plex film he has views of taken for unwatched.
@@ -1136,19 +1165,6 @@ func TestOlderStateDBGainsTheNewColumns(t *testing.T) {
 		WHERE e.id='1100000000' AND s.app='plex' AND s.tmdb=718032`).Scan(&ratedAt, &played)
 	if err != nil || ratedAt != "2026-01-02T06:00:00.000000000Z" || !played {
 		t.Errorf("migrated rows: rated_at %q, Plex played %v (%v); want the logged time, played", ratedAt, played, err)
-	}
-}
-
-// Catches: a film he stopped in the end credits and then logged left in Jellyfin's Continue Watching (Played alone
-// keeps the resume point), and a resume point short of the credits (a rewatch in progress) cleared. 85 % is the
-// owner's line; the two films sit on either side of it.
-func TestJellyfinFinishedInTheCreditsLeavesContinueWatching(t *testing.T) {
-	w := newWorld(t)
-	w.apps.jf["j10"].pct, w.apps.jf["j10"].ticks = 85, 61_000_000_000   // Licorice Pizza, stopped in the credits
-	w.apps.jf["j20"].pct, w.apps.jf["j20"].ticks = 84.9, 52_000_000_000 // Ad Astra, stopped short of them
-	w.run(t, "")
-	if lp, aa := w.apps.jf["j10"], w.apps.jf["j20"]; !lp.played || lp.ticks != 0 || !aa.played || aa.ticks != 52_000_000_000 {
-		t.Errorf("marked watched: Licorice Pizza %+v, Ad Astra %+v; want both played, resume 0 and 52000000000", lp, aa)
 	}
 }
 

@@ -1,29 +1,35 @@
-// Package letterboxd syncs the owner's Letterboxd diary into Plex and Jellyfin: watched state, play counts, the
-// last-played date, his star ratings, and his watchlist as a "Watchlist" collection promoted to Plex Home.
+// Package letterboxd records the owner's Letterboxd diary in projectionist's watch record, and keeps his watchlist
+// as a "Watchlist" collection in Plex (promoted to his Home) and Jellyfin.
 //
-// Letterboxd is the truth; Plex and Jellyfin are sinks. Inputs, all public and fetched politely (one request per
-// 2 s for the whole process, shared with every stage through lbpace; every answer that can be cached is): the RSS
-// feed (every run), the watchlist and watched-films grid pages (daily), the film pages (TMDB id, cached forever),
-// and the account export unzipped on the NAS (the backfill). An answer the stage cannot read as Letterboxd's is never
-// cached, so new markup cannot shrink the watchlist or mark a film unresolvable: a watchlist page not stating its
-// size, or a crawl whose films do not add up to it, is a challenge and backs the crawl off; a film page naming no TMDB
-// type, or a boxd.it answer that is not a redirect to a film page, holds up that one film for a day (a second in a
-// run backs the kind off). A kind failing for 3 days, or a film unreadable for 3 days, is an alert each run. Films
-// join the library on the TMDB id in the folder names. Per app the stage keeps a snapshot of what the app holds (one
-// paged listing, re-read every sink_refresh or jellyfin_refresh, both daily, and before a run that writes to it, at
-// most once a day per film) and updates it after each write, so a rerun writes nothing. Watched in an app is its own
-// mark (a Jellyfin play count rises when playback starts). A film whose writes fail in 3 runs in a row is parked, and
-// the owner told once. Diary viewings count once each, by the viewing id that the feed guid and the export's boxd.it
-// code both carry; an entry he deletes is dropped, and he is told, since a view already written stays.
+//	feed (every run) ───┐                              ┌─► watch_events ──► jfsync ──► Plex, Jellyfin watch state
+//	export (on the NAS) ┼─► letterboxd_* ─► TMDB join ─┤   (logged viewings, ratings)
+//	grid pages (daily) ─┘                              └─► Watchlist collections, _watchlist-missing.txt
 //
-// jfsync also writes Plex views (it carries his Jellyfin plays there), and nothing can take a view back. So a film is
-// scrobbled only up to its view count read right before, and jfsync is told first that Plex holds the film's play, so
-// it does not add the same viewing again when his Jellyfin play of it reaches its record.
+// It writes no watch state itself: jfsync is the one writer to both apps, so a "mark unplayed" newer than his diary
+// entry stands. Each diary viewing is one Logged event (at the time he logged it, on its watched date, with at least
+// as many plays as viewings of the film logged by then) and each rating one Rated event (at the time it was set), each
+// recorded once: a viewing by its id, which the feed guid and the export's boxd.it code both carry, a rating by its
+// time. With history false (the default) only the entries he logs after this stage first runs become events; history
+// true imports the export and the feed's backlog, which Plex then shows his friends (his watch history is visible to
+// friends of friends, his ratings to friends). An entry he deletes is dropped, and he is told when its play is
+// already in the record (marking the film unplayed undoes it).
 //
-// Never: unwatch, lower a play count, clear a rating, or remove anything this stage did not add. Plex takes no
-// last-played date (a scrobble stamps "now"). Reviews are not synced: a Plex review is a community post whose
-// privacy the poster cannot set (createReview takes none; other members' reviews carry ANYONE or PLEX and are
-// listed to non-friends), and Jellyfin has no per-user text field (UpdateUserItemDataDto).
+// Inputs, all public and fetched politely (one request per 2 s for the whole process, shared with every stage through
+// lbpace; every answer that can be cached is): the RSS feed (every run), the watchlist and watched-films grid pages
+// (daily), the film pages (TMDB id, cached forever), and the account export unzipped on the NAS. An answer the stage
+// cannot read as Letterboxd's is never cached, so new markup cannot shrink the watchlist or mark a film unresolvable:
+// a watchlist page not stating its size, or a crawl whose films do not add up to it, is a challenge and backs the
+// crawl off; a film page naming no TMDB type, or a boxd.it answer that is not a redirect to a film page, holds up that
+// one film for a day (a second in a run backs the kind off). A kind failing for 3 days, or a film unreadable for 3
+// days, is an alert each run. Films join the library on the TMDB id in the folder names.
+//
+// For the collections the stage keeps a snapshot of what each app holds (one paged listing, re-read daily and before a
+// run that changes a collection, at most once a day per film) and updates it after each write, so a rerun writes
+// nothing. A film watched on Letterboxd or in the app leaves them; only films this stage added are ever taken out. A
+// film whose collection writes fail in 3 runs in a row is parked, and the owner told once. Reviews are not synced: a
+// Plex review is a community post whose privacy the poster cannot set (createReview takes none; other members'
+// reviews carry ANYONE or PLEX and are listed to non-friends), and Jellyfin has no per-user text field
+// (UpdateUserItemDataDto).
 package letterboxd
 
 import (
@@ -43,6 +49,7 @@ import (
 	"projectionist/internal/library"
 	"projectionist/internal/stage"
 	"projectionist/internal/store"
+	"projectionist/internal/watch"
 )
 
 const name = "letterboxd"
@@ -62,14 +69,14 @@ type Options struct {
 
 	PlexSection   int    `toml:"plex_section"`
 	JellyfinUser  string `toml:"jellyfin_user"`
-	Person        string `toml:"person"`         // the owner in projectionist's watch record: his name in jfsync's users
+	Person        string `toml:"person"`         // the owner in the watch record: his name in jfsync's users (jfsync alerts otherwise)
+	History       bool   `toml:"history"`        // also record the export and the feed's backlog, not just entries logged from now on
 	Collection    string `toml:"collection"`     // "" = no Watchlist collection
 	PlexWatchlist bool   `toml:"plex_watchlist"` // mirror onto the owner's plex.tv watchlist (visible per his Plex privacy)
 	DiscoverURL   string `toml:"discover_url"`
 
-	RunBudget  time.Duration `toml:"run_budget"`  // no app call starts later than this into a run; keep it under "every"
-	DryRun     bool          `toml:"dry_run"`     // plan and count, write nothing to the apps or the missing file
-	FirstFilms int           `toml:"first_films"` // per-film writes only for the first N library films in diary order; 0 = all
+	RunBudget time.Duration `toml:"run_budget"` // no app call starts later than this into a run; keep it under "every"
+	DryRun    bool          `toml:"dry_run"`    // count events and writes, record and write nothing (nor the missing file)
 }
 
 func defaults() Options {
@@ -170,10 +177,6 @@ type run struct {
 	mu    sync.Mutex
 	rep   *stage.Report
 	fails map[string]map[int]bool // app → films with a write that failed or went unconfirmed this run
-	// jfFinished is the films whose resume point this run's Jellyfin read puts in the end credits. A watched mark is
-	// only ever written after a read in the same run (planned re-reads before any write; settle defers the mark
-	// otherwise), so this is never older than the mark it goes with. Only the Jellyfin goroutine touches it.
-	jfFinished map[int]bool
 }
 
 func (r *run) count(kind string, n int) {
@@ -199,6 +202,19 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	}
 	if _, err := db.ExecContext(ctx, foldFeedIDs); err != nil {
 		return err
+	}
+	if err := watch.Open(ctx, db); err != nil {
+		return err
+	}
+	// From when entries become events with history false: this stage's first run (its deploy).
+	var since time.Time
+	if found, err := env.Store.GetJSON(ctx, name, "events_since", &since); err != nil {
+		return err
+	} else if !found {
+		since = env.Now()
+		if err := env.Store.PutJSON(ctx, name, "events_since", since); err != nil {
+			return err
+		}
 	}
 	sleep, pace := s.sleep, s.pace
 	if sleep == nil {
@@ -245,15 +261,17 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if err := r.writeMissing(missing); err != nil {
 		env.Log.Warn("missing-films file not written", "event", "missing_file_error", "err", err)
 	}
-	scope := diaryScope(wants, opt.FirstFilms)
+	if err := r.record(ctx, f.events(opt.Person, env.Loc, opt.History, since)); err != nil {
+		return err
+	}
 
 	var wg sync.WaitGroup
 	var storeFailure error
-	for _, syncApp := range []func(context.Context, []want, map[int]bool) error{r.syncPlex, r.syncJellyfin, r.syncPlexTV} {
+	for _, syncApp := range []func(context.Context, []want) error{r.syncPlex, r.syncJellyfin, r.syncPlexTV} {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err := syncApp(ctx, wants, scope)
+			err := syncApp(ctx, wants)
 			switch {
 			case err == nil || ctx.Err() != nil:
 			case isStoreErr(err):
@@ -290,8 +308,65 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if opt.DryRun {
 		mode = "dry run"
 	}
-	rep.Summary = fmt.Sprintf("%s: %d Letterboxd films in the library (%d watched), %d unresolved, %d watchlist films not on the NAS",
-		mode, inLib, watched, unresolved, len(missing))
+	rep.Summary = fmt.Sprintf("%s: %d diary events recorded, %d Letterboxd films in the library (%d watched), %d unresolved, %d watchlist films not on the NAS",
+		mode, rep.Counts["events.logged"]+rep.Counts["events.rated"], inLib, watched, unresolved, len(missing))
+	return nil
+}
+
+// record appends to the watch record the events it lacks: a Logged event once per viewing (a date he corrects later
+// is not sent again), a Rated event once per rating and time. A dry run counts them.
+func (r *run) record(ctx context.Context, events []watch.Event) error {
+	key := func(kind watch.Kind, ref string, at time.Time, rating *float64) string {
+		if kind == watch.Logged {
+			return "logged " + ref
+		}
+		return fmt.Sprintf("%s %s %s %v", kind, ref, at.UTC().Format(store.TimeFormat), *rating)
+	}
+	recorded := map[string]bool{}
+	err := query(ctx, r.db, `SELECT kind, ref, at, rating FROM watch_events WHERE source = ? AND person = ?`, func(rows *sql.Rows) error {
+		var kind watch.Kind
+		var ref, at string
+		var rating *float64
+		if err := rows.Scan(&kind, &ref, &at, &rating); err != nil {
+			return err
+		}
+		t, err := time.Parse(store.TimeFormat, at)
+		if kind == watch.Logged || rating != nil {
+			recorded[key(kind, ref, t, rating)] = true
+		}
+		return err
+	}, name, r.opt.Person)
+	if err != nil {
+		return storeErr{err}
+	}
+	var fresh []watch.Event
+	for _, e := range events {
+		if k := key(e.Kind, e.Ref, e.At, e.Rating); !recorded[k] {
+			recorded[k] = true
+			fresh = append(fresh, e)
+		}
+	}
+	for _, e := range fresh {
+		r.count("events."+string(e.Kind), 1)
+		r.env.Log.Info("diary event", "event", "watch_event_planned", "kind", e.Kind, "item", e.Item, "ref", e.Ref,
+			"at", e.At.Format(time.RFC3339), "plays", e.Plays, "dry_run", r.opt.DryRun)
+	}
+	if r.opt.DryRun || len(fresh) == 0 {
+		return nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storeErr{err}
+	}
+	defer tx.Rollback()
+	for _, e := range fresh {
+		if err := watch.Add(ctx, tx, e); err != nil {
+			return storeErr{err}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return storeErr{err}
+	}
 	return nil
 }
 
@@ -415,9 +490,8 @@ func (r *run) readFeed(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// A rating's time decides which source's rating is his latest (see wants): an entry's is when it was logged,
-	// until a read finds its rating changed; then it is that read's, so the edit beats a films grid page read in
-	// between, which still showed the old rating.
+	// A rating's time orders it against his other ratings of the film in the watch record (see events): an entry's
+	// is when it was logged, until a read finds its rating changed; then it is that read's, a new Rated event.
 	now := r.env.Now().Format(store.TimeFormat)
 	for _, e := range entries {
 		if e.Slug == "" {
@@ -448,8 +522,8 @@ func (r *run) readFeed(ctx context.Context) error {
 
 // retract drops the stored diary entries he has deleted on Letterboxd. The feed holds his latest 50 entries in the
 // order he logged them (then his lists), so a stored entry logged after the oldest of them and missing from it was
-// deleted; an older one has only fallen off the end. A view a run already wrote for it stays: play counts are
-// never lowered, so he is told.
+// deleted; an older one has only fallen off the end. The record is append-only, so the play of one already recorded
+// stays there: he is told, and marking the film unplayed in Plex or Jellyfin undoes it.
 func (r *run) retract(ctx context.Context, entries []rssEntry) error {
 	if len(entries) == 0 {
 		return nil
@@ -478,12 +552,20 @@ func (r *run) retract(ctx context.Context, entries []rssEntry) error {
 		if _, err := r.db.ExecContext(ctx, `DELETE FROM letterboxd_entry WHERE id=?`, e.ID); err != nil {
 			return storeErr{err}
 		}
-		r.env.Log.Info("diary entry deleted on Letterboxd", "event", "rss_retracted", "id", e.ID, "item", e.Title, "watched", e.Watched)
-		names = append(names, fmt.Sprintf("%s (watched %s)", e.Title, e.Watched))
+		var recorded int
+		if err := r.db.QueryRowContext(ctx, `SELECT count(*) FROM watch_events WHERE source = ? AND ref = ? AND kind = ?`,
+			name, name+":"+e.ID, watch.Logged).Scan(&recorded); err != nil {
+			return storeErr{err}
+		}
+		r.env.Log.Info("diary entry deleted on Letterboxd", "event", "rss_retracted", "id", e.ID, "item", e.Title, "watched", e.Watched,
+			"recorded", recorded > 0)
+		r.count("rss_retracted", 1)
+		if recorded > 0 {
+			names = append(names, fmt.Sprintf("%s (watched %s)", e.Title, e.Watched))
+		}
 	}
 	if len(names) > 0 {
-		r.count("rss_retracted", len(names))
-		r.rep.Alert("Letterboxd diary entries deleted: %s. Plex and Jellyfin play counts are never lowered: a view a run already wrote for one stays until you change it by hand",
+		r.rep.Alert("Letterboxd diary entries deleted: %s. Their plays stay in the watch record, so Plex and Jellyfin keep them: mark the film unplayed in either app to undo one",
 			strings.Join(names, ", "))
 	}
 	return nil
@@ -744,7 +826,7 @@ func (r *run) filmPage(ctx context.Context, slug string) (int, string, error) {
 // ---- facts from the store, the export and the library ----
 
 func (r *run) loadFacts(ctx context.Context) (facts, error) {
-	f := facts{seen: map[string]seenFilm{}, lidSlug: map[string]string{}, films: map[string]filmFacts{}}
+	f := facts{seen: map[string]bool{}, lidSlug: map[string]string{}, films: map[string]filmFacts{}}
 	ex, ok, err := readExport(r.opt.ExportDir)
 	if err != nil {
 		return f, err
@@ -779,14 +861,10 @@ func (r *run) loadFacts(ctx context.Context) (facts, error) {
 		})
 	}
 	if err == nil {
-		err = query(ctx, r.db, `SELECT slug, rating, seen_at FROM letterboxd_seen`, func(rows *sql.Rows) error {
-			var slug, at string
-			var s seenFilm
-			if err := rows.Scan(&slug, &s.Rating, &at); err != nil {
-				return err
-			}
-			s.At, err = time.Parse(store.TimeFormat, at)
-			f.seen[slug] = s
+		err = query(ctx, r.db, `SELECT slug FROM letterboxd_seen`, func(rows *sql.Rows) error {
+			var slug string
+			err := rows.Scan(&slug)
+			f.seen[slug] = true
 			return err
 		})
 	}

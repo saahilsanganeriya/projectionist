@@ -1,14 +1,13 @@
 package letterboxd
 
-// ---- sinks: what Plex, Jellyfin and plex.tv hold (snapshots), and the writes that close the gap ----
+// ---- sinks: what Plex, Jellyfin and plex.tv hold of the watchlist (snapshots), and the writes that close the gap ----
 //
 // Each app runs in its own goroutine, so a slow Plex never holds up Jellyfin. A stored snapshot only ever shows
-// that nothing needs doing: writes are planned against a read of the app made in the same run (see planned), save
-// a rating within a day of the film's last forced read (see settle). Snapshots are also re-read every sink_refresh
-// (Jellyfin: jellyfin_refresh), and each successful write updates its stored row, so a rerun plans nothing.
-// Idempotent calls get 3 attempts (2 s, 4 s apart); a write that may have landed with its answer lost is not
-// repeated in the run. 3 failed calls in a row end that app's run, and what is left stays in the diff for the next
-// run. A film whose writes fail in 3 runs in a row parks, with one alert.
+// that nothing needs doing: writes are planned against a read of the app made in the same run (see planned).
+// Snapshots are also re-read every sink_refresh (Jellyfin: jellyfin_refresh), and each successful write updates its
+// stored row, so a rerun plans nothing. Idempotent calls get 3 attempts (2 s, 4 s apart); a write that may have
+// landed with its answer lost is not repeated in the run. 3 failed calls in a row end that app's run, and what is
+// left stays in the diff for the next run. A film whose writes fail in 3 runs in a row parks, with one alert.
 
 import (
 	"context"
@@ -24,10 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"projectionist/internal/library"
-	"projectionist/internal/stages/jfsync"
 	"projectionist/internal/store"
-	"projectionist/internal/watch"
 )
 
 type sinkMeta struct {
@@ -51,8 +47,8 @@ func (r *run) call(ctx context.Context, b *breaker, f func() error) error {
 	return r.callOnce(ctx, b, true, f)
 }
 
-// callOnce is call for a request that must not be repeated blindly (a scrobble adds a view, a create makes a
-// collection): when it may have reached the app but its answer was lost (any transport error, timeouts included),
+// callOnce is call for a request that must not be repeated blindly (a create makes a second collection, and re-adding
+// a member answers HTTP 500): when it may have reached the app but its answer was lost (any transport error, timeouts included),
 // or f itself reports errUnconfirmed, it returns at once with errUnconfirmed instead of retrying.
 func (r *run) callOnce(ctx context.Context, b *breaker, idempotent bool, f func() error) error {
 	if b.fails >= 3 {
@@ -95,21 +91,23 @@ var errUnconfirmed = errors.New("sent, outcome unknown")
 
 func (r *run) loadHaves(ctx context.Context, app string) (map[int]have, error) {
 	out := map[int]have{}
-	err := query(ctx, r.db, `SELECT tmdb, item, plays, played, rating, last, member, added FROM letterboxd_sink WHERE app=?`, func(rows *sql.Rows) error {
+	err := query(ctx, r.db, `SELECT tmdb, item, played, member, added FROM letterboxd_sink WHERE app=?`, func(rows *sql.Rows) error {
 		var id int
 		var h have
-		err := rows.Scan(&id, &h.Item, &h.Plays, &h.Played, &h.Rating, &h.Last, &h.Member, &h.Added)
+		err := rows.Scan(&id, &h.Item, &h.Played, &h.Member, &h.Added)
 		out[id] = h
 		return err
 	}, app)
 	return out, err
 }
 
-const putSink = `INSERT OR REPLACE INTO letterboxd_sink(app, tmdb, item, plays, played, rating, last, member, added) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+// putSink stores a row. plays, rating and last are no longer read (jfsync writes watch state); they stay in the table
+// so the rows of state DBs made before still fit it.
+const putSink = `INSERT OR REPLACE INTO letterboxd_sink(app, tmdb, item, plays, played, rating, last, member, added) VALUES (?, ?, ?, 0, ?, 0, '', ?, ?)`
 
 // saveHave stores one film's row and keeps haves, the in-memory copy of the rows, in step.
 func (r *run) saveHave(ctx context.Context, app string, haves map[int]have, id int, h have) error {
-	if _, err := r.db.ExecContext(ctx, putSink, app, id, h.Item, h.Plays, h.Played, h.Rating, h.Last, h.Member, h.Added); err != nil {
+	if _, err := r.db.ExecContext(ctx, putSink, app, id, h.Item, h.Played, h.Member, h.Added); err != nil {
 		return storeErr{err}
 	}
 	haves[id] = h
@@ -132,7 +130,7 @@ func (r *run) replaceSnapshot(ctx context.Context, app string, fresh map[int]hav
 		return err
 	}
 	put := func(id int, h have) error {
-		_, err := tx.ExecContext(ctx, putSink, app, id, h.Item, h.Plays, h.Played, h.Rating, h.Last, h.Member, h.Added)
+		_, err := tx.ExecContext(ctx, putSink, app, id, h.Item, h.Played, h.Member, h.Added)
 		return err
 	}
 	for id, h := range fresh {
@@ -190,27 +188,22 @@ func (r *run) mark(ctx context.Context, app string, haves map[int]have, ids []in
 	return nil
 }
 
-// sinkPlan is the writes one app needs.
-type sinkPlan struct {
-	ups         []update
-	add, remove []int // Watchlist collection membership
-}
+// sinkPlan is the Watchlist collection writes one app needs.
+type sinkPlan struct{ add, remove []int }
 
-func (r *run) planSink(wants []want, haves map[int]have, scope map[int]bool, setsLast bool) (p sinkPlan, unmatched int) {
-	p.ups, unmatched = planFilms(wants, haves, scope, setsLast)
+func (r *run) planSink(wants []want, haves map[int]have) (p sinkPlan) {
 	if r.opt.Collection != "" {
 		p.add, p.remove = planMembers(unwatchedWatchlist(wants, haves, true), haves)
 	}
-	return p, unmatched
+	return p
 }
 
 // planned plans an app's writes and counts them. A stored snapshot may only show that nothing needs doing: a plan
-// with work in it is made again against a read made now. He often watches in Plex and logs the film on Letterboxd
-// minutes later; planned against a listing from earlier in the day, that viewing would be scrobbled a second
-// time, and a view can never be taken back. Each film forces that read at most once per rereadEvery, so a write
-// that keeps failing cannot page all of Plex every run.
+// with work in it is made again against a read made now (he watches a film in Plex and it must leave the
+// collection; he adds one by hand, and re-adding a member answers HTTP 500). Each film forces that read at most once
+// per rereadEvery, so a write that keeps failing cannot page all of Plex every run.
 func (r *run) planned(ctx context.Context, app string, snapshot func(context.Context, bool) (sinkMeta, map[int]have, bool, error),
-	wants []want, scope map[int]bool, setsLast bool) (sinkMeta, map[int]have, sinkPlan, error) {
+	wants []want) (sinkMeta, map[int]have, sinkPlan, error) {
 	m, haves, readNow, err := snapshot(ctx, false)
 	if err != nil {
 		return m, nil, sinkPlan{}, fmt.Errorf("%s snapshot: %w", app, err)
@@ -219,7 +212,7 @@ func (r *run) planned(ctx context.Context, app string, snapshot func(context.Con
 	if err != nil {
 		return m, nil, sinkPlan{}, err
 	}
-	p, unmatched := r.planSink(wants, haves, scope, setsLast)
+	p := r.planSink(wants, haves)
 	if !readNow {
 		var due []int
 		for _, id := range sortedKeys(p.films()) {
@@ -232,7 +225,7 @@ func (r *run) planned(ctx context.Context, app string, snapshot func(context.Con
 				return m, nil, sinkPlan{}, fmt.Errorf("%s snapshot: %w", app, err)
 			}
 			readNow = true
-			p, unmatched = r.planSink(wants, haves, scope, setsLast)
+			p = r.planSink(wants, haves)
 			for _, id := range due {
 				t := retries[id]
 				t.RereadAt = r.env.Now()
@@ -249,7 +242,6 @@ func (r *run) planned(ctx context.Context, app string, snapshot func(context.Con
 	if p, err = r.settle(ctx, app, p, haves, retries, !readNow); err != nil {
 		return m, nil, sinkPlan{}, err
 	}
-	r.count(app+".unmatched", unmatched)
 	r.countPlan(app, p)
 	return m, haves, p, nil
 }
@@ -257,9 +249,6 @@ func (r *run) planned(ctx context.Context, app string, snapshot func(context.Con
 // films is every film the plan writes to.
 func (p sinkPlan) films() map[int]bool {
 	out := map[int]bool{}
-	for _, u := range p.ups {
-		out[u.TMDB] = true
-	}
 	for _, id := range append(slices.Clone(p.add), p.remove...) {
 		out[id] = true
 	}
@@ -312,8 +301,7 @@ func (r *run) saveRetry(ctx context.Context, app string, id int, t retry) error 
 
 // settle applies the failure records to a plan: a film with nothing left to do starts any later count afresh, and
 // a parked film is left out. stale means every film with work forced a read within rereadEvery, so none was made
-// now: play counts, watched marks, last-played dates and memberships wait for the next read (he may have watched
-// since, and a date from the older read would lower the app's), and only a rating, which Letterboxd owns, is sent.
+// now: its writes wait for the next read.
 func (r *run) settle(ctx context.Context, app string, p sinkPlan, haves map[int]have, retries map[int]retry, stale bool) (sinkPlan, error) {
 	work := p.films()
 	for _, id := range sortedKeys(retries) {
@@ -337,18 +325,6 @@ func (r *run) settle(ctx context.Context, app string, p sinkPlan, haves map[int]
 		}
 	}
 	var out sinkPlan
-	for _, u := range p.ups {
-		if parked[u.TMDB] {
-			continue
-		}
-		if stale && (u.Plays != u.FromPlays || u.Played || u.Last != "") {
-			deferred[u.TMDB] = true
-			u.Plays, u.Played, u.Last = u.FromPlays, false, ""
-		}
-		if u.Plays != u.FromPlays || u.Played || u.Rating != 0 || u.Last != "" {
-			out.ups = append(out.ups, u)
-		}
-	}
 	keep := func(ids []int) (kept []int) {
 		for _, id := range ids {
 			switch {
@@ -416,24 +392,8 @@ func tmdbFromGuids(guids []struct {
 	return 0
 }
 
-// countPlan records the planned work per category, and logs each film's planned change.
+// countPlan records the planned collection writes, and logs them.
 func (r *run) countPlan(app string, p sinkPlan) {
-	for _, u := range p.ups {
-		r.env.Log.Info("film planned", "event", "film_plan", "app", app, "tmdb", u.TMDB, "item", u.Title,
-			"plays_from", u.FromPlays, "plays_to", u.Plays, "mark_played", u.Played, "rating", u.Rating, "last", u.Last, "dry_run", r.opt.DryRun)
-		switch {
-		case u.Played: // not watched in the app yet
-			r.count(app+".watched", 1)
-		case u.Plays > u.FromPlays:
-			r.count(app+".plays", 1)
-		}
-		if u.Rating != 0 {
-			r.count(app+".rating", 1)
-		}
-		if u.Last != "" {
-			r.count(app+".last_played", 1)
-		}
-	}
 	r.count(app+".collection_add", len(p.add))
 	r.count(app+".collection_remove", len(p.remove))
 	if len(p.add)+len(p.remove) > 0 {
@@ -464,14 +424,13 @@ func (r *run) failed(app, what string, err error, ids ...int) {
 const plexLib = "identifier=com.plexapp.plugins.library"
 
 type plexItem struct {
-	RatingKey  string  `json:"ratingKey"`
-	PlexGUID   string  `json:"guid"` // the string "plex://movie/..."; without its own field Go's case-insensitive keys pour it into Guid
-	Type       string  `json:"type"`
-	Title      string  `json:"title"`
-	Index      int     `json:"index"` // a collection's tag id
-	ViewCount  int     `json:"viewCount"`
-	UserRating float64 `json:"userRating"`
-	Guid       []struct {
+	RatingKey string `json:"ratingKey"`
+	PlexGUID  string `json:"guid"` // the string "plex://movie/..."; without its own field Go's case-insensitive keys pour it into Guid
+	Type      string `json:"type"`
+	Title     string `json:"title"`
+	Index     int    `json:"index"` // a collection's tag id
+	ViewCount int    `json:"viewCount"`
+	Guid      []struct {
 		ID string `json:"id"`
 	} `json:"Guid"`
 }
@@ -519,7 +478,7 @@ func (r *run) plexSnapshot(ctx context.Context, force bool) (sinkMeta, map[int]h
 	fresh, byKey := map[int]have{}, map[string]int{}
 	if err := r.plexPages(ctx, b, "", func(it plexItem) {
 		if id := tmdbFromGuids(it.Guid); id > 0 {
-			fresh[id] = have{Item: it.RatingKey, Plays: it.ViewCount, Played: it.ViewCount > 0, Rating: int(it.UserRating + 0.5)}
+			fresh[id] = have{Item: it.RatingKey, Played: it.ViewCount > 0}
 			byKey[it.RatingKey] = id
 		}
 	}); err != nil {
@@ -563,99 +522,19 @@ func (r *run) plexCollectionID(ctx context.Context) (string, int, error) {
 	return "", 0, nil
 }
 
-func (r *run) syncPlex(ctx context.Context, wants []want, scope map[int]bool) error {
+func (r *run) syncPlex(ctx context.Context, wants []want) error {
 	const app = "plex"
-	m, haves, p, err := r.planned(ctx, app, r.plexSnapshot, wants, scope, false)
+	m, haves, p, err := r.planned(ctx, app, r.plexSnapshot, wants)
 	if err != nil {
 		return err
 	}
 	if r.opt.Collection != "" && (m.Collection == "" && len(p.add) > 0 || m.Collection != "" && m.PromotedID != m.Collection) {
 		r.count(app+".home_promote", 1)
 	}
-	if r.opt.DryRun {
+	if r.opt.DryRun || r.opt.Collection == "" {
 		return nil
 	}
-
-	b := &breaker{}
-	for _, u := range p.ups {
-		h := haves[u.TMDB]
-		if h.Plays < u.Plays {
-			views, err := r.viewsNow(ctx, b, u)
-			switch {
-			case isStoreErr(err):
-				return err
-			case err != nil:
-				r.failed(app, "view_count", err, u.TMDB)
-				u.Plays = h.Plays // no scrobble without a count read now
-			case views > h.Plays:
-				h.Plays, h.Played = views, true
-				if err := r.saveHave(ctx, app, haves, u.TMDB, h); err != nil {
-					return err
-				}
-				r.count(app+".viewed_since_read", 1)
-			}
-			// jfsync carries Jellyfin plays to Plex from the watch record. Told first that Plex holds this film's play,
-			// it does not scrobble the viewing again when his Jellyfin play of it reaches the record (a push resolves
-			// only once jfsync's daily listing has the film).
-			if h.Plays < u.Plays {
-				if err := jfsync.HoldPlexPlay(ctx, r.db, r.opt.Person, watch.MovieItem(library.ID{Source: "tmdb", Value: strconv.Itoa(u.TMDB)})); err != nil {
-					return storeErr{err}
-				}
-			}
-		}
-		// Plex has no "set play count": each scrobble adds one view (and stamps lastViewedAt = now; Plex takes no
-		// date). A scrobble that failed or lost its answer is not recorded: the film stays in the diff, and the next
-		// run plans it against a fresh listing, which shows whether the view landed.
-		for h.Plays < u.Plays {
-			err := r.callOnce(ctx, b, false, func() error {
-				// PUT, not the usual GET: Go's transport silently resends a GET whose connection dropped before
-				// the answer, which here would add a second view. Plex accepts either method.
-				return r.env.Plex.Do(ctx, http.MethodPut, "/:/scrobble?key="+url.QueryEscape(u.Item)+"&"+plexLib)
-			})
-			if err != nil {
-				r.failed(app, "scrobble", err, u.TMDB)
-				break
-			}
-			h.Plays, h.Played = h.Plays+1, true
-			if err := r.saveHave(ctx, app, haves, u.TMDB, h); err != nil {
-				return err
-			}
-			r.count(app+".scrobbles", 1)
-		}
-		if u.Rating != 0 {
-			if err := r.call(ctx, b, func() error {
-				return r.env.Plex.Do(ctx, http.MethodPut, fmt.Sprintf("/:/rate?key=%s&%s&rating=%d", url.QueryEscape(u.Item), plexLib, u.Rating))
-			}); err != nil {
-				r.failed(app, "rate", err, u.TMDB)
-			} else {
-				h.Rating = u.Rating
-				if err := r.saveHave(ctx, app, haves, u.TMDB, h); err != nil {
-					return err
-				}
-			}
-		}
-		if b.fails >= 3 {
-			return errBreakerOpen
-		}
-	}
-	if r.opt.Collection == "" {
-		return nil
-	}
-	return r.plexCollection(ctx, b, m, haves, p.add, p.remove)
-}
-
-// viewsNow reads one film's Plex view count right before it is scrobbled: the listing the plan came from may be
-// minutes old, and jfsync (carrying a Jellyfin play) or he may have added the view since.
-func (r *run) viewsNow(ctx context.Context, b *breaker, u update) (int, error) {
-	var md plexListing
-	path := "/library/metadata/" + url.PathEscape(u.Item) + "?excludeElements=Media,Genre,Country,Director,Writer,Role,Collection,Label,Field&excludeFields=summary,tagline"
-	if err := r.call(ctx, b, func() error { return r.env.Plex.GetJSON(ctx, path, &md) }); err != nil {
-		return 0, err
-	}
-	if len(md.Metadata) != 1 || md.Metadata[0].RatingKey != u.Item {
-		return 0, fmt.Errorf("plex: /library/metadata/%s answered %d items", u.Item, len(md.Metadata))
-	}
-	return md.Metadata[0].ViewCount, nil
+	return r.plexCollection(ctx, &breaker{}, m, haves, p.add, p.remove)
 }
 
 func (r *run) plexCollection(ctx context.Context, b *breaker, m sinkMeta, haves map[int]have, add, remove []int) error {
@@ -756,11 +635,7 @@ type jfItem struct {
 	Path        string            `json:"Path"`
 	ProviderIDs map[string]string `json:"ProviderIds"`
 	UserData    struct {
-		PlayCount        int      `json:"PlayCount"`
-		Played           bool     `json:"Played"`
-		PlayedPercentage float64  `json:"PlayedPercentage"` // of the resume point; absent (0) without one
-		LastPlayedDate   string   `json:"LastPlayedDate"`
-		Rating           *float64 `json:"Rating"`
+		Played bool `json:"Played"`
 	} `json:"UserData"`
 }
 
@@ -824,25 +699,14 @@ func (r *run) jellyfinSnapshot(ctx context.Context, force bool) (sinkMeta, map[i
 	if m.UserID == "" {
 		return m, nil, false, fmt.Errorf("jellyfin: no user %q", r.opt.JellyfinUser)
 	}
-	fresh, finished := map[int]have{}, map[int]bool{}
+	fresh := map[int]have{}
 	if err := r.jfPages(ctx, b, "userId="+m.UserID+"&IncludeItemTypes=Movie&Recursive=true&Fields=Path,ProviderIds&EnableImages=false&EnableUserData=true", func(it jfItem) {
-		id := jfTMDB(it.Path, it.ProviderIDs)
-		if id == 0 {
-			return
+		if id := jfTMDB(it.Path, it.ProviderIDs); id > 0 {
+			fresh[id] = have{Item: it.ID, Played: it.UserData.Played}
 		}
-		finished[id] = it.UserData.PlayedPercentage >= creditsFrom
-		h := have{Item: it.ID, Plays: it.UserData.PlayCount, Played: it.UserData.Played}
-		if it.UserData.Rating != nil {
-			h.Rating = int(*it.UserData.Rating + 0.5)
-		}
-		if t, err := time.Parse(time.RFC3339Nano, it.UserData.LastPlayedDate); err == nil {
-			h.Last = t.In(r.env.Loc).Format(time.DateOnly)
-		}
-		fresh[id] = h
 	}); err != nil {
 		return m, nil, false, err
 	}
-	r.jfFinished = finished
 	m.Collection = ""
 	if r.opt.Collection != "" {
 		if err := r.call(ctx, b, func() (err error) { m.Collection, err = r.jfCollectionID(ctx, m.UserID); return err }); err != nil {
@@ -878,78 +742,16 @@ func (r *run) jfCollectionID(ctx context.Context, userID string) (string, error)
 	return "", nil
 }
 
-// jfUserData is Jellyfin's UpdateUserItemDataDto: absent (nil) fields are left as they are, so a write here
-// never touches favourites or likes, and a resume point only as creditsFrom says.
-type jfUserData struct {
-	Played                *bool    `json:"Played,omitempty"`
-	PlayCount             *int     `json:"PlayCount,omitempty"`
-	PlaybackPositionTicks *int64   `json:"PlaybackPositionTicks,omitempty"`
-	LastPlayedDate        *string  `json:"LastPlayedDate,omitempty"`
-	Rating                *float64 `json:"Rating,omitempty"`
-}
-
-// creditsFrom is the resume point, in percent, from which a film marked watched also leaves Continue Watching: he
-// stopped in the end credits (the owner's call). Marking Played alone keeps the point, where Jellyfin's own Mark
-// Played clears it; an earlier one may be a rewatch in progress, so it stays.
-const creditsFrom = 85.0
-
-func (r *run) syncJellyfin(ctx context.Context, wants []want, scope map[int]bool) error {
+func (r *run) syncJellyfin(ctx context.Context, wants []want) error {
 	const app = "jellyfin"
-	m, haves, p, err := r.planned(ctx, app, r.jellyfinSnapshot, wants, scope, true)
+	m, haves, p, err := r.planned(ctx, app, r.jellyfinSnapshot, wants)
 	if err != nil {
 		return err
 	}
-	if r.opt.DryRun {
+	if r.opt.DryRun || r.opt.Collection == "" {
 		return nil
 	}
-
 	b := &breaker{}
-	for _, u := range p.ups {
-		h := haves[u.TMDB]
-		var body jfUserData
-		if u.Played {
-			played := true
-			body.Played = &played
-			if r.jfFinished[u.TMDB] {
-				var start int64
-				body.PlaybackPositionTicks = &start
-			}
-		}
-		if u.Plays > u.FromPlays {
-			body.PlayCount = &u.Plays
-		}
-		if u.Rating != 0 {
-			rating := float64(u.Rating)
-			body.Rating = &rating
-		}
-		if u.Last != "" {
-			// A diary entry has a date, no time: noon in the owner's zone lands on that date wherever it is shown.
-			day, _ := time.ParseInLocation(time.DateOnly, u.Last, r.env.Loc)
-			at := day.Add(12 * time.Hour).UTC().Format(time.RFC3339)
-			body.LastPlayedDate = &at
-		}
-		if err := r.call(ctx, b, func() error {
-			return r.env.Jellyfin.PostJSON(ctx, "/UserItems/"+url.PathEscape(u.Item)+"/UserData?userId="+m.UserID, body, nil)
-		}); err != nil {
-			r.failed(app, "user_data", err, u.TMDB)
-			if b.fails >= 3 {
-				return errBreakerOpen
-			}
-			continue
-		}
-		h.Plays, h.Played = u.Plays, h.Played || u.Played
-		if u.Rating != 0 {
-			h.Rating = u.Rating
-		}
-		h.Last = max(h.Last, u.Last)
-		if err := r.saveHave(ctx, app, haves, u.TMDB, h); err != nil {
-			return err
-		}
-		r.count(app+".updated", 1)
-	}
-	if r.opt.Collection == "" {
-		return nil
-	}
 	ids := func(tmdbs []int) string {
 		out := make([]string, len(tmdbs))
 		for i, id := range tmdbs {
@@ -1087,7 +889,7 @@ func (r *run) plexTVSnapshot(ctx context.Context, b *breaker) (map[int]have, err
 
 // syncPlexTV mirrors the Letterboxd watchlist (minus watched films) onto the owner's plex.tv watchlist. Films he
 // added there himself, shows included, are never removed.
-func (r *run) syncPlexTV(ctx context.Context, wants []want, _ map[int]bool) error {
+func (r *run) syncPlexTV(ctx context.Context, wants []want) error {
 	const app = "plextv"
 	if !r.opt.PlexWatchlist {
 		return nil

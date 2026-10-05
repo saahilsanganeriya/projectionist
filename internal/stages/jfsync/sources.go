@@ -181,7 +181,7 @@ func (Stage) Hooks(env *stage.Env) map[string]http.Handler {
 		env.Log.Error("options", "event", "config_error", "err", err)
 		return nil
 	}
-	if err := openTables(context.Background(), env.Store.DB()); err != nil {
+	if err := openTables(context.Background(), env); err != nil {
 		env.Log.Error("tables", "event", "store_error", "err", err)
 		return nil
 	}
