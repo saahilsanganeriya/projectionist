@@ -169,19 +169,21 @@ func TestRunHealsJellyfin(t *testing.T) {
 }
 
 // Catches: a restart cut off between Docker's stop and its start (projectionist killed mid-restart) leaving
-// Jellyfin stopped for good, and the opposite: starting a container the owner stopped, or one outside restartable.
+// Jellyfin stopped for good, and the opposite: starting a container the owner stopped, one Docker's restart policy
+// is already bringing back, or one outside restartable.
 func TestResumesACutOffRestart(t *testing.T) {
 	asked := time.Date(2026, 10, 5, 5, 0, 0, 0, time.UTC) // this stage's recorded restart of jellyfin
 	cases := []struct {
-		name              string
+		name, status      string
 		started, finished time.Duration // the container's StartedAt and FinishedAt, relative to asked
 		restartable       string
 		starts            int
 	}{
-		{"stopped by our restart, never started again", -time.Hour, time.Minute, `["jellyfin"]`, 1},
-		{"stopped by the owner after our restart", time.Minute, time.Hour, `["jellyfin"]`, 0},
-		{"stopped before we asked", -time.Hour, -time.Minute, `["jellyfin"]`, 0},
-		{"not in restartable", -time.Hour, time.Minute, `[]`, 0},
+		{"stopped by our restart, never started again", "exited", -time.Hour, time.Minute, `["jellyfin"]`, 1},
+		{"stopped by the owner after our restart", "exited", time.Minute, time.Hour, `["jellyfin"]`, 0},
+		{"stopped before we asked", "exited", -time.Hour, -time.Minute, `["jellyfin"]`, 0},
+		{"Docker's restart policy has it", "restarting", -time.Hour, time.Minute, `["jellyfin"]`, 0},
+		{"not in restartable", "exited", -time.Hour, time.Minute, `[]`, 0},
 	}
 	for _, tc := range cases {
 		h := fake.NewEnv(t, nil)
@@ -189,8 +191,8 @@ func TestResumesACutOffRestart(t *testing.T) {
 		starts := 0
 		mux := http.NewServeMux()
 		mux.HandleFunc("GET /containers/{name}/json", func(w http.ResponseWriter, _ *http.Request) {
-			fmt.Fprintf(w, `{"State":{"Status":"exited","StartedAt":%q,"FinishedAt":%q}}`,
-				asked.Add(tc.started).Format(time.RFC3339Nano), asked.Add(tc.finished).Format(time.RFC3339Nano))
+			fmt.Fprintf(w, `{"State":{"Status":%q,"StartedAt":%q,"FinishedAt":%q}}`,
+				tc.status, asked.Add(tc.started).Format(time.RFC3339Nano), asked.Add(tc.finished).Format(time.RFC3339Nano))
 		})
 		mux.HandleFunc("POST /containers/jellyfin/start", func(w http.ResponseWriter, _ *http.Request) {
 			starts++
