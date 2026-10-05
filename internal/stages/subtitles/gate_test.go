@@ -15,13 +15,16 @@ package subtitles
 // against the PGS captions it never saw, and its caption route with the alass rescue; GATE_SPOT (id, video, sidecar,
 // framecrc file, "idx" or "-", duration) with the same two -> spot.tsv: a written sidecar's median distance to the
 // video's English captions where a framecrc is given (or to its <video>.en.idx captions for "idx"), and the shift
-// alass's alignment to the speech would give it.
+// alass's alignment to the speech would give it; GATE_SYNC (id, video, sidecar, duration, "captions <stream>" or
+// "alass <audio stream>") with the same two -> sync.tsv: a written sidecar's offset from an independent whole-file
+// reference (the complete caption track, or alass's whole-file alignment to the audio) at the start, middle and end.
 
 import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"projectionist/internal/config"
 	"projectionist/internal/fake"
@@ -241,4 +245,105 @@ func TestGateSpot(t *testing.T) {
 		fmt.Fprintf(&b, "%s\t%d\t%s\t%v\t%v\t%v\n", f[0], len(cues(string(sub))), caption, ok, a["offset_ms"], a["agree"])
 	}
 	gateWrite(t, "spot.tsv", b.String())
+}
+
+// syncRegions are where TestGateSync measures a written sidecar: 3-13 %, 45-55 % and 87-97 % of the runtime.
+var syncRegions = [][2]float64{{0.03, 0.13}, {0.45, 0.55}, {0.87, 0.97}}
+
+// TestGateSync measures each written sidecar against a reference the sampled fit never saw whole. "captions": the
+// complete English image track, demuxed from the whole file; in each region the offset is the median distance from
+// caption starts to their matched cue starts at the region's own best offset. "alass": alass aligns the sidecar to the
+// speech of the whole file; in each region the offset is the median shift alass gives its cues (sign: what alass would
+// add). A region with fewer than 5 matches is "n/a".
+func TestGateSync(t *testing.T) {
+	lines := gateLines(t, "GATE_SYNC")
+	h := fake.NewEnv(t, nil) // the gate's runner pauses the whole process group for viewers
+	h.Env.FFmpeg = config.FFmpeg{Dir: os.Getenv("GATE_FFMPEG_DIR")}
+	r := &run{env: h.Env, opt: Options{Alass: os.Getenv("GATE_ALASS_BIN")}, rep: &stage.Report{}, alerted: map[string]bool{}}
+	var b strings.Builder
+	b.WriteString("id\tkind\tstart_ms\tmiddle_ms\tend_ms\tmatched\tworst_ms\tread_bytes\tsecs\n")
+	for _, line := range lines {
+		f := strings.Split(line, "\t")
+		raw, _ := os.ReadFile(f[2])
+		written := cues(string(raw))
+		duration, _ := strconv.ParseFloat(f[3], 64)
+		kind, stream, _ := strings.Cut(f[4], " ")
+		ti := &title{path: f[1]}
+		began := time.Now()
+		var offsets []string
+		var counts []string
+		worst := 0.0
+		region := func(i int, ms float64, n int) {
+			if n < 5 {
+				offsets, counts = append(offsets, "n/a"), append(counts, strconv.Itoa(n))
+				worst = math.Inf(1)
+				return
+			}
+			offsets, counts = append(offsets, strconv.FormatFloat(math.Round(ms), 'f', 0, 64)), append(counts, strconv.Itoa(n))
+			worst = math.Max(worst, math.Abs(ms))
+		}
+		switch kind {
+		case "captions":
+			out, err := r.cmd(context.Background(), ti, r.env.FFmpeg.FFmpegPath(), "-nostdin", "-hide_banner", "-loglevel", "error", "-i", f[1],
+				"-map", "0:"+stream, "-c", "copy", "-f", "framecrc", "-")
+			if err != nil {
+				t.Errorf("%s: %v", f[0], err)
+				continue
+			}
+			var caps []float64
+			tb := 1.0 / 1000
+			for _, l := range pySplitLines(string(out)) {
+				if strings.HasPrefix(l, "#tb") {
+					parts := strings.SplitN(l, ":", 3)
+					n, d, _ := strings.Cut(pyStrip(parts[1]), "/")
+					tb = float64(pyInt(n)) / float64(pyInt(d))
+					continue
+				}
+				if fs := strings.Split(l, ","); !strings.HasPrefix(l, "#") && len(fs) >= 5 {
+					if size, _ := strconv.Atoi(pyStrip(fs[4])); size > pgsMinPkt {
+						pts, _ := strconv.ParseInt(pyStrip(fs[2]), 10, 64)
+						caps = append(caps, float64(pts)*tb)
+					}
+				}
+			}
+			for i, reg := range syncRegions {
+				w := sampleWindow{reg[0] * duration, (reg[1] - reg[0]) * duration}
+				smp := sample{win: w}
+				for _, c := range caps {
+					if c >= w.start && c < w.start+w.dur {
+						smp.captions = append(smp.captions, c)
+					}
+				}
+				n := int(math.Round(2 * sampleShift / frame))
+				at, _ := plateau(captionVotes(written, smp, 1, n))
+				d := matched(written, smp.captions, 1, binOffset(at))
+				region(i, medianOr(d, 0)*1000, len(d))
+			}
+		case "alass":
+			dir := t.TempDir()
+			outPath := filepath.Join(dir, "aligned.srt")
+			if _, err := r.cmd(context.Background(), ti, r.opt.Alass, f[1], f[2], outPath, "--index", stream); err != nil {
+				t.Errorf("%s: %v", f[0], err)
+				continue
+			}
+			alignedRaw, _ := os.ReadFile(outPath)
+			aligned := cues(string(alignedRaw))
+			if len(aligned) != len(written) {
+				t.Errorf("%s: alass wrote %d cues for %d", f[0], len(aligned), len(written))
+				continue
+			}
+			for i, reg := range syncRegions {
+				var d []float64
+				for k, c := range written {
+					if c.start >= reg[0]*duration && c.start < reg[1]*duration {
+						d = append(d, aligned[k].start-c.start)
+					}
+				}
+				region(i, medianOr(d, 0)*1000, len(d))
+			}
+		}
+		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%.0f\n", f[0], kind, offsets[0], offsets[1], offsets[2], strings.Join(counts, "/"),
+			strconv.FormatFloat(math.Round(worst), 'f', 0, 64), ti.disk, time.Since(began).Seconds())
+		gateWrite(t, "sync.tsv", b.String())
+	}
 }

@@ -3,12 +3,12 @@
 package subtitles
 
 import (
-	"slices"
 	"encoding/json"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"

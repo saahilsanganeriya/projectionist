@@ -223,7 +223,7 @@ func captionVotes(spans []span, s sample, ratio float64, n int) []float64 {
 	votes := make([]float64, n+1)
 	tol := int(math.Round(captionTol / frame))
 	for _, c := range s.captions {
-		last := -1 // a caption counts once per bin, however many cue starts land near it
+		last := -1                             // a caption counts once per bin, however many cue starts land near it
 		for i := len(spans) - 1; i >= 0; i-- { // latest cue first: its offset is the smallest
 			d := c - ratio*spans[i].start
 			if d < -sampleShift-captionTol || d > sampleShift+captionTol {
@@ -349,7 +349,7 @@ type sampler struct {
 	samples []sample
 	start   *float64 // the file's start time: ffprobe's intervals are in its timestamps, not presentation time
 	read    int64    // bytes the helpers read (rchar)
-	disk    int64 // of which from the disk (read_bytes)
+	disk    int64    // of which from the disk (read_bytes)
 	started time.Time
 }
 
