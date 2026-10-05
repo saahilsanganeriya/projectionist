@@ -1,0 +1,268 @@
+package subtitles
+
+import (
+	"bytes"
+	"compress/gzip"
+	"context"
+	"encoding/json"
+	"math"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"projectionist/internal/fake"
+	"projectionist/internal/stage"
+)
+
+// fixture is a small library on disk, fake ffprobe/ffmpeg/alass, and fake OpenSubtitles and TMDB servers:
+//
+//	Ran     Japanese audio, English PGS track          -> a candidate 2.5 s late, fitted to the captions
+//	Heat    English audio, embedded English subrip     -> extracted
+//	Clerks  English audio, no subtitle tracks          -> a candidate aligned by alass (+1 s)
+//	Dune    already has Dune.en.srt                    -> untouched, never probed
+//	Show    English audio, nothing anywhere            -> no_candidates
+type fixture struct {
+	h        *fake.Harness
+	st       Stage
+	lib, dir string
+	ts       []float64
+	mu       sync.Mutex
+	requests []string
+}
+
+func (f *fixture) path(rel string) string { return filepath.Join(f.lib, rel) }
+
+const (
+	ran    = "Movies/Ran (1985) {tmdb-11645}/Ran (1985) {tmdb-11645}.mkv"
+	heat   = "Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv"
+	clerks = "Movies/Clerks (1994) {tmdb-2292}/Clerks (1994) {tmdb-2292}.mkv"
+	dune   = "Movies/Dune (2021) {tmdb-438631}/Dune (2021) {tmdb-438631}.mkv"
+	show   = "TV/Show (2008) {tmdb-1}/Season 01/Show (2008) - S01E01 - Pilot.mkv"
+)
+
+func probeJSON(streams string) string {
+	return `{"streams":[{"index":0,"codec_type":"video","codec_name":"h264"},` + streams + `],"format":{"duration":"3000.0"}}`
+}
+
+func gz(s string) []byte {
+	var b bytes.Buffer
+	w := gzip.NewWriter(&b)
+	w.Write([]byte(s))
+	w.Close()
+	return b.Bytes()
+}
+
+func newFixture(t *testing.T) *fixture {
+	f := &fixture{h: fake.NewEnv(t, nil), lib: t.TempDir(), dir: t.TempDir(), ts: captionTimes()}
+	for i, rel := range []string{ran, heat, clerks, dune, show} {
+		os.MkdirAll(filepath.Dir(f.path(rel)), 0o755)
+		os.WriteFile(f.path(rel), bytes.Repeat([]byte{byte(i + 1)}, 4096), 0o644)
+	}
+	os.WriteFile(strings.TrimSuffix(f.path(dune), ".mkv")+".en.srt", []byte("theirs"), 0o644)
+
+	ff := f.h.Env.FFmpeg.Dir
+	put := func(name, body string) { os.WriteFile(filepath.Join(ff, name), []byte(body), 0o644) }
+	eng := `"tags":{"language":"eng"},"disposition":{"default":1}`
+	put("Ran.json", probeJSON(`{"index":1,"codec_type":"audio","codec_name":"ac3","tags":{"language":"jpn"}},{"index":2,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle",`+eng+`}`))
+	put("Heat.json", probeJSON(`{"index":1,"codec_type":"audio","codec_name":"ac3",`+eng+`},{"index":2,"codec_type":"subtitle","codec_name":"subrip",`+eng+`}`))
+	put("Clerks.json", probeJSON(`{"index":1,"codec_type":"audio","codec_name":"aac",`+eng+`}`))
+	put("Show.json", probeJSON(`{"index":1,"codec_type":"audio","codec_name":"aac",`+eng+`}`))
+	put("ran.framecrc", framecrc(f.ts))
+	put("heat.srt", srt(f.ts, 0))
+	put("clerks.aligned.srt", srt(f.ts, 1))
+	f.h.Script(t, "ffprobe", `echo "$*" >> "`+ff+`/ffprobe.calls"
+for n in Ran Heat Clerks Show; do case "$*" in *"/$n "*) cat "`+ff+`/$n.json"; exit 0;; esac; done; exit 1
+`)
+	f.h.Script(t, "ffmpeg", `case "$*" in *framecrc*) cat "`+ff+`/ran.framecrc";; *"-f srt"*) cat "`+ff+`/heat.srt";; *) exit 1;; esac
+`)
+	alass := f.h.Script(t, "alass", `if [ "$2" = "_" ]; then echo speech > "$3"; exit 0; fi
+cp "`+ff+`/clerks.aligned.srt" "$3"; echo "info: 'reference file FPS/input file FPS' ratio is 1"
+`)
+
+	os.WriteFile(filepath.Join(f.dir, "tmdb_read_token"), []byte("test-token\n"), 0o600)
+	tmdbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-token" || r.URL.RawQuery != "" {
+			w.WriteHeader(401)
+			return
+		}
+		ids := map[string]string{"/movie/11645/external_ids": "tt0089881", "/movie/2292/external_ids": "tt0109445"}
+		json.NewEncoder(w).Encode(map[string]any{"imdb_id": ids[r.URL.Path]})
+	}))
+	t.Cleanup(tmdbSrv.Close)
+	var osSrv *httptest.Server
+	osSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.requests = append(f.requests, r.URL.Path)
+		f.mu.Unlock()
+		cand := func(id, release string) string {
+			return `[{"IDSubtitleFile":"` + id + `","SubFormat":"srt","MovieReleaseName":"` + release + `","SubDownloadLink":"` + osSrv.URL + `/dl/` + id + `.gz"}]`
+		}
+		switch {
+		case strings.Contains(r.URL.Path, "imdbid-0089881"):
+			w.Write([]byte(cand("ran", "Ran.1985.BluRay")))
+		case strings.Contains(r.URL.Path, "imdbid-0109445"):
+			w.Write([]byte(cand("clerks", "Clerks.1994.DVDRip")))
+		case r.URL.Path == "/dl/ran.gz": // 2.5 s late, plus the ad block OpenSubtitles appends
+			w.Write(gz(srt(f.ts, -2.5) + "999\n00:49:00,000 --> 00:49:02,000\nAdvertise your product or brand here\n"))
+		case r.URL.Path == "/dl/clerks.gz":
+			w.Write(gz(srt(f.ts, 0)))
+		default:
+			w.Write([]byte("[]"))
+		}
+	}))
+	t.Cleanup(osSrv.Close)
+	f.st = Stage{openSubtitles: osSrv.URL + "/search/", tmdbAPI: tmdbSrv.URL, sleep: func(context.Context, time.Duration) error { return nil }}
+	f.h.SetOptions(`roots = ["` + f.path("Movies") + `", "` + f.path("TV") + `"]
+stats_file = "` + filepath.Join(f.dir, "sub_stats.tsv") + `"
+secrets_dir = "` + f.dir + `"
+alass = "` + alass + `"
+workers = 1`)
+	f.h.Jellyfin.Handle("POST", "/Library/Media/Updated", 204, "")
+	return f
+}
+
+func (f *fixture) run(t *testing.T) stage.Report {
+	t.Helper()
+	var rep stage.Report
+	if err := f.st.Run(context.Background(), f.h.Env, &rep); err != nil {
+		t.Fatalf("run: %v (alerts %v)", err, rep.Alerts)
+	}
+	return rep
+}
+
+func (f *fixture) sidecar(t *testing.T, rel string) string {
+	t.Helper()
+	b, err := os.ReadFile(strings.TrimSuffix(f.path(rel), ".mkv") + ".en.srt")
+	if err != nil {
+		t.Fatalf("%s: %v", rel, err)
+	}
+	return string(b)
+}
+
+func (f *fixture) requestCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.requests)
+}
+
+// Catches, end to end: a sidecar not written for each route (PGS fit, extraction, alass), the PGS fit not landing on
+// the captions or the ad block kept, an existing sidecar touched or its video probed, titles with English audio
+// served before the foreign one, Jellyfin not told, a rerun repeating any search, and a title without candidates
+// searched again before retry_after.
+func TestRunWritesSidecarsAndReconciles(t *testing.T) {
+	f := newFixture(t)
+	rep := f.run(t)
+	if len(rep.Alerts) > 0 {
+		t.Fatalf("alerts: %v", rep.Alerts)
+	}
+
+	got := cues(f.sidecar(t, ran))
+	if len(got) != len(f.ts) {
+		t.Fatalf("Ran: %d cues, want %d (ad block stripped)", len(got), len(f.ts))
+	}
+	for i, s := range got {
+		if d := s.start - f.ts[i]; d > 0.01 || d < -0.21 {
+			t.Fatalf("Ran cue %d starts %.3f s off its caption", i, d)
+		}
+	}
+	if f.sidecar(t, heat) != srt(f.ts, 0) {
+		t.Error("Heat: the embedded track was not extracted as is")
+	}
+	if f.sidecar(t, clerks) != srt(f.ts, 1) {
+		t.Error("Clerks: alass's alignment was not written")
+	}
+	if b, _ := os.ReadFile(strings.TrimSuffix(f.path(dune), ".mkv") + ".en.srt"); string(b) != "theirs" {
+		t.Error("Dune: existing sidecar changed")
+	}
+	calls, _ := os.ReadFile(filepath.Join(f.h.Env.FFmpeg.Dir, "ffprobe.calls"))
+	if strings.Contains(string(calls), "Dune") {
+		t.Error("Dune was probed although it has a sidecar")
+	}
+	var first, outcome string
+	db := f.h.Env.Store.DB()
+	db.QueryRow(`SELECT item FROM events WHERE stage='subtitles' ORDER BY id LIMIT 1`).Scan(&first)
+	db.QueryRow(`SELECT outcome FROM subtitles_titles WHERE path=?`, f.path(show)).Scan(&outcome)
+	if first != f.path(ran) {
+		t.Errorf("first title handled: %s, want the one without English audio", first)
+	}
+	if outcome != "no_candidates" {
+		t.Errorf("Show outcome %q", outcome)
+	}
+	var fields string
+	db.QueryRow(`SELECT fields FROM events WHERE item=? AND status='retimed'`, f.path(ran)).Scan(&fields)
+	var ev map[string]any
+	json.Unmarshal([]byte(fields), &ev)
+	if ms, ok := ev["ref_median_ms"].(float64); !ok || math.Abs(ms) > 210 {
+		t.Errorf("Ran event %s: want ref_median_ms within 210", fields)
+	}
+	if calls := f.h.Jellyfin.Calls("POST", "/Library/Media/Updated"); len(calls) != 1 || bytes.Count(calls[0].Body, []byte(`"Created"`)) != 3 {
+		t.Errorf("Jellyfin calls %v", calls)
+	}
+
+	before := f.requestCount()
+	f.run(t)
+	if n := f.requestCount(); n != before {
+		t.Errorf("rerun made %d provider requests; want none", n-before)
+	}
+	f.h.Now = f.h.Now.Add(169 * time.Hour)
+	f.run(t)
+	if n := f.requestCount(); n == before {
+		t.Error("Show was not searched again after retry_after")
+	}
+}
+
+// Catches: heavy work or downloads started while a guest is watching (the owner's own viewing must not block).
+func TestRunWaitsWhileGuestsWatch(t *testing.T) {
+	f := newFixture(t)
+	polls := make(chan struct{}, 100)
+	var mu sync.Mutex
+	body := `<MediaContainer size="2"><Video type="movie" title="X"><User title="saahil"/></Video><Video type="episode" title="Y"><User title="guest"/></Video></MediaContainer>`
+	f.h.Plex.HandleFunc("GET", "/status/sessions", func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		w.Write([]byte(body))
+		mu.Unlock()
+		select {
+		case polls <- struct{}{}:
+		default:
+		}
+	})
+	done := make(chan stage.Report)
+	go func() {
+		var rep stage.Report
+		f.st.Run(context.Background(), f.h.Env, &rep)
+		done <- rep
+	}()
+	for range 3 {
+		<-polls
+	}
+	if n := f.requestCount(); n != 0 {
+		t.Fatalf("%d provider requests while a guest watched", n)
+	}
+	mu.Lock()
+	body = `<MediaContainer size="1"><Video type="movie" title="X"><User title="saahil"/></Video></MediaContainer>`
+	mu.Unlock()
+	<-done
+	f.sidecar(t, ran)
+}
+
+// Catches an existing subtitle overwritten: .en.srt taken means .eng.srt, both taken means nothing written.
+func TestWriteSidecarNeverOverwrites(t *testing.T) {
+	base := filepath.Join(t.TempDir(), "Film (2000) {tmdb-1}")
+	os.WriteFile(base+".en.srt", []byte("old"), 0o644)
+	if dest, err := writeSidecar(base, []byte("new")); err != nil || dest != base+".eng.srt" {
+		t.Fatalf("dest %q err %v", dest, err)
+	}
+	if dest, err := writeSidecar(base, []byte("newer")); err != nil || dest != "" {
+		t.Fatalf("both taken: dest %q err %v", dest, err)
+	}
+	for name, want := range map[string]string{".en.srt": "old", ".eng.srt": "new"} {
+		if b, _ := os.ReadFile(base + name); string(b) != want {
+			t.Errorf("%s = %q, want %q", name, b, want)
+		}
+	}
+}
