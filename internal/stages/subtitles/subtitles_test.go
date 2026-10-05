@@ -272,7 +272,7 @@ func TestRunTrustsOwnHashMatch(t *testing.T) {
 		f := newFixture(t)
 		f.hashIMDb = imdb
 		f.run(t)
-		if got := f.sidecar(t, ran) == srt(otherTimes(), 0); got != trusted {
+		if got := cues(f.sidecar(t, ran))[0].start == otherTimes()[0]; got != trusted {
 			t.Errorf("hash match labelled tt%s: kept %v, want %v", imdb, got, trusted)
 		}
 	}
