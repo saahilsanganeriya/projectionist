@@ -313,13 +313,23 @@ func TestRunMakesBothAppsMatchThenStops(t *testing.T) {
 		t.Errorf("jellyfin posters = %v", posters)
 	}
 
-	before := px.writes + jf.writes
+	if n := len(h.Jellyfin.Calls("POST", "/Collections/box0/Items")); n != 0 {
+		t.Errorf("jellyfin got %d member adds for a collection it was just given whole", n)
+	}
+	jfMemberReads := func() (n int) {
+		for _, c := range h.Jellyfin.Calls("GET", "/Items") {
+			n += strings.Count(c.RawQuery, "ParentId=")
+		}
+		return n
+	}
+	before, jfReads := px.writes+jf.writes, jfMemberReads()
 	runOnce(t, h)
 	if after := px.writes + jf.writes; after != before {
 		t.Errorf("second run sent %d writes; want none", after-before)
 	}
-	if n := len(h.Plex.Calls("GET", "/library/collections/900/children")); n != 1 {
-		t.Errorf("plex members of an unchanged collection read %d times over two runs; want 1", n)
+	if n := len(h.Plex.Calls("GET", "/library/collections/900/children")); n != 1 || jfMemberReads() != jfReads {
+		t.Errorf("members of unchanged collections read again: plex %d times over two runs (want 1), jellyfin %d times on the second run (want 0)",
+			n, jfMemberReads()-jfReads)
 	}
 	px.colls[0].Members = px.colls[0].Members[:1] // someone took films out: the count moves, so the list is read again
 	runOnce(t, h)
