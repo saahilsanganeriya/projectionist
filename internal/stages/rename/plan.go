@@ -1,8 +1,8 @@
 package rename
 
 // The planner: every file under Movies/ and TV/ gets exactly one decision (port of rename_engine.py). It is a pure
-// function of Input, so a run plans the whole library in milliseconds and the executor acts only on the units that
-// own new work. Identity (which film or show a video is) is an input; nothing here reads Plex.
+// function of Input, so a run plans the whole library in well under a second and the executor acts only on the units
+// that own new work. Identity (which film or show a video is) and episode numbers are inputs; nothing here reads Plex.
 //
 //	op = move     rename on the same volume (instant)        archive  move under <root>/_archive (reversible)
 //	     keep     already at its final path                  delete   identical copy of a kept file (bytes compared when acting)
@@ -16,12 +16,18 @@ import (
 	"strings"
 )
 
-// Title is a film or show as the metadata source (TMDB) names it.
+// Title is a film or show: its scheme tag body ("tmdb-348", "tvdb-79169"), name, original-language name and year.
 type Title struct {
-	ID       string // the scheme's tag body: "tmdb-348", "imdb-tt0078748", "tvdb-79169"
+	ID       string
 	Name     string
-	Original string // original-language title; "" when unknown
+	Original string
 	Year     int
+}
+
+// Episode is one episode a TV file holds (a file may hold several), with the episode's title from the metadata source.
+type Episode struct {
+	Season, Episode int
+	Title           string
 }
 
 type VideoFacts struct {
@@ -29,25 +35,20 @@ type VideoFacts struct {
 	Codec         string // ffprobe codec_name: hevc, h264, ...
 }
 
-// SubLang is a language decision made outside the name (a text-based guess); Lang "none" means no dialogue.
-type SubLang struct {
-	Lang string
-	SDH  bool
-}
-
-type EpisodeKey struct{ Season, Episode int }
-
 // Input is everything the planner decides from. Paths are absolute; Files lists every file under Movies/ and TV/.
 type Input struct {
-	Root          string // the media share, e.g. /volume1/media
-	Files         map[string]int64
-	Movies        map[string]Title // video → its film
-	Shows         map[string]Title // video → its show
-	EpisodeTitles map[string]map[EpisodeKey]string
-	Video         map[string]VideoFacts
-	Subs          map[string]SubFacts
-	Aligned       map[string]bool // subtitle file names the nightly aligner wrote
-	SubLang       map[string]SubLang
+	Root         string           // the media share, e.g. /volume1/media
+	Files        map[string]int64 // path → size
+	Movies       map[string]Title // video → its film
+	Shows        map[string]Title // video → its show
+	Episodes     map[string][]Episode
+	Hints        map[string][]Episode // show ID → every episode the source lists; present (even empty) = fetched
+	Video        map[string]VideoFacts
+	Subs         map[string]SubFacts
+	Aligned      map[string]bool    // subtitle file names the nightly aligner wrote
+	SubLang      map[string]SubLang // subtitle → language decided by a text classifier
+	Moved        map[string]string  // old video path → where it is now (the rename logs)
+	Unidentified map[string]string  // video → why no film or show could be named for it
 }
 
 type Op struct{ Unit, Op, Src, Dst, Reason string }
@@ -55,9 +56,10 @@ type Op struct{ Unit, Op, Src, Dst, Reason string }
 type Review struct{ Unit, Item, Issue string }
 
 type Plan struct {
-	Ops      []Op
-	Review   []Review
-	Problems map[string][]string // unit → reasons it must not run (collisions, existing targets, bad names)
+	Ops       []Op
+	Review    []Review
+	Problems  map[string][]string // unit → reasons it must not run (collisions, existing targets, bad names)
+	Unplanned []string            // files no op covers (a planner gap; never acted on)
 }
 
 const (
@@ -66,13 +68,11 @@ const (
 	dead    = "dead"
 )
 
-// Subtitle-to-video matches and version labels that needed a person (paths relative to Movies/); decided once.
 var (
-	manualSubOwner = map[string]string{
-		"Batman Mask of the Phantasm/Batman - Mask of The Phantasm, Open Matte Version (1993 - 1080p BluRay).en.srt": "Batman Mask of the Phantasm/Batman - Mask of The Phantasm(1993 - 1080p BluRay).mp4",
-	}
 	manualLabel = map[string]string{"Batman Mask of the Phantasm/Batman - Mask of The Phantasm(1993 - 1080p BluRay).mp4": "1080p Open Matte"}
-	episodeN    = regexp.MustCompile(`(?i)^episode \d+$`)
+	// Owner decision: these TV episodes stored inside Movies duplicate the TV library's copies.
+	manualTVInMovies = []string{"Sharp.Objects.S01", "Reacher.S03E07"}
+	episodeN         = regexp.MustCompile(`(?i)^episode \d+$`)
 )
 
 type planned struct{ unit, folder, stem, ext, kind string }
@@ -83,6 +83,8 @@ type videoPlan struct {
 	by    map[string]planned
 }
 
+func newVideoPlan() *videoPlan { return &videoPlan{by: map[string]planned{}} }
+
 func (v *videoPlan) set(p string, x planned) {
 	if _, ok := v.by[p]; !ok {
 		v.order = append(v.order, p)
@@ -90,15 +92,51 @@ func (v *videoPlan) set(p string, x planned) {
 	v.by[p] = x
 }
 
+func (v *videoPlan) has(p string) bool {
+	_, ok := v.by[p]
+	return ok
+}
+
+func (v *videoPlan) remove(p string) {
+	if !v.has(p) {
+		return
+	}
+	delete(v.by, p)
+	for i, o := range v.order {
+		if o == p {
+			v.order = append(v.order[:i], v.order[i+1:]...)
+			break
+		}
+	}
+}
+
+// opSet is an insertion-ordered map src → op (Python's {o[2]: o} dicts of special cases).
+type opSet struct {
+	order []string
+	by    map[string]Op
+}
+
+func (s *opSet) put(o Op) {
+	if s.by == nil {
+		s.by = map[string]Op{}
+	}
+	if _, ok := s.by[o.Src]; !ok {
+		s.order = append(s.order, o.Src)
+	}
+	s.by[o.Src] = o
+}
+
+func (s *opSet) ops() []Op {
+	out := make([]Op, 0, len(s.order))
+	for _, k := range s.order {
+		out = append(out, s.by[k])
+	}
+	return out
+}
+
 type planner struct {
 	in                         *Input
 	media, movies, tv, archive string
-	ops                        []Op
-	review                     []Review
-}
-
-func (p *planner) op(unit, op, src, dst, reason string) {
-	p.ops = append(p.ops, Op{unit, op, src, dst, reason})
 }
 
 func sortedKeys[V any](m map[string]V) []string {
@@ -122,19 +160,105 @@ func depthThenPath(paths []string) {
 
 func relParts(root, p string) []string { return strings.Split(strings.TrimPrefix(p, root+"/"), "/") }
 
+func hasPart(parts []string, s string) bool {
+	for _, x := range parts {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func underRoot(files []string, root string) []string {
+	var out []string
+	for _, f := range files {
+		if strings.HasPrefix(f, root+"/") {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // Build plans the whole library.
 func Build(in *Input) Plan {
 	p := &planner{in: in, media: in.Root, movies: in.Root + "/Movies", tv: in.Root + "/TV", archive: in.Root + "/_archive"}
-	movies := p.planMovies()
-	shows := p.planTV()
-	p.planRoot(p.movies, movies)
-	p.planRoot(p.tv, shows)
-	plan := Plan{Ops: p.ops, Review: p.review, Problems: check(p.ops, in.Files)}
+	all := sortedKeys(in.Files)
+	mfiles, tfiles := underRoot(all, p.movies), underRoot(all, p.tv)
+	movies, mops, mreview := p.planMovies()
+	shows, tops, treview := p.planTV()
+	var specialM, specialT opSet
+	for _, o := range mops {
+		specialM.put(o)
+	}
+	for _, o := range tops {
+		specialT.put(o)
+	}
+	unitOfShowDir := map[string]string{}
+	for _, v := range shows.order {
+		if x := shows.by[v]; x.unit != dead {
+			if top := relParts(p.tv, v)[0]; unitOfShowDir[top] == "" {
+				unitOfShowDir[top] = x.unit
+			}
+		}
+	}
+	for _, f := range mfiles {
+		rel := relParts(p.movies, f)
+		if hasPart(rel, "@eaDir") {
+			continue
+		}
+		if rel[0] == "POSTERS" {
+			specialM.put(Op{"assets", "archive", f, p.media + "/_assets/POSTERS/" + strings.Join(rel[1:], "/"), "poster artwork, kept outside the libraries"})
+			continue
+		}
+		if !hasPrefixAny(rel[0], manualTVInMovies) {
+			continue
+		}
+		movies.remove(f)
+		if !videoExt[lowerExt(f)] {
+			specialM.put(Op{"dup:tv-in-movies", "archive", f, p.archive + "/junk/Movies/" + strings.Join(rel, "/"), "sidecar of a deleted duplicate"})
+			continue
+		}
+		twin := ""
+		for _, t := range tfiles {
+			if path.Base(t) == path.Base(f) && in.Files[t] == in.Files[f] && !strings.Contains(t, "@eaDir") {
+				twin = t
+				break
+			}
+		}
+		if twin == "" {
+			specialM.put(Op{"dup:tv-in-movies", "leave", f, "", "no TV twin found"})
+			continue
+		}
+		unit := unitOfShowDir[relParts(p.tv, twin)[0]]
+		if unit == "" {
+			unit = "dup:tv-in-movies"
+		}
+		specialM.put(Op{unit, "delete", f, twin, "duplicate of the TV library copy (owner approved)"})
+	}
+	for _, f := range tfiles {
+		if low := strings.ToLower(f); (strings.Contains(low, "don't need") || strings.Contains(low, "dont need")) && !strings.Contains(f, "@eaDir") {
+			specialT.put(Op{"misc", "archive", f, p.archive + "/junk/TV/" + strings.TrimPrefix(f, p.tv+"/"), "folder named 'Subs that you don't need'"})
+		}
+	}
+	ops := append(specialM.ops(), p.planRoot(p.movies, movies, mfiles, specialM.by)...)
+	ops = append(ops, specialT.ops()...)
+	ops = append(ops, p.planRoot(p.tv, shows, tfiles, specialT.by)...)
+
+	plan := Plan{Ops: ops, Review: append(mreview, treview...), Problems: check(ops, in.Files)}
+	accounted := map[string]bool{}
+	for _, o := range ops {
+		accounted[o.Src] = true
+	}
+	for _, f := range append(mfiles, tfiles...) {
+		if !accounted[f] && !strings.Contains(f, "@eaDir") && !ignoreName[path.Base(f)] && !strings.Contains(f, "#recycle") && !strings.Contains(f, "/.details/") {
+			plan.Unplanned = append(plan.Unplanned, f)
+		}
+	}
 	reviewed := map[string]bool{}
 	for _, r := range plan.Review {
 		reviewed[r.Item] = true
 	}
-	for _, o := range plan.Ops {
+	for _, o := range ops {
 		if o.Op == "leave" && !reviewed[o.Src] {
 			plan.Review = append(plan.Review, Review{o.Unit, o.Src, o.Reason})
 		}
@@ -142,11 +266,22 @@ func Build(in *Input) Plan {
 	return plan
 }
 
+func hasPrefixAny(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(s, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // ---- movies
 
-func (p *planner) planMovies() *videoPlan {
+func (p *planner) planMovies() (*videoPlan, []Op, []Review) {
 	in := p.in
-	videos := &videoPlan{by: map[string]planned{}}
+	videos := newVideoPlan()
+	var ops []Op
+	var review []Review
 	var ids []string
 	parts := map[string][]string{}
 	for _, f := range sortedKeys(in.Movies) {
@@ -164,9 +299,9 @@ func (p *planner) planMovies() *videoPlan {
 		first := in.Movies[files[0]]
 		if !strings.HasPrefix(id, "tmdb-") || first.Year == 0 {
 			for _, f := range files {
-				p.op(unit, "leave", f, "", "movie has no TMDB id or year: rematch first")
+				ops = append(ops, Op{unit, "leave", f, "", "movie has no TMDB id or year: rematch first"})
 			}
-			p.review = append(p.review, Review{unit, first.Name, fmt.Sprintf("match incomplete (year=%d id=%s): rematch", first.Year, id)})
+			review = append(review, Review{unit, first.Name, fmt.Sprintf("match incomplete (year=%d id=%s): rematch", first.Year, id)})
 			continue
 		}
 		base := component(withYear(first.Name, first.Year) + " {" + id + "}")
@@ -182,7 +317,7 @@ func (p *planner) planMovies() *videoPlan {
 			small := len(files) > 1 && float64(size) < 0.05*float64(largest) && size < bigFile
 			switch {
 			case !isMain && (sampleRe.MatchString(name) || small):
-				p.op(unit, "archive", f, p.archive+"/samples/Movies/"+strings.Join(rel, "/"), "sample/ad clip filed as a version")
+				ops = append(ops, Op{unit, "archive", f, p.archive + "/samples/Movies/" + strings.Join(rel, "/"), "sample/ad clip filed as a version"})
 			case len(rel) >= 3 && rel[0] != "Remote Versions" && extraFolder.MatchString(rel[len(rel)-2]):
 				videos.set(f, planned{unit, folder + "/" + extraCategory(rel[:len(rel)-1]), component(clean(stem(name))), lowerExt(f), "extra"})
 			default:
@@ -203,14 +338,18 @@ func (p *planner) planMovies() *videoPlan {
 				keep = append(keep, f)
 				continue
 			}
-			p.op(unit, "delete", f, twin, "identical copy of another version (bytes compared at run time)")
+			ops = append(ops, Op{unit, "delete", f, twin, "identical copy of another version (bytes compared at run time)"})
 			videos.set(f, planned{unit: dead, kind: "deleted"})
 		}
 		if len(keep) == 0 {
 			continue
 		}
 		labels := p.movieLabels(keep, folder, base)
-		if labels == nil {
+		if !distinct(labels) {
+			for _, f := range keep {
+				ops = append(ops, Op{unit, "leave", f, "", "versions still share a label " + pyList(labels)})
+			}
+			review = append(review, Review{unit, first.Name, "versions share a label: " + pyList(labels)})
 			continue
 		}
 		for i, f := range keep {
@@ -221,10 +360,10 @@ func (p *planner) planMovies() *videoPlan {
 			videos.set(f, planned{unit, folder, s, lowerExt(f), "movie"})
 		}
 	}
-	return videos
+	return videos, ops, review
 }
 
-// movieLabels names each version; nil when two still share a name (then every version is left for review).
+// movieLabels names each version: resolution, then cut, codec, release group and size until they differ.
 func (p *planner) movieLabels(keep []string, folder, base string) []string {
 	in := p.in
 	labels := make([]string, len(keep))
@@ -284,44 +423,60 @@ func (p *planner) movieLabels(keep []string, folder, base string) []string {
 			}
 		}
 	}
+	return labels
+}
+
+func distinct(labels []string) bool {
 	seen := map[string]bool{}
 	for _, l := range labels {
 		if seen[l] {
-			unit := "movie:" + p.in.Movies[keep[0]].ID
-			for _, f := range keep {
-				p.op(unit, "leave", f, "", fmt.Sprintf("versions still share a label %q", labels))
-			}
-			p.review = append(p.review, Review{unit, p.in.Movies[keep[0]].Name, fmt.Sprintf("versions share a label: %q", labels)})
-			return nil
+			return false
 		}
 		seen[l] = true
 	}
-	return labels
+	return true
+}
+
+// pyList renders labels as Python's str(list) for the review text.
+func pyList(items []string) string {
+	quoted := make([]string, len(items))
+	for i, s := range items {
+		quoted[i] = pyRepr(s)
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
 }
 
 // ---- tv
 
 type candidate struct {
-	unit, showDir     string
-	season, ep, last  int
-	title, reason     string
-	show              Title
+	unit, showDir    string
+	season, ep, last int
+	title, reason    string
+	show             Title
 }
 
-func (p *planner) planTV() *videoPlan {
+func (p *planner) planTV() (*videoPlan, []Op, []Review) {
 	in := p.in
-	videos := &videoPlan{by: map[string]planned{}}
+	videos := newVideoPlan()
+	var ops []Op
+	var review []Review
 	cands := map[string]candidate{}
 	var order []string
+	type showSeason struct {
+		show   string
+		season int
+	}
+	dvdSeasons := map[showSeason]int{}
 	for _, f := range sortedKeys(in.Shows) {
-		if _, ok := in.Files[f]; !ok {
+		eps := in.Episodes[f]
+		if _, ok := in.Files[f]; !ok || len(eps) == 0 {
 			continue
 		}
 		show := in.Shows[f]
 		unit := "show:" + show.ID
 		if !strings.HasPrefix(show.ID, "tmdb-") && !strings.HasPrefix(show.ID, "tvdb-") {
-			p.op(unit, "leave", f, "", "show has no TMDB/TVDB id")
-			p.review = append(p.review, Review{unit, f, "show has no TMDB/TVDB id"})
+			ops = append(ops, Op{unit, "leave", f, "", "show has no TMDB/TVDB id"})
+			review = append(review, Review{unit, f, "show has no TMDB/TVDB id"})
 			continue
 		}
 		showDir := p.tv + "/" + component(withYear(show.Name, show.Year)+" {"+show.ID+"}")
@@ -331,52 +486,86 @@ func (p *planner) planTV() *videoPlan {
 			continue
 		}
 		if !sameShow(showPrefix(name), show.Name, show.Original) {
-			p.op(unit, "leave", f, "", fmt.Sprintf("file names a different show than its match (%s)", show.Name))
-			p.review = append(p.review, Review{unit, f, fmt.Sprintf("matched to %q; the file name says otherwise: rematch", show.Name)})
+			mine, ok := ownShow(stem(name))
+			dst := f
+			if ok {
+				dst = fmt.Sprintf("%s/%s/Season %02d/%s", p.tv, component(mine.show), mine.season, name)
+			}
+			if dst != f { // a folder named for the file's own show: the next run matches it anew
+				ops = append(ops, Op{"isolate:" + mine.show, "move", f, dst,
+					fmt.Sprintf("file names %s, matched to %s: own folder", pyRepr(mine.show), pyRepr(show.Name))})
+			} else {
+				ops = append(ops, Op{unit, "leave", f, "", fmt.Sprintf("file names a different show than its match (%s)", show.Name)})
+				review = append(review, Review{unit, f, fmt.Sprintf("matched to %s; the file name says otherwise: rematch", pyRepr(show.Name))})
+			}
 			continue
 		}
-		num, ok := episodeNumbers(p.tv, f)
-		if !ok {
-			p.op(unit, "leave", f, "", "no episode number in the name")
-			continue
+		season, ep := eps[0].Season, eps[0].Episode
+		if ep >= 100 && ep/100 == season { // Seinfeld 'Season #9/901' read as E901
+			ep %= 100
 		}
-		season, ep, last := num.season, num.first, num.last
+		lastRaw := eps[len(eps)-1].Episode
+		if lastRaw >= 100 && lastRaw/100 == season {
+			lastRaw %= 100
+		}
+		last := max(ep, lastRaw)
+		fileTitle := ""
+		if parsed, ok := fileEpisode(name); ok {
+			fileTitle = parsed.title
+			if (parsed.season == -1 || parsed.season == season) && parsed.first <= ep && ep <= parsed.last && parsed.last > parsed.first {
+				ep, last = parsed.first, max(last, parsed.last) // the file's own range wins when it contains the listed number
+			}
+		}
 		if ep == 0 && season > 0 {
-			p.op(unit, "leave", f, "", "SxxE00 special: needs its Season 00 number")
-			p.review = append(p.review, Review{unit, f, "special numbered as episode 0 of a season: map to Season 00 by hand"})
+			known, fetched := in.Hints[show.ID]
+			guess := fileTitle
+			if guess == "" {
+				guess = eps[0].Title
+			}
+			if hit, ok := bestHint(known, guess); ok { // listed under its real number (Season 00, or a mislabeled episode)
+				cands[f] = candidate{unit, showDir, hit.Season, hit.Episode, hit.Episode, truncRunes(clean(hit.Title), 80),
+					"episode (numbered by its title in TMDB's episode list)", show}
+				order = append(order, f)
+			} else if fetched { // numbered nowhere: bonus material, kept as the show's extra
+				s := clean(guess)
+				if s == "" {
+					s = fmt.Sprintf("Season %d special", season)
+				}
+				videos.set(f, planned{unit, showDir + "/Featurettes", component(s), lowerExt(f), "extra"})
+			} else {
+				ops = append(ops, Op{unit, "leave", f, "", "SxxE00 special: needs its Season 00 number"})
+				review = append(review, Review{unit, f, "special numbered as episode 0 of a season: map to Season 00 by hand"})
+			}
 			continue
 		}
-		known := in.EpisodeTitles[show.ID][EpisodeKey{season, ep}]
-		title, reason := "", "episode"
+		known, title, reason := eps[0].Title, "", "episode"
 		switch {
 		case last > ep:
-			title = clean(num.title)
-		case known != "" && num.title != "" && !titlesAgree(num.title, known):
-			title, reason = clean(num.title), "episode (kept the file's own title: TMDB numbering differs)"
+			title = clean(fileTitle)
+		case known != "" && fileTitle != "" && !titlesAgree(fileTitle, known):
+			title, reason = clean(fileTitle), "episode (kept the file's own title: TMDB numbering differs)"
+			dvdSeasons[showSeason{show.Name, season}]++
 		case known != "":
 			title = clean(known)
 		default:
-			title = clean(num.title)
+			title = clean(fileTitle)
 		}
 		if episodeN.MatchString(title) {
 			title = ""
 		}
-		if r := []rune(title); len(r) > 80 {
-			title = string(r[:80])
-		}
-		cands[f] = candidate{unit, showDir, season, ep, last, title, reason, show}
+		cands[f] = candidate{unit, showDir, season, ep, last, truncRunes(title, 80), reason, show}
 		order = append(order, f)
 	}
-	type key struct {
-		unit        string
-		season, ep  int
+	type epKey struct {
+		unit       string
+		season, ep int
 	}
-	perEp := map[key]int{}
-	groups := map[key][]string{}
-	var groupOrder []key
+	perEp := map[epKey]int{}
+	groups := map[epKey][]string{}
+	var groupOrder []epKey
 	for _, f := range order {
 		c := cands[f]
-		k := key{c.unit, c.season, c.ep}
+		k := epKey{c.unit, c.season, c.ep}
 		if groups[k] == nil {
 			groupOrder = append(groupOrder, k)
 		}
@@ -391,7 +580,7 @@ func (p *planner) planTV() *videoPlan {
 		depthThenPath(olds)
 		for _, o := range olds[1:] {
 			if in.Files[o] == in.Files[olds[0]] && suffix(path.Base(o)) == suffix(path.Base(olds[0])) {
-				p.op(k.unit, "delete", o, olds[0], "identical copy of another episode file (bytes compared at run time)")
+				ops = append(ops, Op{k.unit, "delete", o, olds[0], "identical copy of another episode file (bytes compared at run time)"})
 				videos.set(o, planned{unit: dead, kind: "deleted"})
 				delete(cands, o)
 				perEp[k]--
@@ -411,7 +600,7 @@ func (p *planner) planTV() *videoPlan {
 		if c.title != "" {
 			s += " - " + c.title
 		}
-		if perEp[key{c.unit, c.season, c.ep}] > 1 {
+		if perEp[epKey{c.unit, c.season, c.ep}] > 1 {
 			label := clean(releaseGroup(f))
 			if label == "" {
 				label = fmt.Sprintf("%.1fGB", float64(in.Files[f])/1e9)
@@ -420,19 +609,33 @@ func (p *planner) planTV() *videoPlan {
 		}
 		videos.set(f, planned{c.unit, fmt.Sprintf("%s/Season %02d", c.showDir, c.season), component(s), lowerExt(f), c.reason})
 	}
-	return videos
+	seasons := make([]showSeason, 0, len(dvdSeasons))
+	for k := range dvdSeasons {
+		seasons = append(seasons, k)
+	}
+	sort.Slice(seasons, func(i, j int) bool {
+		if seasons[i].show != seasons[j].show {
+			return seasons[i].show < seasons[j].show
+		}
+		return seasons[i].season < seasons[j].season
+	})
+	for _, k := range seasons {
+		review = append(review, Review{"show:" + k.show, fmt.Sprintf("Season %d", k.season),
+			fmt.Sprintf("%d file(s) kept their own titles: TMDB numbering differs (renumber later)", dvdSeasons[k])})
+	}
+	return videos, ops, review
 }
 
-// ---- everything else under a root: sidecars, extras the resolver does not list, junk
+// ---- everything else under a root: sidecars, extras no source lists, junk
 
-func (p *planner) planRoot(root string, videos *videoPlan) {
+func (p *planner) planRoot(root string, videos *videoPlan, files []string, special map[string]Op) []Op {
 	in := p.in
+	var ops []Op
 	rootName := path.Base(root)
-	owner := p.attachSubtitles(root, videos)
+	owner := p.attachSubtitles(root, files, videos)
 	subs := p.nameSubtitles(owner, videos)
 	taken := map[string]bool{}
 	unitHome := map[string]string{}
-	planned := map[string]map[string]bool{} // folder → units with a planned video below it
 	for _, v := range videos.order {
 		x := videos.by[v]
 		if x.unit == dead {
@@ -445,44 +648,44 @@ func (p *planner) planRoot(root string, videos *videoPlan) {
 				unitHome[x.unit] = path.Dir(x.folder)
 			}
 		}
+	}
+	plannedDirs := map[string]map[string]bool{} // folder → units with a planned video below it
+	mark := func(v, unit string) {
+		if unit == dead { // a video's old folder (moved) still belongs to its unit: its leftovers follow the video
+			return
+		}
 		for d := path.Dir(v); strings.HasPrefix(d, root) && d != root; d = path.Dir(d) {
-			if planned[d] == nil {
-				planned[d] = map[string]bool{}
+			if plannedDirs[d] == nil {
+				plannedDirs[d] = map[string]bool{}
 			}
-			planned[d][x.unit] = true
+			plannedDirs[d][unit] = true
 		}
 	}
-	for _, f := range sortedKeys(in.Files) {
-		if !strings.HasPrefix(f, root+"/") {
-			continue
+	for _, v := range videos.order {
+		mark(v, videos.by[v].unit)
+	}
+	for _, o := range sortedKeys(in.Moved) {
+		if n := in.Moved[o]; videos.has(n) {
+			mark(o, videos.by[n].unit)
 		}
+	}
+	for _, f := range files {
 		rel := relParts(root, f)
 		name, ext, size := path.Base(f), lowerExt(f), in.Files[f]
-		if contains(rel, "@eaDir") {
-			continue
-		}
-		if root == p.movies && rel[0] == "POSTERS" {
-			p.op("assets", "archive", f, p.media+"/_assets/POSTERS/"+strings.Join(rel[1:], "/"), "poster artwork, kept outside the libraries")
-			continue
-		}
-		if low := strings.ToLower(f); root == p.tv && (strings.Contains(low, "don't need") || strings.Contains(low, "dont need")) {
-			p.op("misc", "archive", f, p.archive+"/junk/TV/"+strings.Join(rel, "/"), "folder named 'Subs that you don't need'")
-			continue
-		}
-		if ignoreName[name] || contains(rel, "#recycle") {
+		if _, isSpecial := special[f]; hasPart(rel, "@eaDir") || ignoreName[name] || hasPart(rel, "#recycle") || isSpecial {
 			continue
 		}
 		if len(rel) >= 2 && rel[len(rel)-2] == ".details" { // write_details notes travel with their video; never junk
 			if v, ok := videos.by[path.Dir(path.Dir(f))+"/"+stem(name)]; ok && v.unit != dead {
 				dst := v.folder + "/.details/" + v.stem + v.ext + ".txt"
-				p.op(v.unit, keepOr(dst, f, "move"), f, dst, "details note")
+				ops = append(ops, Op{v.unit, keepOr(dst, f), f, dst, "details note"})
 			}
 			continue
 		}
 		if v, ok := videos.by[f]; ok {
 			if v.unit != dead {
 				dst := v.folder + "/" + v.stem + v.ext
-				p.op(v.unit, keepOr(dst, f, "move"), f, dst, v.kind)
+				ops = append(ops, Op{v.unit, keepOr(dst, f), f, dst, v.kind})
 			}
 			continue
 		}
@@ -497,12 +700,12 @@ func (p *planner) planRoot(root string, videos *videoPlan) {
 			default:
 				op = "move"
 			}
-			p.op(s.unit, op, f, s.dst, s.reason)
+			ops = append(ops, Op{s.unit, op, f, s.dst, s.reason})
 			continue
 		}
 		ownerUnit := ""
 		for d := path.Dir(f); d != root && strings.HasPrefix(d, root); d = path.Dir(d) {
-			if units := planned[d]; len(units) > 0 {
+			if units := plannedDirs[d]; len(units) > 0 {
 				if len(units) == 1 {
 					for u := range units {
 						ownerUnit = u
@@ -524,10 +727,9 @@ func (p *planner) planRoot(root string, videos *videoPlan) {
 					break
 				}
 			}
-			home := unitHome[ownerUnit]
-			switch {
+			switch home := unitHome[ownerUnit]; {
 			case sampleRe.MatchString(name) && size < 600_000_000:
-				p.op(unitOrMisc, "archive", f, p.archive+"/samples/"+rootName+"/"+strings.Join(rel, "/"), "sample clip")
+				ops = append(ops, Op{unitOrMisc, "archive", f, p.archive + "/samples/" + rootName + "/" + strings.Join(rel, "/"), "sample clip"})
 			case extraDir != "" && ownerUnit != "" && home != "":
 				cat := extraCategory(rel[:len(rel)-1])
 				dst := home + "/" + cat + "/" + component(clean(stem(name))) + ext
@@ -535,36 +737,44 @@ func (p *planner) planRoot(root string, videos *videoPlan) {
 					dst = home + "/" + cat + "/" + component(clean(stem(name))+" ("+clean(path.Base(path.Dir(f)))+")") + ext
 				}
 				taken[casefold.String(dst)] = true
-				p.op(ownerUnit, keepOr(dst, f, "move"), f, dst, "extra ("+extraDir+")")
+				ops = append(ops, Op{ownerUnit, keepOr(dst, f), f, dst, "extra (" + extraDir + ")"})
+			case in.Unidentified[f] != "":
+				ops = append(ops, Op{unitOrMisc, "leave", f, "", in.Unidentified[f]})
 			default:
-				p.op(unitOrMisc, "leave", f, "", "video no metadata source lists")
+				mine, ok := ownName{}, false
+				if root == p.tv && extraDir == "" {
+					mine, ok = ownShow(stem(name))
+				}
+				dst := f
+				if ok {
+					dst = fmt.Sprintf("%s/%s/Season %02d/%s%s", p.tv, component(mine.show), mine.season,
+						component(fmt.Sprintf("%s - S%02dE%02d", mine.show, mine.season, mine.episode)), ext)
+				}
+				if dst == f {
+					ops = append(ops, Op{unitOrMisc, "leave", f, "", "video no source lists"})
+					break
+				}
+				// a name the apps cannot read ('Season 3 Episode 1-'): SxxEyy in a folder of its own show
+				ops = append(ops, Op{"isolate:" + mine.show, "move", f, dst, "episode no source lists: a name the apps read"})
 			}
 		case subExt[ext]:
-			p.op(unitOrMisc, "archive", f, p.archive+"/subtitles/"+rootName+"/"+strings.Join(rel, "/"), "subtitle with no matching video")
+			ops = append(ops, Op{unitOrMisc, "archive", f, p.archive + "/subtitles/" + rootName + "/" + strings.Join(rel, "/"), "subtitle with no matching video"})
 		default:
 			what := ext
 			if what == "" {
 				what = "no extension"
 			}
-			p.op(unitOrMisc, "archive", f, p.archive+"/junk/"+rootName+"/"+strings.Join(rel, "/"), "junk ("+what+")")
+			ops = append(ops, Op{unitOrMisc, "archive", f, p.archive + "/junk/" + rootName + "/" + strings.Join(rel, "/"), "junk (" + what + ")"})
 		}
 	}
+	return ops
 }
 
-func keepOr(dst, src, op string) string {
+func keepOr(dst, src string) string {
 	if dst == src {
 		return "keep"
 	}
-	return op
-}
-
-func contains(parts []string, s string) bool {
-	for _, x := range parts {
-		if x == s {
-			return true
-		}
-	}
-	return false
+	return "move"
 }
 
 var illegalChar = regexp.MustCompile(`[:*?"<>|]`)
@@ -602,8 +812,7 @@ func check(ops []Op, files map[string]int64) map[string][]string {
 			if _, exists := files[o.Dst]; exists && o.Dst != o.Src {
 				add(o.Unit, "target exists: "+o.Dst)
 			}
-			parts := strings.Split(o.Dst, "/")
-			for _, c := range parts[1:] {
+			for _, c := range strings.Split(o.Dst, "/")[1:] {
 				if len(c) > maxName || c != strings.TrimRight(c, " .") {
 					add(o.Unit, "bad component: "+o.Dst)
 					break

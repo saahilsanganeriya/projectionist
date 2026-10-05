@@ -31,9 +31,10 @@ var (
 		"other": "Other"}
 	extrasNames = set("Behind The Scenes", "Deleted Scenes", "Featurettes", "Interviews", "Scenes", "Shorts", "Trailers", "Other")
 
-	// A folder is an extras folder only when its WHOLE name says so ('Generation Kill ... + Extras (...)' is a season pack).
-	extraFolder = regexp.MustCompile(`(?i)^(extras?|bonus( features)?|special features|featurettes?|making[ .-]of|behind the scenes|` +
-		`deleted scenes|interviews|scenes|shorts|trailers|other|criterion extras|plex versions? extras?)` +
+	// A folder is an extras folder only when its WHOLE name says so ('Generation Kill ... + Extras (...)' is a season
+	// pack); leading punctuation is allowed ('...Extras'). [^\pL\pN] is Python's [\W_].
+	extraFolder = regexp.MustCompile(`(?i)^[^\pL\pN]*(extras?|bonus( features)?|special features|featurettes?|making[ .-]of|` +
+		`behind the scenes|deleted scenes|interviews|scenes|shorts|trailers|other|criterion extras|plex versions? extras?)` +
 		`( ?[-–] ?season \d+| season \d+| season [a-z]+)?$`)
 	sampleRe = regexp.MustCompile(`(?i)(^|[ ._\-\[(])sample([ ._\-\])]|$)|^sitea\.com|^sitee\.|^main menu`)
 	quality  = regexp.MustCompile(`(?i)\b(\d{3,4}p|web[ .-]?(dl|rip)?|blu[ .-]?ray|bdrip|brrip|hdtv|x26[45]|h[ .]?26[45]|hevc|avc|aac|ac3|` +
@@ -277,58 +278,25 @@ func extraCategory(parts []string) string {
 	return "Featurettes"
 }
 
-// ---- episode numbers
-
-type fileEp struct {
-	season       int // -1: the name carries no season (absolute numbering)
-	first, last  int
-	title        string
+// truncRunes is Python's text[:n] (code points, not bytes).
+func truncRunes(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return string(r[:n])
+	}
+	return s
 }
 
-var (
-	seinfeldPair = regexp.MustCompile(`^(\d)(\d\d)` + pyS + `*&` + pyS + `*(\d)(\d\d)` + pyS + `*-` + pyS + `*(.+)$`)
-	seinfeldOne  = regexp.MustCompile(`^(\d)(\d\d)` + pyS + `*-` + pyS + `*(.+)$`)
-	sxxeyy       = regexp.MustCompile(`[Ss](\d{1,2})[ ._-]?[Ee](\d{1,3})(?:[ ._-]?(?:-|[Ee]){1,2}[Ee]?(\d{1,3}))?`)
-	absolute     = regexp.MustCompile(`(?:^|` + pyS + `)-` + pyS + `*(\d{2,3})` + pyS + `*-` + pyS + `*(.+?)` + pyS + `*(?:\[|$)`)
-	titleCut     = regexp.MustCompile(pyS + `[\[(]|` + pyS + `{2,}`)
-)
-
-// fileEpisode parses an episode file name as rename_engine.file_episode did; ok is false when it names no episode.
-func fileEpisode(name string) (fileEp, bool) {
-	s := stem(name)
-	if m := seinfeldPair.FindStringSubmatch(s); m != nil && m[3] == m[1] { // Seinfeld '317 & 318 - The Boyfriend'
-		return fileEp{atoi(m[1]), atoi(m[2]), atoi(m[4]), m[5]}, true
+// pyRepr is Python's repr() of a str, enough for the reason column (quotes and backslashes; names hold no controls).
+func pyRepr(s string) string {
+	q := "'"
+	if strings.Contains(s, "'") && !strings.Contains(s, `"`) {
+		q = `"`
 	}
-	if m := seinfeldOne.FindStringSubmatch(s); m != nil { // Seinfeld '901 - The Butter Shave'
-		return fileEp{atoi(m[1]), atoi(m[2]), atoi(m[2]), m[3]}, true
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	if q == "'" {
+		s = strings.ReplaceAll(s, "'", `\'`)
 	}
-	loc := sxxeyy.FindStringSubmatchIndex(s)
-	if loc == nil {
-		if m := absolute.FindStringSubmatch(s); m != nil { // 'Case Closed - 013 - Kidnapped Amy   [DarkDream]'
-			return fileEp{-1, atoi(m[1]), atoi(m[1]), m[2]}, true
-		}
-		return fileEp{}, false
-	}
-	end := loc[1]
-	// Python's range group ends in (?![\dp]): a range followed by a digit or "p" (a resolution) is no range.
-	if loc[6] >= 0 && end < len(s) && (s[end] == 'p' || (s[end] >= '0' && s[end] <= '9')) {
-		loc[6], loc[7], end = -1, -1, loc[5]
-	}
-	first := atoi(s[loc[4]:loc[5]])
-	last := first
-	if loc[6] >= 0 {
-		if n := atoi(s[loc[6]:loc[7]]); n-first > 0 && n-first <= 3 {
-			last = n
-		}
-	}
-	rest := strings.NewReplacer(".", " ", "_", " ").Replace(s[end:])
-	if i := titleCut.FindStringIndex(rest); i != nil {
-		rest = rest[:i[0]]
-	}
-	if q := quality.FindStringIndex(rest); q != nil {
-		rest = rest[:q[0]]
-	}
-	return fileEp{atoi(s[loc[2]:loc[3]]), first, last, strings.TrimFunc(rest, func(r rune) bool { return isPySpace(r) || r == '-' || r == '–' })}, true
+	return q + s + q
 }
 
 func atoi(s string) int {
@@ -336,64 +304,9 @@ func atoi(s string) int {
 	return n
 }
 
-var showPrefixRe = regexp.MustCompile(`[Ss]\d{1,2}[ ._-]?[Ee]\d`)
-
-func showPrefix(name string) string {
-	if loc := showPrefixRe.FindStringIndex(name); loc != nil {
-		return normTitle(name[:loc[0]])
-	}
-	return ""
-}
-
-// sameShowAliases are show names a file may use for the title the metadata source gives (decided once by hand).
-var sameShowAliases = [][2]string{{"shinya shokudo", "midnight diner"}, {"plur1bus", "pluribus"}}
-
-func sameShow(prefix, show, original string) bool {
-	if prefix == "" {
-		return true
-	}
-	pw := map[string]bool{}
-	for _, w := range strings.Fields(prefix) {
-		if len([]rune(w)) > 2 && !isDigits(w) {
-			pw[w] = true
-		}
-	}
-	var names []string
-	for _, n := range []string{normTitle(show), normTitle(original)} {
-		if n != "" {
-			names = append(names, n)
-		}
-	}
-	if len(pw) == 0 {
-		return true
-	}
-	for _, n := range names {
-		for _, w := range strings.Fields(n) {
-			if pw[w] {
-				return true
-			}
-		}
-	}
-	for _, alias := range sameShowAliases {
-		if strings.Contains(prefix, alias[0]) {
-			for _, n := range names {
-				if strings.Contains(n, alias[1]) {
-					return true
-				}
-			}
-		}
-	}
-	for _, n := range names {
-		if seqRatio(prefix, n) >= 0.75 {
-			return true
-		}
-	}
-	return false
-}
-
 func isDigits(s string) bool {
 	for _, r := range s {
-		if !unicode.IsDigit(r) {
+		if r < '0' || r > '9' {
 			return false
 		}
 	}
