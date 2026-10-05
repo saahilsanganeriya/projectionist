@@ -102,8 +102,8 @@ func TestQuietFolderTriggersOnce(t *testing.T) {
 }
 
 // Catches: a folder whose events were lost (past the watch limit, between runs, a kernel queue overflow) never
-// triggering; the sweep re-triggering a folder whose content did not change (@eaDir bumps its mtime); a deleted
-// folder not triggering; and running out of watches without an alert.
+// triggering, including one moved in (mv keeps its old mtime); the sweep re-triggering a folder whose content did not
+// change (@eaDir bumps its mtime); a deleted folder not triggering; and running out of watches without an alert.
 func TestSweepCatchesLostEvents(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newRig(t, 3) // Movies and its two folders; TV and later folders are past the limit
@@ -113,6 +113,10 @@ func TestSweepCatchesLostEvents(t *testing.T) {
 		finish := r.start()
 		time.Sleep(time.Minute)
 		r.put("Movies/Lost (2003) {tmdb-3}/Lost.mkv", 1) // no events for any of these
+		moved := filepath.Join(r.dir, filepath.Dir(r.put("Movies/Moved (1999) {tmdb-5}/Moved.mkv", 1)))
+		if err := os.Chtimes(moved, time.Now().Add(-24*time.Hour), time.Now().Add(-24*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
 		r.put(old+"/@eaDir/thumb.jpg", 1)
 		if err := os.RemoveAll(filepath.Join(r.dir, gone)); err != nil {
 			t.Fatal(err)
@@ -127,13 +131,13 @@ func TestSweepCatchesLostEvents(t *testing.T) {
 
 		finish = r.start() // the next period's sweep finds what the events missed
 		time.Sleep(3*time.Minute + time.Second)
-		if got := r.quiet(); !slices.Equal(got, []string{gone + " sweep", "Movies/Lost (2003) {tmdb-3} sweep"}) {
-			t.Fatalf("after the sweep: quiet %q, want the gone and the lost folders", got)
+		if got := r.quiet(); !slices.Equal(got, []string{gone + " sweep", "Movies/Lost (2003) {tmdb-3} sweep", "Movies/Moved (1999) {tmdb-5} sweep"}) {
+			t.Fatalf("after the sweep: quiet %q, want the gone, lost and moved-in folders", got)
 		}
 		r.put("Movies/Over (2004) {tmdb-4}/Over.mkv", 1)
 		r.send(event{Overflow: true})
 		time.Sleep(3*time.Minute + time.Second)
-		if got := r.quiet(); len(got) != 3 || got[2] != "Movies/Over (2004) {tmdb-4} sweep" {
+		if got := r.quiet(); len(got) != 4 || got[3] != "Movies/Over (2004) {tmdb-4} sweep" {
 			t.Fatalf("after a queue overflow: quiet %q, want the folder it hid", got)
 		}
 		finish()
