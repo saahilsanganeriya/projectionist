@@ -50,7 +50,8 @@ func cueSeconds(g []string) float64 {
 	return float64(pyInt(g[0])*3600+pyInt(g[1])*60+pyInt(g[2])) + float64(pyInt(g[3]))/1000
 }
 
-// sane: at least 40 cues, none ending more than 10 s after the video, together spanning at least 40% of it.
+// sane: at least 40 cues, none ending more than 10 s after the video, together spanning at least 70% of it (half a
+// film's cues, like CD1 of a two-part subtitle, would still line up chunk by chunk).
 func sane(spans []span, duration float64) bool {
 	if len(spans) < minCues {
 		return false
@@ -59,7 +60,7 @@ func sane(spans []span, duration float64) bool {
 	for _, s := range spans {
 		maxEnd, minStart, maxStart = math.Max(maxEnd, s.end), math.Min(minStart, s.start), math.Max(maxStart, s.start)
 	}
-	return maxEnd <= duration+10 && maxStart-minStart >= float64(0.4*duration)
+	return maxEnd <= duration+10 && maxStart-minStart >= float64(0.7*duration)
 }
 
 // retime rewrites every cue time t as ratio*t + off (seconds), rounding half to even like Python's round().

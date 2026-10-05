@@ -294,6 +294,7 @@ type legacyResult struct {
 	SubFormat           flexString
 	SubForeignPartsOnly flexString
 	SubBad              flexString
+	SubSumCD            flexString
 	SubHearingImpaired  flexString
 	SubDownloadsCnt     flexString
 	SubEncoding         flexString
@@ -345,7 +346,7 @@ func (o *legacy) search(ctx context.Context, source string, params ...string) ([
 			HashMatch: r.MatchedBy == "moviehash", HearingImpaired: r.SubHearingImpaired == "1", Downloads: downloads,
 			Encoding: string(r.SubEncoding), Season: string(r.SeriesSeason), Episode: string(r.SeriesEpisode),
 			link: string(r.SubDownloadLink), provider: o,
-			unusable: r.SubFormat != "srt" || r.SubForeignPartsOnly == "1" || r.SubBad == "1",
+			unusable: r.SubFormat != "srt" || r.SubSumCD != "" && r.SubSumCD != "1" || r.SubForeignPartsOnly == "1" || r.SubBad == "1",
 		})
 	}
 	return out, nil
