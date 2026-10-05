@@ -86,6 +86,23 @@ retry_unreadable  = "24h"
 # notes_root      = "/volume1/PlexMediaServer/projectionist-test/details/notes" # dry run: notes into a mirror tree
 # paths_file      = "/path/to/list.txt"                                          # only these videos
 
+# Keeps Movies/ and TV/ in the naming scheme (replaces rename/rename_engine.py + apply_ops.py and autorename.py).
+# Identity from the names and TMDB (env.TMDB, direct); never from Plex or Jellyfin.
+[stages.rename]
+every        = "15m"
+root         = "/volume1/media"
+mode         = "apply" # "plan": write ops.tsv, review.tsv, problems.tsv to plan_dir and touch nothing; "undo": replay undo_log backwards
+plan_dir     = "/volume1/media/.projectionist/rename/plan"
+undo_log     = "/volume1/media/.projectionist/rename/undo.tsv" # apply_ops.py's format: either tool can undo the other's moves
+undo_units   = [] # undo mode: only these units (e.g. "movie:tmdb-348"); empty = the whole log
+redo_undone  = false # false: a file undo put back stays until you rename or move it; true: apply plans it again
+ghost_logs   = ["/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv"]
+review_file  = "/volume1/media/_needs-review.txt"
+aligned_log  = "/volume1/PlexMediaServer/subtitle-downloads/log2.csv" # the aligner's copy wins the primary subtitle name
+sublang_file = "" # optional JSON {path: {lang, sdh}} for subtitles whose language neither name nor text gives
+notify       = true  # tell Jellyfin which folders changed (one /Library/Media/Updated push per run; Plex watches the disk)
+quiet        = "10m" # a folder written to more recently is still arriving
+
 # The USB SSD (exFAT) as a mirror of Movies A→Z, as many as fit; replaces ssd-copy/fill.py. Idle I/O priority, capped,
 # paused while anyone but the owner is watching. Nothing on the SSD is overwritten, or deleted without proof.
 [stages.ssdmirror]

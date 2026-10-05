@@ -45,6 +45,7 @@ services:
       - /volumeUSB1/usbshare1-2:/volumeUSB1/usbshare1-2
       - /volume1/PlexMediaServer/ssd-copy:/volume1/PlexMediaServer/ssd-copy
       # subtitles: subfetch2.py's quota.csv and downloads.csv, imported once at cutover (OpenSubtitles' per-IP quota).
+      # rename: the aligner's log2.csv (its aligned copy takes the primary subtitle name).
       - /volume1/PlexMediaServer/subtitle-downloads:/volume1/PlexMediaServer/subtitle-downloads:ro
     secrets: [jellyfin_key, tmdb_read_token, tmdb_api_key, fanart_api_key] # /run/secrets/<name>, read-only
     logging:
