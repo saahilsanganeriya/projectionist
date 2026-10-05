@@ -1,7 +1,6 @@
 package watcher
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
@@ -218,9 +217,9 @@ func newRig(t *testing.T, limit int) *rig {
 func (r *rig) start() (finish func() stage.Report) {
 	r.src.dirs = map[string]bool{}
 	var rep stage.Report
-	done := make(chan error)
-	go func() {
-		done <- Stage{open: func() (source, error) { return r.src, nil }}.Run(context.Background(), r.env, &rep)
+	done := make(chan error, 1)
+	go func() { // a failed test cancels t.Context, which ends the run
+		done <- Stage{open: func() (source, error) { return r.src, nil }}.Run(r.t.Context(), r.env, &rep)
 	}()
 	return func() stage.Report {
 		if err := <-done; err != nil {
