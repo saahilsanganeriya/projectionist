@@ -464,6 +464,9 @@ type run struct {
 	disk    map[int]bool
 	canon   map[string]bool
 	targets []*collection // the desired collections this run reconciles (all, or the `only` list)
+
+	refused    int // posters the current sink refused this run
+	refusedErr error
 }
 
 func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {

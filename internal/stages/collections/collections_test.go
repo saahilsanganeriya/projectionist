@@ -190,10 +190,16 @@ func serveJellyfin(h *fake.Harness, a *app, posters map[string]string, ids ...in
 			json.NewDecoder(r.Body).Decode(&body)
 			c.Sort, c.Other = body["ForcedSortName"], body["Other"]
 		}))
-		h.Jellyfin.HandleFunc("POST", "/Items/"+c.ID+"/Images/Primary", a.write(func(r *http.Request) {
-			raw, _ := io.ReadAll(r.Body)
-			posters[c.Title] = r.Header.Get("Content-Type") + " " + string(raw)
-		}))
+		h.Jellyfin.HandleFunc("POST", "/Items/"+c.ID+"/Images/Primary", func(w http.ResponseWriter, r *http.Request) {
+			if posters == nil { // a Jellyfin that wants another image encoding
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			a.write(func(r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				posters[c.Title] = r.Header.Get("Content-Type") + " " + string(raw)
+			})(w, r)
+		})
 	}
 	h.Jellyfin.Handle("GET", "/Users", 200, `[{"Id":"guest","Policy":{"IsAdministrator":false}},{"Id":"admin","Policy":{"IsAdministrator":true}}]`)
 	h.Jellyfin.HandleFunc("GET", "/Items", a.read(func(w http.ResponseWriter, r *http.Request) {
@@ -351,6 +357,22 @@ func TestPlexOutageBacksOffAndNeverFailsTheRun(t *testing.T) {
 	rep = runOnce(t, h)
 	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "plex has failed collection updates since 2026-10-05T06:00:00Z") {
 		t.Fatalf("alerts after a day of failures = %v", rep.Alerts)
+	}
+}
+
+// Catches: a refused poster stalling Jellyfin's other collection work behind a backoff, or passing without an alert.
+func TestRefusedPosterAlertsWithoutStoppingJellyfin(t *testing.T) {
+	h := fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "mid"})
+	servePlex(h, &app{}, 1, 2, 3, 4)
+	jf := &app{}
+	serveJellyfin(h, jf, nil, 1, 2, 3, 4)
+	setup(t, h, "http://unused.invalid", `sinks = ["jellyfin"]`, 1, 2, 3, 4)
+	rep := runOnce(t, h)
+	if rep.Counts["jellyfin_failed"] != 0 || len(jf.colls) != 2 || jf.colls[0].Sort != "zzChristopher Nolan" {
+		t.Fatalf("counts %v, jellyfin %d collections, first sorted %q", rep.Counts, len(jf.colls), jf.colls[0].Sort)
+	}
+	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "jellyfin refused 1 collection poster(s) sent as image/jpeg bytes") {
+		t.Fatalf("alerts = %v", rep.Alerts)
 	}
 }
 

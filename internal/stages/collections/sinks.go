@@ -83,7 +83,11 @@ func (r *run) apply(ctx context.Context, s sink) {
 		r.rep.Count(s.Name()+"_waiting", 1)
 		r.env.Log.Info("sink backing off", "event", "sink_waiting", "sink", s.Name(), "retry_after", b.RetryAfter.UTC().Format(time.RFC3339))
 	default:
+		r.refused, r.refusedErr = 0, nil
 		err := r.reconcile(ctx, s)
+		if r.refused > 0 {
+			r.rep.Alert("%s refused %d collection poster(s) sent as image/jpeg bytes: %v", s.Name(), r.refused, r.refusedErr)
+		}
 		switch {
 		case err == nil:
 			b = backoff{}
@@ -301,7 +305,18 @@ func (r *run) poster(ctx context.Context, s sink, c *collection, id string) erro
 	if err != nil {
 		return err
 	}
-	if err := r.write(s, "poster", c, 0, func() error { return ps.Poster(ctx, id, jpeg) }); err != nil || r.opt.DryRun {
+	err = r.write(s, "poster", c, 0, func() error { return ps.Poster(ctx, id, jpeg) })
+	switch {
+	case err != nil && ctx.Err() == nil:
+		// A refused poster is cosmetic: it must not hold up members and sort titles. The run's alert names it.
+		r.refused++
+		r.rep.Count(s.Name()+"_poster_refused", 1)
+		r.env.Log.Warn("poster refused", "event", "poster_refused", "sink", s.Name(), "collection", c.Name, "err", err)
+		if r.refusedErr == nil {
+			r.refusedErr = err
+		}
+		return nil
+	case err != nil || r.opt.DryRun:
 		return err
 	}
 	return r.env.Store.PutJSON(ctx, name, "poster/"+s.Name()+"/"+id, c.Poster)
