@@ -5,11 +5,15 @@
 // followed), and Docker's view of the Jellyfin and qBittorrent containers. A service that fails `fail_threshold`
 // runs in a row raises an alert on every run until it passes. Its container is restarted through the Docker Engine
 // API only when all of these hold:
-//   - the container is in the `restartable` allow-list;
+//   - the container is in the `restartable` allow-list (default: none);
 //   - every failure is one a restart can cure: no answer, a timeout, HTTP 5xx, Docker "unhealthy". A refused key,
 //     an unexpected status or a stopped container is alerted, never "fixed" by a restart;
-//   - nobody is playing on Jellyfin;
-//   - this stage has not restarted it within `restart_cooldown`.
+//   - nobody is playing on Jellyfin: /Sessions counts the sessions, and an unread count holds the restart, unless
+//     Jellyfin answered none of this run's requests (a server that answers nothing streams to no one);
+//   - this stage has not restarted it within `restart_cooldown` (at least 1 h).
+//
+// A restart is recorded before it is sent, so it is resumable: when projectionist dies between Docker's stop and its
+// start, the next run starts the container it stopped.
 //
 // Plex is a DSM package and the hostnames belong to Cloudflare: their failures only alert. Plex and Jellyfin are
 // sinks: these probes read no data from them, they only prove the apps answer, and /Sessions is the viewer check.
@@ -56,7 +60,6 @@ func defaults() Options {
 		Timeout:              30 * time.Second, // a Cloudflare hostname took 9.8 s on the loaded NAS; a hung Jellyfin never answers
 		FailThreshold:        3,
 		RestartCooldown:      time.Hour,
-		Restartable:          []string{"jellyfin"},
 		DockerSocket:         "/var/run/docker.sock",
 		JellyfinContainer:    "jellyfin",
 		QBittorrentContainer: "qbittorrent",
@@ -67,13 +70,16 @@ func defaults() Options {
 // fault classifies a probe's outcome.
 type fault string
 
+// A restart may cure unanswered and down; it never cures wrong.
 const (
-	passed fault = ""
-	down   fault = "down"  // no answer, timeout, HTTP 5xx, Docker "unhealthy": a restart may cure it
-	wrong  fault = "wrong" // an answer, but the wrong one (refused key, unexpected status, container not running)
+	passed     fault = ""
+	unanswered fault = "unanswered" // no HTTP status at all: refused, reset, timed out
+	down       fault = "down"       // it answered, but HTTP 5xx or Docker "unhealthy"
+	wrong      fault = "wrong"      // the wrong answer (refused key, unexpected status, container not running)
 )
 
-// faultOf classifies a client error: no answer or a 5xx is down, anything else (401, unreadable key file) is wrong.
+// faultOf classifies a client error; anything that is neither a 5xx nor a transport failure (401, unreadable key
+// file) is wrong.
 func faultOf(err error) fault {
 	var status *jellyfin.StatusError
 	if errors.As(err, &status) {
@@ -84,18 +90,20 @@ func faultOf(err error) fault {
 	}
 	var netErr net.Error // *url.Error is one: every transport failure, timeouts included
 	if errors.As(err, &netErr) {
-		return down
+		return unanswered
 	}
 	return wrong
 }
 
 type probe struct {
 	name, service string
+	docker        bool // Docker's view of the service's container, not an answer from the service itself
 	check         func(ctx context.Context) (detail string, f fault)
 }
 
 type result struct {
 	probe, service, detail string
+	docker                 bool
 	fault                  fault
 	latency                time.Duration
 }
@@ -115,14 +123,18 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if err := env.Options(&opt); err != nil {
 		return err
 	}
-	if opt.Timeout <= 0 || opt.FailThreshold < 1 {
-		return errors.New("stages.health: timeout must be > 0 and fail_threshold >= 1")
+	if opt.Timeout <= 0 || opt.FailThreshold < 1 || opt.RestartCooldown < time.Hour {
+		return fmt.Errorf("stages.health: need timeout > 0, fail_threshold >= 1, restart_cooldown >= 1h; got %s, %d, %s",
+			opt.Timeout, opt.FailThreshold, opt.RestartCooldown)
 	}
 	st := State{Streak: map[string]int{}, LastRestart: map[string]time.Time{}}
 	if _, err := env.Store.GetJSON(ctx, name, "state", &st); err != nil {
 		return err
 	}
 	dk := newDocker(opt.DockerSocket)
+	if err := resume(ctx, env, dk, st, opt.Restartable, rep); err != nil {
+		return err
+	}
 	results := runProbes(ctx, opt.Timeout, probes(env, opt, dk))
 	if err := ctx.Err(); err != nil {
 		return err // probes cut short by shutdown are not failures
@@ -162,10 +174,13 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		if svc == "jellyfin" {
 			playing = jellyfinPlaying(ctx, env, opt.Timeout)
 		}
+		answered := slices.ContainsFunc(results, func(r result) bool {
+			return r.service == svc && !r.docker && r.fault != unanswered
+		})
 		v := decide(restartCase{
 			streak: st.Streak[svc], threshold: opt.FailThreshold, faults: faults,
 			container: c, allowed: slices.Contains(opt.Restartable, c),
-			sinceRestart: now.Sub(st.LastRestart[c]), cooldown: opt.RestartCooldown, playing: playing,
+			sinceRestart: now.Sub(st.LastRestart[c]), cooldown: opt.RestartCooldown, playing: playing, silent: !answered,
 		})
 		env.Metrics.Set("projectionist_health_failed_checks", float64(st.Streak[svc]), "service", svc)
 		if !v.alert {
@@ -193,25 +208,54 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 func restart(ctx context.Context, env *stage.Env, dk *docker, st *State, svc, c string, now time.Time, why string, rep *stage.Report) error {
 	st.Streak[svc] = 0 // the next restart needs a fresh run of failures
 	st.LastRestart[c] = now
-	// Recorded before acting: a crash in between can only skip a restart, never repeat one inside the cooldown.
+	// Recorded before acting: a crash in between can only skip a restart, never repeat one inside the cooldown, and
+	// one cut off after Docker's stop is finished by resume.
 	if err := env.Store.PutJSON(context.WithoutCancel(ctx), name, "state", st); err != nil {
 		return err
 	}
-	// Docker 24 runs the stop and then the start on the request's context: a request we abandon can leave the
-	// container stopped, so a shutdown never cancels it and the timeout is far above a slow restart.
-	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restartTimeout)
-	start := time.Now()
-	err := dk.restart(rctx, c)
-	cancel()
-	outcome := "restarted"
-	if err != nil {
-		outcome = "restart_failed"
-		rep.Alert("restart of container %s failed: %v", c, err)
+	return act(ctx, env, rep, "restart", c, why, dk.restart)
+}
+
+// resume starts a container that a restart of ours stopped and nothing started again (projectionist died between
+// Docker's stop and its start). A container the owner stops after one of our restarts started after it, so it
+// stays stopped.
+func resume(ctx context.Context, env *stage.Env, dk *docker, st State, restartable []string, rep *stage.Report) error {
+	for _, c := range restartable {
+		asked, ok := st.LastRestart[c]
+		if !ok {
+			continue
+		}
+		s, err := dk.inspect(ctx, c)
+		if err != nil || s.Status != "exited" || !s.StartedAt.Before(asked) || s.FinishedAt.Before(asked) {
+			continue // an inspect error is the probe's to report
+		}
+		rep.Alert("container %s stopped during this stage's restart at %s and never started again; starting it",
+			c, asked.Format(time.RFC3339))
+		if err := act(ctx, env, rep, "resume", c, "restart cut off after the stop", dk.start); err != nil {
+			return err
+		}
 	}
-	env.Log.Warn("container restart", "event", "container_restart", "container", c, "service", svc, "outcome", outcome,
+	return nil
+}
+
+// act runs one Docker action on container c to its end, then alerts a failure, logs, counts and records it. Docker 24
+// runs a restart's stop and start on the request's context, so an abandoned request can leave the container
+// stopped: a shutdown never cancels the action, and the bound is far above a slow restart.
+func act(ctx context.Context, env *stage.Env, rep *stage.Report, action, c, why string,
+	call func(context.Context, string) error) error {
+	actx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restartTimeout)
+	start := time.Now()
+	err := call(actx, c)
+	cancel()
+	outcome := "ok"
+	if err != nil {
+		outcome = "failed"
+		rep.Alert("%s of container %s failed: %v", action, c, err)
+	}
+	env.Log.Warn("container "+action, "event", "container_action", "action", action, "container", c, "outcome", outcome,
 		"duration_ms", time.Since(start).Milliseconds(), "err", err)
-	env.Metrics.Add("projectionist_health_restarts_total", 1, "container", c, "outcome", outcome)
-	return env.Store.AddEvent(context.WithoutCancel(ctx), now, name, c, outcome, map[string]any{"failed": why})
+	env.Metrics.Add("projectionist_health_container_actions_total", 1, "container", c, "action", action, "outcome", outcome)
+	return env.Store.AddEvent(context.WithoutCancel(ctx), env.Now(), name, c, action+"_"+outcome, map[string]any{"why": why})
 }
 
 // restartCase is everything decide weighs for one service this run.
@@ -223,6 +267,7 @@ type restartCase struct {
 	sinceRestart      time.Duration
 	cooldown          time.Duration
 	playing           func() (int, error) // sessions playing on the service; nil when it has no viewers
+	silent            bool                // the service answered none of its own HTTP probes this run
 }
 
 type verdict struct {
@@ -245,11 +290,12 @@ func decide(c restartCase) verdict {
 	}
 	if c.playing != nil {
 		n, err := c.playing()
-		// A server that does not answer at all cannot be streaming to anyone; any other error leaves it unknown.
-		if err != nil && faultOf(err) != down {
+		switch {
+		// A server that answered nothing this run, /Sessions included, streams to no one. Any answer, a 5xx too,
+		// means it is up and may be streaming, so an unread count is a busy one.
+		case err != nil && !(c.silent && faultOf(err) == unanswered):
 			return verdict{alert: true, hold: "cannot tell who is playing: " + err.Error()}
-		}
-		if n > 0 {
+		case n > 0:
 			return verdict{alert: true, hold: fmt.Sprintf("%d session(s) playing", n)}
 		}
 	}
@@ -282,41 +328,43 @@ func probes(env *stage.Env, opt Options, dk *docker) []probe {
 		Transport:     tr,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, // a 302 is the answer
 	}
-	get := func(url string, want ...int) func(context.Context) (string, fault) {
-		return func(ctx context.Context) (string, fault) { return httpCheck(ctx, web, url, want) }
+	get := func(name, service, url string, want ...int) probe {
+		return probe{name: name, service: service, check: func(ctx context.Context) (string, fault) {
+			return httpCheck(ctx, web, url, want)
+		}}
 	}
-	client := func(call func(context.Context) error) func(context.Context) (string, fault) {
-		return func(ctx context.Context) (string, fault) {
+	client := func(name, service string, call func(context.Context) error) probe {
+		return probe{name: name, service: service, check: func(ctx context.Context) (string, fault) {
 			if err := call(ctx); err != nil {
 				return err.Error(), faultOf(err)
 			}
 			return "200", passed
-		}
+		}}
 	}
-	inspect := func(container string) func(context.Context) (string, fault) {
-		return func(ctx context.Context) (string, fault) {
+	inspect := func(service, container string) probe {
+		return probe{name: "docker:" + container, service: service, docker: true, check: func(ctx context.Context) (string, fault) {
 			s, err := dk.inspect(ctx, container)
 			if err != nil {
 				return err.Error(), wrong
 			}
 			return s.judge()
-		}
+		}}
 	}
 	ps := []probe{
-		{"plex", "plex", client(func(ctx context.Context) error { return env.Plex.Do(ctx, http.MethodGet, "/identity") })},
-		{"jellyfin", "jellyfin", client(func(ctx context.Context) error {
+		client("plex", "plex", func(ctx context.Context) error { return env.Plex.Do(ctx, http.MethodGet, "/identity") }),
+		client("jellyfin", "jellyfin", func(ctx context.Context) error {
 			return env.Jellyfin.GetJSON(ctx, "/System/Info/Public", nil)
-		})},
-		{"jellyfin-items", "jellyfin", client(func(ctx context.Context) error {
+		}),
+		client("jellyfin-items", "jellyfin", func(ctx context.Context) error {
 			return env.Jellyfin.GetJSON(ctx, "/Items?Limit=1", nil)
-		})},
-		{"docker:" + opt.JellyfinContainer, "jellyfin", inspect(opt.JellyfinContainer)},
+		}),
+		inspect("jellyfin", opt.JellyfinContainer),
 		// 403 is up: the WebUI answers and wants a login (its localhost auth bypass is off).
-		{"qbittorrent", "qbittorrent", get(opt.QBittorrentURL+"/api/v2/app/version", 200, 403)},
-		{"docker:" + opt.QBittorrentContainer, "qbittorrent", inspect(opt.QBittorrentContainer)},
+		get("qbittorrent", "qbittorrent", opt.QBittorrentURL+"/api/v2/app/version", 200, 403),
+		inspect("qbittorrent", opt.QBittorrentContainer),
 	}
 	for _, u := range slices.Sorted(maps.Keys(opt.Public)) {
-		ps = append(ps, probe{u, "cloudflare", get(u, opt.Public[u])})
+		ps = append(ps, get(u, "cloudflare", u, opt.Public[u]))
 	}
 	return ps
 }
@@ -328,7 +376,7 @@ func httpCheck(ctx context.Context, c *http.Client, url string, want []int) (str
 	}
 	resp, err := c.Do(req)
 	if err != nil {
-		return err.Error(), down
+		return err.Error(), unanswered
 	}
 	resp.Body.Close()
 	switch {
@@ -351,7 +399,7 @@ func runProbes(ctx context.Context, timeout time.Duration, ps []probe) []result 
 			defer cancel()
 			start := time.Now()
 			detail, f := p.check(ctx)
-			out[i] = result{probe: p.name, service: p.service, detail: detail, fault: f, latency: time.Since(start)}
+			out[i] = result{probe: p.name, service: p.service, docker: p.docker, detail: detail, fault: f, latency: time.Since(start)}
 		})
 	}
 	wg.Wait()

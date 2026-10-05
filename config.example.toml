@@ -50,8 +50,8 @@ legacy_state    = "/volume1/PlexMediaServer/scripts/gpu_guard.state.json" # impo
 every                 = "5m"
 timeout               = "30s"          # per probe; all probes run at once (Cloudflare: up to 9.8 s seen)
 fail_threshold        = 3              # consecutive failed runs before an alert (and a restart)
-restart_cooldown      = "1h"           # at most one restart per container per cooldown
-restartable           = ["jellyfin"]   # the ONLY containers projectionist may restart; [] = alert only
+restart_cooldown      = "1h"           # at most one restart per container per cooldown; at least 1h
+restartable           = ["jellyfin"]   # the ONLY containers projectionist may restart; left out or [] = alert only
 docker_socket         = "/var/run/docker.sock"
 jellyfin_container    = "jellyfin"
 qbittorrent_container = "qbittorrent"

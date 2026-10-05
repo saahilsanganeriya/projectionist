@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 )
 
 // docker is the two Docker Engine API calls this stage needs, over the unix socket: inspect and restart.
@@ -24,8 +25,10 @@ func newDocker(socket string) *docker {
 }
 
 type containerState struct {
-	Status string       `json:"Status"` // running, exited, restarting, paused, ...
-	Health *healthState `json:"Health"` // nil when the image has no HEALTHCHECK
+	Status     string       `json:"Status"` // running, exited, restarting, paused, ...
+	Health     *healthState `json:"Health"` // nil when the image has no HEALTHCHECK
+	StartedAt  time.Time    `json:"StartedAt"`
+	FinishedAt time.Time    `json:"FinishedAt"` // the last stop; zero when it never stopped
 }
 
 type healthState struct {
@@ -61,6 +64,10 @@ func (d *docker) inspect(ctx context.Context, name string) (containerState, erro
 // restart stops the container (SIGKILL after 30 s) and starts it again; Docker answers once it has started.
 func (d *docker) restart(ctx context.Context, name string) error {
 	return d.call(ctx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/restart?t=30", nil)
+}
+
+func (d *docker) start(ctx context.Context, name string) error {
+	return d.call(ctx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/start", nil)
 }
 
 func (d *docker) call(ctx context.Context, method, path string, out any) error {
