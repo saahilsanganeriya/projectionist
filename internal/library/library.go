@@ -96,3 +96,35 @@ func ParseEpisode(path string) (e Episode, ok bool) {
 	}
 	return Episode{Show: sh[1], Year: year, ID: ID{Source: sh[3], Value: sh[4]}, Season: season, Episodes: eps, Title: ef[6], Ext: ext}, true
 }
+
+// Folder is a movie or show folder name read from the scheme ("Title (Year) {tmdb-N}").
+type Folder struct {
+	Title string
+	Year  int
+	ID    ID
+}
+
+// ParseMovieFolder reads a movie folder's name; ok is false when it is not in the scheme.
+func ParseMovieFolder(name string) (f Folder, ok bool) { return parseFolder(movieFolder, name) }
+
+// ParseShowFolder reads a show folder's name; ok is false when it is not in the scheme.
+func ParseShowFolder(name string) (f Folder, ok bool) { return parseFolder(showFolder, name) }
+
+// ParseSeasonFolder reads "Season NN" (00 holds specials); ok is false for any other name.
+func ParseSeasonFolder(name string) (season int, ok bool) {
+	m := seasonDir.FindStringSubmatch(name)
+	if m == nil {
+		return 0, false
+	}
+	season, _ = strconv.Atoi(m[1])
+	return season, true
+}
+
+func parseFolder(re *regexp.Regexp, name string) (Folder, bool) {
+	m := re.FindStringSubmatch(name)
+	if m == nil {
+		return Folder{}, false
+	}
+	year, _ := strconv.Atoi(m[2])
+	return Folder{Title: m[1], Year: year, ID: ID{Source: m[3], Value: m[4]}}, true
+}
