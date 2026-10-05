@@ -179,12 +179,14 @@ quiet        = "10m" # a folder written to more recently is still arriving
 
 # An English text subtitle beside every movie and episode; replaces scripts/sub_stats.py and scripts/subfetch2.py.
 # A video carrying an embedded English text track already has English subtitles (the players show it, and the audit
-# counts it): it is skipped, never opened. Cheap first: a subtitle made for the file's own release (its original
-# name's group, from the .details note or the rename logs; or an OpenSubtitles file-hash match) is written without
-# reading the video once its last cue fits the note's duration and frame rate. In careful mode (the default) anything
-# else waits in the alignment queue, worked while nobody but the owner watches, at most align_per_day titles in any
-# 24 h. mode = "quick" also writes any plausible subtitle that passes that check, its timing unverified and for good (a
-# written sidecar is never revisited), and aligns only inside align_window. Providers are called
+# counts it): it is skipped, never opened. Nothing is written whose timing was not checked. Per title, the first route
+# that succeeds: a subtitle made for the file's own release (its original name's group, from the .details note or the
+# rename logs; or an OpenSubtitles file-hash match) is written without reading the video once its last cue fits the
+# note's duration and frame rate; in sampled mode (the default) a plausible subtitle fitted to an English .en.idx
+# beside the video, still without reading it; then one fitted to sample_windows short windows of the video (the
+# English image track's caption starts, else the voice band of its audio), written retimed only when every window has
+# evidence and agrees. Anything else waits in the alignment queue, worked while nobody but the owner watches, at most
+# align_per_day titles in any 24 h (sampled mode: only inside align_window). Providers are called
 # directly, never through Plex: Gestdown (Addic7ed, episodes) and SITEC Subtitles (films) need no key; OpenSubtitles'
 # legacy REST API comes last whatever this list's order (180 downloads a day), and is used for a hash match, or when
 # no other provider has a candidate; OpenSubtitles.com and Subdl join only when <secrets_dir>/<name>_api_key exists
@@ -202,11 +204,12 @@ secrets_dir   = "/run/secrets"
 alass         = "/usr/local/bin/alass" # the queue: aligns to the audio when there is no English image track, and rescues misfits
 providers     = ["gestdown", "sitec", "subdl", "opensubtitles", "opensubtitles-com"]
 align_per_day = 20                     # queued titles aligned in any 24 h, counted as each starts reading its video; 0 = none
-mode          = "careful"              # careful: write unaligned only a release match, align any hour. quick: also write
-                                       # any plausible subtitle that passes the cheap check (no video read, timing not
-                                       # verified), fit to an English .en.idx where there is one, align only in align_window
-align_window  = "01:00-07:00"          # quick mode: the queue starts alignments only inside this window (config timezone);
-                                       # a run outside it that leaves titles queued asks for a run at its opening
+mode          = "sampled"              # sampled: the routes above. careful, the rollback: only a release match before
+                                       # the queue, which aligns at any hour
+align_window  = "01:00-07:00"          # sampled mode: the queue starts alignments only inside this window (config timezone);
+                                       # a run outside it, or inside it with the day's cap spent, asks for a run when it may
+sample_windows = 4                     # windows the sampled fit reads, spread over 3-97 % of the runtime
+sample_length  = "90s"                 # each; a window without dialogue is replaced by the next stretch, twice at most
 legacy_quota  = "/volume1/PlexMediaServer/subtitle-downloads" # subfetch2.py's quota files, read once while the store has none
 # undo_logs = [...]                    # rename logs for original names a note lacks; default: the details stage's list
 # output_dir = "/volume1/PlexMediaServer/projectionist-test/subtitles/out" # test runs: write sidecars here instead

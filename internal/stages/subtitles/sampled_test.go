@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"projectionist/internal/fake"
 	"projectionist/internal/probe"
@@ -92,13 +94,25 @@ func TestFitSamples(t *testing.T) {
 		drift[i] *= 1.0002
 	}
 	thin := captionSamples(truth, wins)
-	other := thin[2].captions[:3:3] // window 3 keeps 3 of its lines and gains another film's
+	other := thin[2].captions[:7:7] // window 3 keeps 7 of its lines and gains another film's 30: under half match
 	for _, c := range dense(1000, 11) {
 		if w := thin[2].win; c >= w.start && c < w.start+w.dur {
 			other = append(other, c)
 		}
 	}
 	thin[2].captions = other
+	five := captionSamples(truth, wins) // window 2 holds five lines, every one matched
+	five[1].captions = five[1].captions[:5]
+	var fewCues []span // the subtitle has five lines in window 2; the speech is all there
+	inSecond := 0
+	for _, c := range cueSpans(truth, 1, 0) {
+		if c.start >= wins[1].start && c.start < wins[1].start+wins[1].dur {
+			if inSecond++; inSecond > 5 {
+				continue
+			}
+		}
+		fewCues = append(fewCues, c)
+	}
 	close := []sampleWindow{{1000, 90}, {1090, 90}, {1180, 90}, {1270, 90}}
 	for _, c := range []struct {
 		name          string
@@ -114,10 +128,12 @@ func TestFitSamples(t *testing.T) {
 		{"captions, another cut", cueSpans(truth, 1, 0), captionSamples(cut, wins), 0, 0, "window 3 lacks evidence"},
 		{"captions, a drift", cueSpans(truth, 1, 0), captionSamples(drift, wins), 0, 0, "disagree"},
 		{"captions, a thin window", cueSpans(truth, 1, 0), thin, 0, 0, "window 3 lacks evidence"},
+		{"captions, a window of five lines", cueSpans(truth, 1, 0), five, 0, 0, "window 2 lacks evidence"},
 		{"captions, ratio undecided", cueSpans(truth, 1, 0), captionSamples(truth, close), 0, 0, "another frame-rate ratio"},
 		{"speech, 3.1 s early", cueSpans(truth, 1, -3.1), speechSamples(truth, wins), 1, -3.1, ""},
 		{"speech, PAL", cueSpans(truth, 25/23.976, 0.6), speechSamples(truth, wins), 25 / 23.976, 0.6, ""},
 		{"speech, another film", cueSpans(dense(1000, 11), 1, 0), speechSamples(truth, wins), 0, 0, "lacks evidence"},
+		{"speech, a window of five lines", fewCues, speechSamples(truth, wins), 0, 0, "window 2 lacks evidence"},
 		{"speech, another cut", cueSpans(truth, 1, 0), speechSamples(cut, wins), 0, 0, "lacks evidence"},
 		{"speech, a drift", cueSpans(truth, 1, 0), speechSamples(drift, wins), 0, 0, "disagree"},
 	} {
@@ -214,7 +230,13 @@ echo "$*" >> "`+dir+`/calls"; cat "`+dir+`/packets.json"`+"\n")
 		}
 		for i, want := range c.starts {
 			smp := s.samples[i]
-			if smp.win.start != want || len(smp.captions) < 25 || smp.captions[0] < want || math.Abs(smp.captions[0]-captionAt(captions, want)) > 1e-6 {
+			var in int
+			for _, c := range captions {
+				if c >= want && c < want+90 {
+					in++
+				}
+			}
+			if smp.win.start != want || len(smp.captions) != in || smp.captions[0] < want || math.Abs(smp.captions[0]-captionAt(captions, want)) > 1e-6 {
 				t.Errorf("%s: window %d at %v with %d captions from %v; want at %v, its captions in video time", c.name, i+1, smp.win.start,
 					len(smp.captions), smp.captions[:min(1, len(smp.captions))], want)
 			}
@@ -368,8 +390,14 @@ func TestRunSampled(t *testing.T) {
 		if c.want == "queued" {
 			var n int
 			f.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM events WHERE item=? AND status='rejected_sampled'`, f.path(show)).Scan(&n)
-			if n != 2 {
-				t.Errorf("%s: %d rejected_sampled events, want both candidates", c.why, n)
+			f.h.Now = f.h.Now.Add(169 * time.Hour) // due again: the refused subtitles are not sampled again
+			f.run(t)
+			again, _ := os.ReadFile(filepath.Join(ff, "ffprobe.calls"))
+			more, _ := os.ReadFile(filepath.Join(ff, "helper.calls"))
+			reads := func(b []byte) int { return strings.Count(string(b), "-read_intervals") + strings.Count(string(b), "-ss ") }
+			if n != 2 || reads(again)+reads(more) != reads(probes)+reads(helpers) || f.outcomes()[f.path(show)] != "queued" {
+				t.Errorf("%s: %d rejected_sampled events, windows read %d times, then %d after a second run; want both candidates refused once",
+					c.why, n, reads(probes)+reads(helpers), reads(again)+reads(more))
 			}
 			continue
 		}
@@ -385,5 +413,68 @@ func TestRunSampled(t *testing.T) {
 			v["id"] != "gestdown:0" || rep.Counts["written_sampled"] != 1 || strings.Count(strings.Join(f.requests, " "), "/dl/") != 0 {
 			t.Errorf("%s: event %v, counts %v; want %s, PAL, -2400 ms, 4 window offsets, gestdown:0 only", c.why, v, rep.Counts, ref)
 		}
+	}
+}
+
+// Catches a title sampled that cannot be sampled cheaply or meaningfully: under 10 minutes, an AVI without an index,
+// or no reference at all; and the reference picked wrong: the English image track whenever there is one (not a forced
+// one), else the first audio track.
+func TestNewSampler(t *testing.T) {
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "v.avi")
+	os.WriteFile(plain, []byte("RIFF\x04\x00\x00\x00AVI "), 0o644)
+	pgs := probe.Subtitle{Index: 4, Codec: "hdmv_pgs_subtitle", Language: "eng"}
+	audio := []probe.Audio{{Index: 1, Layout: "5.1(side)"}}
+	r := &run{env: fake.NewEnv(t, nil).Env, opt: Options{SampleWindows: 4, SampleLength: 90e9}}
+	for _, c := range []struct {
+		why, path string
+		info      probe.Info
+		want      string // "captions", "speech", or "" for none
+	}{
+		{"a film with English captions", "v.mkv", probe.Info{Duration: 6000, Audio: audio, Subtitles: []probe.Subtitle{pgs}}, "captions"},
+		{"only forced captions", "v.mkv", probe.Info{Duration: 6000, Audio: audio, Subtitles: []probe.Subtitle{{Index: 4, Codec: "hdmv_pgs_subtitle",
+			Language: "eng", Forced: true}}}, "speech"},
+		{"no captions", "v.mp4", probe.Info{Duration: 6000, Audio: audio}, "speech"},
+		{"no audio either", "v.mkv", probe.Info{Duration: 6000}, ""},
+		{"a featurette", "v.mkv", probe.Info{Duration: 540, Audio: audio}, ""},
+		{"an AVI without an index", plain, probe.Info{Duration: 6000, Audio: audio}, ""},
+	} {
+		s, why := r.newSampler(&title{path: c.path, info: c.info})
+		got := ""
+		if s != nil {
+			got = s.label()
+		}
+		if got != c.want || s == nil && why == "" {
+			t.Errorf("%s: %q (why %q), want %q", c.why, got, why, c.want)
+		}
+	}
+}
+
+// Catches the dialogue taken from a mix where a centre channel holds it, or a pan asked of a layout without one (ffmpeg
+// would fail the read).
+func TestDialogue(t *testing.T) {
+	for layout, want := range map[string]string{"5.1(side)": "-af pan=mono|c0=FC", "7.1": "-af pan=mono|c0=FC",
+		"stereo": "-ac 1", "mono": "-ac 1", "": "-ac 1", "quad": "-ac 1"} {
+		if got := dialogue(probe.Audio{Layout: layout}); got[0]+" "+got[1] != want {
+			t.Errorf("%q: %v, want %s", layout, got, want)
+		}
+	}
+}
+
+// Catches the sampled fit reading on when a seek does not land (no usable index: the helper reads from the start):
+// a read far past its share of the file stops the title's sampling. Linux only: the count is rchar from /proc.
+func TestSamplerStopsWhenAReadOverruns(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("rchar is read from /proc/<pid>/io")
+	}
+	h := fake.NewEnv(t, nil)
+	h.Script(t, "ffmpeg", "head -c 80000000 /dev/zero > /dev/null\n") // 80 MB for one 90 s window of a 1 GB film
+	video := filepath.Join(t.TempDir(), "v.mkv")
+	os.WriteFile(video, []byte("v"), 0o644)
+	r := &run{env: h.Env, opt: Options{SampleWindows: 4, SampleLength: 90e9}, rep: &stage.Report{}}
+	s, _ := r.newSampler(&title{path: video, info: probe.Info{Duration: 6000, Size: 1 << 30, Audio: []probe.Audio{{Index: 1}}}})
+	why, err := s.readAll(context.Background())
+	if err != nil || !strings.Contains(why, "no usable index") || s.read < 80e6 || s.read > 81e6 {
+		t.Errorf("why %q err %v after %d bytes; want stopped after the first window's 80 MB", why, err, s.read)
 	}
 }
