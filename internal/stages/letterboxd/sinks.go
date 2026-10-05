@@ -3,11 +3,12 @@ package letterboxd
 // ---- sinks: what Plex, Jellyfin and plex.tv hold (snapshots), and the writes that close the gap ----
 //
 // Each app runs in its own goroutine, so a slow Plex never holds up Jellyfin. A stored snapshot only ever shows
-// that nothing needs doing: writes are planned against a read of the app made in the same run (see planned).
-// Snapshots are also re-read every sink_refresh (Jellyfin: jellyfin_refresh), and each successful write updates
-// its stored row, so a rerun plans nothing. Idempotent calls get 3 attempts (2 s, 4 s apart); a write that may
-// have landed with its answer lost is not repeated in the run. 3 failed calls in a row end that app's run, and
-// what is left stays in the diff for the next run.
+// that nothing needs doing: writes are planned against a read of the app made in the same run (see planned), save
+// a rating within a day of the film's last forced read (see settle). Snapshots are also re-read every sink_refresh
+// (Jellyfin: jellyfin_refresh), and each successful write updates its stored row, so a rerun plans nothing.
+// Idempotent calls get 3 attempts (2 s, 4 s apart); a write that may have landed with its answer lost is not
+// repeated in the run. 3 failed calls in a row end that app's run, and what is left stays in the diff for the next
+// run. A film whose writes fail in 3 runs in a row parks, with one alert.
 
 import (
 	"context"
@@ -18,9 +19,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"projectionist/internal/store"
 )
 
 type sinkMeta struct {
@@ -200,23 +204,192 @@ func (r *run) planSink(wants []want, haves map[int]have, scope map[int]bool, set
 // planned plans an app's writes and counts them. A stored snapshot may only show that nothing needs doing: a plan
 // with work in it is made again against a read made now. He often watches in Plex and logs the film on Letterboxd
 // minutes later; planned against a listing from earlier in the day, that viewing would be scrobbled a second
-// time, and a view can never be taken back.
+// time, and a view can never be taken back. Each film forces that read at most once per rereadEvery, so a write
+// that keeps failing cannot page all of Plex every run.
 func (r *run) planned(ctx context.Context, app string, snapshot func(context.Context, bool) (sinkMeta, map[int]have, bool, error),
 	wants []want, scope map[int]bool, setsLast bool) (sinkMeta, map[int]have, sinkPlan, error) {
 	m, haves, readNow, err := snapshot(ctx, false)
 	if err != nil {
 		return m, nil, sinkPlan{}, fmt.Errorf("%s snapshot: %w", app, err)
 	}
+	retries, err := r.loadRetries(ctx, app)
+	if err != nil {
+		return m, nil, sinkPlan{}, err
+	}
 	p, unmatched := r.planSink(wants, haves, scope, setsLast)
-	if !readNow && len(p.ups)+len(p.add)+len(p.remove) > 0 {
-		if m, haves, _, err = snapshot(ctx, true); err != nil {
-			return m, nil, sinkPlan{}, fmt.Errorf("%s snapshot: %w", app, err)
+	if !readNow {
+		var due []int
+		for _, id := range sortedKeys(p.films()) {
+			if t := retries[id]; !t.parked(haves[id].Item) && r.env.Now().Sub(t.RereadAt) >= rereadEvery {
+				due = append(due, id)
+			}
 		}
-		p, unmatched = r.planSink(wants, haves, scope, setsLast)
+		if len(due) > 0 {
+			if m, haves, _, err = snapshot(ctx, true); err != nil {
+				return m, nil, sinkPlan{}, fmt.Errorf("%s snapshot: %w", app, err)
+			}
+			readNow = true
+			p, unmatched = r.planSink(wants, haves, scope, setsLast)
+			for _, id := range due {
+				t := retries[id]
+				t.RereadAt = r.env.Now()
+				if r.opt.DryRun { // a dry run's read must not keep the apply after it from reading again
+					continue
+				}
+				if err := r.saveRetry(ctx, app, id, t); err != nil {
+					return m, nil, sinkPlan{}, err
+				}
+				retries[id] = t
+			}
+		}
+	}
+	if p, err = r.settle(ctx, app, p, haves, retries, !readNow); err != nil {
+		return m, nil, sinkPlan{}, err
 	}
 	r.count(app+".unmatched", unmatched)
 	r.countPlan(app, p)
 	return m, haves, p, nil
+}
+
+// films is every film the plan writes to.
+func (p sinkPlan) films() map[int]bool {
+	out := map[int]bool{}
+	for _, u := range p.ups {
+		out[u.TMDB] = true
+	}
+	for _, id := range append(slices.Clone(p.add), p.remove...) {
+		out[id] = true
+	}
+	return out
+}
+
+// ---- writes that keep failing: one forced read per film per day, then parked ----
+
+const (
+	rereadEvery = 24 * time.Hour // a film's writes force a full read of its app at most this often
+	parkAfter   = 3              // runs in a row with a failed write for a film, after which its writes stop
+)
+
+// retry is a row of letterboxd_retry: what one film's writes have cost in one app.
+type retry struct {
+	Item     string    // the app item the failures were against; a new one (the app re-indexed it) starts afresh
+	RereadAt time.Time // last full read forced by this film's writes; zero = never
+	Tries    int       // runs in a row in which a write for this film failed or went unconfirmed
+}
+
+func (t retry) parked(item string) bool { return t.Tries >= parkAfter && t.Item == item }
+
+func (r *run) loadRetries(ctx context.Context, app string) (map[int]retry, error) {
+	out := map[int]retry{}
+	err := query(ctx, r.db, `SELECT tmdb, item, reread_at, tries FROM letterboxd_retry WHERE app=?`, func(rows *sql.Rows) error {
+		var id int
+		var t retry
+		var at string
+		if err := rows.Scan(&id, &t.Item, &at, &t.Tries); err != nil {
+			return err
+		}
+		var err error
+		t.RereadAt, err = time.Parse(store.TimeFormat, at)
+		out[id] = t
+		return err
+	}, app)
+	if err != nil {
+		return nil, storeErr{err}
+	}
+	return out, nil
+}
+
+func (r *run) saveRetry(ctx context.Context, app string, id int, t retry) error {
+	if _, err := r.db.ExecContext(ctx, `INSERT OR REPLACE INTO letterboxd_retry(app, tmdb, item, reread_at, tries) VALUES (?, ?, ?, ?, ?)`,
+		app, id, t.Item, t.RereadAt.UTC().Format(store.TimeFormat), t.Tries); err != nil {
+		return storeErr{err}
+	}
+	return nil
+}
+
+// settle applies the failure records to a plan: a film with nothing left to do starts any later count afresh, and
+// a parked film is left out. stale means every film with work forced a read within rereadEvery, so none was made
+// now: play counts and memberships wait for the next read, and only a rating, safe to send twice, is written.
+func (r *run) settle(ctx context.Context, app string, p sinkPlan, haves map[int]have, retries map[int]retry, stale bool) (sinkPlan, error) {
+	work := p.films()
+	for _, id := range sortedKeys(retries) {
+		switch t := retries[id]; {
+		case work[id]:
+		case r.env.Now().Sub(t.RereadAt) >= rereadEvery:
+			if _, err := r.db.ExecContext(ctx, `DELETE FROM letterboxd_retry WHERE app=? AND tmdb=?`, app, id); err != nil {
+				return p, storeErr{err}
+			}
+		case t.Tries != 0:
+			t.Tries = 0
+			if err := r.saveRetry(ctx, app, id, t); err != nil {
+				return p, err
+			}
+		}
+	}
+	parked, deferred := map[int]bool{}, map[int]bool{}
+	for id := range work {
+		if retries[id].parked(haves[id].Item) {
+			parked[id] = true
+		}
+	}
+	var out sinkPlan
+	for _, u := range p.ups {
+		if parked[u.TMDB] {
+			continue
+		}
+		if stale && u.Plays != u.FromPlays {
+			deferred[u.TMDB], u.Plays = true, u.FromPlays
+		}
+		if u.Plays != u.FromPlays || u.Rating != 0 || u.Last != "" {
+			out.ups = append(out.ups, u)
+		}
+	}
+	keep := func(ids []int) (kept []int) {
+		for _, id := range ids {
+			switch {
+			case parked[id]:
+			case stale:
+				deferred[id] = true
+			default:
+				kept = append(kept, id)
+			}
+		}
+		return kept
+	}
+	out.add, out.remove = keep(p.add), keep(p.remove)
+	r.count(app+".parked", len(parked))
+	r.count(app+".deferred", len(deferred))
+	return out, nil
+}
+
+// recordFails counts, per film, the runs in a row in which one of its writes failed or went unconfirmed, and tells
+// the owner once when films park.
+func (r *run) recordFails(ctx context.Context, wants []want) error {
+	titles := map[int]string{}
+	for _, w := range wants {
+		titles[w.TMDB] = w.Title
+	}
+	for _, app := range sortedKeys(r.fails) {
+		var parked []string
+		for _, id := range sortedKeys(r.fails[app]) {
+			var tries int
+			err := r.db.QueryRowContext(ctx, `INSERT INTO letterboxd_retry(app, tmdb, item, reread_at, tries)
+				VALUES (?1, ?2, COALESCE((SELECT item FROM letterboxd_sink WHERE app=?1 AND tmdb=?2), ''), ?3, 1)
+				ON CONFLICT(app, tmdb) DO UPDATE SET tries = CASE WHEN item = excluded.item THEN tries + 1 ELSE 1 END, item = excluded.item
+				RETURNING tries`, app, id, time.Time{}.Format(store.TimeFormat)).Scan(&tries)
+			if err != nil {
+				return storeErr{err}
+			}
+			if tries == parkAfter {
+				parked = append(parked, fmt.Sprintf("%s (TMDB %d)", titles[id], id))
+			}
+		}
+		if len(parked) > 0 {
+			r.rep.Alert("%s: writes for %s failed in %d runs in a row; parked until the app lists the film anew or it needs nothing more",
+				app, strings.Join(parked, ", "), parkAfter)
+		}
+	}
+	return nil
 }
 
 func (r *run) putMeta(ctx context.Context, app string, m sinkMeta) error {
@@ -263,13 +436,22 @@ func (r *run) countPlan(app string, p sinkPlan) {
 	}
 }
 
-func (r *run) failed(app, what string, id int, err error) {
+// failed reports a write that failed or went unconfirmed, for the films it was for (none: not a film's write).
+func (r *run) failed(app, what string, err error, ids ...int) {
 	kind, event := ".failed", "sink_write_failed"
-	if errors.Is(err, errUnconfirmed) { // sent, answer lost: the next run re-reads the app before planning it again
+	if errors.Is(err, errUnconfirmed) { // sent, answer lost: the next read of the app shows whether it landed
 		kind, event = ".unconfirmed", "sink_write_unconfirmed"
 	}
 	r.count(app+kind, 1)
-	r.env.Log.Warn("write failed or unconfirmed", "event", event, "app", app, "what", what, "tmdb", id, "err", err)
+	r.env.Log.Warn("write failed or unconfirmed", "event", event, "app", app, "what", what, "tmdb", ids, "err", err)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fails[app] == nil {
+		r.fails[app] = map[int]bool{}
+	}
+	for _, id := range ids {
+		r.fails[app][id] = true
+	}
 }
 
 // ---- Plex ----
@@ -402,7 +584,7 @@ func (r *run) syncPlex(ctx context.Context, wants []want, scope map[int]bool) er
 				return r.env.Plex.Do(ctx, http.MethodPut, "/:/scrobble?key="+url.QueryEscape(u.Item)+"&"+plexLib)
 			})
 			if err != nil {
-				r.failed(app, "scrobble", u.TMDB, err)
+				r.failed(app, "scrobble", err, u.TMDB)
 				break
 			}
 			h.Plays++
@@ -415,7 +597,7 @@ func (r *run) syncPlex(ctx context.Context, wants []want, scope map[int]bool) er
 			if err := r.call(ctx, b, func() error {
 				return r.env.Plex.Do(ctx, http.MethodPut, fmt.Sprintf("/:/rate?key=%s&%s&rating=%d", url.QueryEscape(u.Item), plexLib, u.Rating))
 			}); err != nil {
-				r.failed(app, "rate", u.TMDB, err)
+				r.failed(app, "rate", err, u.TMDB)
 			} else {
 				h.Rating = u.Rating
 				if err := r.saveHave(ctx, app, haves, u.TMDB, h); err != nil {
@@ -484,7 +666,7 @@ func (r *run) plexCollection(ctx context.Context, b *breaker, m sinkMeta, haves 
 			}
 		}
 		if err != nil {
-			r.failed(app, "collection_add", batch[0], err)
+			r.failed(app, "collection_add", err, batch...)
 			return nil
 		}
 		if err := r.mark(ctx, app, haves, batch, true, true); err != nil {
@@ -496,7 +678,7 @@ func (r *run) plexCollection(ctx context.Context, b *breaker, m sinkMeta, haves 
 		if err := r.call(ctx, b, func() error {
 			return r.env.Plex.Do(ctx, http.MethodDelete, "/library/collections/"+m.Collection+"/items/"+url.PathEscape(haves[id].Item))
 		}); err != nil {
-			r.failed(app, "collection_remove", id, err)
+			r.failed(app, "collection_remove", err, id)
 			return nil
 		}
 		if err := r.mark(ctx, app, haves, []int{id}, false, false); err != nil {
@@ -511,7 +693,7 @@ func (r *run) plexCollection(ctx context.Context, b *breaker, m sinkMeta, haves 
 			return r.env.Plex.Do(ctx, http.MethodPost, fmt.Sprintf("/hubs/sections/%d/manage?metadataItemId=%s&promotedToOwnHome=1&promotedToRecommended=1&promotedToSharedHome=0",
 				r.opt.PlexSection, m.Collection))
 		}); err != nil {
-			r.failed(app, "home_promote", 0, err)
+			r.failed(app, "home_promote", err)
 			return nil
 		}
 		m.PromotedID = m.Collection
@@ -693,7 +875,7 @@ func (r *run) syncJellyfin(ctx context.Context, wants []want, scope map[int]bool
 		if err := r.call(ctx, b, func() error {
 			return r.env.Jellyfin.PostJSON(ctx, "/UserItems/"+url.PathEscape(u.Item)+"/UserData?userId="+m.UserID, body, nil)
 		}); err != nil {
-			r.failed(app, "user_data", u.TMDB, err)
+			r.failed(app, "user_data", err, u.TMDB)
 			if b.fails >= 3 {
 				return errBreakerOpen
 			}
@@ -757,7 +939,7 @@ func (r *run) syncJellyfin(ctx context.Context, wants []want, scope map[int]bool
 			}
 		}
 		if err != nil {
-			r.failed(app, "collection_add", batch[0], err)
+			r.failed(app, "collection_add", err, batch...)
 			return nil
 		}
 		if err := r.mark(ctx, app, haves, batch, true, true); err != nil {
@@ -769,7 +951,7 @@ func (r *run) syncJellyfin(ctx context.Context, wants []want, scope map[int]bool
 		if err := r.call(ctx, b, func() error {
 			return r.env.Jellyfin.Delete(ctx, "/Collections/"+m.Collection+"/Items?ids="+ids(p.remove))
 		}); err != nil {
-			r.failed(app, "collection_remove", p.remove[0], err)
+			r.failed(app, "collection_remove", err, p.remove...)
 			return nil
 		}
 		if err := r.mark(ctx, app, haves, p.remove, false, false); err != nil {
@@ -821,7 +1003,7 @@ func (r *run) discover(ctx context.Context, method, path string, out any) error 
 	return json.Unmarshal(wrap.MediaContainer, out)
 }
 
-func (r *run) plexTVSnapshot(ctx context.Context) (map[int]have, error) {
+func (r *run) plexTVSnapshot(ctx context.Context, b *breaker) (map[int]have, error) {
 	m, haves, due, err := r.storedSnapshot(ctx, "plextv", r.opt.SinkRefresh, false)
 	if err != nil || !due {
 		return haves, err
@@ -830,7 +1012,8 @@ func (r *run) plexTVSnapshot(ctx context.Context) (map[int]have, error) {
 	const page = 100
 	for start := 0; ; start += page {
 		var l plexListing
-		if err := r.discover(ctx, http.MethodGet, fmt.Sprintf("/library/sections/watchlist/all?includeGuids=1&X-Plex-Container-Start=%d&X-Plex-Container-Size=%d", start, page), &l); err != nil {
+		path := fmt.Sprintf("/library/sections/watchlist/all?includeGuids=1&X-Plex-Container-Start=%d&X-Plex-Container-Size=%d", start, page)
+		if err := r.call(ctx, b, func() error { return r.discover(ctx, http.MethodGet, path, &l) }); err != nil {
 			return nil, err
 		}
 		for _, it := range l.Metadata {
@@ -853,9 +1036,14 @@ func (r *run) syncPlexTV(ctx context.Context, wants []want, _ map[int]bool) erro
 	if !r.opt.PlexWatchlist {
 		return nil
 	}
-	haves, err := r.plexTVSnapshot(ctx)
+	b := &breaker{}
+	haves, err := r.plexTVSnapshot(ctx, b)
 	if err != nil {
 		return fmt.Errorf("plex.tv watchlist snapshot: %w", err)
+	}
+	retries, err := r.loadRetries(ctx, app)
+	if err != nil {
+		return err
 	}
 	plexHaves, err := r.loadHaves(ctx, "plex")
 	if err != nil {
@@ -866,12 +1054,16 @@ func (r *run) syncPlexTV(ctx context.Context, wants []want, _ map[int]bool) erro
 		desired[id] = true
 	}
 	add, remove := planMembers(desired, haves)
+	p, err := r.settle(ctx, app, sinkPlan{add: add, remove: remove}, haves, retries, false) // a watchlist add or removal is safe to repeat
+	if err != nil {
+		return err
+	}
+	add, remove = p.add, p.remove
 	r.count(app+".watchlist_add", len(add))
 	r.count(app+".watchlist_remove", len(remove))
 	if r.opt.DryRun {
 		return nil
 	}
-	b := &breaker{}
 	for _, id := range add {
 		h := haves[id]
 		if h.Item == "" {
@@ -879,14 +1071,14 @@ func (r *run) syncPlexTV(ctx context.Context, wants []want, _ map[int]bool) erro
 			if err := r.call(ctx, b, func() error {
 				return r.discover(ctx, http.MethodGet, fmt.Sprintf("/library/metadata/matches?type=1&guid=tmdb://%d", id), &match)
 			}); err != nil {
-				r.failed(app, "match", id, err)
+				r.failed(app, "match", err, id)
 				if b.fails >= 3 {
 					return errBreakerOpen
 				}
 				continue
 			}
-			if len(match.Metadata) == 0 {
-				r.count(app+".no_match", 1)
+			if len(match.Metadata) == 0 { // a failure like any other, so a film plex.tv lacks parks
+				r.failed(app, "match", fmt.Errorf("plex.tv lists no film tmdb://%d", id), id)
 				continue
 			}
 			h.Item = match.Metadata[0].RatingKey
@@ -897,7 +1089,7 @@ func (r *run) syncPlexTV(ctx context.Context, wants []want, _ map[int]bool) erro
 		if err := r.call(ctx, b, func() error {
 			return r.discover(ctx, http.MethodPut, "/actions/addToWatchlist?ratingKey="+url.QueryEscape(h.Item), nil)
 		}); err != nil {
-			r.failed(app, "watchlist_add", id, err)
+			r.failed(app, "watchlist_add", err, id)
 			if b.fails >= 3 {
 				return errBreakerOpen
 			}
@@ -914,7 +1106,7 @@ func (r *run) syncPlexTV(ctx context.Context, wants []want, _ map[int]bool) erro
 		if err := r.call(ctx, b, func() error {
 			return r.discover(ctx, http.MethodPut, "/actions/removeFromWatchlist?ratingKey="+url.QueryEscape(h.Item), nil)
 		}); err != nil {
-			r.failed(app, "watchlist_remove", id, err)
+			r.failed(app, "watchlist_remove", err, id)
 			if b.fails >= 3 {
 				return errBreakerOpen
 			}

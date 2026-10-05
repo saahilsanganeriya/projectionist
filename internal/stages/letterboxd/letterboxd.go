@@ -5,8 +5,10 @@
 // 2 s, every answer that can be cached is): the RSS feed (every run), the watchlist and watched-films grid pages
 // (daily), the film pages (TMDB id, cached forever), and the account export unzipped on the NAS (the backfill).
 // Films join the library on the TMDB id in the folder names. Per app the stage keeps a snapshot of what the app
-// holds (Plex: one paged listing, re-read daily and before any run that writes to it; Jellyfin: every run, while
-// it is still indexing) and updates it after each write, so a rerun writes nothing.
+// holds (Plex: one paged listing, re-read daily and before a run that writes to it, at most once a day per film;
+// Jellyfin: every run, while it is still indexing) and updates it after each write, so a rerun writes nothing. A
+// film whose writes fail in 3 runs in a row is parked, and the owner told once. Diary viewings count once each, by
+// the viewing id that the feed guid and the export's boxd.it code both carry.
 //
 // Never: unwatch, lower a play count, clear a rating, or remove anything this stage did not add. Plex takes no
 // last-played date (a scrobble stamps "now"). Reviews are not synced: a Plex review is shown to everyone his
@@ -87,6 +89,20 @@ CREATE TABLE IF NOT EXISTS letterboxd_seen (slug TEXT PRIMARY KEY, rating INTEGE
 CREATE TABLE IF NOT EXISTS letterboxd_sink (app TEXT NOT NULL, tmdb INTEGER NOT NULL, item TEXT NOT NULL,
   plays INTEGER NOT NULL, rating INTEGER NOT NULL, last TEXT NOT NULL, member INTEGER NOT NULL, added INTEGER NOT NULL,
   PRIMARY KEY (app, tmdb));
+CREATE TABLE IF NOT EXISTS letterboxd_retry (app TEXT NOT NULL, tmdb INTEGER NOT NULL, item TEXT NOT NULL,
+  reread_at TEXT NOT NULL, tries INTEGER NOT NULL, PRIMARY KEY (app, tmdb));
+`
+
+// foldFeedIDs re-keys feed rows stored under the whole guid onto the viewing id. Where one viewing was stored
+// twice (as watch, then as review), the most recently logged row stays.
+const foldFeedIDs = `
+INSERT INTO letterboxd_entry(id, slug, tmdb, title, year, watched, rating, logged_at)
+  SELECT substr(id, length(rtrim(id, '0123456789')) + 1), slug, tmdb, title, year, watched, rating, logged_at
+  FROM letterboxd_entry WHERE id GLOB 'letterboxd-*'
+  ON CONFLICT(id) DO UPDATE SET slug=excluded.slug, tmdb=excluded.tmdb, title=excluded.title, year=excluded.year,
+    watched=excluded.watched, rating=excluded.rating, logged_at=excluded.logged_at
+  WHERE excluded.logged_at >= letterboxd_entry.logged_at;
+DELETE FROM letterboxd_entry WHERE id GLOB 'letterboxd-*';
 `
 
 // minInterval is the politeness floor: never more than one Letterboxd request per 2 s.
@@ -110,6 +126,7 @@ type run struct {
 	sleep func(context.Context, time.Duration) error
 	mu    sync.Mutex
 	rep   *stage.Report
+	fails map[string]map[int]bool // app → films with a write that failed or went unconfirmed this run
 }
 
 func (r *run) count(kind string, n int) {
@@ -129,14 +146,14 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if opt.Interval < minInterval {
 		return fmt.Errorf("%w: %v", errTooFast, opt.Interval)
 	}
-	if _, err := env.Store.DB().ExecContext(ctx, schema); err != nil {
+	if _, err := env.Store.DB().ExecContext(ctx, schema+foldFeedIDs); err != nil {
 		return err
 	}
 	sleep := s.sleep
 	if sleep == nil {
 		sleep = realSleep
 	}
-	r := &run{env: env, opt: opt, db: env.Store.DB(), until: env.Now().Add(opt.RunBudget), sleep: sleep, rep: rep, fetch: &fetcher{
+	r := &run{env: env, opt: opt, db: env.Store.DB(), until: env.Now().Add(opt.RunBudget), sleep: sleep, rep: rep, fails: map[string]map[int]bool{}, fetch: &fetcher{
 		http: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}},
@@ -202,6 +219,9 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	}
 	if storeFailure != nil {
 		return storeFailure
+	}
+	if err := r.recordFails(ctx, wants); err != nil {
+		return err
 	}
 	inLib, watched := 0, 0
 	for _, w := range wants {
@@ -324,7 +344,8 @@ func (r *run) readFeed(ctx context.Context) error {
 			continue
 		}
 		res, err := r.db.ExecContext(ctx, `INSERT INTO letterboxd_entry(id, slug, tmdb, title, year, watched, rating, logged_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET rating=excluded.rating WHERE rating != excluded.rating`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET watched=excluded.watched, rating=excluded.rating
+			WHERE watched != excluded.watched OR rating != excluded.rating`,
 			e.ID, e.Slug, e.TMDB, e.Title, e.Year, e.Watched, e.Rating, e.LoggedAt.Format(store.TimeFormat))
 		if err != nil {
 			return storeErr{err}

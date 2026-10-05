@@ -145,8 +145,7 @@ func (f facts) wants() (wants []want, missing []missingFilm, unresolved, other i
 		title     string
 		year      int
 		watched   bool
-		csvDays   map[string]int
-		rssDays   map[string]int
+		days      []string // one per viewing
 		rating    int
 		ratedAt   time.Time
 		watchlist bool
@@ -155,7 +154,7 @@ func (f facts) wants() (wants []want, missing []missingFilm, unresolved, other i
 	get := func(slug string) *agg {
 		a := bySlug[slug]
 		if a == nil {
-			a = &agg{slug: slug, csvDays: map[string]int{}, rssDays: map[string]int{}}
+			a = &agg{slug: slug}
 			bySlug[slug] = a
 		}
 		return a
@@ -179,6 +178,10 @@ func (f facts) wants() (wants []want, missing []missingFilm, unresolved, other i
 		}
 	}
 
+	// Each diary viewing counts once, by its id: a feed entry replaces the export's row for the same viewing (whose
+	// date he may have corrected since), and adding a review later changes the guid's prefix, never its number.
+	type viewing struct{ slug, day string }
+	viewings := map[string]viewing{}
 	var watchlist []string
 	if f.ex != nil {
 		filmLID := f.exportFilmLIDs()
@@ -191,10 +194,8 @@ func (f facts) wants() (wants []want, missing []missingFilm, unresolved, other i
 		}
 		for _, r := range f.ex.Diary {
 			if slug, ok := slugFor(f.diaryLID(r, filmLID)); ok && r.Watched != "" {
-				a := get(slug)
-				a.watched = true
-				a.csvDays[r.Watched]++
-				name(a, r.Title, r.Year)
+				viewings[viewingKey(r.LID)] = viewing{slug, r.Watched}
+				name(get(slug), r.Title, r.Year)
 			}
 		}
 		for _, r := range f.ex.Ratings {
@@ -219,11 +220,15 @@ func (f facts) wants() (wants []want, missing []missingFilm, unresolved, other i
 		}
 	}
 	for _, e := range f.entries {
+		viewings[e.ID] = viewing{e.Slug, e.Watched}
 		a := get(e.Slug)
-		a.watched = true
-		a.rssDays[e.Watched]++
 		rate(a, e.Rating, e.LoggedAt)
 		name(a, e.Title, e.Year)
+	}
+	for _, v := range viewings {
+		a := get(v.slug)
+		a.watched = true
+		a.days = append(a.days, v.day)
 	}
 	for slug, s := range f.seen {
 		a := get(slug)
@@ -235,6 +240,7 @@ func (f facts) wants() (wants []want, missing []missingFilm, unresolved, other i
 	}
 
 	byTMDB := map[int]*want{}
+	ratedAt := map[int]time.Time{}
 	for _, slug := range sortedKeys(bySlug) {
 		a := bySlug[slug]
 		film, ok := f.films[slug]
@@ -246,44 +252,30 @@ func (f facts) wants() (wants []want, missing []missingFilm, unresolved, other i
 			other++
 			continue
 		}
-		// A diary day logged in both the export and the feed is one viewing, so take the larger count per day.
-		days := map[string]bool{}
-		for day := range a.csvDays {
-			days[day] = true
-		}
-		for day := range a.rssDays {
-			days[day] = true
-		}
-		plays, first, last := 0, "", ""
-		for day := range days {
-			plays += max(a.csvDays[day], a.rssDays[day])
-			if first == "" || day < first {
-				first = day
-			}
-			last = max(last, day)
-		}
-		if a.watched {
-			plays = max(plays, 1)
-		}
 		w := byTMDB[film.TMDB]
 		if w == nil {
 			w = &want{TMDB: film.TMDB, Slug: slug, Title: a.title, Year: a.year}
 			byTMDB[film.TMDB] = w
 		}
-		// Two Letterboxd slugs on one TMDB film (rare duplicates) merge: union of facts, latest rating.
+		// Two Letterboxd slugs on one TMDB film (rare duplicates) merge: union of facts, the most recent rating.
 		w.Watched = w.Watched || a.watched
 		w.Watchlist = w.Watchlist || a.watchlist
-		w.Plays = max(w.Plays, plays)
-		w.Last = max(w.Last, last)
-		if w.First == "" || (first != "" && first < w.First) {
-			w.First = first
+		w.Plays += len(a.days)
+		for _, day := range a.days {
+			w.Last = max(w.Last, day)
+			if w.First == "" || day < w.First {
+				w.First = day
+			}
 		}
-		if a.rating > 0 {
-			w.Rating = a.rating
+		if a.rating > 0 && !a.ratedAt.Before(ratedAt[film.TMDB]) {
+			w.Rating, ratedAt[film.TMDB] = a.rating, a.ratedAt
 		}
 	}
 	for _, id := range sortedKeys(byTMDB) {
 		w := byTMDB[id]
+		if w.Watched {
+			w.Plays = max(w.Plays, 1)
+		}
 		if lib, ok := f.library[id]; ok {
 			w.InLibrary, w.Title, w.Year = true, lib.Title, lib.Year
 		} else if w.Watchlist {

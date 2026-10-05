@@ -83,7 +83,15 @@ func (lb *fakeLetterboxd) logRing() {
 		` <letterboxd:filmTitle>The Ring</letterboxd:filmTitle> <letterboxd:filmYear>2002</letterboxd:filmYear>` +
 		` <letterboxd:memberRating>4.0</letterboxd:memberRating> <tmdb:movieId>565</tmdb:movieId> </item>`
 	lb.feed = []byte(strings.Replace(string(lb.feed), "<channel>", "<channel>"+item, 1))
-	lb.etag = `"v2"`
+	lb.etag += "+"
+}
+
+// editFeed changes the served feed as an edit on Letterboxd would, with a new ETag.
+func (lb *fakeLetterboxd) editFeed(old, new string) {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	lb.feed = []byte(strings.Replace(string(lb.feed), old, new, 1))
+	lb.etag += "+"
 }
 
 func (lb *fakeLetterboxd) total() int {
@@ -115,6 +123,7 @@ type apps struct {
 	collection       []string
 	promoted         bool
 	failScrobble     bool
+	failRate         map[string]bool // ratingKey → /:/rate answers 500
 	loseCreateAnswer bool
 	dropScrobble     bool               // count the view, then drop the connection: the answer is lost
 	jf               map[string]*jfFilm // item id →
@@ -215,6 +224,10 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 	px.HandleFunc("PUT", "/:/rate", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
+		if a.failRate[r.URL.Query().Get("key")] {
+			http.Error(w, "busy", 500)
+			return
+		}
 		fmt.Sscan(r.URL.Query().Get("rating"), &a.plex[r.URL.Query().Get("key")].rating)
 	})
 
@@ -686,5 +699,84 @@ func TestSlowPlexEndsItsPartOfTheRun(t *testing.T) {
 	rep := w.run(t, "")
 	if n := len(w.h.Plex.Calls("GET", "/library/sections/4/all")); n != 0 || rep.Counts["out_of_time"] == 0 || rep.Counts["sink_errors"] == 0 {
 		t.Errorf("%d Plex listing calls after the budget (counts %v)", n, rep.Counts)
+	}
+}
+
+// Catches: a viewing counted twice when he adds a review to it (the feed guid turns letterboxd-watch-<id> into
+// letterboxd-review-<id>), also against a feed row stored under the whole guid before this key, and an edited
+// watched date that never reaches Jellyfin's last played. Nothing may lower a play count, so a second view stays.
+func TestEditedDiaryEntryIsOneViewing(t *testing.T) {
+	w := newWorld(t)
+	w.lb.logRing()
+	w.run(t, "")
+	// The row as stages before the viewing-id key stored it.
+	if _, err := w.h.Env.Store.DB().Exec(`UPDATE letterboxd_entry SET id='letterboxd-watch-1530000000' WHERE id='1530000000'`); err != nil {
+		t.Fatal(err)
+	}
+	w.lb.editFeed("letterboxd-watch-1530000000", "letterboxd-review-1530000000") // he adds a review
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	rep := w.run(t, "")
+	if v, p := w.apps.plex["30"].views, w.apps.jf["j30"].plays; v != 1 || p != 1 {
+		t.Errorf("one viewing with a review added: Plex views %d, Jellyfin plays %d, want 1 and 1 (counts %v)", v, p, rep.Counts)
+	}
+	w.lb.editFeed("<letterboxd:watchedDate>2026-10-04<", "<letterboxd:watchedDate>2026-10-05<") // he corrects the date
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	w.run(t, "")
+	if f := w.apps.jf["j30"]; f.plays != 1 || f.last != "2026-10-05T19:00:00Z" || w.apps.plex["30"].views != 1 {
+		t.Errorf("edited watched date: jellyfin %+v, Plex views %d; want 1 play last played 2026-10-05 noon PT, 1 view", f, w.apps.plex["30"].views)
+	}
+}
+
+// Catches: a write that keeps failing re-paging Plex every run (a film may force one full re-read a day), a film
+// inside that day scrobbled or moved in or out of a collection from an older listing (only a rating, safe to send
+// twice, may be), a dry run's re-read keeping the apply after it from reading again, a film whose writes failed
+// in 3 runs in a row still written, the owner told of it more than once, and deferred writes never landing.
+func TestFailingWritesRereadOncePerDayThenPark(t *testing.T) {
+	w := newWorld(t)
+	w.apps.failRate = map[string]bool{"10": true, "20": true}
+	rates := func() int { return len(w.h.Plex.Calls("PUT", "/:/rate")) }
+	step := func(d time.Duration, extra string) stage.Report {
+		w.h.Now = w.h.Now.Add(d)
+		return w.run(t, extra)
+	}
+	step(0, "dry_run = true\n")
+	if rep := step(30*time.Minute, "dry_run = true\n"); rep.Counts["plex.snapshot"] != 1 {
+		t.Fatalf("setup: a dry run whose plan has work reads Plex again: %v", rep.Counts)
+	}
+	rep := step(30*time.Minute, "") // scrobbles land, both ratings fail
+	if rep.Counts["plex.snapshot"] != 1 || w.apps.plex["10"].views != 3 || w.apps.plex["20"].views != 2 {
+		t.Errorf("apply after a dry run: Plex read %d times, views %d and %d; want a read and 3, 2 (counts %v)",
+			rep.Counts["plex.snapshot"], w.apps.plex["10"].views, w.apps.plex["20"].views, rep.Counts)
+	}
+
+	w.lb.logRing() // The Ring, put in the Watchlist collection by the run before, is watched and logged
+	rep = step(30*time.Minute, "")
+	if f := w.apps.plex["30"]; rep.Counts["plex.snapshot"] != 0 || f.views != 0 || !slices.Contains(w.apps.collection, "30") || f.rating != 8 {
+		t.Errorf("a day of a re-read: Plex read %d times, The Ring %+v in %v; want no read, no scrobble, kept, rated 8 (counts %v)",
+			rep.Counts["plex.snapshot"], f, w.apps.collection, rep.Counts)
+	}
+	if rep = step(30*time.Minute, ""); len(rep.Alerts) != 1 { // the third run with failed ratings
+		t.Errorf("parking alerts = %v, want one", rep.Alerts)
+	}
+	before := rates()
+	if rep = step(30*time.Minute, ""); rates() != before || len(rep.Alerts) != 0 || rep.Counts["plex.parked"] != 2 {
+		t.Errorf("parked films: %d more rate calls, alerts %v (counts %v)", rates()-before, rep.Alerts, rep.Counts)
+	}
+
+	before = rates()
+	rep = step(25*time.Hour, "") // the daily read: The Ring's deferred writes land; the parked films stay parked
+	if w.apps.plex["30"].views != 1 || slices.Contains(w.apps.collection, "30") || rates() != before {
+		t.Errorf("after the daily read: The Ring views %d, collection %v, %d rate calls (counts %v)",
+			w.apps.plex["30"].views, w.apps.collection, rates()-before, rep.Counts)
+	}
+}
+
+// Catches: plex.tv's watchlist listing read outside r.call, so neither the run budget nor the breaker covers it
+// and a slow plex.tv holds the run open.
+func TestPlexTVInsideRunBudget(t *testing.T) {
+	w := newWorld(t)
+	rep := w.run(t, fmt.Sprintf("plex_watchlist = true\ndiscover_url = %q\nrun_budget = \"0s\"\n", w.h.Plex.URL))
+	if n := len(w.h.Plex.Calls("GET", "/library/sections/watchlist/all")); n != 0 || rep.Counts["out_of_time"] == 0 {
+		t.Errorf("%d plex.tv listing calls with the run budget spent (counts %v)", n, rep.Counts)
 	}
 }

@@ -17,25 +17,30 @@ func baseFacts() facts {
 			Diary: []exportRow{
 				{LID: "v1", Title: "Licorice Pizza", Year: 2021, Watched: "2021-11-25"},
 				{LID: "v2", Title: "Licorice Pizza", Year: 2021, Watched: "2022-01-09"},
-				{LID: "v3", Title: "Ad Astra", Year: 2019, Watched: "2026-01-20"},
+				// cPajUH is his export's code for the viewing his feed calls letterboxd-watch-1174964695 (another film:
+				// the pair is what matters here)
+				{LID: "cPajUH", Title: "Ad Astra", Year: 2019, Watched: "2026-01-20"},
 			},
 			Ratings:   []exportRow{{LID: "lp", Rating: 10, Date: "2022-01-10"}, {LID: "aa", Rating: 6, Date: "2026-01-20"}},
 			Watchlist: []exportRow{{LID: "ring", Title: "The Ring", Year: 2002}, {LID: "okja", Title: "Okja", Year: 2017}},
 		},
 		entries: []rssEntry{
-			// the same viewing as the export's v3 (one day, both sources) and a re-rating after the export
-			{ID: "e1", Slug: "ad-astra-2019", Watched: "2026-01-20", Rating: 9, LoggedAt: exportAt.Add(48 * time.Hour)},
+			// the export's cPajUH viewing, its date corrected since the export, and a re-rating after the export
+			{ID: "1174964695", Slug: "ad-astra-2019", Watched: "2026-01-21", Rating: 9, LoggedAt: exportAt.Add(48 * time.Hour)},
 		},
-		// an older grid observation, read after the export: it must not beat the export's newer rating
-		seen:    map[string]seenFilm{"licorice-pizza": {Rating: 8, At: time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)}},
+		// a duplicate slug on the same TMDB film with an older rating: it must not beat the export's newer one, though
+		// its slug sorts last
+		seen:    map[string]seenFilm{"licorice-pizza-2021": {Rating: 8, At: time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)}},
 		lidSlug: map[string]string{"lp": "licorice-pizza", "aa": "ad-astra-2019", "tv": "chernobyl", "ring": "the-ring-2002", "okja": "okja"},
-		films: map[string]filmFacts{"licorice-pizza": {718032, "movie"}, "ad-astra-2019": {419704, "movie"},
+		films: map[string]filmFacts{"licorice-pizza": {718032, "movie"}, "licorice-pizza-2021": {718032, "movie"}, "ad-astra-2019": {419704, "movie"},
 			"chernobyl": {87108, "tv"}, "the-ring-2002": {565, "movie"}, "okja": {387426, "movie"}},
 		library: map[int]libraryFilm{718032: {"Licorice Pizza", 2021}, 419704: {"Ad Astra", 2019}, 565: {"The Ring", 2002}},
 	}
 }
 
-// Catches: a viewing in both the export and the feed counted twice, an older rating beating a newer one, a TV
+// Catches: a viewing in both the export and the feed counted twice (matched on its id, so a date edited since the
+// export is still one viewing, and the feed's date wins), an older rating beating a newer one, also from a second
+// slug on the same film, a TV
 // TMDB id joined to a movie, an unresolved film silently dropped from the count, a newer complete watchlist
 // crawl not replacing the export's watchlist (or an older one replacing it), and missing films listed wrong.
 func TestWants(t *testing.T) {
@@ -51,8 +56,8 @@ func TestWants(t *testing.T) {
 	if w := got[718032]; !w.InLibrary || !w.Watched || w.Plays != 2 || w.First != "2021-11-25" || w.Last != "2022-01-09" || w.Rating != 10 {
 		t.Errorf("Licorice Pizza = %+v", w)
 	}
-	if w := got[419704]; w.Plays != 1 || w.Rating != 9 {
-		t.Errorf("Ad Astra = %+v (want one play, the feed's newer rating 9)", w)
+	if w := got[419704]; w.Plays != 1 || w.Rating != 9 || w.Last != "2026-01-21" {
+		t.Errorf("Ad Astra = %+v (want one play last on the feed's 2026-01-21, the feed's newer rating 9)", w)
 	}
 	if w := got[565]; !w.Watchlist || w.Watched || !w.InLibrary {
 		t.Errorf("The Ring = %+v", w)

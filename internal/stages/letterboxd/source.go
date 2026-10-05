@@ -110,7 +110,7 @@ func slugOf(path string) string {
 
 // rssEntry is one diary entry from the feed (list items are skipped).
 type rssEntry struct {
-	ID       string // the feed guid, e.g. letterboxd-watch-1522858910
+	ID       string // the viewing id: the number in the guid letterboxd-watch-<id>, letterboxd-review-<id> once reviewed
 	Slug     string
 	TMDB     int
 	Title    string
@@ -138,14 +138,18 @@ func parseRSS(body []byte) ([]rssEntry, error) {
 	}
 	var out []rssEntry
 	for _, it := range doc.Items {
-		if it.Watched == "" || !(strings.HasPrefix(it.GUID, "letterboxd-watch-") || strings.HasPrefix(it.GUID, "letterboxd-review-")) {
+		id, ok := strings.CutPrefix(it.GUID, "letterboxd-watch-")
+		if !ok {
+			id, ok = strings.CutPrefix(it.GUID, "letterboxd-review-")
+		}
+		if it.Watched == "" || !ok {
 			continue
 		}
 		logged, err := time.Parse("Mon, 2 Jan 2006 15:04:05 -0700", it.PubDate) // the day has no leading zero
 		if err != nil {
 			return nil, fmt.Errorf("letterboxd rss %s: pubDate %q: %w", it.GUID, it.PubDate, err)
 		}
-		out = append(out, rssEntry{ID: it.GUID, Slug: slugOf(it.Link), TMDB: it.MovieID, Title: it.Title, Year: it.Year,
+		out = append(out, rssEntry{ID: id, Slug: slugOf(it.Link), TMDB: it.MovieID, Title: it.Title, Year: it.Year,
 			Watched: it.Watched, Rating: halfStars(it.Rating), LoggedAt: logged.UTC()})
 	}
 	return out, nil
@@ -281,6 +285,25 @@ func readExport(dir string) (ex export, ok bool, err error) {
 		}
 	}
 	return ex, true, nil
+}
+
+// viewingKey names the viewing a diary row's boxd.it code stands for. The code is base 62 (0-9a-zA-Z) of id*10+1,
+// the final 1 marking a viewing (film codes end in 0): all 617 diary codes in his 2026-02-01 export end in 1, and
+// the four of those viewings still in the feed decode to their guid numbers. Any other code keeps its own name.
+func viewingKey(code string) string {
+	const digits = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	var n uint64
+	for _, c := range code {
+		i := strings.IndexRune(digits, c)
+		if i < 0 {
+			return "code:" + code
+		}
+		n = n*62 + uint64(i)
+	}
+	if len(code) > 10 || n%10 != 1 { // longer would overflow: 62^10 < 2^64
+		return "code:" + code
+	}
+	return strconv.FormatUint(n/10, 10)
 }
 
 func readCSV(path string) ([]exportRow, error) {
