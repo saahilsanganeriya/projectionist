@@ -1,0 +1,10 @@
+Title:           All of Us Strangers (2023) {tmdb-994108}
+Original name:   All of Us Strangers (2023) Criterion (1080p BluRay x265 Silence).mkv
+Original folder: All of Us Strangers (2023) Criterion (1080p BluRay x265 HEVC 10bit EAC3 5.1 Silence)
+Resolution:      1920x800 (1080p)
+Video:           x265 (HEVC) · 10-bit · SDR · 23.976 fps · 7.8 Mb/s
+Audio:           eng E-AC-3 5.1(side); eng AC-3 stereo
+Subtitles:       eng hdmv_pgs_subtitle
+Container:       matroska · 6.21 GB · 1h 45m · 12 chapters
+Source · group:  BluRay · Silence
+Identity:        tmdb-994108

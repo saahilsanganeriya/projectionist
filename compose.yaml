@@ -36,6 +36,9 @@ services:
       # GPU self-test sample and the old scripts' state files (imported once at cutover): read-only.
       - /volume1/PlexMediaServer/scripts:/volume1/PlexMediaServer/scripts:ro
       - /volume1/PlexMediaServer/remote4k:/volume1/PlexMediaServer/remote4k # STATUS.txt the owner reads
+      # The Python renamers' logs (undo.tsv, undo_auto.tsv): each video's original name for its .details note.
+      # Read-only; the rename stage's own logs live under /volume1/media/.projectionist/rename.
+      - /volume1/PlexMediaServer/rename:/volume1/PlexMediaServer/rename:ro
       # ssdmirror: the USB SSD, and fill.py's folder whose PROGRESS.txt it takes over. DSM's mounts are private (no
       # propagation): stop the container before ejecting the SSD and start it after plugging it back in. Started
       # without the SSD, Docker makes an empty folder at that path and the stage refuses ("SSD not mounted").
