@@ -1,155 +1,334 @@
-package llm
+package llm_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"io"
-	"net"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
+
+	"projectionist/internal/llm"
+	"projectionist/internal/llm/llmtest"
 )
 
-func client(t *testing.T, h http.HandlerFunc) *Client {
-	RetryDelay = func(int) time.Duration { return 0 }
-	srv := httptest.NewServer(h)
-	t.Cleanup(srv.Close)
-	return &Client{API: srv.URL, HTTP: srv.Client(), Key: func() (string, error) { return "sk-test", nil }}
+type memStore struct {
+	mu sync.Mutex
+	m  map[string][]byte
 }
 
-// Catches: "haiku:latest" resolving to the first listed or an older Haiku, or to another family, which would stop
-// a new Haiku from being picked up the day it ships; and a model's effort support misread (Haiku 4.5 answers 400 to
-// output_config.effort, and Sonnet 5.5 without it thinks at high effort into max_tokens).
-func TestLatest(t *testing.T) {
-	c := client(t, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"data":[{"id":"claude-sonnet-5-5","created_at":"2026-09-01T00:00:00Z","capabilities":{"effort":{"supported":true,"low":{"supported":true}}}},
- {"id":"claude-3-5-haiku-20241022","created_at":"2024-10-22T00:00:00Z"},
- {"id":"claude-haiku-5","created_at":"2026-11-01T00:00:00Z","capabilities":{"effort":{"supported":true,"low":{"supported":true}}}},
- {"id":"claude-haiku-4-5-20251001","created_at":"2025-10-01T00:00:00Z","capabilities":{"effort":{"supported":false,"low":{"supported":false}}}}]}`)
-	})
-	for family, want := range map[string]Model{"haiku": {ID: "claude-haiku-5", LowEffort: true}, "sonnet": {ID: "claude-sonnet-5-5", LowEffort: true},
-		"haiku-4-5": {ID: "claude-haiku-4-5-20251001"}} {
-		if got, err := c.Latest(context.Background(), family); err != nil || got != want {
-			t.Errorf("Latest(%q) = %+v, %v; want %+v", family, got, err, want)
-		}
+func (s *memStore) GetJSON(_ context.Context, stage, key string, v any) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.m[stage+"/"+key]
+	if !ok {
+		return false, nil
 	}
+	return true, json.Unmarshal(b, v)
 }
 
-// Catches: the owner's switch from Sonnet to Haiku happening a moment early or late (the rule holds until its
-// instant, exclusive), a later rule winning over an earlier one, and a policy whose rules have all expired picking
-// a model anyway.
-func TestPolicy(t *testing.T) {
-	switchAt := time.Date(2026, 11, 5, 8, 0, 0, 0, time.UTC) // 00:00 PST
-	custom := Policy{{Model: "opus:latest", Until: switchAt.Add(-time.Hour)}, {Model: "claude-haiku-4-5", Until: switchAt}}
+func (s *memStore) PutJSON(_ context.Context, stage, key string, v any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.m == nil {
+		s.m = map[string][]byte{}
+	}
+	b, err := json.Marshal(v)
+	s.m[stage+"/"+key] = b
+	return err
+}
+
+// onClock is a client on g served in memory, with the default backoff, for a synctest bubble's fake clock.
+func onClock(g *llmtest.Gateway, st llm.Store, tasks map[string]llm.Task) *llm.Client {
+	c := llm.New(llm.Config{API: "http://gateway.test/v1", Tasks: tasks}, st, time.Now)
+	c.Key = func() (string, error) { return "test-gateway-key", nil }
+	c.HTTP = &http.Client{Transport: g.Transport()}
+	return c
+}
+
+var ask = llm.Request{Messages: []llm.Message{llm.User(llm.Text("hi"))}, MaxTokens: 100, InputTokens: 1000}
+
+// Catches: a 429 or 5xx failing the call instead of being retried; a server's Retry-After ignored (hammering a gateway
+// that asked for a pause) or one of minutes waited out inside a run; retries past the fourth attempt; a 400 or a
+// billing refusal retried (each a paid-for or pointless repeat); a timeout or a dropped answer not retried, or retried
+// without the lost attempt counted as possibly billed. Waits are measured on the fake clock.
+func TestFailurePolicy(t *testing.T) {
+	ok := llmtest.Answer{Text: "fine", In: 10, Out: 5}
 	cases := []struct {
-		name   string
-		policy Policy
-		at     time.Time
-		want   string
-		err    error
+		name        string
+		answers     []llmtest.Answer
+		calls       int
+		minWait     time.Duration
+		maxWait     time.Duration // exclusive
+		maybeBilled int
+		err         error // nil = answered
 	}{
-		{"default, just before", nil, switchAt.Add(-time.Nanosecond), "sonnet:latest", nil},
-		{"default, at the instant", nil, switchAt, "haiku:latest", nil},
-		{"default, after", DefaultPolicy, switchAt.AddDate(1, 0, 0), "haiku:latest", nil},
-		{"first rule still running", custom, switchAt.Add(-2 * time.Hour), "opus:latest", nil},
-		{"second rule", custom, switchAt.Add(-time.Hour), "claude-haiku-4-5", nil},
-		{"all expired", custom, switchAt, "", ErrPolicyExpired},
+		{"429 with Retry-After", []llmtest.Answer{{Status: 429, Type: "rate_limit_exceeded", RetryAfter: "7"}, ok}, 2, 7 * time.Second, 7*time.Second + 1, 0, nil},
+		{"5xx three times, jittered backoff", []llmtest.Answer{{Status: 503}, {Status: 500}, {Status: 502}, ok}, 4, 14 * time.Second, 28 * time.Second, 0, nil},
+		{"5xx four times: gives up", []llmtest.Answer{{Status: 503}, {Status: 503}, {Status: 503}, {Status: 503}, ok}, 4, 14 * time.Second, 28 * time.Second, 0, &llm.APIError{}},
+		{"Retry-After of 10 minutes: fails at once", []llmtest.Answer{{Status: 429, RetryAfter: "600"}, ok}, 1, 0, 1, 0, &llm.APIError{}},
+		{"400: no retry", []llmtest.Answer{{Status: 400, Type: "invalid_request_error", Message: "bad image"}, ok}, 1, 0, 1, 0, &llm.APIError{}},
+		{"403 no card: no retry", []llmtest.Answer{{Status: 403, Type: "customer_verification_required", Message: "requires a valid credit card on file"}, ok}, 1, 0, 1, 0, llm.ErrBilling},
+		{"402 no credits: no retry", []llmtest.Answer{{Status: 402, Type: "insufficient_funds"}, ok}, 1, 0, 1, 0, llm.ErrBilling},
+		{"timeout, then an answer", []llmtest.Answer{{Hang: true}, ok}, 2, 122 * time.Second, 124 * time.Second, 1, nil},
+		{"answer dropped, then an answer", []llmtest.Answer{{Drop: true}, ok}, 2, 2 * time.Second, 4 * time.Second, 1, nil},
 	}
 	for _, c := range cases {
-		got, err := c.policy.Model(c.at)
-		if got != c.want || !errors.Is(err, c.err) {
-			t.Errorf("%s: %q, %v; want %q, %v", c.name, got, err, c.want, c.err)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				g := llmtest.New(func(n int, _ llm.Request) llmtest.Answer { return c.answers[n-1] })
+				s := onClock(g, &memStore{}, nil).Session("tonight")
+				start := time.Now()
+				res, err := s.Chat(context.Background(), ask)
+				waited := time.Since(start)
+				var apiErr *llm.APIError
+				switch {
+				case c.err == nil && (err != nil || res.Text != "fine"):
+					t.Fatalf("got %q, %v; want the answer", res.Text, err)
+				case c.err == llm.ErrBilling && !errors.Is(err, llm.ErrBilling):
+					t.Fatalf("err %v; want a billing refusal", err)
+				case c.err != nil && c.err != llm.ErrBilling && !errors.As(err, &apiErr):
+					t.Fatalf("err %v; want the gateway's error", err)
+				}
+				if n := len(g.Calls()); n != c.calls || res.Attempts != c.calls || waited < c.minWait || waited >= c.maxWait || res.MaybeBilled != c.maybeBilled {
+					t.Fatalf("%d calls (%d attempts) over %v, %d maybe billed; want %d over [%v, %v), %d", n, res.Attempts, waited,
+						res.MaybeBilled, c.calls, c.minWait, c.maxWait, c.maybeBilled)
+				}
+			})
+		})
 	}
 }
 
-// Catches: a model priced under its list price (a budget that stops late), the batch discount missed, or an
-// unknown model budgeted at less than its family's dearest price, including one whose id extends a known one.
-func TestPriceOf(t *testing.T) {
-	u := Usage{InputTokens: 1_000_000, OutputTokens: 100_000}
+// Catches: more than in_flight calls in the air at once (a backlog of 3,000 titles would open 3,000 connections to the
+// gateway and hit its rate limit), or fewer (the bound serialising the work). 20 calls of 1 s each run as three waves.
+func TestInFlightBound(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var mu sync.Mutex
+		inAir, most := 0, 0
+		g := llmtest.New(func(int, llm.Request) llmtest.Answer {
+			mu.Lock()
+			inAir++
+			most = max(most, inAir)
+			mu.Unlock()
+			time.Sleep(time.Second)
+			mu.Lock()
+			inAir--
+			mu.Unlock()
+			return llmtest.Answer{Text: "ok"}
+		})
+		s := onClock(g, &memStore{}, nil).Session("tonight")
+		start := time.Now()
+		var wg sync.WaitGroup
+		for range 20 {
+			wg.Go(func() { s.Chat(context.Background(), ask) })
+		}
+		wg.Wait()
+		if most != 8 || time.Since(start) != 3*time.Second {
+			t.Fatalf("at most %d calls in the air, done in %v; want 8 and 3 s", most, time.Since(start))
+		}
+	})
+}
+
+// Catches: a call's cost under-counted against a budget: the gateway's own figure ignored, usage priced at a cheaper
+// model than the fallback that answered, the cheaper base price used where a region lists a dearer one, a lost
+// attempt counted as free; and the worst case (the reservation) priced below the dearest model the task may reach.
+func TestCost(t *testing.T) {
+	cheap, dear := llmtest.Model{ID: "test/cheap", In: 1, Out: 2}, llmtest.Model{ID: "test/dear", In: 10, Out: 20}
+	tasks := map[string]llm.Task{"t": {Model: "test/cheap", Fallbacks: []string{"test/dear"}}}
 	cases := []struct {
-		model   string
-		batch   bool
+		name    string
+		answers []llmtest.Answer
 		usd     float64
-		assumed bool
 	}{
-		{"claude-haiku-4-5-20251001", false, 1.5, false},
-		{"anthropic/claude-haiku-4.5", true, 0.75, false},
-		{"claude-sonnet-5-5", false, 3, false},
-		{"claude-haiku-5", false, 3, true},    // twice Haiku 4.5's price until the table knows it
-		{"claude-sonnet-5-6", false, 6, true}, // a later Sonnet is not priced as Sonnet 5 by its shared prefix
+		{"the gateway's figure", []llmtest.Answer{{Text: "x", In: 1000, Out: 100, Cost: "0.0123"}}, 0.0123},
+		{"usage at the model's price", []llmtest.Answer{{Text: "x", In: 1000, Out: 100}}, (1000*1 + 100*2) / 1e6},
+		{"a fallback answered", []llmtest.Answer{{Text: "x", In: 1000, Out: 100, Model: "test/dear"}}, (1000*10 + 100*20) / 1e6},
+		{"a lost attempt at the worst case", []llmtest.Answer{{Drop: true}, {Text: "x", In: 1000, Out: 100, Cost: "0.001"}}, 0.001 + (1000*10+100*20)/1e6},
 	}
 	for _, c := range cases {
-		p := PriceOf(c.model)
-		if got := p.Cost(u, c.batch); got != c.usd || p.Assumed != c.assumed {
-			t.Errorf("%s batch=%v: $%v assumed=%v; want $%v assumed=%v", c.model, c.batch, got, p.Assumed, c.usd, c.assumed)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			g := llmtest.New(func(n int, _ llm.Request) llmtest.Answer { return c.answers[n-1] })
+			g.Models = []llmtest.Model{cheap, dear}
+			s := llmtest.Client(t, g, &memStore{}, time.Now, tasks).Session("t")
+			worst, err := s.WorstCase(context.Background(), llm.Request{InputTokens: 1000, MaxTokens: 100})
+			if err != nil || math.Abs(worst-0.012) > 1e-12 {
+				t.Fatalf("worst case $%v, %v; want $0.012 (the dear fallback's price)", worst, err)
+			}
+			res, err := s.Chat(context.Background(), ask)
+			if err != nil || math.Abs(res.CostUSD-c.usd) > 1e-12 {
+				t.Fatalf("cost $%v, %v; want $%v", res.CostUSD, err, c.usd)
+			}
+			if got := g.Calls()[0].Models; len(got) != 1 || got[0] != "test/dear" {
+				t.Fatalf("fallbacks sent %v", got)
+			}
+		})
 	}
+	t.Run("the dearest listed price", func(t *testing.T) {
+		// The catalogue's real entry: the US region charges more than the base price.
+		raw := `{"data":[{"id":"deepseek/deepseek-v4-flash-0731","type":"language","pricing":{"input":"0.000000076","output":"0.000000153",
+			"input_cache_read":"0.000000014","varies_by_provider":true,"regional":{"us":{"input":"0.00000013","output":"0.00000026"}},
+			"output_tiers":[{"cost":"$0.0000003","min":0}]}}]}`
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(raw)) }))
+		defer srv.Close()
+		c := llm.New(llm.Config{API: srv.URL + "/v1"}, &memStore{}, time.Now)
+		c.Key = func() (string, error) { return "k", nil }
+		m, err := c.Model(context.Background(), "deepseek/deepseek-v4-flash-0731")
+		if err != nil || m.In != 0.00000013 || m.Out != 0.0000003 {
+			t.Fatalf("%+v, %v; want the US input price and the tier's output price", m, err)
+		}
+	})
 }
 
-// Catches: an overloaded answer (529) failing the call instead of being retried, and a bad request retried (paid
-// for again) or reported without the API's error type.
-func TestRetries(t *testing.T) {
-	calls := 0
-	c := client(t, func(w http.ResponseWriter, r *http.Request) {
-		calls++
+// Catches: a broken model or key paid for and logged thousands of times in one run instead of parking after five
+// failed calls in a row; a success not resetting the count (three bad hours parking a healthy day); a billing refusal
+// counted as a model failure, retried call after call, or forgotten by the next run's alert; and the refusal kept after
+// the gateway answers again.
+func TestSessionParks(t *testing.T) {
+	var mu sync.Mutex
+	fail, billing := true, false
+	g := llmtest.New(func(int, llm.Request) llmtest.Answer {
+		mu.Lock()
+		defer mu.Unlock()
 		switch {
-		case strings.Contains(r.Header.Get("x-api-key"), "sk-test") && calls == 1:
-			w.WriteHeader(529)
-			io.WriteString(w, `{"type":"error","error":{"type":"overloaded_error","message":"busy"}}`)
-		case calls == 2:
-			io.WriteString(w, `{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":3,"output_tokens":1}}`)
-		default:
-			w.WriteHeader(400)
-			io.WriteString(w, `{"type":"error","error":{"type":"invalid_request_error","message":"bad image"}}`)
+		case billing:
+			return llmtest.Answer{Status: 403, Type: "customer_verification_required", Message: "requires a valid credit card on file"}
+		case fail:
+			return llmtest.Answer{Status: 400, Type: "invalid_request_error"}
 		}
+		return llmtest.Answer{Text: "ok"}
 	})
-	resp, err := c.Messages(context.Background(), Request{Model: "m", MaxTokens: 1})
-	if err != nil || resp.Text() != "ok" || calls != 2 {
-		t.Fatalf("after a 529: %q, %v, %d calls; want ok after 2", resp.Text(), err, calls)
+	st := &memStore{}
+	clock := time.Date(2026, 10, 5, 23, 0, 0, 0, time.UTC)
+	c := llmtest.Client(t, g, st, func() time.Time { return clock }, nil)
+	ctx := context.Background()
+	set := func(f, b bool) { mu.Lock(); fail, billing = f, b; mu.Unlock() }
+
+	s := c.Session("tonight")
+	for range 4 {
+		s.Chat(ctx, ask)
 	}
-	_, err = c.Messages(context.Background(), Request{Model: "m", MaxTokens: 1})
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) || apiErr.Type != "invalid_request_error" || calls != 3 {
-		t.Fatalf("a 400 must fail at once with its type: %v after %d calls", err, calls)
+	set(false, false)
+	s.Chat(ctx, ask) // resets the count
+	set(true, false)
+	for range 4 {
+		s.Chat(ctx, ask)
+	}
+	if s.Parked() != nil {
+		t.Fatalf("parked after 4 failures in a row: %v", s.Parked())
+	}
+	s.Chat(ctx, ask)
+	_, err := s.Chat(ctx, ask)
+	if !errors.Is(err, llm.ErrParked) || !errors.Is(s.Parked(), llm.ErrParked) || len(g.Calls()) != 10 {
+		t.Fatalf("after 5 failures in a row: %v, %d calls; want parked at the fifth and the sixth not sent", err, len(g.Calls()))
+	}
+
+	set(false, true)
+	s = c.Session("tonight")
+	_, err = s.Chat(ctx, ask)
+	_, again := s.Chat(ctx, ask)
+	if !errors.Is(err, llm.ErrBilling) || !errors.Is(again, llm.ErrParked) || len(g.Calls()) != 11 ||
+		!strings.Contains(s.Parked().Error(), "since 2026-10-05T23:00:00Z") || !errors.Is(s.Parked(), llm.ErrBilling) {
+		t.Fatalf("billing: %v then %v after %d calls, parked %v; want one call, parked since the refusal", err, again, len(g.Calls()), s.Parked())
+	}
+	clock = clock.Add(6 * time.Hour) // the next run: a new client, as after a restart, still refused
+	c = llmtest.Client(t, g, st, func() time.Time { return clock }, nil)
+	s = c.Session("tonight")
+	s.Chat(ctx, ask)
+	if !strings.Contains(s.Parked().Error(), "since 2026-10-05T23:00:00Z") {
+		t.Fatalf("the next run's refusal: %v; want it dated from the first", s.Parked())
+	}
+	set(false, false)
+	s = c.Session("tonight")
+	if _, err := s.Chat(ctx, ask); err != nil {
+		t.Fatal(err)
+	}
+	set(false, true)
+	s = c.Session("tonight")
+	s.Chat(ctx, ask)
+	if !strings.Contains(s.Parked().Error(), "since 2026-10-06T05:00:00Z") {
+		t.Fatalf("a refusal after an answered call: %v; want it dated anew", s.Parked())
 	}
 }
 
-// Catches: a POST that reached the server but lost its answer being retried (a second billed call, or a second batch
-// nobody records) or reported like an unbilled failure; and a POST whose body never fully left (a refused connection,
-// a batch upload cut off by the client timeout) being counted as billed instead of retried.
-func TestUnknownOutcome(t *testing.T) {
-	var calls atomic.Int32
-	dropped := client(t, func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
-		conn, _, _ := w.(http.Hijacker).Hijack()
-		conn.Close()
-	})
-	_, err := dropped.CreateBatch(context.Background(), nil)
-	if !errors.Is(err, ErrUnknownOutcome) || calls.Load() != 1 {
-		t.Fatalf("connection dropped after sending: %v after %d calls; want ErrUnknownOutcome after 1", err, calls.Load())
+// Catches: a judge that reasons (paid output, and minutes per call) because "off" was sent in a form the model does
+// not take, or an effort sent to a model that lists none; and fallbacks, the bearer key or a one-part message sent
+// in a shape the gateway does not read.
+func TestRequestShape(t *testing.T) {
+	cases := []struct {
+		model  llmtest.Model
+		effort string
+		want   string
+	}{
+		{llmtest.Model{ID: "m/none", Efforts: []string{"none", "low"}, Toggle: true}, "off", `{"effort":"none"}`},
+		{llmtest.Model{ID: "m/toggle", Toggle: true}, "off", `{"enabled":false}`},
+		{llmtest.Model{ID: "m/least", Efforts: []string{"low", "high", "max"}}, "off", `{"effort":"low"}`},
+		{llmtest.Model{ID: "m/silent"}, "off", `null`},
+		{llmtest.Model{ID: "m/least", Efforts: []string{"low", "high"}}, "high", `{"effort":"high"}`},
 	}
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	ln.Close()
-	refused := &Client{API: "http://" + ln.Addr().String(), HTTP: &http.Client{}, Key: dropped.Key}
-	if _, err := refused.Messages(context.Background(), Request{}); err == nil || errors.Is(err, ErrUnknownOutcome) {
-		t.Fatalf("connection refused: %v; nothing was sent, so it must not count as billed", err)
+	for _, c := range cases {
+		g := llmtest.New(nil)
+		g.Models = []llmtest.Model{c.model}
+		s := llmtest.Client(t, g, &memStore{}, time.Now, map[string]llm.Task{"t": {Model: c.model.ID, Reasoning: c.effort}}).Session("t")
+		if _, err := s.Chat(context.Background(), llm.Request{Messages: []llm.Message{llm.System("be brief"), llm.User(llm.Text("a"), llm.JPEG([]byte{1}))}}); err != nil {
+			t.Fatal(err)
+		}
+		got, _ := json.Marshal(g.Calls()[0].Reasoning)
+		if string(got) != c.want {
+			t.Errorf("%s %q: reasoning %s; want %s", c.model.ID, c.effort, got, c.want)
+		}
+		if k := g.Keys()[0]; k != "Bearer test-SECRET-gateway-key" {
+			t.Errorf("Authorization %q", k)
+		}
 	}
-	var attempts int
-	cutOff := &Client{API: "http://api.invalid", Key: dropped.Key, HTTP: &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
-		attempts++
-		io.CopyN(io.Discard, r.Body, 10) // the upload stalls after 10 bytes and the client gives up
-		return nil, errors.New("context deadline exceeded (Client.Timeout exceeded while awaiting headers)")
-	})}}
-	reqs := []BatchRequest{{CustomID: "c1", Params: Request{Model: "m", MaxTokens: 1, Messages: []Message{{Role: "user", Content: []Block{Text("hi")}}}}}}
-	if _, err := cutOff.CreateBatch(context.Background(), reqs); err == nil || errors.Is(err, ErrUnknownOutcome) || attempts != 3 {
-		t.Fatalf("upload cut off part-way: %v after %d attempts; it never reached the API, so retry it (3 attempts) and never count it", err, attempts)
+	one, _ := json.Marshal(llm.System("be brief"))
+	two, _ := json.Marshal(llm.User(llm.Text("a"), llm.JPEG([]byte{1})))
+	if string(one) != `{"role":"system","content":"be brief"}` ||
+		string(two) != `{"role":"user","content":[{"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,AQ=="}}]}` {
+		t.Fatalf("messages: %s %s", one, two)
 	}
 }
 
-type roundTrip func(*http.Request) (*http.Response, error)
+// Catches: the catalogue fetched on every call (409 models, each run) or never again (a price change missed for
+// good); a gateway outage failing calls that a day-old copy can price; and a model the copy lacks refetched on every
+// call.
+func TestCatalogueCachedDaily(t *testing.T) {
+	g := llmtest.New(nil)
+	clock := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	c := llmtest.Client(t, g, &memStore{}, func() time.Time { return clock }, nil)
+	ctx := context.Background()
+	steps := []struct {
+		after   time.Duration
+		id      string
+		down    bool
+		listed  int
+		wantErr bool
+	}{
+		{0, "deepseek/deepseek-v4-flash-0731", false, 1, false},
+		{23*time.Hour + 30*time.Minute, "deepseek/deepseek-v4-flash-0731", false, 1, false},
+		{time.Hour, "deepseek/deepseek-v4-flash-0731", false, 2, false},
+		{10 * time.Minute, "nobody/unknown", false, 2, true},                // a copy 10 minutes old: no refetch for an unknown id
+		{55 * time.Minute, "nobody/unknown", false, 3, true},                // over an hour old: one refetch
+		{25 * time.Hour, "deepseek/deepseek-v4-flash-0731", true, 3, false}, // the gateway is down: the old copy stands
+	}
+	for i, s := range steps {
+		clock = clock.Add(s.after)
+		if s.down {
+			c.HTTP.Transport = failing{}
+		}
+		_, err := c.Model(ctx, s.id)
+		if (err != nil) != s.wantErr || g.Listed() != s.listed {
+			t.Fatalf("step %d: err %v, listed %d times; want err %v, %d", i, err, g.Listed(), s.wantErr, s.listed)
+		}
+	}
+}
 
-func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+type failing struct{}
+
+func (failing) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("connection refused")
+}

@@ -284,24 +284,6 @@ func TestComposeFramesTheDirector(t *testing.T) {
 	}
 }
 
-// Catches: a spent title budget ending a Message Batch submission at the first refused title, so the collections queued
-// behind every title are never batched (within a batch, and in the batches after one the titles filled).
-func TestBatchReachesCollectionsPastSpentTitles(t *testing.T) {
-	for _, size := range []int{2, 3} {
-		w := collectionWorld(t, fmt.Sprintf("dry_run = true\nbatch_min = 1\nbatch_size = %d\n", size), true)
-		db := w.h.Env.Store.DB()
-		db.Exec(schema)
-		db.Exec(`INSERT INTO posters_calls(at, item, of, model, mode, batch_id, state, input_tokens, output_tokens, reserved_usd,
-			cost_usd, llm_ms, error) VALUES (?, 'movie:tmdb-9', 'x', 'claude-sonnet-5-5', 'sync', '', 'done', 0, 0, 0, 11.999, 0, '')`, stamp(w.h.Now))
-		w.run(t)
-		var batched int
-		db.QueryRow(`SELECT count(*) FROM posters_calls WHERE item LIKE 'collection:%' AND state='pending' AND batch_id != ''`).Scan(&batched)
-		if len(w.batches) != 1 || batched != 1 {
-			t.Errorf("batch_size %d: %d batches, %d collection requests batched; want Scary Movie batched past the refused titles", size, len(w.batches), batched)
-		}
-	}
-}
-
 // Catches: a poster sent to one of the owner's Plex collections because he renamed it to an approved name, or to his
 // Jellyfin BoxSet (the one the collections stage gave his poster) under such a name; and a first upload replacing a
 // Plex collection poster someone else locked.

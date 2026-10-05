@@ -1,5 +1,5 @@
 // Package tonight fills a "Tonight" row on the owner's Plex Home, first of its Movies rows: five films
-// from his library he has not seen, picked once a day by one Claude call that reads his Letterboxd ratings and
+// from his library he has not seen, picked once a day by one model call that reads his Letterboxd ratings and
 // reviews, each with a one-line reason tied to a film or director he rated highly.
 //
 // Every 30 min the stage reconciles: a pick he has since watched (Letterboxd, Plex or Jellyfin) leaves the row at
@@ -11,8 +11,8 @@
 //	                                                   Plex collection + Home row ◄──────────────────┤ queued, retried,
 //	                                                   Jellyfin BoxSet           ◄──────────────────┘ never fail the run
 //
-// The model is the dated policy's choice ([[llm.policy]], env.LLM): the newest Sonnet until 2026-11-05, then the
-// newest Haiku.
+// The model is the tonight task's ([llm.tasks.tonight], env.LLM), through the AI gateway: DeepSeek V4 Flash 0731
+// unless the config names another.
 //
 // The stage never writes watched state, never touches Continue Watching / On Deck, and never deletes anything
 // of his: it edits only the collection it owns.
@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -33,11 +34,8 @@ import (
 const name = "tonight"
 
 type Options struct {
-	Effort         string        `toml:"effort"` // low, medium, high; sent only to a model that accepts it
-	MaxTokens      int           `toml:"max_tokens"`
+	MaxTokens      int           `toml:"max_tokens"` // reasoning included
 	DailyCapUSD    float64       `toml:"daily_cap_usd"`
-	APIKeyFile     string        `toml:"api_key_file"`
-	APIBase        string        `toml:"api_base"` // "" = https://api.anthropic.com
 	Picks          int           `toml:"picks"`
 	PickAfter      string        `toml:"pick_after"`     // HH:MM in the config timezone: a new day's picks after this
 	MaxCandidates  int           `toml:"max_candidates"` // unseen films shown to the model, best-ranked first
@@ -55,8 +53,7 @@ type Options struct {
 
 func defaults() Options {
 	return Options{
-		Effort: "medium", MaxTokens: 1000, DailyCapUSD: 0.15,
-		APIKeyFile: "/run/secrets/anthropic_api_key", Picks: 5, PickAfter: "05:00", MaxCandidates: 400,
+		MaxTokens: 4000, DailyCapUSD: 0.15, Picks: 5, PickAfter: "05:00", MaxCandidates: 400,
 		Section: 4, Collection: "Tonight", MoviesDir: "/volume1/media/Movies",
 		LetterboxdDir: "/volume1/docker/projectionist/data/letterboxd",
 		LetterboxdRSS: "https://letterboxd.com/saahilsan/rss/", ImageBase: "https://image.tmdb.org/t/p", JellyfinUser: "saahil",
@@ -79,7 +76,6 @@ type state struct {
 	Picks    []pick             `json:"picks"`         // still unwatched, in the model's order
 	Recent   map[int]string     `json:"recent"`        // tmdb → day picked; kept 14 days so the picks rotate
 	Spend    map[string]float64 `json:"spend"`         // local day → USD, including reservations for calls in flight
-	Resolved resolved           `json:"resolved"`
 	Plex     sinkState          `json:"plex"`
 	Jellyfin sinkState          `json:"jellyfin"`
 }
@@ -305,23 +301,29 @@ func reconcile(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 	st.Picks = kept
 }
 
-// pickFilms makes the day's one AI call, plus at most one retry, inside the daily cap. Both are sized before the
-// first is sent, at their worst (bound), so the pair can never pass the cap; each call's worst case is reserved
-// before it is sent and settled to the billed usage after. A call whose answer was lost after it may have run keeps
-// its reservation, because it may have been billed.
-func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, st *state, day string, rss rssCache,
-	pm, jm idMap, save func() error) error {
+// pickCall is the day's call as sized, and what its answer is checked against.
+type pickCall struct {
+	req    llm.Request
+	unseen map[int]candidate
+	loved  map[string]bool
+	n      int // candidates shown
+}
+
+// preparePick reads his history and the library, ranks the unseen films, and sizes the day's call: the candidate list
+// is cut until the call AND its one retry, each at its worst (bound), fit what is left of the day's cap.
+func preparePick(ctx context.Context, env *stage.Env, opt Options, st *state, day string, rss rssCache, pm, jm idMap,
+	s *llm.Session) (pickCall, error) {
 	export, err := readExport(opt.LetterboxdDir)
 	if err != nil {
-		return fmt.Errorf("letterboxd export: %w", err)
+		return pickCall{}, fmt.Errorf("letterboxd export: %w", err)
 	}
 	lib, err := scanLibrary(opt.MoviesDir)
 	if err != nil {
-		return err
+		return pickCall{}, err
 	}
 	fetched, failed, err := fillFacts(ctx, env, lib)
 	if err != nil {
-		return err
+		return pickCall{}, err
 	}
 	env.Log.Info("library facts", "event", "tonight_library", "films", len(lib), "tmdb_fetched", fetched, "tmdb_failed", failed,
 		"letterboxd_export_rows", len(export), "letterboxd_rss_entries", len(rss.Entries))
@@ -340,50 +342,35 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 	}
 	cands := rankCandidates(lib, w, hist, st.Recent, day)
 	if len(cands) < opt.Picks {
-		return fmt.Errorf("only %d unseen films", len(cands))
+		return pickCall{}, fmt.Errorf("only %d unseen films", len(cands))
 	}
-
-	a := newAI(opt.APIBase, opt.APIKeyFile, 3*time.Minute)
-	m, err := resolveModel(ctx, env, a, &st.Resolved)
+	p, err := s.Price(ctx)
 	if err != nil {
-		return err
-	}
-	p := llm.PriceOf(m.ID)
-	if p.Assumed {
-		env.Log.Warn("no list price for the model; budgeting at twice its family's", "event", "tonight_price_assumed", "model", m.ID)
+		return pickCall{}, err
 	}
 
-	// Size the candidate list so the call AND its retry fit what is left of today's budget. The retry re-sends the
-	// call plus the answer (at most max_tokens) and the violations. fixed counts the request without candidate
-	// lines: the cached prefix plus a short tail, all of it priced as a cache write.
+	// The retry re-sends the call plus the answer (at most max_tokens) and the violations; each is priced with all of
+	// max_tokens as output. The cost grows linearly with the candidate lines, so one rescale nearly always lands.
 	taste := tasteText(hist, 400, tasteBytes)
-	request := func(n int) llm.CachedRequest {
-		return pickRequest(m, opt, taste, []llm.Message{userMessage(prompt(day, cands[:n], opt.Picks))})
+	request := func(n int) llm.Request {
+		return pickRequest(opt, taste, []llm.Message{userMessage(prompt(day, cands[:n], opt.Picks))})
 	}
-	fixed, err := a.CountTokens(ctx, request(0))
-	if err != nil {
-		return err
-	}
+	fixed := request(0).InputTokens
 	pair := func(total int) float64 {
-		return bound(p, total, fixed, opt.MaxTokens) + bound(p, total+opt.MaxTokens+retryExtra, fixed, opt.MaxTokens)
+		return p.Cost(total, opt.MaxTokens) + p.Cost(total+opt.MaxTokens+retryExtra, opt.MaxTokens)
 	}
 	left := opt.DailyCapUSD - st.Spend[day]
 	n := min(opt.MaxCandidates, len(cands))
-	var req llm.CachedRequest
-	var total int
+	var req llm.Request
 	for i := 0; ; i++ {
 		req = request(n)
-		if total, err = a.CountTokens(ctx, req); err != nil {
-			return err
-		}
-		if pair(total) <= left {
+		if pair(req.InputTokens) <= left {
 			break
 		}
-		// the cost grows linearly with the candidate lines, so one rescale nearly always lands
-		next := int(float64(n) * (left - pair(fixed)) / (pair(total) - pair(fixed)) * 0.95)
+		next := int(float64(n) * (left - pair(fixed)) / (pair(req.InputTokens) - pair(fixed)) * 0.95)
 		if i == 3 || next < 4*opt.Picks {
-			return fmt.Errorf("%w: the call and its retry may cost $%.4f, $%.4f left of $%.2f (%d input tokens, %d candidates)",
-				errOverBudget, pair(total), left, opt.DailyCapUSD, total, n)
+			return pickCall{}, fmt.Errorf("%w: the call and its retry may cost $%.4f, $%.4f left of $%.2f (%d input tokens, %d candidates)",
+				errOverBudget, pair(req.InputTokens), left, opt.DailyCapUSD, req.InputTokens, n)
 		}
 		n = next
 	}
@@ -391,81 +378,125 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 	for _, c := range cands[:n] {
 		unseen[c.TMDB] = c
 	}
-	env.Log.Info("ai call sized", "event", "tonight_ai_sized", "model", m.ID, "candidates", n, "unseen", len(cands),
-		"counted_input_tokens", total, "pair_bound_usd", fmt.Sprintf("%.5f", pair(total)), "left_usd", fmt.Sprintf("%.5f", left))
+	env.Log.Info("ai call sized", "event", "tonight_ai_sized", "model", s.Model(), "candidates", n, "unseen", len(cands),
+		"estimated_input_tokens", req.InputTokens, "pair_bound_usd", fmt.Sprintf("%.5f", pair(req.InputTokens)), "left_usd", fmt.Sprintf("%.5f", left))
+	return pickCall{req: req, unseen: unseen, loved: lovedFilms(hist), n: n}, nil
+}
 
-	call := func(attempt int, reserve float64) (llm.Response, error) {
-		st.Spend[day] += reserve
-		if err := save(); err != nil {
-			return llm.Response{}, err
-		}
-		r, err := a.MessagesCached(ctx, req)
-		switch {
-		case err == nil:
-			st.Spend[day] += p.Cost(r.Usage, false) - reserve
-		case errors.Is(err, llm.ErrUnknownOutcome):
-			env.Log.Warn("ai answer lost; counting the call as billed", "event", "tonight_ai_unknown_outcome", "attempt", attempt,
-				"reserved_usd", fmt.Sprintf("%.5f", reserve))
-		default: // refused by the API, or never sent
-			st.Spend[day] -= reserve
-		}
-		if serr := save(); serr != nil {
-			return llm.Response{}, serr
-		}
-		if err != nil {
-			return llm.Response{}, err
-		}
-		u := r.Usage
-		env.Log.Info("ai call", "event", "tonight_ai_call", "attempt", attempt, "model", m.ID, "candidates", n,
-			"input_tokens", u.InputTokens, "cache_write_tokens", u.CacheCreationInputTokens, "cache_read_tokens", u.CacheReadInputTokens,
-			"output_tokens", u.OutputTokens, "stop", r.StopReason, "cost_usd", fmt.Sprintf("%.5f", p.Cost(u, false)),
-			"bound_usd", fmt.Sprintf("%.5f", reserve), "spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]))
-		if st.Spend[day] > opt.DailyCapUSD { // only a count_tokens estimate beyond bound's slack gets here
-			env.Log.Warn("over the daily AI cap", "event", "tonight_over_cap", "spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]))
-		}
-		env.Log.Debug("ai answer", "event", "tonight_ai_answer", "attempt", attempt, "text", r.Text())
-		rep.Count("ai_calls", 1)
-		return r, nil
+// Today is the pick call the stage would make now, for the bake-off tool (cmd/bakeoff): its request, before a model
+// and its reasoning are set, and a check that reads an answer as the stage does, into "Title (year) [mood; liked]:
+// reason" lines and the violations a retry would name.
+func Today(ctx context.Context, env *stage.Env) (llm.Request, func(text string) (picks, violations []string), error) {
+	opt := defaults()
+	if err := env.Options(&opt); err != nil {
+		return llm.Request{}, nil, err
 	}
-	r, err := call(1, bound(p, total, fixed, opt.MaxTokens))
+	after, err := clock(opt.PickAfter)
+	if err != nil {
+		return llm.Request{}, nil, err
+	}
+	st := state{Recent: map[int]string{}, Spend: map[string]float64{}}
+	var pm, jm idMap
+	var rss rssCache
+	for key, v := range map[string]any{"state": &st, "plexmap": &pm, "jfmap": &jm, "rss": &rss} {
+		if _, err := env.Store.GetJSON(ctx, name, key, v); err != nil {
+			return llm.Request{}, nil, err
+		}
+	}
+	loc := env.Loc
+	if loc == nil {
+		loc = time.UTC
+	}
+	day := pickDay(env.Now(), loc, after)
+	st.Spend[day] = 0 // the bake-off sizes the call as a fresh day's
+	pc, err := preparePick(ctx, env, opt, &st, day, rss, pm, jm, env.LLM.Session("tonight"))
+	if err != nil {
+		return llm.Request{}, nil, err
+	}
+	return pc.req, func(text string) (lines, violations []string) {
+		picks, violations, _ := validate(text, pc.unseen, pc.loved, opt.Picks)
+		for _, p := range picks {
+			lines = append(lines, fmt.Sprintf("%s (%d) [%s; liked %s]: %s", p.Title, p.Year, p.Mood, p.Liked, p.Reason))
+		}
+		return lines, violations
+	}, nil
+}
+
+// pickFilms makes the day's one AI call, plus at most one retry, inside the daily cap. Both are sized before the
+// first is sent, at their worst, so the pair can never pass the cap; each call's worst case is reserved before it is
+// sent and settled to what it cost after (an attempt whose answer was lost stays counted at its worst case).
+func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, st *state, day string, rss rssCache,
+	pm, jm idMap, save func() error) error {
+	s := env.LLM.Session("tonight")
+	pc, err := preparePick(ctx, env, opt, st, day, rss, pm, jm, s)
 	if err != nil {
 		return err
 	}
-	loved := lovedFilms(hist)
-	picks, violations, glued := validate(r.Text(), unseen, loved, opt.Picks)
-	if r.StopReason == "max_tokens" {
-		// Thinking shares max_tokens with the answer, so the retry thinks less; a changed effort may miss the cache,
-		// which bound already prices.
-		violations = append([]string{"the answer was cut off at the length limit before the JSON was complete"}, violations...)
-		if m.LowEffort {
-			oc := *req.OutputConfig
-			oc.Effort = "low"
-			req.OutputConfig = &oc
+	p, err := s.Price(ctx)
+	if err != nil {
+		return err
+	}
+	req := pc.req
+	call := func(attempt int, reserve float64) (llm.Result, error) {
+		st.Spend[day] += reserve
+		if err := save(); err != nil {
+			return llm.Result{}, err
 		}
+		r, err := s.Chat(ctx, req)
+		st.Spend[day] += r.CostUSD - reserve
+		if serr := save(); serr != nil {
+			return llm.Result{}, serr
+		}
+		if r.MaybeBilled > 0 {
+			env.Log.Warn("ai answer lost; counting the attempt as billed", "event", "tonight_ai_unknown_outcome", "attempt", attempt,
+				"lost_attempts", r.MaybeBilled, "counted_usd", fmt.Sprintf("%.5f", r.CostUSD))
+		}
+		if err != nil {
+			return llm.Result{}, err
+		}
+		env.Log.Info("ai call", "event", "tonight_ai_call", "attempt", attempt, "model", r.Model, "candidates", pc.n,
+			"input_tokens", r.Usage.PromptTokens, "output_tokens", r.Usage.CompletionTokens, "finish", r.Finish,
+			"cost_usd", fmt.Sprintf("%.5f", r.CostUSD), "bound_usd", fmt.Sprintf("%.5f", reserve),
+			"spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]), "duration_ms", r.Took.Milliseconds())
+		if st.Spend[day] > opt.DailyCapUSD { // only an input past its estimate, or lost attempts, get here
+			env.Log.Warn("over the daily AI cap", "event", "tonight_over_cap", "spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]))
+		}
+		env.Log.Debug("ai answer", "event", "tonight_ai_answer", "attempt", attempt, "text", r.Text)
+		rep.Count("ai_calls", 1)
+		return r, nil
+	}
+	r, err := call(1, p.Cost(req.InputTokens, req.MaxTokens))
+	if err != nil {
+		return err
+	}
+	picks, violations, glued := validate(r.Text, pc.unseen, pc.loved, opt.Picks)
+	if r.Finish == "length" {
+		// Reasoning shares max_tokens with the answer, so the retry asks for as little reasoning as the model allows.
+		violations = append([]string{"the answer was cut off at the length limit before the JSON was complete"}, violations...)
+		req.Effort = "off"
 	}
 	if len(violations) > 0 {
 		env.Log.Warn("picks need a retry", "event", "tonight_picks_invalid", "violations", strings.Join(violations, "; "))
 		problems := "\n- " + strings.Join(violations, "\n- ")
-		if text := r.Text(); strings.TrimSpace(text) != "" {
-			// The answer goes back as text alone: thinking blocks are bound to their conversation and may be left out.
-			req.Messages = append(req.Messages, llm.Message{Role: "assistant", Content: []llm.Block{llm.Text(text)}},
+		if text := r.Text; strings.TrimSpace(text) != "" {
+			req.Messages = append(req.Messages, llm.Assistant(text),
 				userMessage("Fix these problems and answer again with all "+fmt.Sprint(opt.Picks)+" picks:"+problems))
 		} else {
-			// Nothing to send back (cut off inside thinking, or a refusal): the API refuses an empty text block and two
-			// user turns in a row, so the one user turn goes again with the problems as a second block.
-			ask := req.Messages[0]
-			ask.Content = append(ask.Content, llm.Text("An earlier answer to this had these problems; avoid them and answer with all "+
+			// Nothing to send back (cut off inside reasoning, or a refusal): an empty assistant turn is refused by some
+			// providers, so the user turn goes again with the problems as a second part.
+			last := len(req.Messages) - 1
+			ask := req.Messages[last]
+			ask.Content = append(slices.Clone(ask.Content), llm.Text("An earlier answer to this had these problems; avoid them and answer with all "+
 				fmt.Sprint(opt.Picks)+" picks:"+problems))
-			req.Messages = []llm.Message{ask}
+			req.Messages = append(slices.Clone(req.Messages[:last]), ask)
 		}
-		if total, err = a.CountTokens(ctx, req); err != nil {
-			env.Log.Warn("retry not sized; keeping the valid picks", "event", "tonight_retry_skipped", "err", err)
-		} else if b := bound(p, total, fixed, opt.MaxTokens); st.Spend[day]+b > opt.DailyCapUSD {
+		req = estimated(req)
+		if b := p.Cost(req.InputTokens, req.MaxTokens); st.Spend[day]+b > opt.DailyCapUSD {
 			env.Log.Warn("no budget left for the retry; keeping the valid picks", "event", "tonight_retry_skipped",
 				"retry_bound_usd", fmt.Sprintf("%.5f", b), "spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]))
 		} else if r2, err := call(2, b); err != nil {
 			env.Log.Warn("retry failed; keeping the valid picks", "event", "tonight_retry_error", "err", err)
-		} else if picks2, v2, g2 := validate(r2.Text(), unseen, loved, opt.Picks); len(picks2) > len(picks) {
+		} else if picks2, v2, g2 := validate(r2.Text, pc.unseen, pc.loved, opt.Picks); len(picks2) > len(picks) {
 			picks, glued = picks2, append(glued, g2...)
 			if len(v2) > 0 {
 				env.Log.Warn("dropped invalid picks after the retry", "event", "tonight_picks_dropped", "violations", strings.Join(v2, "; "))
