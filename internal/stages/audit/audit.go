@@ -476,13 +476,16 @@ func (v *video) read(info probe.Info, err error) {
 	}
 }
 
-// ffprobeReason is the last line ffprobe printed, without the path it starts with.
+// ffprobeReason is the last line ffprobe printed, after the path it names ("<path>: Invalid data found ...").
 func ffprobeReason(err error, path string) string {
 	msg := strings.TrimSpace(err.Error())
 	if i := strings.LastIndexByte(msg, '\n'); i >= 0 {
 		msg = msg[i+1:]
 	}
-	return strings.TrimPrefix(msg, path+": ")
+	if i := strings.LastIndex(msg, path+": "); i >= 0 {
+		msg = msg[i+len(path)+2:]
+	}
+	return msg
 }
 
 const hashPrefix = 4 << 20
@@ -617,8 +620,10 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	for _, items := range s.found {
 		sort.Strings(items)
 	}
-	next := snapshot{At: env.Now(), Items: s.found}
-	if deferred > 0 && hadPrev { // keep a complete baseline for what this partial pass could not see
+	// A partial pass keeps the last complete baseline for what it could not see, and a partial first pass is no
+	// baseline at all: either way the next full pass does not alert on problems that were there all along.
+	next, save := snapshot{At: env.Now(), Items: s.found}, hadPrev || deferred == 0
+	if deferred > 0 && hadPrev {
 		next.Items = maps.Clone(s.found)
 		for k := range probeBound {
 			next.Items[k] = prev.Items[k]
@@ -641,8 +646,10 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if err := writeReport(opt.Report, text); err != nil {
 		return err
 	}
-	if err := env.Store.PutJSON(ctx, name, "last", next); err != nil {
-		return err
+	if save {
+		if err := env.Store.PutJSON(ctx, name, "last", next); err != nil {
+			return err
+		}
 	}
 	var parts []string
 	for _, c := range categories {
@@ -652,7 +659,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	}
 	rep.Summary = fmt.Sprintf("%d videos; %s", len(s.videos), strings.Join(parts, " "))
 	if !hadPrev {
-		rep.Summary += " (first run: baseline, no growth alerts)"
+		rep.Summary += " (no baseline yet: no growth alerts)"
 	}
 	env.Log.Info("audit written", "event", "audit_report", "path", opt.Report, "videos", len(s.videos), "not_probed", deferred, "unsettled", unsettled, "held", held)
 	return nil
