@@ -118,8 +118,11 @@ owner_posters      = "/volume1/PlexMediaServer/backups/customizations/posters"
 owner_backup_db    = "/volume1/PlexMediaServer/backups/pre-rename-20261005T0328Z/com.plexapp.plugins.library.db"
 plex_movie_section = 4
 plex_tv_section    = 2
-sink_index_every   = "24h"           # one item listing per app per day maps titles to the apps' ids
-mark               = "poster-curator 2026-10" # EXIF ImageDescription on every uploaded image
+sink_index_every   = "24h"           # one item listing per app per day maps titles to the apps' ids; a title an app
+                                     # re-created under a new id (Jellyfin: any rename) gets its poster again
+sink_alert_after   = "72h"           # an app whose listing fails this long raises an alert (its posters wait)
+mark               = "poster-curator 2026-10" # EXIF ImageDescription on the images the stage uploads, the owner's own
+                                     # uploads excepted; a later export reads a marked upload as the stage's
 
 # Which Claude model the stages that call one use, by date: the first rule whose `until` is still in the future wins
 # (`until` is exclusive; no `until` = for good). "<family>:latest" is the newest model whose id contains <family>,
