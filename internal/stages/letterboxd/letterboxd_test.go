@@ -395,13 +395,22 @@ func TestRunEndToEnd(t *testing.T) {
 		t.Errorf("missing file = %q", text)
 	}
 
+	w.h.Now = w.h.Now.Add(time.Minute) // within both refresh periods: nothing is re-read
 	before, hits := writes(w.h), w.lb.total()
 	again := w.run(t, "")
+	if again.Counts["plex.snapshot"]+again.Counts["jellyfin.snapshot"] != 0 {
+		t.Errorf("an app re-read inside its refresh period: %v", again.Counts)
+	}
 	if n := writes(w.h) - before; n != 0 {
 		t.Errorf("second run made %d writes (counts %v)", n, again.Counts)
 	}
 	if n := w.lb.total() - hits; n != 1 || again.Counts["rss_not_modified"] != 1 {
 		t.Errorf("second run made %d Letterboxd requests, want 1 conditional feed read", n)
+	}
+
+	w.h.Now = w.h.Now.Add(31 * time.Minute) // Jellyfin is still indexing the library: its films must show up within the hour
+	if jfr := w.run(t, ""); jfr.Counts["jellyfin.snapshot"] != 1 || jfr.Counts["plex.snapshot"] != 0 {
+		t.Errorf("after 31 min: counts %v; want a Jellyfin re-read and no Plex re-read", jfr.Counts)
 	}
 
 	w.h.Now = w.h.Now.Add(25 * time.Hour) // the daily re-read of both apps must agree with what was written

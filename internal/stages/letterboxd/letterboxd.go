@@ -39,8 +39,9 @@ type Options struct {
 	PagesEvery    time.Duration `toml:"pages_every"` // watchlist + watched grid crawl
 	ExportDir     string        `toml:"export_dir"`  // holds letterboxd-<user>-<date>-utc/ folders; newest wins
 	MoviesDir     string        `toml:"movies_dir"`
-	MissingFile   string        `toml:"missing_file"` // watchlist films not on the NAS; "" = none
-	SinkRefresh   time.Duration `toml:"sink_refresh"` // re-read what Plex/Jellyfin hold at most this often
+	MissingFile   string        `toml:"missing_file"`     // watchlist films not on the NAS; "" = none
+	SinkRefresh   time.Duration `toml:"sink_refresh"`     // re-read what Plex and plex.tv hold at most this often
+	JFRefresh     time.Duration `toml:"jellyfin_refresh"` // Jellyfin's listing is cheap and it is still indexing: more often
 
 	PlexSection   int    `toml:"plex_section"`
 	JellyfinUser  string `toml:"jellyfin_user"`
@@ -65,6 +66,7 @@ func defaults() Options {
 		MoviesDir:     "/volume1/media/Movies",
 		MissingFile:   "/volume1/media/_watchlist-missing.txt",
 		SinkRefresh:   24 * time.Hour,
+		JFRefresh:     30 * time.Minute,
 		PlexSection:   4,
 		JellyfinUser:  "saahil",
 		Collection:    "Watchlist",

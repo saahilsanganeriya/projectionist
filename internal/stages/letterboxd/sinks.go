@@ -143,7 +143,7 @@ func (r *run) putMeta(ctx context.Context, app string, m sinkMeta) error {
 	return nil
 }
 
-func (r *run) due(m sinkMeta) bool { return r.env.Now().Sub(m.FetchedAt) >= r.opt.SinkRefresh }
+func (r *run) due(m sinkMeta, every time.Duration) bool { return r.env.Now().Sub(m.FetchedAt) >= every }
 
 func tmdbFromGuids(guids []struct {
 	ID string `json:"id"`
@@ -213,7 +213,7 @@ func (r *run) plexSnapshot(ctx context.Context) (sinkMeta, map[int]have, error) 
 	if err != nil {
 		return m, nil, err
 	}
-	if !r.due(m) {
+	if !r.due(m, r.opt.SinkRefresh) {
 		haves, err := r.loadHaves(ctx, "plex")
 		return m, haves, err
 	}
@@ -533,7 +533,7 @@ func (r *run) jellyfinSnapshot(ctx context.Context) (sinkMeta, map[int]have, err
 	if err != nil {
 		return m, nil, err
 	}
-	if !r.due(m) {
+	if !r.due(m, r.opt.JFRefresh) {
 		haves, err := r.loadHaves(ctx, "jellyfin")
 		return m, haves, err
 	}
@@ -800,7 +800,7 @@ func (r *run) discover(ctx context.Context, method, path string, out any) error 
 
 func (r *run) plexTVSnapshot(ctx context.Context) (map[int]have, error) {
 	m, err := r.meta(ctx, "plextv")
-	if err != nil || !r.due(m) {
+	if err != nil || !r.due(m, r.opt.SinkRefresh) {
 		if err != nil {
 			return nil, err
 		}
