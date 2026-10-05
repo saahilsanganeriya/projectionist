@@ -73,7 +73,8 @@ func TestDockerJudge(t *testing.T) {
 }
 
 // Catches: no restart after K failed runs on a 5xx, the streak not reset by a restart, a second restart inside the
-// cooldown or under a viewer, the restart not recorded before it is sent (a crash could then repeat it), a
+// cooldown or under a viewer, an idle connected client counted as a viewer (it would hold every restart), the
+// restart not recorded before it is sent (a crash could then repeat it), a
 // followed redirect read as the hostname's answer, results missing from /health and /metrics, and a restart once
 // the container is dropped from restartable.
 func TestRunHealsJellyfin(t *testing.T) {
@@ -136,7 +137,7 @@ func TestRunHealsJellyfin(t *testing.T) {
 	h.Now = h.Now.Add(31 * time.Minute)
 	h.Jellyfin.Handle("GET", "/Sessions", 200, `[{"Id":"s","UserName":"guest","NowPlayingItem":{"Name":"Heat"}}]`)
 	expect("viewer playing", run(), 1, "1 session(s) playing")
-	h.Jellyfin.Handle("GET", "/Sessions", 200, `[]`)
+	h.Jellyfin.Handle("GET", "/Sessions", 200, `[{"Id":"s","UserName":"guest"}]`) // connected, nothing playing
 	expect("viewer gone", run(), 2, "restarting container jellyfin")
 	jfStatus = http.StatusOK
 	expect("recovered", run(), 2, "")
