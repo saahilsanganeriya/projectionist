@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -12,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -51,7 +53,7 @@ func writeBackup(t *testing.T, path string, rows [][]any) {
 		CREATE TABLE metadata_item_settings (id INTEGER PRIMARY KEY, account_id INTEGER, guid TEXT, rating REAL, view_offset INTEGER, view_count INTEGER, last_viewed_at INTEGER, updated_at INTEGER);
 		CREATE TABLE media_items (id INTEGER PRIMARY KEY, metadata_item_id INTEGER, deleted_at INTEGER);
 		CREATE TABLE media_parts (id INTEGER PRIMARY KEY, media_item_id INTEGER, file TEXT);
-		INSERT INTO accounts VALUES (1, 'saahilsanganeriya'), (578, 'roger')`)
+		INSERT INTO accounts VALUES (1, 'saahilsanganeriya'), (578, 'roger'), (579, 'roger-tv')`)
 	for _, r := range rows {
 		typ, section := 1, 4
 		if strings.Contains(r[3].(string), "/TV/") {
@@ -93,6 +95,17 @@ func (w *writes) since(n int) []string {
 	return append([]string(nil), w.calls[n:]...)
 }
 
+// pages answers a listing with the page its query asks for, by Plex's or Jellyfin's paging parameters.
+func pages(head, tail string, items ...string) http.HandlerFunc {
+	return func(rw http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		start, _ := strconv.Atoi(q.Get("X-Plex-Container-Start") + q.Get("StartIndex"))
+		size, _ := strconv.Atoi(q.Get("X-Plex-Container-Size") + q.Get("Limit"))
+		start = min(start, len(items))
+		rw.Write([]byte(head + strings.Join(items[start:min(start+size, len(items))], ",") + tail))
+	}
+}
+
 // newHarness: Plex holds Heat (re-created after the backup: ratingKey 13, was 10), Ran, Alien, Clerks, Dune, Fargo
 // and both episodes of a two-episode Wire file; Jellyfin holds all but Alien, the Wire file as one item. History:
 // saahil watched Heat (twice), Alien, Clerks, Dune, Fargo in Plex, is 30 min into Ran in Jellyfin and 20 min into a
@@ -119,13 +132,14 @@ users = [{ name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" }, {
 `
 	h.SetOptions(options)
 
+	listPage = 4 // the movie and Jellyfin listings take two pages
 	part := func(rk string, index int, file string) string {
 		return `{"ratingKey":"` + rk + `","index":` + string(rune('0'+index)) + `,"Media":[{"Part":[{"file":"` + file + `"}]}]}`
 	}
 	h.Plex.Handle("GET", "/accounts", 200, `{"MediaContainer":{"Account":[{"id":1,"name":"saahilsanganeriya"},{"id":578,"name":"roger"},{"id":9,"name":""}]}}`)
-	h.Plex.Handle("GET", "/library/sections/4/all", 200, `{"MediaContainer":{"Metadata":[`+part("13", 0, heat)+","+
-		part("11", 0, ran)+","+part("12", 0, alien)+","+part("14", 0, clerks)+","+part("15", 0, dune)+","+part("16", 0, fargo)+`]}}`)
-	h.Plex.Handle("GET", "/library/sections/2/all", 200, `{"MediaContainer":{"Metadata":[`+part("20", 1, wire)+","+part("21", 2, wire)+`]}}`)
+	h.Plex.HandleFunc("GET", "/library/sections/4/all", pages(`{"MediaContainer":{"Metadata":[`, `]}}`, part("13", 0, heat),
+		part("11", 0, ran), part("12", 0, alien), part("14", 0, clerks), part("15", 0, dune), part("16", 0, fargo)))
+	h.Plex.HandleFunc("GET", "/library/sections/2/all", pages(`{"MediaContainer":{"Metadata":[`, `]}}`, part("20", 1, wire), part("21", 2, wire)))
 	h.Plex.Handle("GET", "/api/v2/user/webhooks", 200, `<webhooks><webhook url="http://tautulli:8181/hook"/></webhooks>`)
 	h.Plex.Handle("POST", "/api/v2/user/webhooks", 201, ``)
 	h.Plex.Handle("GET", "/api/servers/mid/shared_servers", 200,
@@ -144,14 +158,14 @@ users = [{ name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" }, {
 
 	h.Jellyfin.Handle("GET", "/Users", 200, `[{"Name":"saahil","Id":"u1"},{"Name":"roger","Id":"u2"}]`)
 	// Like Jellyfin 12.1 on the NAS, user-scoped item queries leave items out; each item's own UserData is right.
+	items := pages(`{"Items":[`, `]}`, `{"Id":"a1","Path":"`+heat+`"}`, `{"Id":"b1","Path":"`+ran+`"}`, `{"Id":"c1","Path":"`+clerks+`"}`,
+		`{"Id":"d1","Path":"`+dune+`"}`, `{"Id":"e1","Path":"`+wire+`"}`, `{"Id":"f1","Path":"`+fargo+`"}`, `{"Id":"x1","Path":"/lib/Home Videos/x.mkv"}`)
 	h.Jellyfin.HandleFunc("GET", "/Items", func(rw http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("userId") != "" {
 			rw.Write([]byte(`{"Items":[]}`))
 			return
 		}
-		rw.Write([]byte(`{"Items":[{"Id":"a1","Path":"` + heat + `"},{"Id":"b1","Path":"` + ran + `"},{"Id":"c1","Path":"` +
-			clerks + `"},{"Id":"d1","Path":"` + dune + `"},{"Id":"e1","Path":"` + wire + `"},{"Id":"f1","Path":"` + fargo +
-			`"},{"Id":"x1","Path":"/lib/Home Videos/x.mkv"}]}`))
+		items(rw, r)
 	})
 	userData := map[string]string{
 		"u1/b1": `"PlaybackPositionTicks":18000000000,"LastPlayedDate":"2025-01-01T00:00:00.0000000Z"`,
@@ -209,8 +223,10 @@ func plexPlay(event, account, key, extra string) string {
 // be scrobbled again, adding a play); the Plex history not counted as held (Clerks would be scrobbled again); a
 // friend's write sent with the owner's token; an existing plex.tv webhook dropped when ours is added; a rerun that
 // writes again; a pushed play not reaching the other app, or not counted as held by the app that pushed it; the
-// owner's pushed play lost because its payload names him by his plex.tv title; and a state that knows only a resume
-// point sent to Jellyfin as played=false, playcount=0 (it would unmark a play there).
+// owner's pushed play lost because its payload names him by his plex.tv title; a state that knows only a resume
+// point sent to Jellyfin as played=false, playcount=0 (it would unmark a play there); a listing that reads only its
+// first page; and a rating sent to Jellyfin with the play it already holds, or setting LastPlayedDate to the time of
+// the rating rather than of the play (it reorders "recently played").
 func TestRunTwoWay(t *testing.T) {
 	h, w, options, _ := newHarness(t)
 	h.SetOptions(options + "apply = false\n")
@@ -269,6 +285,18 @@ func TestRunTwoWay(t *testing.T) {
 		got[0] != "owner /:/progress?identifier=com.plexapp.plugins.library&key=11&time=600000&state=stopped" {
 		t.Fatalf("after the Jellyfin rewatch (hook %d): %v", code, got)
 	}
+
+	done = len(w.since(0))
+	h.Now = h.Now.Add(10 * time.Minute)
+	push(h, plexApp, plexPlay("media.rate", "saahilsanganeriya", "13", `,"userRating":8`)) // Jellyfin holds the play
+	push(h, plexApp, plexPlay("media.scrobble", "roger", "15", ""))
+	h.Now = h.Now.Add(time.Minute)
+	push(h, plexApp, plexPlay("media.rate", "roger", "15", `,"userRating":6`))
+	run(t, h)
+	if got := strings.Join(w.since(done), "\n"); got != `/UserItems/a1/UserData?userId=u1 {"Rating":8}`+"\n"+
+		`/UserItems/d1/UserData?userId=u2 {"LastPlayedDate":"2026-10-05T07:20:00Z","PlayCount":1,"PlaybackPositionTicks":0,"Played":true,"Rating":6}` {
+		t.Fatalf("after the ratings:\n%s", got)
+	}
 }
 
 // Catches: a push that crosses this stage's write to the same item lost for good. Saahil marks Heat unplayed in
@@ -298,12 +326,26 @@ func TestPushCrossingAWrite(t *testing.T) {
 }
 
 // Catches: a person configured with no Plex account (plex = "") written as the server's unnamed account, which the
-// NAS has: that person's watch state would land in another account.
-func TestNoAccountMeansNoWrites(t *testing.T) {
+// NAS has (their watch state would land in another account); a Plex name absent from the backup copy (an account
+// added since it was taken) marked imported without an alert, so its Plex writes would replay plays Plex holds,
+// adding views its API cannot remove; and an import of one account standing for another configured later.
+func TestPlexAccountConfig(t *testing.T) {
 	h, _, options, _ := newHarness(t)
-	h.SetOptions(strings.Replace(options, `plex = "roger"`, `plex = ""`, 1))
-	if rep := run(t, h); rep.Counts["plex_from_jellyfin.roger"] != 0 || !strings.Contains(strings.Join(rep.Alerts, "|"), `plex has no account ""`) {
-		t.Fatalf("counts %v alerts %q", rep.Counts, rep.Alerts)
+	for _, c := range []struct {
+		plex, alert      string
+		imported, writes int
+	}{
+		{`""`, `plex has no account ""`, 5, 0}, // saahil's five films import
+		{`"Roger R"`, `"Roger R" (users entry "roger") is not in the backup copy`, 0, 0},
+		{`"roger-tv"`, `plex has no account "roger-tv"`, 0, 0}, // in the copy, with no plays
+		{`"roger"`, "", 1, 1}, // the Wire episode he finished in Plex; Ran, finished in Jellyfin, goes to Plex
+	} {
+		h.SetOptions(strings.Replace(options, `plex = "roger"`, "plex = "+c.plex, 1))
+		rep := run(t, h)
+		if rep.Counts["imported.plex"] != c.imported || rep.Counts["plex_from_jellyfin.roger"] != c.writes ||
+			!strings.Contains(strings.Join(rep.Alerts, "|"), c.alert) {
+			t.Errorf("plex = %s: counts %v alerts %q", c.plex, rep.Counts, rep.Alerts)
+		}
 	}
 }
 
@@ -334,8 +376,8 @@ func TestWriteFailuresBackOff(t *testing.T) {
 }
 
 // Catches: a due listing run before the writes (a whole-library Plex listing takes minutes and would hold up every
-// Jellyfin write); a play of an item added since the listing waiting a day for the next one; and a failed listing
-// retried every run instead of backing off.
+// Jellyfin write); an app listed more than once a day (the sources rule allows one listing per app per day), for an
+// item added since or to retry a failed listing; and a failed listing raising no alert.
 func TestListingsFollowTheWrites(t *testing.T) {
 	h, w, _, _ := newHarness(t)
 	run(t, h)
@@ -343,20 +385,76 @@ func TestListingsFollowTheWrites(t *testing.T) {
 		w.add(rw, "list", "list plex")
 		rw.WriteHeader(500)
 	})
-	done := len(w.since(0))
-	h.Now = h.Now.Add(time.Hour)
-	push(h, plexApp, plexPlay("media.scrobble", "saahilsanganeriya", "15", ""))
-	push(h, plexApp, plexPlay("media.scrobble", "saahilsanganeriya", "17", "")) // added after the listing
-	run(t, h)
-	if got := w.since(done); len(got) != 2 || !strings.HasPrefix(got[0], "/UserItems/d1/") || got[1] != "list plex" {
-		t.Fatalf("new item: %v", got)
-	}
-	for i, step := range []time.Duration{24 * time.Hour, 5 * time.Minute} { // daily: due; 5 min later: backing off
-		done = len(w.since(0))
-		h.Now = h.Now.Add(step)
-		if run(t, h); (len(w.since(done)) == 1) != (i == 0) {
-			t.Errorf("run %d after the failure: %v", i+1, w.since(done))
+	for i, step := range []struct {
+		after     time.Duration
+		key, want string // key: a film saahil finishes in Plex before the run
+	}{
+		{time.Hour, "17", ""}, // added since the listing: it waits for the next one
+		{23 * time.Hour, "15", "/UserItems/d1/ list plex"},
+		{30 * time.Minute, "", ""},
+		{24 * time.Hour, "", "list plex"},
+	} {
+		done := len(w.since(0))
+		h.Now = h.Now.Add(step.after)
+		if step.key != "" {
+			push(h, plexApp, plexPlay("media.scrobble", "saahilsanganeriya", step.key, ""))
 		}
+		rep := run(t, h)
+		var got []string
+		for _, c := range w.since(done) {
+			got = append(got, c[:min(len(c), 14)])
+		}
+		if strings.Join(got, " ") != step.want || len(rep.Alerts) != strings.Count(step.want, "list plex") {
+			t.Errorf("run %d: %v, alerts %q", i+1, w.since(done), rep.Alerts)
+		}
+	}
+}
+
+// Catches: an item removed from Jellyfin since the listing (404) stalling the import; one person's failing import
+// holding up the next person's; a stopped or cancelled import restarting from the first item rather than resuming;
+// an import walked again (after a new listing) recording its history twice; and a stuck import never alerting.
+func TestJellyfinImportResumes(t *testing.T) {
+	h, _, _, _ := newHarness(t)
+	h.Jellyfin.Handle("GET", "/UserItems/a1/UserData", 404, "") // removed since the listing
+	broken := true
+	h.Jellyfin.HandleFunc("GET", "/UserItems/c1/UserData", func(rw http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Query().Get("userId") != "u1":
+			rw.Write([]byte(`{}`))
+		case broken:
+			rw.WriteHeader(500)
+		default:
+			rw.Write([]byte(`{"PlaybackPositionTicks":12000000000}`))
+		}
+	})
+	gone := func() int { return len(h.Jellyfin.Calls("GET", "/UserItems/a1/UserData")) }
+	if rep := run(t, h); rep.Counts["waiting.jellyfin.saahil"] != 1 || rep.Counts["waiting.jellyfin.roger"] != 0 {
+		t.Fatalf("first run: counts %v", rep.Counts)
+	}
+	for i, after := range []time.Duration{5 * time.Minute, 25 * time.Hour} { // the second ends with a new listing
+		h.Now = h.Now.Add(after)
+		rep := run(t, h)
+		if gone() != 2 || strings.Contains(strings.Join(rep.Alerts, "|"), "saahil stops at item c1 (3 runs in a row)") != (i == 1) {
+			t.Fatalf("run %d: %d asks for a1 (it resumes at c1), alerts %q", i+2, gone(), rep.Alerts)
+		}
+	}
+	broken = false
+	h.Now = h.Now.Add(5 * time.Minute) // the new listing: the walk starts again
+	rep := run(t, h)
+	var rows int
+	h.Env.Store.DB().QueryRow(`SELECT count(*) FROM watch_events WHERE source = 'jellyfin-backfill'`).Scan(&rows)
+	if gone() != 3 || rep.Counts["waiting.jellyfin.saahil"] != 0 || rows != 3 { // saahil's Ran and Clerks, roger's Ran
+		t.Fatalf("after the fix: %d asks for a1, %d imported rows, counts %v", gone(), rows, rep.Counts)
+	}
+
+	h, _, _, _ = newHarness(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	h.Jellyfin.HandleFunc("GET", "/UserItems/b1/UserData", func(http.ResponseWriter, *http.Request) { cancel() })
+	if err := (Stage{}).Run(ctx, h.Env, &stage.Report{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled import returned %v", err)
+	}
+	if run(t, h); len(h.Jellyfin.Calls("GET", "/UserItems/a1/UserData")) != 2 { // saahil's before the cancel, roger's
+		t.Errorf("the cancelled import restarted")
 	}
 }
 

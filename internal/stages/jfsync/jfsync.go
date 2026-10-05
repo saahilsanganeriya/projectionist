@@ -11,7 +11,8 @@
 // read from its file path. A run is a reconciler: it folds the events into each person's state per item and writes
 // to an app only what the record knows and the app is not believed to hold (jfsync_sink: everything the app pushed
 // or was given). A state an app wrote is never written back to that app. Failed writes are retried on later runs
-// with backoff and never fail the run. A listing is refreshed after the writes, so it never delays them.
+// with backoff and never fail the run. A listing is refreshed after the writes, so it never delays them; an item
+// added since the last listing waits for the next one.
 package jfsync
 
 import (
@@ -38,7 +39,7 @@ const (
 	maxFailRun   = 3 // consecutive write failures that stop an app's writes for the rest of a run (it is down)
 	firstBackoff = 5 * time.Minute
 	maxBackoff   = 24 * time.Hour
-	relistFloor  = 30 * time.Minute // the least time between two listings of an app, and the first listing backoff
+	firstListing = 30 * time.Minute // the first retry of an app's first listing (nothing is addressed until it works)
 	raceSlack    = 2 * time.Minute  // how late an app's webhook may arrive after the event it reports
 	freshBackup  = time.Hour        // an older Plex backup copy misses the plays made since it was taken
 )
@@ -95,14 +96,13 @@ type Stage struct{}
 func (Stage) Name() string { return name }
 
 type syncer struct {
-	env      *stage.Env
-	opt      Options
-	rep      *stage.Report
-	tokens   map[string]string // Plex account id → that friend's server token; memory only, never logged
-	plan     []string
-	readAt   time.Time       // when this run read the record
-	ready    map[string]bool // "app/person": that person's history in the app is imported, so writes may go
-	unplaced map[string]bool // app: something newer than its listing could not be placed in it
+	env    *stage.Env
+	opt    Options
+	rep    *stage.Report
+	tokens map[string]string // Plex account id → that friend's server token; memory only, never logged
+	plan   []string
+	readAt time.Time       // when this run read the record
+	ready  map[string]bool // "app/person": that person's history in the app is imported, so writes may go
 }
 
 func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
@@ -113,7 +113,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if err := openTables(ctx, env); err != nil {
 		return err
 	}
-	s := &syncer{env: env, opt: opt, rep: rep, ready: map[string]bool{}, unplaced: map[string]bool{}}
+	s := &syncer{env: env, opt: opt, rep: rep, ready: map[string]bool{}}
 	s.ensureWebhook(ctx)
 	addrs := map[string]*addresses{}
 	for _, app := range apps {
@@ -121,7 +121,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		if err != nil {
 			return err
 		}
-		if a.At.IsZero() && s.due(a, false) { // never listed: nothing can be addressed until it is
+		if a.At.IsZero() && s.due(a) { // never listed: nothing can be addressed until it is
 			a = s.refresh(ctx, app, a)
 		}
 		addrs[app] = a
@@ -148,7 +148,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		}
 	}
 	for _, app := range apps { // after the writes, so a whole-library listing never delays them
-		if s.due(addrs[app], s.unplaced[app]) {
+		if s.due(addrs[app]) {
 			s.refresh(ctx, app, addrs[app])
 		}
 	}
@@ -171,7 +171,6 @@ func (s *syncer) resolve(ctx context.Context, addrs map[string]*addresses) error
 		var items []string
 		if a := addrs[app]; a != nil {
 			items = a.Targets[id]
-			s.unplaced[app] = s.unplaced[app] || (len(items) == 0 && e.At.After(a.At))
 		}
 		if len(items) == 0 {
 			s.rep.Count("unresolved", 1)
@@ -279,7 +278,7 @@ func (s *syncer) reconcile(ctx context.Context, app string, addr *addresses, sta
 			if !s.opt.Apply {
 				continue
 			}
-			held, err := s.write(ctx, app, userID, id, w, row.State, want.At)
+			held, err := s.write(ctx, app, userID, id, w, row.State, want.PlayedAt)
 			if !held.Same(row.State) {
 				if err := wroteSink(ctx, db, app, u.Name, id, held, s.readAt, s.env.Now()); err != nil {
 					return err
@@ -305,32 +304,32 @@ func (s *syncer) reconcile(ctx context.Context, app string, addr *addresses, sta
 		for k, st := range states {
 			if k.Person == u.Name && !covered[k] && origin(st.Source) != app {
 				s.rep.Count("pending."+app+"."+u.Name, 1)
-				s.unplaced[app] = s.unplaced[app] || st.At.After(addr.At)
 			}
 		}
 	}
 	return nil
 }
 
-// write puts w into one app item believed to hold have, and returns what the item then holds. A Plex write is up to
+// write puts into one app item, believed to hold have, the fields of w it does not hold, and returns what the item
+// then holds. playedAt (the last play or stop, never a rating) is Jellyfin's LastPlayedDate. A Plex write is up to
 // three calls; the ones that went through count even when a later one fails, so a scrobble is never repeated.
-func (s *syncer) write(ctx context.Context, app, userID, id string, w, have watch.State, at time.Time) (watch.State, error) {
+func (s *syncer) write(ctx context.Context, app, userID, id string, w, have watch.State, playedAt time.Time) (watch.State, error) {
 	held := have
 	if app == jellyfinApp { // Jellyfin sets only the fields the body carries
 		body := map[string]any{}
-		if w.KnowsPlay {
+		if w.KnowsPlay && (!have.KnowsPlay || w.Played != have.Played || w.Plays != have.Plays) {
 			body["Played"], body["PlayCount"] = w.Played, w.Plays
 			held.Played, held.Plays, held.KnowsPlay = w.Played, w.Plays, true
 		}
-		if w.KnowsPosition {
+		if w.KnowsPosition && (!have.KnowsPosition || w.PositionMs != have.PositionMs) {
 			body["PlaybackPositionTicks"] = w.PositionMs * 10_000
 			held.PositionMs, held.KnowsPosition = w.PositionMs, true
 		}
-		if w.Rating != nil {
-			body["Rating"], held.Rating = *w.Rating, w.Rating
+		if len(body) > 0 && !playedAt.IsZero() && (w.Played || w.PositionMs > 0) { // a play or a stop goes
+			body["LastPlayedDate"] = playedAt.UTC().Format(time.RFC3339)
 		}
-		if !at.IsZero() && (w.Played || w.PositionMs > 0) {
-			body["LastPlayedDate"] = at.UTC().Format(time.RFC3339)
+		if w.Rating != nil && (have.Rating == nil || *have.Rating != *w.Rating) {
+			body["Rating"], held.Rating = *w.Rating, w.Rating
 		}
 		if err := s.env.Jellyfin.PostJSON(ctx, "/UserItems/"+id+"/UserData?userId="+userID, body, nil); err != nil {
 			return have, err

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,9 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrNotFound is Jellyfin's 404: the item (or user) does not exist, e.g. it was removed or renamed since a listing.
+var ErrNotFound = errors.New("jellyfin: not found")
 
 type Client struct {
 	base    string
@@ -59,6 +63,9 @@ func (c *Client) do(ctx context.Context, method, path string, in any, out any) e
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
 		return fmt.Errorf("jellyfin %s %s: %w", method, path, err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("jellyfin %s %s: %w", method, path, ErrNotFound)
 	}
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("jellyfin %s %s: HTTP %d", method, path, resp.StatusCode)

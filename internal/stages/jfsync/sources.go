@@ -20,6 +20,7 @@ import (
 
 	_ "modernc.org/sqlite" // read-only access to the Plex DB backup copy
 
+	"projectionist/internal/jellyfin"
 	"projectionist/internal/stage"
 	"projectionist/internal/watch"
 )
@@ -40,18 +41,18 @@ func (s *syncer) loadAddress(ctx context.Context, app string) (*addresses, error
 	return &a, err
 }
 
-// due says whether an app's listing is to be refreshed: daily; after a failure, with backoff (30 min doubling up to
-// address_every); sooner when something newer than the listing could not be placed in it (an item added since),
-// but never twice within 30 min.
-func (s *syncer) due(a *addresses, unplaced bool) bool {
+// listPage is how many items one listing request asks for; a listing takes as many requests as it needs.
+var listPage = 1000
+
+// due says whether an app's listing is to be refreshed: once per address_every, whether or not the last attempt
+// worked (the sources rule allows one listing per app per day). An app never listed retries sooner, with backoff
+// (30 min, doubling), since nothing can be addressed until it is.
+func (s *syncer) due(a *addresses) bool {
 	now := s.env.Now()
-	switch {
-	case a.Failures > 0:
-		return !now.Before(a.Tried.Add(backoff(relistFloor, a.Failures, s.opt.AddressEvery)))
-	case a.At.IsZero():
-		return true
+	if a.At.IsZero() && a.Failures > 0 {
+		return !now.Before(a.Tried.Add(backoff(firstListing, a.Failures, s.opt.AddressEvery)))
 	}
-	return now.Sub(a.At) >= s.opt.AddressEvery || (unplaced && now.Sub(a.Tried) >= relistFloor)
+	return a.Tried.IsZero() || now.Sub(a.Tried) >= s.opt.AddressEvery
 }
 
 // refresh lists the app again. A failed listing keeps the previous one, which the next runs go on using.
@@ -65,6 +66,10 @@ func (s *syncer) refresh(ctx context.Context, app string, old *addresses) *addre
 	if err := list(ctx, next); err != nil {
 		s.env.Log.Warn("addressing failed", "event", "address_failed", "app", app, "attempt", old.Failures+1, "err", err)
 		s.rep.Count("address_failed."+app, 1)
+		if !old.At.IsZero() {
+			s.rep.Alert("%s listing failed (next try in %s; items added since %s wait for it): %v", app,
+				s.opt.AddressEvery, old.At.Format(time.RFC3339), err)
+		}
 		kept := *old
 		kept.Tried, kept.Failures = now, old.Failures+1
 		next = &kept
@@ -102,29 +107,36 @@ func (s *syncer) listPlex(ctx context.Context, a *addresses) error {
 			a.Users[acc.Name] = strconv.FormatInt(acc.ID, 10)
 		}
 	}
-	for _, path := range []string{fmt.Sprintf("/library/sections/%d/all", s.opt.MoviesSection),
-		fmt.Sprintf("/library/sections/%d/all?type=4", s.opt.TVSection)} {
-		var list struct {
-			Metadata []struct {
-				RatingKey string `json:"ratingKey"`
-				Index     int    `json:"index"` // episode number; Plex lists a multi-episode file once per episode
-				Media     []struct {
-					Part []struct {
-						File string `json:"file"`
-					} `json:"Part"`
-				} `json:"Media"`
-			} `json:"Metadata"`
-		}
-		if err := px.GetJSON(ctx, path, &list); err != nil {
-			return err
-		}
-		for _, m := range list.Metadata {
-			for _, md := range m.Media {
-				for _, p := range md.Part {
-					if items := watch.ItemsForPath(p.File, m.Index); items != nil && a.Targets[m.RatingKey] == nil {
-						a.Targets[m.RatingKey] = items
+	// Oldest first, so an item added while the pages are read lands on a later page rather than shifting the rest.
+	for _, path := range []string{fmt.Sprintf("/library/sections/%d/all?type=1&sort=addedAt", s.opt.MoviesSection),
+		fmt.Sprintf("/library/sections/%d/all?type=4&sort=addedAt", s.opt.TVSection)} {
+		for start := 0; ; start += listPage {
+			var list struct {
+				Metadata []struct {
+					RatingKey string `json:"ratingKey"`
+					Index     int    `json:"index"` // episode number; Plex lists a multi-episode file once per episode
+					Media     []struct {
+						Part []struct {
+							File string `json:"file"`
+						} `json:"Part"`
+					} `json:"Media"`
+				} `json:"Metadata"`
+			}
+			page := fmt.Sprintf("%s&X-Plex-Container-Start=%d&X-Plex-Container-Size=%d", path, start, listPage)
+			if err := px.GetJSON(ctx, page, &list); err != nil {
+				return err
+			}
+			for _, m := range list.Metadata {
+				for _, md := range m.Media {
+					for _, p := range md.Part {
+						if items := watch.ItemsForPath(p.File, m.Index); items != nil && a.Targets[m.RatingKey] == nil {
+							a.Targets[m.RatingKey] = items
+						}
 					}
 				}
+			}
+			if len(list.Metadata) != listPage { // the last page, or a server that ignored the paging and sent all
+				break
 			}
 		}
 	}
@@ -142,13 +154,19 @@ func (s *syncer) listJellyfin(ctx context.Context, a *addresses) error {
 			a.Users[u.Name] = u.ID
 		}
 	}
-	var list struct{ Items []struct{ ID, Path string } }
-	if err := jf.GetJSON(ctx, "/Items?Recursive=true&IncludeItemTypes=Movie,Episode&Fields=Path&enableImages=false&enableUserData=false", &list); err != nil {
-		return err
-	}
-	for _, it := range list.Items {
-		if items := watch.ItemsForPath(it.Path, 0); items != nil {
-			a.Targets[it.ID] = items
+	for start := 0; ; start += listPage {
+		var list struct{ Items []struct{ ID, Path string } }
+		if err := jf.GetJSON(ctx, fmt.Sprintf("/Items?Recursive=true&IncludeItemTypes=Movie,Episode&Fields=Path"+
+			"&enableImages=false&enableUserData=false&SortBy=DateCreated,SortName&StartIndex=%d&Limit=%d", start, listPage), &list); err != nil {
+			return err
+		}
+		for _, it := range list.Items {
+			if items := watch.ItemsForPath(it.Path, 0); items != nil {
+				a.Targets[it.ID] = items
+			}
+		}
+		if len(list.Items) != listPage {
+			break
 		}
 	}
 	return nil
@@ -356,31 +374,36 @@ func parseJellyfin(r *http.Request, opt Options, now time.Time) (watch.Event, dr
 // ---- one-time migrations of the history that existed only inside an app ----
 
 type migrated struct {
-	From   string    `json:"from"`
-	At     time.Time `json:"at"`
-	Events int       `json:"events"`
+	Account string    `json:"account"` // the app account imported; another one configured later is imported afresh
+	From    string    `json:"from"`
+	At      time.Time `json:"at"`
+	Events  int       `json:"events"`
 }
 
-// migrated says whether a person's history in an app has been imported, and remembers the answer for the run.
-func (s *syncer) migrated(ctx context.Context, app, person string) (bool, error) {
+// migrated says whether a person's history in an app has been imported from the account configured now, and
+// remembers the answer for the run.
+func (s *syncer) migrated(ctx context.Context, app, person, account string) (bool, error) {
 	var m migrated
 	found, err := s.env.Store.GetJSON(ctx, name, "migrated."+app+"."+person, &m)
-	s.ready[app+"/"+person] = found
-	return found, err
+	done := found && m.Account == account
+	s.ready[app+"/"+person] = done
+	return done, err
 }
 
-func (s *syncer) markMigrated(ctx context.Context, app, person, from string, events int) error {
-	s.ready[app+"/"+person] = true
-	return s.env.Store.PutJSON(ctx, name, "migrated."+app+"."+person, migrated{From: from, At: s.env.Now(), Events: events})
+func (s *syncer) markMigrated(ctx context.Context, app string, u User, from string, events int) error {
+	s.ready[app+"/"+u.Name] = true
+	return s.env.Store.PutJSON(ctx, name, "migrated."+app+"."+u.Name,
+		migrated{Account: u.account(app), From: from, At: s.env.Now(), Events: events})
 }
 
 // backfillPlex imports, once per person, the mapped accounts' watch rows from the newest Plex database backup copy
-// (never the live DB). A copy that cannot be read is retried every run; until then that person's Plex writes wait.
+// (never the live DB). A copy that cannot be read, or that has no account of the configured name, is retried every
+// run; until then that person's Plex writes wait, since they would replay plays Plex already holds.
 func (s *syncer) backfillPlex(ctx context.Context) error {
 	var todo []User
 	var accounts []any
 	for _, u := range s.opt.Users {
-		done, err := s.migrated(ctx, plexApp, u.Name)
+		done, err := s.migrated(ctx, plexApp, u.Name, u.Plex)
 		if err != nil {
 			return err
 		}
@@ -393,8 +416,9 @@ func (s *syncer) backfillPlex(ctx context.Context) error {
 	}
 	file, taken, err := newestBackup(s.opt.PlexBackups)
 	var rows []backupRow
+	var present map[string]bool
 	if err == nil {
-		rows, err = readPlexBackup(ctx, file, accounts, s.opt.MoviesSection, s.opt.TVSection)
+		rows, present, err = readPlexBackup(ctx, file, accounts, s.opt.MoviesSection, s.opt.TVSection)
 	}
 	if err != nil {
 		s.rep.Alert("Plex watch history not imported, so Plex writes wait: %v", err)
@@ -417,7 +441,12 @@ func (s *syncer) backfillPlex(ctx context.Context) error {
 	}
 	s.env.Log.Info("plex history imported", "event", "migrated", "app", plexApp, "from", file, "rows", len(rows))
 	for _, u := range todo {
-		if err := s.markMigrated(ctx, plexApp, u.Name, file, events[u.Name]); err != nil {
+		if !present[u.Plex] {
+			s.rep.Alert("Plex account %q (users entry %q) is not in the backup copy's accounts, so its history is not "+
+				"imported and its Plex writes wait: use the account's name on this server", u.Plex, u.Name)
+			continue
+		}
+		if err := s.markMigrated(ctx, plexApp, u, file, events[u.Name]); err != nil {
 			return err
 		}
 	}
@@ -482,13 +511,31 @@ func newestBackup(dir string) (string, time.Time, error) {
 	return best, taken, err
 }
 
-func readPlexBackup(ctx context.Context, file string, accounts []any, movies, tv int) ([]backupRow, error) {
+// readPlexBackup returns the watch rows of the named accounts, and which of those names the copy has an account for.
+func readPlexBackup(ctx context.Context, file string, accounts []any, movies, tv int) ([]backupRow, map[string]bool, error) {
 	// immutable=1: read-only, and SQLite creates no -wal/-shm beside the copy.
 	db, err := sql.Open("sqlite", "file:"+(&url.URL{Path: file}).EscapedPath()+"?mode=ro&immutable=1")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer db.Close()
+	names := `(?` + strings.Repeat(",?", len(accounts)-1) + `)`
+	present := map[string]bool{}
+	found, err := db.QueryContext(ctx, `SELECT name FROM accounts WHERE name IN `+names, accounts...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer found.Close()
+	for found.Next() {
+		var n string
+		if err := found.Scan(&n); err != nil {
+			return nil, nil, err
+		}
+		present[n] = true
+	}
+	if err := found.Err(); err != nil {
+		return nil, nil, err
+	}
 	rows, err := db.QueryContext(ctx, `SELECT a.name, m.id, coalesce(m."index", 0), coalesce(s.view_count, 0),
 		coalesce(s.view_offset, 0), s.rating, coalesce(nullif(s.last_viewed_at, 0), s.updated_at, 0),
 		coalesce((SELECT p.file FROM media_items mi JOIN media_parts p ON p.media_item_id = mi.id
@@ -498,9 +545,9 @@ func readPlexBackup(ctx context.Context, file string, accounts []any, movies, tv
 		JOIN metadata_items m ON m.guid = s.guid AND m.deleted_at IS NULL
 		WHERE m.metadata_type IN (1, 4) AND m.library_section_id IN (?, ?)
 		  AND (s.view_count > 0 OR s.view_offset > 0 OR s.rating IS NOT NULL)
-		  AND a.name IN (?`+strings.Repeat(",?", len(accounts)-1)+`)`, append([]any{movies, tv}, accounts...)...)
+		  AND a.name IN `+names, append([]any{movies, tv}, accounts...)...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	var out []backupRow
@@ -508,12 +555,12 @@ func readPlexBackup(ctx context.Context, file string, accounts []any, movies, tv
 		var r backupRow
 		var at int64
 		if err := rows.Scan(&r.account, &r.ratingKey, &r.index, &r.plays, &r.positionMs, &r.rating, &at, &r.file); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		r.at = time.Unix(at, 0).UTC()
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	return out, present, rows.Err()
 }
 
 // backfillJellyfin imports, once per person, the user's played, resumable and rated items from Jellyfin, asking for
@@ -528,30 +575,71 @@ func (s *syncer) backfillJellyfin(ctx context.Context, addr *addresses) error {
 	}
 	sort.Strings(ids)
 	for _, u := range s.opt.Users {
-		done, err := s.migrated(ctx, jellyfinApp, u.Name)
+		done, err := s.migrated(ctx, jellyfinApp, u.Name, u.Jellyfin)
 		if err != nil {
 			return err
 		}
-		userID, ok := addr.Users[u.Jellyfin]
-		if done || !ok {
-			continue
+		if userID, ok := addr.Users[u.Jellyfin]; ok && !done {
+			if err := s.importJellyfin(ctx, u, userID, addr, ids); err != nil {
+				return err
+			}
 		}
-		n := 0
-		for _, id := range ids {
-			var ud struct {
-				Played                bool
-				PlayCount             int
-				PlaybackPositionTicks int64
-				Rating                *float64
-				LastPlayedDate        string
+	}
+	return nil
+}
+
+// importCursor is where a person's Jellyfin import stopped, so the next run resumes there.
+type importCursor struct {
+	Account  string    `json:"account"`
+	Listed   time.Time `json:"listed"` // the listing walked; another one restarts the walk (Add skips what is recorded)
+	After    string    `json:"after"`  // the last item id done
+	Failures int       `json:"fails"`  // runs in a row that stopped at the item after it
+}
+
+// importJellyfin walks the listing's ids in order from where the last run stopped. An item gone since the listing
+// (404) holds nothing to import. Any other failure stops this person's walk until the next run (alerting from the
+// third in a row) and leaves the other people to go on.
+func (s *syncer) importJellyfin(ctx context.Context, u User, userID string, addr *addresses, ids []string) error {
+	key := "import.jellyfin." + u.Name
+	var cur importCursor
+	if _, err := s.env.Store.GetJSON(ctx, name, key, &cur); err != nil {
+		return err
+	}
+	if cur.Account != u.Jellyfin || !cur.Listed.Equal(addr.At) {
+		cur = importCursor{Account: u.Jellyfin, Listed: addr.At}
+	}
+	start := sort.SearchStrings(ids, cur.After)
+	if start < len(ids) && ids[start] == cur.After {
+		start++
+	}
+	n := 0
+	for _, id := range ids[start:] {
+		var ud struct {
+			Played                bool
+			PlayCount             int
+			PlaybackPositionTicks int64
+			Rating                *float64
+			LastPlayedDate        string
+		}
+		err := s.env.Jellyfin.GetJSON(ctx, "/UserItems/"+id+"/UserData?userId="+userID, &ud)
+		switch {
+		case ctx.Err() != nil:
+			if err := s.env.Store.PutJSON(context.WithoutCancel(ctx), name, key, cur); err != nil {
+				s.env.Log.Warn("import cursor write failed", "event", "store_error", "err", err)
 			}
-			if err := s.env.Jellyfin.GetJSON(ctx, "/UserItems/"+id+"/UserData?userId="+userID, &ud); err != nil {
-				s.env.Log.Warn("jellyfin history import failed", "event", "migrate_failed", "person", u.Name, "item", id, "err", err)
-				return nil // retried next run: nothing marks it done
+			return ctx.Err()
+		case errors.Is(err, jellyfin.ErrNotFound):
+			s.rep.Count("import_gone."+jellyfinApp, 1)
+		case err != nil:
+			cur.Failures++
+			s.env.Log.Warn("jellyfin history import stopped", "event", "migrate_failed", "person", u.Name, "item", id,
+				"attempt", cur.Failures, "err", err)
+			if cur.Failures >= 3 {
+				s.rep.Alert("Jellyfin history import for %s stops at item %s (%d runs in a row), so its Jellyfin writes "+
+					"wait: %v", u.Name, id, cur.Failures, err)
 			}
-			if !ud.Played && ud.PlaybackPositionTicks <= 0 && ud.Rating == nil {
-				continue
-			}
+			return s.env.Store.PutJSON(ctx, name, key, cur)
+		case ud.Played || ud.PlaybackPositionTicks > 0 || ud.Rating != nil:
 			at, _ := time.Parse(time.RFC3339Nano, ud.LastPlayedDate) // absent: the zero time, older than any other source
 			e := history(ud.Played, ud.PlayCount, ud.PlaybackPositionTicks/10_000, ud.Rating)
 			e.Person, e.Ref, e.Source, e.At = u.Name, jellyfinApp+":"+id, "jellyfin-backfill", at
@@ -561,13 +649,14 @@ func (s *syncer) backfillJellyfin(ctx context.Context, addr *addresses) error {
 			}
 			n += added
 		}
-		s.env.Log.Info("jellyfin history imported", "event", "migrated", "app", jellyfinApp, "person", u.Name,
-			"items", len(ids), "events", n)
-		if err := s.markMigrated(ctx, jellyfinApp, u.Name, "jellyfin", n); err != nil {
-			return err
-		}
+		cur.After, cur.Failures = id, 0
 	}
-	return nil
+	s.env.Log.Info("jellyfin history imported", "event", "migrated", "app", jellyfinApp, "person", u.Name,
+		"items", len(ids)-start, "events", n)
+	if err := s.env.Store.PutJSON(ctx, name, key, importCursor{}); err != nil {
+		return err
+	}
+	return s.markMigrated(ctx, jellyfinApp, u, "jellyfin", n)
 }
 
 // ---- plex.tv: the webhook registration and friends' server tokens ----

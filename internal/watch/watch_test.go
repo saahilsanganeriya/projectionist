@@ -25,15 +25,15 @@ func TestApply(t *testing.T) {
 		{"finish after a stop", []Event{
 			{Kind: Stopped, PositionMs: 5000, At: t1, Source: "plex-webhook"},
 			{Kind: Finished, At: t2, Source: "plex-webhook"},
-		}, State{Played: true, Plays: 1, KnowsPlay: true, KnowsPosition: true, At: t2, Source: "plex-webhook"}},
+		}, State{Played: true, Plays: 1, KnowsPlay: true, KnowsPosition: true, At: t2, Source: "plex-webhook", PlayedAt: t2}},
 		{"echo keeps the writer", []Event{
 			{Kind: Finished, At: t1, Source: "plex-webhook"},
 			{Kind: Snapshot, Played: true, Plays: 1, At: t2, Source: "jellyfin-webhook"},
-		}, State{Played: true, Plays: 1, KnowsPlay: true, KnowsPosition: true, At: t1, Source: "plex-webhook"}},
+		}, State{Played: true, Plays: 1, KnowsPlay: true, KnowsPosition: true, At: t1, Source: "plex-webhook", PlayedAt: t1}},
 		{"newer snapshot wins, keeps the rating", []Event{
 			{Kind: Rated, Rating: rating(8), At: t1, Source: "plex-webhook"},
 			{Kind: Snapshot, PositionMs: 9000, At: t2, Source: "jellyfin-webhook"},
-		}, State{PositionMs: 9000, Rating: rating(8), KnowsPlay: true, KnowsPosition: true, At: t2, Source: "jellyfin-webhook"}},
+		}, State{PositionMs: 9000, Rating: rating(8), KnowsPlay: true, KnowsPosition: true, At: t2, Source: "jellyfin-webhook", PlayedAt: t2}},
 		{"rating removed", []Event{
 			{Kind: Rated, Rating: rating(8), At: t1, Source: "plex-webhook"},
 			{Kind: Rated, At: t3, Source: "plex-webhook"},

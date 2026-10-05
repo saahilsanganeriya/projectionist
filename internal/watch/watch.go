@@ -72,6 +72,7 @@ type State struct {
 	KnowsPosition bool      // PositionMs comes from an event (any kind but Rated)
 	At            time.Time // when the newest event that changed the state happened
 	Source        string    // that event's source, i.e. who wrote last
+	PlayedAt      time.Time // when the newest event that changed Played, Plays or PositionMs happened (not a rating)
 }
 
 // Apply folds e into s. An event that changes nothing (an app echoing a state it was given) leaves At and Source
@@ -93,6 +94,10 @@ func (s State) Apply(e Event) State {
 		return s
 	}
 	n.At, n.Source = e.At, e.Source
+	if n.Played != s.Played || n.Plays != s.Plays || n.PositionMs != s.PositionMs || n.KnowsPlay != s.KnowsPlay ||
+		n.KnowsPosition != s.KnowsPosition {
+		n.PlayedAt = e.At
+	}
 	return n
 }
 
@@ -136,11 +141,13 @@ func Open(ctx context.Context, db *sql.DB) error {
 	return err
 }
 
-// Add appends e. Recording the same snapshot, stop or rating twice changes no state, so an import interrupted
-// part-way may simply run again; a Finished event must be recorded once.
+// Add appends e unless the identical event is already recorded, so an import that runs again adds nothing (a
+// repeated Finished would count a second play).
 func Add(ctx context.Context, db *sql.DB, e Event) error {
 	_, err := db.ExecContext(ctx, `INSERT INTO watch_events
-		(person, item, ref, source, at, kind, played, plays, position_ms, rating) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+		(person, item, ref, source, at, kind, played, plays, position_ms, rating) SELECT ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10
+		WHERE NOT EXISTS (SELECT 1 FROM watch_events WHERE person = ?1 AND item = ?2 AND at = ?5 AND ref = ?3 AND
+		  source = ?4 AND kind = ?6 AND played = ?7 AND plays = ?8 AND position_ms = ?9 AND rating IS ?10)`,
 		e.Person, e.Item, e.Ref, e.Source, e.At.UTC().Format(store.TimeFormat), e.Kind, e.Played, e.Plays, e.PositionMs, e.Rating)
 	return err
 }
