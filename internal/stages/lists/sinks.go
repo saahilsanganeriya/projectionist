@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"projectionist/internal/store"
@@ -129,20 +130,31 @@ func putRow(ctx context.Context, db *sql.DB, app, key string, r sinkRow) error {
 }
 
 // writer runs one app's calls: idempotent ones up to three times (2 s, then 4 s apart); the first call that still
-// fails, or the end of the budget, stops the app for this run.
+// fails, or the end of the budget, stops the app for this run. A member call Plex refuses (item) is skipped instead.
 type writer struct {
 	app     string
 	log     *slog.Logger
 	writes  int
+	refused int    // member calls the app refused, skipped
 	stopped string // why the rest was deferred; "" while healthy
 }
 
 func (w *writer) read(ctx context.Context, what string, fn func(context.Context) error) bool {
-	return w.try(ctx, what, 3, fn)
+	return w.try(ctx, what, 3, false, fn)
 }
 
 func (w *writer) write(ctx context.Context, what string, fn func(context.Context) error) bool {
-	ok := w.try(ctx, what, 3, fn)
+	ok := w.try(ctx, what, 3, false, fn)
+	if ok {
+		w.writes++
+	}
+	return ok
+}
+
+// item is write for a call naming one collection member (an add, a drop, a move). One Plex refuses (refusedItem) is
+// skipped and counted, so a key the map got wrong costs that call, not the app's other shelves and Home rows.
+func (w *writer) item(ctx context.Context, what string, fn func(context.Context) error) bool {
+	ok := w.try(ctx, what, 3, true, fn)
 	if ok {
 		w.writes++
 	}
@@ -152,14 +164,14 @@ func (w *writer) write(ctx context.Context, what string, fn func(context.Context
 // writeOnce is for a call that is not idempotent (creating a collection): no retry; the next run adopts the
 // result if the call went through after all.
 func (w *writer) writeOnce(ctx context.Context, what string, fn func(context.Context) error) bool {
-	ok := w.try(ctx, what, 1, fn)
+	ok := w.try(ctx, what, 1, false, fn)
 	if ok {
 		w.writes++
 	}
 	return ok
 }
 
-func (w *writer) try(ctx context.Context, what string, attempts int, fn func(context.Context) error) bool {
+func (w *writer) try(ctx context.Context, what string, attempts int, item bool, fn func(context.Context) error) bool {
 	if w.stopped != "" {
 		return false
 	}
@@ -167,6 +179,11 @@ func (w *writer) try(ctx context.Context, what string, attempts int, fn func(con
 	for attempt := 1; attempt <= attempts; attempt++ {
 		if err = fn(ctx); err == nil {
 			return true
+		}
+		if item && refusedItem(err) {
+			w.refused++
+			w.log.Warn(w.app+" refused a member call; skipped", "event", w.app+"_item_refused", "call", what, "err", err)
+			return false
 		}
 		if ctx.Err() != nil || attempt == attempts {
 			break
@@ -184,21 +201,52 @@ func (w *writer) try(ctx context.Context, what string, attempts int, fn func(con
 	return false
 }
 
-// poster returns the shelf's poster: the configured file, else one rendered from the name.
-func poster(s shelf) (img []byte, contentType string, err error) {
-	if s.List.Poster != "" {
-		img, err = os.ReadFile(s.List.Poster)
-		if strings.EqualFold(filepath.Ext(s.List.Poster), ".png") {
-			return img, "image/png", err
+// art is a shelf's poster, shared by both apps: rendered at most once per run, and only when an app's record of the
+// poster it holds differs from key, so a quiet run renders nothing (a 1000x1500 render is costly on the J4125).
+type art struct {
+	key           string // the configured file's digest, or the generated poster's inputs; "" = no poster to send
+	title, kicker string
+	once          sync.Once
+	img           []byte
+	ctype         string
+	err           error
+}
+
+// posterVersion is part of a generated poster's key: bump it when renderPoster draws differently, so every shelf's
+// poster is sent again.
+const posterVersion = "1"
+
+// render draws a generated poster; tests count its calls.
+var render = renderPoster
+
+// newArt is the list's poster: the configured file, else one rendered from the name when first needed.
+func newArt(l list) (*art, error) {
+	if l.Poster != "" {
+		img, err := os.ReadFile(l.Poster)
+		if err != nil {
+			return &art{}, err
 		}
-		return img, "image/jpeg", err
+		ctype := "image/jpeg"
+		if strings.EqualFold(filepath.Ext(l.Poster), ".png") {
+			ctype = "image/png"
+		}
+		return &art{key: digest(img), img: img, ctype: ctype}, nil
 	}
 	kicker := "LETTERBOXD · MY LIST"
-	if s.List.Canon {
+	if l.Canon {
 		kicker = "THE CANON"
 	}
-	img, err = renderPoster(s.List.Name, kicker)
-	return img, "image/png", err
+	return &art{key: "v" + posterVersion + ":" + digest([]byte(kicker+"\n"+l.Name)), title: l.Name, kicker: kicker}, nil
+}
+
+func (a *art) get() (img []byte, contentType string, err error) {
+	a.once.Do(func() {
+		if a.img == nil {
+			a.img, a.err = render(a.title, a.kicker)
+			a.ctype = "image/png"
+		}
+	})
+	return a.img, a.ctype, a.err
 }
 
 func digest(b []byte) string {

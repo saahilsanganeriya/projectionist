@@ -149,6 +149,7 @@ func (j *jellyfinSink) load(ctx context.Context) appReport {
 
 type boxSet struct {
 	ID          string    `json:"Id"`
+	Type        string    `json:"Type"`
 	Name        string    `json:"Name"`
 	Overview    string    `json:"Overview"`
 	DateCreated time.Time `json:"DateCreated"`
@@ -187,9 +188,10 @@ func (j *jellyfinSink) reconcile(ctx context.Context, shelves []shelf, retire []
 	}
 }
 
-// retire deletes the BoxSets of retired lists, each looked up by its id; only one that still carries the stage's
-// overview is deleted. As for Plex, a record is forgotten only once the BoxSet is confirmed gone or the owner's, and
-// a 404 confirms nothing while Jellyfin scans: items drop out of its answers then and come back.
+// retire deletes the BoxSets of retired lists, each looked up by its id. As for Plex, only a BoxSet with the stage's
+// overview or none is deleted (DELETE /Items would delete a movie's files too, so the type is checked first), a
+// record is forgotten only once the BoxSet is confirmed gone, and a 404 confirms nothing while Jellyfin scans: items
+// drop out of its answers then and come back.
 func (j *jellyfinSink) retire(ctx context.Context, keys []string) {
 	db := j.env.Store.DB()
 	for _, key := range keys {
@@ -217,12 +219,17 @@ func (j *jellyfinSink) retire(ctx context.Context, keys []string) {
 		case gone && j.scanning:
 			continue
 		case gone:
-		case strings.HasPrefix(b.Overview, summaryMarker):
+		case b.Type != "BoxSet":
+			j.log.Warn("record names an item that is not a BoxSet; left alone", "event", "retire_refused", "app", "jellyfin", "list", key, "id", row.ID)
+			continue
+		case b.Overview == "" || strings.HasPrefix(b.Overview, summaryMarker):
 			if !j.w.write(ctx, "retire "+b.Name, func(ctx context.Context) error { return j.env.Jellyfin.Delete(ctx, "/Items/"+row.ID) }) {
 				return
 			}
 			j.retired++
 			j.log.Info("shelf retired", "event", "collection_retired", "app", "jellyfin", "list", key, "title", b.Name, "id", row.ID)
+		default:
+			continue // the owner rewrote its overview: his now
 		}
 		if err := deleteRow(ctx, db, "jellyfin", key); err != nil {
 			j.log.Warn("state write failed", "event", "store_error", "err", err)
@@ -306,19 +313,19 @@ func (j *jellyfinSink) shelf(ctx context.Context, s shelf, sets []boxSet) {
 			return
 		}
 	}
-	img, ctype, err := poster(s)
-	if err != nil {
-		j.log.Warn("poster unavailable", "event", "poster_error", "list", s.List.Name, "err", err)
-		return
-	}
-	if sum := digest(img); row.Poster != sum {
+	if s.Art.key != "" && row.Poster != s.Art.key {
+		img, ctype, err := s.Art.get()
+		if err != nil {
+			j.log.Warn("poster unavailable", "event", "poster_error", "list", s.List.Name, "err", err)
+			return
+		}
 		body := []byte(base64.StdEncoding.EncodeToString(img))
 		if !j.w.write(ctx, "poster of "+s.List.Name, func(ctx context.Context) error {
 			return j.env.Jellyfin.PostBody(ctx, "/Items/"+set.ID+"/Images/Primary", ctype, body)
 		}) {
 			return
 		}
-		row.Poster = sum
+		row.Poster = s.Art.key
 		if err := putRow(ctx, db, "jellyfin", s.List.Key, row); err != nil {
 			j.log.Warn("state write failed", "event", "store_error", "err", err)
 		}
@@ -345,6 +352,9 @@ func (j *jellyfinSink) adoptOrCreate(ctx context.Context, s shelf, row *sinkRow,
 		return nil
 	}
 	keep := func(b *boxSet) *boxSet {
+		if row.ID != b.ID { // another BoxSet than the record's (the old one deleted by hand): no poster yet
+			row.Poster = ""
+		}
 		row.ID, row.IntentAt = b.ID, time.Time{}
 		if err := putRow(ctx, db, "jellyfin", s.List.Key, *row); err != nil {
 			j.w.stopped = "state: " + err.Error()

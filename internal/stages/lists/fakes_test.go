@@ -47,21 +47,22 @@ func (c *plexColl0) show() {
 }
 
 type fakePlex struct {
-	mu      sync.Mutex
-	srv     *httptest.Server
-	movies  map[string]int // ratingKey → tmdb
-	watched map[string]bool
-	colls   []*plexColl0
-	hubs    []map[string]any
-	calls   []string // "METHOD path?query" of every request
-	next    int
-	now     func() int64
-	fail    bool            // answer 500 to everything
-	failAt  int             // answer 500 to section listings starting here (0 = never)
-	hold    chan struct{}   // when set, every request waits until it is closed: a Plex too busy to answer
-	failOn  string          // answer 500 to requests starting with this "METHOD /path"
-	loseOn  string          // like failOn, but the request is applied first: its answer is lost
-	hidden  map[string]bool // collections left out of the section's collections listing
+	mu       sync.Mutex
+	srv      *httptest.Server
+	movies   map[string]int // ratingKey → tmdb
+	synopsis map[string]string
+	watched  map[string]bool
+	colls    []*plexColl0
+	hubs     []map[string]any
+	calls    []string // "METHOD path?query" of every request
+	next     int
+	now      func() int64
+	fail     bool            // answer 500 to everything
+	failAt   int             // answer 500 to section listings starting here (0 = never)
+	hold     chan struct{}   // when set, every request waits until it is closed: a Plex too busy to answer
+	failOn   string          // answer 500 to requests starting with this "METHOD /path"
+	loseOn   string          // like failOn, but the request is applied first: its answer is lost
+	hidden   map[string]bool // collections left out of the section's collections listing
 }
 
 func (p *fakePlex) coll(key string) *plexColl0 {
@@ -85,17 +86,35 @@ func (p *fakePlex) writes() []string {
 	return out
 }
 
+// rekey re-adds a film under a new ratingKey, as Plex does when a file is deleted and added again: the old key is
+// gone from the section and from every collection.
+func (p *fakePlex) rekey(old, key string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.movies[key] = p.movies[old]
+	delete(p.movies, old)
+	for _, c := range p.colls {
+		c.items = without(c.items, old)
+	}
+}
+
 func newFakePlex(t *testing.T, movies map[string]int, now func() int64) *fakePlex {
-	p := &fakePlex{movies: movies, watched: map[string]bool{}, next: 9000, now: now, hidden: map[string]bool{}}
+	p := &fakePlex{movies: movies, synopsis: map[string]string{}, watched: map[string]bool{}, next: 9000, now: now, hidden: map[string]bool{}}
 	p.hubs = []map[string]any{{"identifier": "movie.recentlyreleased"}, {"identifier": "movie.recentlyadded", "promotedToOwnHome": true},
 		{"identifier": "movie.curated", "promotedToOwnHome": true}}
 	mc := func(w http.ResponseWriter, v any) { json.NewEncoder(w).Encode(map[string]any{"MediaContainer": v}) }
-	keysOf := func(uri string) []string {
+	keysOf := func(uri string) []string { // like Plex 1.43: a key it does not hold is dropped
 		_, list, _ := strings.Cut(uri, "/library/metadata/")
-		return strings.Split(list, ",")
+		var keys []string
+		for _, k := range strings.Split(list, ",") {
+			if _, ok := p.movies[k]; ok {
+				keys = append(keys, k)
+			}
+		}
+		return keys
 	}
 	collJSON := func(c *plexColl0) map[string]any {
-		m := map[string]any{"ratingKey": c.key, "title": c.title, "summary": c.summary, "addedAt": c.added}
+		m := map[string]any{"ratingKey": c.key, "type": "collection", "subtype": "movie", "title": c.title, "summary": c.summary, "addedAt": c.added}
 		if c.titleSort != "" {
 			m["titleSort"] = c.titleSort
 		}
@@ -154,7 +173,12 @@ func newFakePlex(t *testing.T, movies map[string]int, now func() int64) *fakePle
 		mc(w, map[string]any{"Metadata": md})
 	})
 	mux.HandleFunc("GET /library/metadata/{id}", func(w http.ResponseWriter, r *http.Request) {
-		c := p.coll(r.PathValue("id"))
+		id := r.PathValue("id")
+		if _, ok := p.movies[id]; ok {
+			mc(w, map[string]any{"Metadata": []any{map[string]any{"ratingKey": id, "type": "movie", "summary": p.synopsis[id]}}})
+			return
+		}
+		c := p.coll(id)
 		if c == nil {
 			http.NotFound(w, r)
 			return
@@ -176,6 +200,7 @@ func newFakePlex(t *testing.T, movies map[string]int, now func() int64) *fakePle
 	})
 	mux.HandleFunc("DELETE /library/collections/{id}", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
+		delete(p.movies, id) // what Plex would do with a movie's key here is unmeasured: assume the worst
 		var rest []*plexColl0
 		for _, c := range p.colls {
 			if c.key != id {
@@ -192,6 +217,11 @@ func newFakePlex(t *testing.T, movies map[string]int, now func() int64) *fakePle
 		p.hubs = hubs
 	})
 	mux.HandleFunc("GET /library/collections/{id}/children", func(w http.ResponseWriter, r *http.Request) {
+		// at load 20 a members read with its Media elements took 108 s, five times a 20 s timeout
+		if !strings.Contains(r.URL.Query().Get("excludeElements"), "Media") {
+			http.Error(w, "timeout", http.StatusGatewayTimeout)
+			return
+		}
 		c := p.coll(r.PathValue("id"))
 		var md []map[string]any
 		for _, k := range c.items {
@@ -200,8 +230,12 @@ func newFakePlex(t *testing.T, movies map[string]int, now func() int64) *fakePle
 		mc(w, map[string]any{"Metadata": md})
 	})
 	mux.HandleFunc("PUT /library/collections/{id}/items", func(w http.ResponseWriter, r *http.Request) {
-		c := p.coll(r.PathValue("id"))
-		c.items = append(c.items, keysOf(r.URL.Query().Get("uri"))...)
+		c, keys := p.coll(r.PathValue("id")), keysOf(r.URL.Query().Get("uri"))
+		if len(keys) == 0 { // measured: a batch of only keys Plex does not hold is refused
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		c.items = append(c.items, keys...)
 		c.show()
 	})
 	mux.HandleFunc("DELETE /library/collections/{id}/items/{item}", func(w http.ResponseWriter, r *http.Request) {
@@ -210,13 +244,17 @@ func newFakePlex(t *testing.T, movies map[string]int, now func() int64) *fakePle
 	})
 	mux.HandleFunc("PUT /library/collections/{id}/items/{item}/move", func(w http.ResponseWriter, r *http.Request) {
 		c, item := p.coll(r.PathValue("id")), r.PathValue("item")
+		if indexOf(c.items, item) < 0 { // measured: moving a non-member, or a key Plex does not hold, is refused
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
 		for _, k := range c.items { // a move gives every member a position, in the order shown
 			c.placed[k] = true
 		}
 		c.items = without(c.items, item)
 		at := 0
 		if after := r.URL.Query().Get("after"); after != "" {
-			at = indexOf(c.items, after) + 1
+			at = indexOf(c.items, after) + 1 // measured: after a non-member, the item goes to the front
 		}
 		c.items = append(c.items[:at], append([]string{item}, c.items[at:]...)...)
 	})
@@ -324,6 +362,7 @@ type fakeJellyfin struct {
 	mu       sync.Mutex
 	srv      *httptest.Server
 	movies   map[string]int // item id → tmdb
+	synopsis map[string]string
 	played   map[string]bool
 	sets     []*boxSet0
 	calls    []string
@@ -358,7 +397,7 @@ func (j *fakeJellyfin) writes() []string {
 }
 
 func newFakeJellyfin(t *testing.T, movies map[string]int, now func() time.Time) *fakeJellyfin {
-	j := &fakeJellyfin{movies: movies, played: map[string]bool{}, hidden: map[string]bool{}, now: now}
+	j := &fakeJellyfin{movies: movies, synopsis: map[string]string{}, played: map[string]bool{}, hidden: map[string]bool{}, now: now}
 	visible := func(s *boxSet0) bool { return s != nil && !(j.scanning != "" && j.hidden[s.id]) }
 	js := func(w http.ResponseWriter, v any) { json.NewEncoder(w).Encode(v) }
 	ids := func(r *http.Request) []string { return strings.Split(r.URL.Query().Get("ids"), ",") }
@@ -412,12 +451,17 @@ func newFakeJellyfin(t *testing.T, movies map[string]int, now func() time.Time) 
 		js(w, map[string]any{"Items": items})
 	})
 	mux.HandleFunc("GET /Items/{id}", func(w http.ResponseWriter, r *http.Request) {
-		s := j.set(r.PathValue("id"))
+		id := r.PathValue("id")
+		if _, ok := j.movies[id]; ok {
+			js(w, map[string]any{"Id": id, "Type": "Movie", "Overview": j.synopsis[id]})
+			return
+		}
+		s := j.set(id)
 		if !visible(s) {
 			http.NotFound(w, r)
 			return
 		}
-		js(w, map[string]any{"Id": s.id, "Name": s.name, "Overview": nilIfEmpty(s.overview), "ForcedSortName": nilIfEmpty(s.forcedSort),
+		js(w, map[string]any{"Id": s.id, "Type": "BoxSet", "Name": s.name, "Overview": nilIfEmpty(s.overview), "ForcedSortName": nilIfEmpty(s.forcedSort),
 			"DisplayOrder": s.order, "LockData": true, "ProviderIds": map[string]string{}})
 	})
 	mux.HandleFunc("POST /Items/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -445,6 +489,7 @@ func newFakeJellyfin(t *testing.T, movies map[string]int, now func() time.Time) 
 		s.items = append(s.items, ids(r)...)
 	})
 	mux.HandleFunc("DELETE /Items/{id}", func(w http.ResponseWriter, r *http.Request) {
+		delete(j.movies, r.PathValue("id")) // like Jellyfin: deleting a movie item deletes the film
 		var rest []*boxSet0
 		for _, s := range j.sets {
 			if s.id != r.PathValue("id") {
@@ -501,6 +546,7 @@ type fakeLetterboxd struct {
 	redirect map[string]string // boxd.it code → path
 	films    map[string]string // slug → "movie/949" or "tv/87108"
 	status   map[string]int    // path → an error status to answer with (403: a refusal)
+	answer   func()            // called before each answer: a test's slow Letterboxd advances its clock here
 	requests []string
 }
 
@@ -510,6 +556,9 @@ func newFakeLetterboxd(t *testing.T) *fakeLetterboxd {
 		lb.mu.Lock()
 		defer lb.mu.Unlock()
 		lb.requests = append(lb.requests, r.URL.Path)
+		if lb.answer != nil {
+			lb.answer()
+		}
 		if r.Header.Get("User-Agent") == "" {
 			http.Error(w, "no agent", http.StatusForbidden)
 			return

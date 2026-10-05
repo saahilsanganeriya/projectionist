@@ -8,7 +8,8 @@
 // flags) and to see the collections. Each app loads and reconciles on its own, so a slow one never holds up the
 // other; writes are retried with backoff, bounded by a per-app budget, and never fail the run. A collection the
 // stage did not make is never touched; one it made for a list that is gone (private or deleted on Letterboxd, left
-// out by skip_own, dropped from the config) is deleted.
+// out by skip_own, dropped from the config) is deleted, unless the owner rewrote its summary. A shelf deleted by
+// hand in an app is made again on the next run: skip_own, only and the canon config are the off switches.
 package lists
 
 import (
@@ -207,7 +208,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	// Each app loads and reconciles in its own lane. What the shelves take from the apps (their watched flags for
 	// "seen", the titles of collections the stage did not make) comes from each app's report of its previous run,
 	// so a slow app never holds up the other; only an app that has never reported is waited for.
-	px := &plexSink{env: env, opt: opt, log: env.Log}
+	px := &plexSink{env: env, opt: opt, log: env.Log, start: start}
 	jf := &jellyfinSink{env: env, opt: opt, log: env.Log}
 	lanes := []*lane{{sink: px, app: "plex"}, {sink: jf, app: "jellyfin"}}
 	var shelves, shelve []shelf
@@ -245,6 +246,9 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	canonTitles := map[string]bool{}
 	for _, l := range lists { // the canon comes first
 		s := plan(l, known, owned, seen)
+		if s.Art, err = newArt(l); err != nil {
+			env.Log.Warn("poster unavailable", "event", "poster_error", "list", l.Name, "err", err)
+		}
 		s.Title = shelfTitle(l.Name, taken)
 		if l.Canon {
 			canonTitles[fold(s.Title)] = true
@@ -282,6 +286,11 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	for _, w := range []*writer{px.w, jf.w} {
 		lasting(ctx, env, rep, w.app+"_deferred_runs", w.stopped != "", "%s shelf upkeep deferred: %s", w.app, w.stopped)
 	}
+	// one run heals itself (the section is listed again); a lasting one means Plex's listing and its collections disagree
+	lasting(ctx, env, rep, "plex_stale_runs", px.notTaken+px.w.refused > 0,
+		"Plex took %d shelf members under no key its section listing gives, and refused %d calls", px.notTaken, px.w.refused)
+	rep.Count("plex_not_taken", px.notTaken)
+	rep.Count("plex_refused", px.w.refused)
 	rep.Count("plex_writes", px.w.writes)
 	rep.Count("jellyfin_writes", jf.w.writes)
 	rep.Count("shelves_retired", px.retired+jf.retired)
@@ -293,6 +302,10 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	}
 	if px.taken+jf.taken > 0 {
 		rep.Summary += fmt.Sprintf("; %d shelves held back: title taken by a hand-made collection", px.taken+jf.taken)
+	}
+	if px.notTaken+px.w.refused > 0 {
+		rep.Summary += fmt.Sprintf("; plex took %d members under no key it holds (%d calls refused): the section is listed again next run",
+			px.notTaken, px.w.refused)
 	}
 	return ctx.Err()
 }
@@ -582,6 +595,7 @@ type shelf struct {
 	List                         list
 	Title, SortTitle, Summary    string // Title: the collection's, the list's name unless that is taken
 	Members                      []int  // owned movie TMDB ids, list order, no repeats
+	Art                          *art
 	Missing                      []missing
 	Total, Resolved, Owned, Seen int
 }

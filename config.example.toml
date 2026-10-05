@@ -122,6 +122,8 @@ jellyfin_user    = "saahil"
 jellyfin_budget  = "15m"
 home             = ["Letterboxd Top 500", "Criterion Collection", "Sight & Sound 2022"] # the owner's own Plex Home rows, in order
 home_after       = "movie.recentlyadded"
+# To take a shelf away, leave its list out here (skip_own, only, the canon): a shelf deleted by hand in Plex or
+# Jellyfin is made again on the next run. A shelf whose summary you rewrite is yours: it stays when its list goes.
 # The canon defaults to the lists below (checked 2026-10-05); a [[stages.lists.canon]] table replaces all of them.
 # [[stages.lists.canon]]
 # name    = "Criterion Collection"

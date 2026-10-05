@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -18,16 +19,27 @@ import (
 // Plex: one collection per shelf in the Movies section, custom order, Home rows for the configured lists.
 
 type plexSink struct {
-	env     *stage.Env
-	opt     Options
-	log     *slog.Logger
-	w       *writer
-	byTMDB  map[int]string // ratingKey
-	colls   []plexColl     // the section's collections, as load read them
-	machine string
-	taken   int
-	retired int
+	env      *stage.Env
+	opt      Options
+	log      *slog.Logger
+	start    time.Time // the run's start, which stamps a section listing
+	w        *writer
+	m        plexMap
+	byTMDB   map[int]string // ratingKey
+	colls    []plexColl     // the section's collections, as load read them
+	machine  string
+	taken    int
+	retired  int
+	notTaken int // wanted members Plex holds under no key the map gives
 }
+
+// plexLean leaves out of a read what the stage never uses: at load 20 a 5-film collection's /children took 108 s, the
+// same members read lean 0.18 s (measured by the tonight stage, 2026-10-05).
+const plexLean = "excludeFields=summary,tagline&excludeElements=Media,Genre,Country,Director,Writer,Role,Collection,Producer,Label,Image"
+
+// mapSlack lets the map listed one run ago count as due on the next run, which starts at the last start + every and
+// so can begin a moment short of plex_refresh after the stamp (the run's start).
+const mapSlack = time.Minute
 
 // plexPage is how many movies one listing call asks for: on the busy NAS (2026-10-05) the whole section in one answer
 // took over three minutes, and 300 at a time 4 s to over a minute.
@@ -44,7 +56,7 @@ type plexItem struct {
 }
 
 // load reads the TMDB id → ratingKey map, from Plex at most once per plex_refresh (one paged listing of the
-// section), else from the copy kept in the store; then the section's collections.
+// section) or after a run found it wrong, else from the copy kept in the store; then the section's collections.
 func (p *plexSink) load(ctx context.Context) appReport {
 	p.w = &writer{app: "plex", log: p.log}
 	var m plexMap
@@ -52,10 +64,10 @@ func (p *plexSink) load(ctx context.Context) appReport {
 	if err != nil {
 		p.log.Warn("plex map unreadable", "event", "store_error", "err", err)
 	}
-	if !found || p.env.Now().Sub(m.FetchedAt) >= p.opt.PlexRefresh {
+	if !found || p.start.Sub(m.FetchedAt) >= p.opt.PlexRefresh-mapSlack {
 		ctx, cancel := context.WithTimeout(ctx, p.opt.PlexBudget)
 		defer cancel()
-		fresh := plexMap{FetchedAt: p.env.Now(), Items: map[int]plexItem{}}
+		fresh := plexMap{FetchedAt: p.start, Items: map[int]plexItem{}}
 		complete := false
 		for start := 0; ; start += plexPage {
 			var page struct {
@@ -71,9 +83,8 @@ func (p *plexSink) load(ctx context.Context) appReport {
 					} `json:"Guid"`
 				} `json:"Metadata"`
 			}
-			path := fmt.Sprintf("/library/sections/%d/all?type=1&includeGuids=1&excludeFields=summary,tagline"+
-				"&excludeElements=Media,Genre,Country,Director,Writer,Role,Image,Collection"+
-				"&X-Plex-Container-Start=%d&X-Plex-Container-Size=%d", p.opt.PlexSection, start, plexPage)
+			path := fmt.Sprintf("/library/sections/%d/all?type=1&includeGuids=1&%s&X-Plex-Container-Start=%d&X-Plex-Container-Size=%d",
+				p.opt.PlexSection, plexLean, start, plexPage)
 			if !p.w.read(ctx, "section listing", func(ctx context.Context) error { return p.env.Plex.GetJSON(ctx, path, &page) }) {
 				break
 			}
@@ -111,7 +122,7 @@ func (p *plexSink) load(ctx context.Context) appReport {
 		p.w.stopped = "" // a failed listing only means the old copy (if any) is used
 	}
 	var r appReport
-	p.byTMDB = map[int]string{}
+	p.m, p.byTMDB = m, map[int]string{}
 	for t, it := range m.Items {
 		p.byTMDB[t] = it.Key
 		if it.Watched {
@@ -142,6 +153,7 @@ func (p *plexSink) load(ctx context.Context) appReport {
 
 type plexColl struct {
 	RatingKey      string `json:"ratingKey"`
+	Type           string `json:"type"`
 	Title          string `json:"title"`
 	TitleSort      string `json:"titleSort"`
 	Summary        string `json:"summary"`
@@ -191,9 +203,10 @@ func (p *plexSink) reconcile(ctx context.Context, shelves []shelf, retire []stri
 }
 
 // retire deletes the collections of retired lists. Each is looked up by its id, never judged by the collections
-// listing: only one that still carries the stage's summary is deleted (that also drops its Home row, measured on
-// 1.43). A record is forgotten only once Plex has confirmed the collection gone (a DELETE, or a 404) or the owner's
-// (he rewrote its summary); a record whose create was never confirmed has no id to look up and is kept.
+// listing, and deleted (which also drops its Home row, measured on 1.43) only when it is a collection that carries the
+// stage's summary or none: a create whose summary write never ran. One whose summary the owner rewrote is his and
+// stays. A record is forgotten only once Plex confirms the collection gone (a DELETE, or a 404); a record whose
+// create was never confirmed has no id to look up and is kept.
 func (p *plexSink) retire(ctx context.Context, keys []string) {
 	db := p.env.Store.DB()
 	for _, key := range keys {
@@ -223,7 +236,10 @@ func (p *plexSink) retire(ctx context.Context, keys []string) {
 		case gone:
 		case len(found.Metadata) == 0:
 			continue // Plex answers the collection or 404; anything else confirms nothing
-		case strings.HasPrefix(found.Metadata[0].Summary, summaryMarker):
+		case found.Metadata[0].Type != "collection":
+			p.log.Warn("record names an item that is not a collection; left alone", "event", "retire_refused", "app", "plex", "list", key, "id", row.ID)
+			continue
+		case found.Metadata[0].Summary == "" || strings.HasPrefix(found.Metadata[0].Summary, summaryMarker):
 			if !p.w.write(ctx, "retire "+found.Metadata[0].Title, func(ctx context.Context) error {
 				return p.env.Plex.Do(ctx, "DELETE", "/library/collections/"+row.ID)
 			}) {
@@ -231,6 +247,8 @@ func (p *plexSink) retire(ctx context.Context, keys []string) {
 			}
 			p.retired++
 			p.log.Info("shelf retired", "event", "collection_retired", "app", "plex", "list", key, "title", found.Metadata[0].Title, "id", row.ID)
+		default:
+			continue // the owner rewrote its summary: his now
 		}
 		if err := deleteRow(ctx, db, "plex", key); err != nil {
 			p.log.Warn("state write failed", "event", "store_error", "err", err)
@@ -281,13 +299,13 @@ func (p *plexSink) shelf(ctx context.Context, s shelf, colls []plexColl) string 
 	}
 	drop, add := diffSets(have, want)
 	for _, k := range drop {
-		if !p.w.write(ctx, "drop from "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "DELETE", base+"/items/"+k) }) {
+		if !p.w.item(ctx, "drop from "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "DELETE", base+"/items/"+k) }) && p.w.stopped != "" {
 			return ""
 		}
 	}
 	for _, b := range batches(add, 100) {
 		path := base + "/items?" + url.Values{"uri": {p.uri(b)}}.Encode()
-		if !p.w.write(ctx, "add to "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "PUT", path) }) {
+		if !p.w.item(ctx, "add to "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "PUT", path) }) && p.w.stopped != "" {
 			return ""
 		}
 	}
@@ -298,12 +316,33 @@ func (p *plexSink) shelf(ctx context.Context, s shelf, colls []plexColl) string 
 			return ""
 		}
 	}
-	for _, m := range planMoves(have, want) {
+	// Plex takes no key it does not hold (1.43 drops one from a batch, refuses a batch of only such keys): a wanted key
+	// missing now is one the map got wrong, as when a film is re-added under a new key. Only members are ordered (Plex
+	// refuses to move anything else), and the section is listed again on the next run, whatever plex_refresh says.
+	held := map[string]bool{}
+	for _, k := range have {
+		held[k] = true
+	}
+	var placed []string
+	for _, k := range want {
+		if held[k] {
+			placed = append(placed, k)
+		}
+	}
+	if n := len(want) - len(placed); n > 0 {
+		p.notTaken += n
+		p.log.Warn("plex did not take members under the keys the map gives", "event", "plex_map_stale", "list", s.List.Name, "members", n)
+		p.m.FetchedAt = time.Time{}
+		if err := p.env.Store.PutJSON(ctx, name, "plex_map", p.m); err != nil {
+			p.log.Warn("plex map not kept", "event", "store_error", "err", err)
+		}
+	}
+	for _, m := range planMoves(have, placed) {
 		path := base + "/items/" + m.Item + "/move"
 		if m.After != "" {
 			path += "?after=" + m.After
 		}
-		if !p.w.write(ctx, "order "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "PUT", path) }) {
+		if !p.w.item(ctx, "order "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Do(ctx, "PUT", path) }) && p.w.stopped != "" {
 			return ""
 		}
 	}
@@ -323,15 +362,17 @@ func (p *plexSink) shelf(ctx context.Context, s shelf, colls []plexColl) string 
 			return ""
 		}
 	}
-	img, ctype, err := poster(s)
-	if err != nil {
-		p.log.Warn("poster unavailable", "event", "poster_error", "list", s.List.Name, "err", err)
-	} else if sum := digest(img); row.Poster != sum {
+	if s.Art.key != "" && row.Poster != s.Art.key {
+		img, ctype, err := s.Art.get()
+		if err != nil {
+			p.log.Warn("poster unavailable", "event", "poster_error", "list", s.List.Name, "err", err)
+			return coll.RatingKey
+		}
 		path := "/library/metadata/" + coll.RatingKey + "/posters"
 		if !p.w.write(ctx, "poster of "+s.List.Name, func(ctx context.Context) error { return p.env.Plex.Send(ctx, "POST", path, ctype, img) }) {
 			return ""
 		}
-		row.Poster = sum
+		row.Poster = s.Art.key
 		if err := putRow(ctx, db, "plex", s.List.Key, row); err != nil {
 			p.log.Warn("state write failed", "event", "store_error", "err", err)
 		}
@@ -346,7 +387,7 @@ func (p *plexSink) children(ctx context.Context, key string) ([]string, bool) {
 		} `json:"Metadata"`
 	}
 	ok := p.w.read(ctx, "members", func(ctx context.Context) error {
-		return p.env.Plex.GetJSON(ctx, "/library/collections/"+key+"/children", &kids)
+		return p.env.Plex.GetJSON(ctx, "/library/collections/"+key+"/children?"+plexLean, &kids)
 	})
 	var out []string
 	for _, k := range kids.Metadata {
@@ -361,7 +402,6 @@ func (p *plexSink) children(ctx context.Context, key string) ([]string, bool) {
 func (p *plexSink) adoptOrCreate(ctx context.Context, s shelf, row *sinkRow, colls []plexColl, want []string) *plexColl {
 	db := p.env.Store.DB()
 	if c := p.adoptable(s, row, colls); c != nil {
-		row.ID = c.RatingKey
 		return p.keep(ctx, db, s, row, c)
 	}
 	for _, c := range colls {
@@ -394,7 +434,6 @@ func (p *plexSink) adoptOrCreate(ctx context.Context, s shelf, row *sinkRow, col
 		return nil
 	}
 	if c := p.adoptable(s, row, fresh); c != nil {
-		row.ID = c.RatingKey
 		p.log.Info("collection made", "event", "collection_created", "app", "plex", "list", s.List.Name, "id", c.RatingKey)
 		return p.keep(ctx, db, s, row, c)
 	}
@@ -415,7 +454,10 @@ func (p *plexSink) adoptable(s shelf, row *sinkRow, colls []plexColl) *plexColl 
 }
 
 func (p *plexSink) keep(ctx context.Context, db *sql.DB, s shelf, row *sinkRow, c *plexColl) *plexColl {
-	row.IntentAt = time.Time{}
+	if row.ID != c.RatingKey { // another collection than the record's (the old one deleted by hand): no poster yet
+		row.Poster = ""
+	}
+	row.ID, row.IntentAt = c.RatingKey, time.Time{}
 	if err := putRow(ctx, db, "plex", s.List.Key, *row); err != nil {
 		p.w.stopped = "state: " + err.Error()
 		return nil
@@ -546,4 +588,11 @@ func indexOf(xs []string, x string) int {
 		}
 	}
 	return -1
+}
+
+// refusedItem tells a member call Plex refuses from a sick Plex: 1.43 answers 400 to an add or a move naming a key it
+// does not hold, or a move of a non-member (measured 2026-10-05), and 404 once the collection is gone.
+func refusedItem(err error) bool {
+	var se *plex.StatusError
+	return errors.As(err, &se) && (se.Code == http.StatusBadRequest || se.Code == http.StatusNotFound)
 }

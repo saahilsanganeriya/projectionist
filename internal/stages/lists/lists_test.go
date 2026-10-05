@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -139,8 +140,9 @@ func jfOrder(s *boxSet0) []string {
 // sorts by premiere date unless told otherwise), a summary or sort title off the owner's format, a missing poster
 // or Home row, a Home row on Recommended or friends' Homes, a private list shelved, a hand-made collection whose
 // title differs only in case touched (Plex files a new collection with that title into it) or the two apps naming
-// the shelf differently, and — on the second run — any write at all or any Letterboxd request inside the refresh
-// windows (the reconciler's "nothing to do").
+// the shelf differently, a members read that asks for Media elements (the fake times it out, as Plex at load 20 took
+// 108 s for one), and — on the second run — any write at all or any Letterboxd request inside the refresh windows
+// (the reconciler's "nothing to do").
 func TestShelvesAndRerunChangesNothing(t *testing.T) {
 	w := newWorld(t)
 	rep := w.run(t)
@@ -347,8 +349,12 @@ func TestLimit(t *testing.T) {
 	if want := []string{"k14537", "k389", "k25237"}; !reflect.DeepEqual(top4.items, want) {
 		t.Errorf("plex = %v, want %v", top4.items, want)
 	}
-	if want := "On the NAS: 3 of 4 · seen 2 · the first 4 of " + w.top; top4.summary != want {
-		t.Errorf("summary = %q, want %q", top4.summary, want)
+	want := "On the NAS: 3 of 4 · seen 2 · the first 4 of " + w.top
+	if top4.summary != want {
+		t.Errorf("plex summary = %q, want %q", top4.summary, want)
+	}
+	if bs := w.boxSet(t, "Top 4"); bs.overview != want {
+		t.Errorf("jellyfin overview = %q, want %q", bs.overview, want)
 	}
 }
 
@@ -469,9 +475,11 @@ func TestOwnShelfNeverTakesItsOwnTitle(t *testing.T) {
 }
 
 // Catches: a shelf left in both apps (and on Home) after its list is gone — made private on Letterboxd (also one
-// found only on his lists page, which drops it), left out by skip_own, dropped from the canon config — so a private
-// list stays visible to every account sharing the library; a shelf deleted because its list was merely unreadable
-// this run (a refusal, a state read that fails); and a shelf deleted after the owner made it his (rewrote its summary).
+// found only on his lists page, which drops it), left out by skip_own, dropped from the canon config, or made by a
+// create whose summary write never ran (its record was forgotten and the collection orphaned) — so a private list
+// stays visible to every account sharing the library; a shelf deleted because its list was merely unreadable this run
+// (a refusal, a state read that fails); a shelf deleted after the owner made it his (rewrote its summary); and a
+// record forgotten while its collection is still there.
 func TestRetiresShelvesOfGoneLists(t *testing.T) {
 	nolan := "/saahilsan/list/nolan/"
 	canonTop := func(w *world, extra string) {
@@ -506,6 +514,12 @@ func TestRetiresShelvesOfGoneLists(t *testing.T) {
 			w.plexColl(t, "Top").summary = "my favourites from the Top 500"
 			w.h.SetOptions(w.opts + "canon = []\n")
 		}, "", "Top", 1},
+		{"never described, then dropped", func(w *world) {
+			w.px.failOn, w.jf.failOn = "PUT /library/sections/4/all", "POST /Items/" // Top made, its summary write fails
+		}, func(w *world) {
+			w.px.failOn, w.jf.failOn = "", ""
+			w.h.SetOptions(w.opts + "canon = []\n")
+		}, "Top", "Top", 2},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			w := newWorld(t)
@@ -516,7 +530,12 @@ func TestRetiresShelvesOfGoneLists(t *testing.T) {
 			c.change(w)
 			w.clock.Sleep(context.Background(), 21*time.Hour) // past own_refresh
 			rep := w.run(t)
-			for _, title := range []string{"Top", "nolan · Letterboxd"} {
+			recorded := func(app, key string) bool {
+				var n int
+				w.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM lists_sinks WHERE app=? AND list=? AND id!=''`, app, key).Scan(&n)
+				return n > 0
+			}
+			for title, key := range map[string]string{"Top": w.top, "nolan · Letterboxd": "own:fQbG8"} {
 				inPlex, inJellyfin := false, false
 				for _, x := range w.px.colls {
 					inPlex = inPlex || x.title == title
@@ -526,6 +545,10 @@ func TestRetiresShelvesOfGoneLists(t *testing.T) {
 				}
 				if inPlex == (title == c.goneInPlex) || inJellyfin == (title == c.goneInJF) {
 					t.Errorf("%q: in Plex %v (gone: %q), in Jellyfin %v (gone: %q)", title, inPlex, c.goneInPlex, inJellyfin, c.goneInJF)
+				}
+				if recorded("plex", key) != inPlex || recorded("jellyfin", key) != inJellyfin {
+					t.Errorf("%q: records plex %v jellyfin %v, collections plex %v jellyfin %v (a record lasts as long as its collection)",
+						title, recorded("plex", key), recorded("jellyfin", key), inPlex, inJellyfin)
 				}
 			}
 			for _, h := range w.px.hubs {
@@ -746,5 +769,145 @@ func TestPrivateOwnListsStayOff(t *testing.T) {
 		if got := skipped([]string{c.pattern}, c.name); got != c.skip {
 			t.Errorf("skip_own %q on %q = %v, want %v", c.pattern, c.name, got, c.skip)
 		}
+	}
+}
+
+// Catches: one film Plex re-added under a new ratingKey between section listings (the map is listed at most daily)
+// stalling all Plex shelf upkeep. Plex 1.43 refuses to add only keys it does not hold, and to move a non-member
+// (HTTP 400, measured 2026-10-05). A refused call deferred the lane, so the shelves after it and the Home rows waited
+// every run, and the add was resent until plex_refresh ran out.
+func TestRekeyedFilmNeverStallsPlex(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	w.run(t)
+	w.px.rekey("k389", "k389b")                  // 12 Angry Men, second on Top
+	w.px.hubs[2]["promotedToRecommended"] = true // Home rows come after every shelf: fixed only if the lane goes on
+	w.clock.Sleep(ctx, time.Hour)                // inside plex_refresh: the map still gives k389
+	before := len(w.px.writes())
+	rep := w.run(t)
+	if strings.Contains(rep.Summary, "rest deferred") || len(rep.Alerts) > 0 {
+		t.Errorf("summary = %q, alerts %v", rep.Summary, rep.Alerts)
+	}
+	if h := w.px.hubs[2]; h["promotedToRecommended"] != false {
+		t.Errorf("home rows not reached after the stale key: %v", h)
+	}
+	for _, c := range w.px.writes()[before:] {
+		if strings.Contains(c, "/items/k389/move") {
+			t.Errorf("moved a key Plex does not hold: %s", c)
+		}
+	}
+	w.clock.Sleep(ctx, time.Hour) // still inside plex_refresh: only the stale mark has the section listed
+	w.run(t)
+	if want := []string{"k14537", "k389b", "k25237", "k670"}; !reflect.DeepEqual(w.plexColl(t, "Top").items, want) {
+		t.Errorf("plex Top = %v, want %v (the film under its new key, in place)", w.plexColl(t, "Top").items, want)
+	}
+	w.clock.Sleep(ctx, time.Hour)
+	before = len(w.px.writes())
+	w.run(t)
+	if got := w.px.writes()[before:]; len(got) > 0 {
+		t.Errorf("run after the heal wrote %v", got)
+	}
+}
+
+// Catches: the section listed only on every other daily run. The scheduler starts a run at the last START + every,
+// so a map stamped when it was read (after the Letterboxd reads, which take hours on a first build), or one compared
+// with no slack, is a moment short of plex_refresh old on the next run; new films then reach shelves 48 h late.
+func TestPlexMapListedOnEveryDailyRun(t *testing.T) {
+	ctx := context.Background()
+	w := newWorld(t)
+	w.lb.answer = func() { w.clock.Sleep(ctx, 10*time.Second) } // Letterboxd answers each page in 10 s
+	start := w.clock.Now()
+	w.run(t)
+	w.clock.Sleep(ctx, start.Add(24*time.Hour-time.Second).Sub(w.clock.Now())) // a day after, less a scheduling moment
+	listings := func() (n int) {
+		for _, c := range w.px.calls {
+			n += strings.Count(c, "GET /library/sections/4/all?")
+		}
+		return n
+	}
+	before := listings()
+	w.run(t)
+	if listings() == before {
+		t.Errorf("the next daily run did not list the section (map stamped %v)", w.mapStamp(t))
+	}
+}
+
+func (w *world) mapStamp(t *testing.T) time.Time {
+	var m plexMap
+	w.h.Env.Store.GetJSON(context.Background(), name, "plex_map", &m)
+	return m.FetchedAt
+}
+
+// Catches: retire deleting whatever item a record names once its summary starts with the stage's marker: DELETE
+// /Items on a Jellyfin movie deletes the film. Here a corrupt record names a film whose synopsis happens to start that
+// way; only a collection may be deleted.
+func TestRetireDeletesOnlyCollections(t *testing.T) {
+	w := newWorld(t)
+	const dropped = "https://letterboxd.com/x/list/dropped/"
+	w.px.synopsis["k670"] = summaryMarker + "a documentary about home servers"
+	w.jf.synopsis["j670"] = summaryMarker + "a documentary about home servers"
+	if _, err := w.h.Env.Store.DB().Exec(sinkSchema); err != nil {
+		t.Fatal(err)
+	}
+	for app, id := range map[string]string{"plex": "k670", "jellyfin": "j670"} {
+		if err := putRow(context.Background(), w.h.Env.Store.DB(), app, dropped, sinkRow{ID: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rep := w.run(t)
+	if _, ok := w.px.movies["k670"]; !ok {
+		t.Errorf("plex film k670 deleted by retire")
+	}
+	if _, ok := w.jf.movies["j670"]; !ok {
+		t.Errorf("jellyfin film j670 deleted by retire")
+	}
+	if rep.Counts["shelves_retired"] != 0 {
+		t.Errorf("shelves_retired = %d, want 0", rep.Counts["shelves_retired"])
+	}
+}
+
+// Catches: a shelf the owner deleted by hand coming back without its poster: the record still held the old
+// collection's poster key, so the new collection never got one. (A shelf deleted by hand is made again on the next
+// run; skip_own, only and the canon config are the off switches.)
+func TestShelfDeletedByHandComesBackWithItsPoster(t *testing.T) {
+	w := newWorld(t)
+	w.run(t)
+	oldKey, oldID := w.plexColl(t, "Top").key, w.boxSet(t, "Top").id
+	w.px.colls = slices.DeleteFunc(w.px.colls, func(c *plexColl0) bool { return c.key == oldKey })
+	w.px.hubs = slices.DeleteFunc(w.px.hubs, func(h map[string]any) bool { return h["identifier"] == "custom.collection.4."+oldKey })
+	w.jf.sets = slices.DeleteFunc(w.jf.sets, func(s *boxSet0) bool { return s.id == oldID })
+	w.clock.Sleep(context.Background(), time.Hour)
+	w.run(t)
+	if top := w.plexColl(t, "Top"); top.key == oldKey || len(top.poster) == 0 {
+		t.Errorf("plex Top made again as %s (was %s) with a %d-byte poster", top.key, oldKey, len(top.poster))
+	}
+	if top := w.boxSet(t, "Top"); top.id == oldID || len(top.poster) == 0 {
+		t.Errorf("jellyfin Top made again as %s (was %s) with a %d-byte poster", top.id, oldID, len(top.poster))
+	}
+}
+
+// Catches: a poster rendered for every shelf in each app on every run (about 140 renders of 1000x1500 a run on the
+// J4125), when one render per shelf whose poster an app lacks is enough: the apps share it, and a quiet run renders none.
+func TestPostersRenderedOnlyWhenSent(t *testing.T) {
+	w := newWorld(t)
+	var mu sync.Mutex
+	renders := map[string]int{}
+	old := render
+	render = func(title, kicker string) ([]byte, error) {
+		mu.Lock()
+		renders[title]++
+		mu.Unlock()
+		return old(title, kicker)
+	}
+	t.Cleanup(func() { render = old })
+	w.run(t)
+	if want := map[string]int{"Top": 1, "nolan": 1}; !reflect.DeepEqual(renders, want) {
+		t.Errorf("first run renders %v, want %v", renders, want)
+	}
+	renders = map[string]int{}
+	w.clock.Sleep(context.Background(), time.Hour)
+	w.run(t)
+	if len(renders) > 0 {
+		t.Errorf("a run with every poster in place rendered %v", renders)
 	}
 }
