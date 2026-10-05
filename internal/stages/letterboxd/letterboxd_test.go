@@ -441,6 +441,14 @@ func TestRunSurvivesBlocksAndFailures(t *testing.T) {
 		t.Errorf("alerts with a fresh feed: %v", rep.Alerts)
 	}
 
+	w.h.Now = w.h.Now.Add(25 * time.Hour) // next day, page 2 still blocked: page 1 (the newest films) is read again
+	page1 := w.lb.hits["/saahilsan/watchlist/"]
+	w.lb.challenge["/saahilsan/watchlist/page/2/"] = true
+	w.run(t, "")
+	if w.lb.hits["/saahilsan/watchlist/"] != page1+1 {
+		t.Errorf("a stuck crawl did not start over at page 1 the next day")
+	}
+
 	w.lb.challenge["/saahilsan/rss/"] = true // blocked for over two days: the owner must hear of it
 	w.h.Now = w.h.Now.Add(feedStale + time.Minute)
 	if rep = w.run(t, ""); len(rep.Alerts) != 1 {

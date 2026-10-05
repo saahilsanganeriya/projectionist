@@ -330,9 +330,11 @@ type crawlState struct {
 	Films   []gridFilm `json:"films,omitempty"` // watchlist only: pages read so far
 }
 
-// crawl reads /<user>/<kind>/ page by page, at most once per PagesEvery, resuming where an earlier run stopped.
-// "films" pages record watched films and their current ratings; a complete "watchlist" crawl replaces the
-// watchlist snapshot (an incomplete one never does, so a blocked page cannot shrink the watchlist).
+// crawl reads /<user>/<kind>/ page by page, at most once per PagesEvery, resuming where an earlier run stopped
+// that day (a crawl older than PagesEvery starts over, so page 1, the newest films, is read daily even when
+// Cloudflare blocks the deeper pages). "films" pages record watched films and their current ratings; a complete
+// "watchlist" crawl replaces the watchlist snapshot (an incomplete one never does, so a blocked page cannot
+// shrink the watchlist).
 func (r *run) crawl(ctx context.Context, kind string) error {
 	key := "crawl." + kind
 	var c crawlState
@@ -340,7 +342,7 @@ func (r *run) crawl(ctx context.Context, kind string) error {
 		return storeErr{err}
 	}
 	now := r.env.Now()
-	if c.Next == 0 || now.Sub(c.Started) > 2*r.opt.PagesEvery {
+	if c.Next == 0 || now.Sub(c.Started) >= r.opt.PagesEvery {
 		if c.Next == 0 && now.Sub(c.Done) < r.opt.PagesEvery {
 			return nil
 		}
