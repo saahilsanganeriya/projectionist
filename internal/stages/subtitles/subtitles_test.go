@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -402,8 +403,8 @@ func TestRunWaitsWhileGuestsWatch(t *testing.T) {
 	f.sidecar(t, ran)
 }
 
-// Catches ffmpeg or alass left running while a guest watches (a title may start while nobody watches, and an alass
-// decode runs for minutes): the helper's process group must be stopped, then continued once the guest leaves.
+// Catches ffmpeg or alass left running while a guest watches or the count is unknown (a title may start while nobody
+// watches, and an alass decode runs for minutes): the helper's process group must be stopped, then continued.
 func TestHelperStopsWhileGuestsWatch(t *testing.T) {
 	h := fake.NewEnv(t, nil)
 	dir := t.TempDir()
@@ -419,6 +420,9 @@ func TestHelperStopsWhileGuestsWatch(t *testing.T) {
 		mu.Lock()
 		b := body
 		mu.Unlock()
+		if b == "" {
+			w.WriteHeader(500) // Plex down: who is watching is unknown
+		}
 		w.Write([]byte(b))
 		select {
 		case served <- b:
@@ -430,8 +434,10 @@ func TestHelperStopsWhileGuestsWatch(t *testing.T) {
 		b, err := (&run{env: h.Env}).cmd(context.Background(), helper)
 		out <- fmt.Sprint(string(b), err)
 	}()
-	pid, _ := os.ReadFile(pidPipe)
-	state := func(b string) string { // after two polls answered b: the first one's signal is sent before the second
+	raw, _ := os.ReadFile(pidPipe)
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+	t.Cleanup(func() { syscall.Kill(-pid, syscall.SIGKILL) }) // a helper left stopped must not outlive the test
+	state := func(b string) string {                          // after two polls answered b: the first one's signal is sent before the second
 		mu.Lock()
 		body = b
 		mu.Unlock()
@@ -440,14 +446,16 @@ func TestHelperStopsWhileGuestsWatch(t *testing.T) {
 				n++
 			}
 		}
-		st, _ := exec.Command("ps", "-o", "stat=", "-p", strings.TrimSpace(string(pid))).Output()
+		st, _ := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
 		return string(st)
 	}
-	if st := state(guest); !strings.HasPrefix(st, "T") {
-		t.Errorf("helper state %q while a guest watches, want stopped (T)", st)
-	}
-	if st := state(nobody); strings.HasPrefix(st, "T") {
-		t.Errorf("helper state %q after the guest left, want running", st)
+	for _, c := range []struct {
+		body, why string
+		stopped   bool
+	}{{guest, "a guest watches", true}, {nobody, "the guest left", false}, {"", "Plex cannot say", true}, {nobody, "Plex is back", false}} {
+		if st := state(c.body); strings.HasPrefix(st, "T") != c.stopped {
+			t.Fatalf("helper state %q when %s; want stopped %v", st, c.why, c.stopped)
+		}
 	}
 	os.WriteFile(goPipe, []byte("go\n"), 0o600)
 	if got := <-out; got != "done\n<nil>" {

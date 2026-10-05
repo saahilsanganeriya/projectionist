@@ -310,7 +310,7 @@ func TestDecodeDownload(t *testing.T) {
 	for _, c := range []struct {
 		name, raw, enc, want string
 	}{
-		{"BOM", "\xff\xfe" + string(le), "UTF-16", text},
+		{"BOM picks big-endian", "\xfe\xff" + string(be), "UTF-16", text},
 		{"no BOM: little-endian", string(le), "UTF-16", text},
 		{"big-endian", string(be), "utf-16be", text},
 		{"odd length", "\xff\xfe1\x00x", "UTF-16", "\u00ff\u00fe1\x00x"},
