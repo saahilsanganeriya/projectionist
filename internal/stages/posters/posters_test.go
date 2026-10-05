@@ -606,6 +606,22 @@ func TestSinkItemRecreated(t *testing.T) {
 	}
 }
 
+// Catches: a title an app lists twice (two folders with one id) moving between its two items, and uploaded again,
+// whenever the listing order changes.
+func TestSinkDuplicateStable(t *testing.T) {
+	w := newWorld(t, "")
+	dup := `{"Id":"j0","Type":"Movie","ProviderIds":{"Tmdb":"1"}}`
+	w.h.Jellyfin.Handle("POST", "/Items/j0/Images/Primary", 204, "")
+	w.jellyfinLists(jellyfinItems + ", " + dup)
+	w.run(t)
+	w.jellyfinLists(dup + ", " + jellyfinItems)
+	w.h.Now = w.h.Now.Add(25 * time.Hour)
+	w.run(t)
+	if a, b := len(w.h.Jellyfin.Calls("POST", "/Items/j0/Images/Primary")), len(w.h.Jellyfin.Calls("POST", "/Items/j1/Images/Primary")); a+b != 1 {
+		t.Fatalf("Alpha, listed twice in another order the next day: %d uploads to j0 and %d to j1; want one in all", a, b)
+	}
+}
+
 // Catches: an app whose item listing keeps failing (Jellyfin's stalls during a library scan) going without posters
 // with only a warning in the log; an alert before sink_alert_after has passed; and, after the app recovered, its next
 // failure alerting at once.

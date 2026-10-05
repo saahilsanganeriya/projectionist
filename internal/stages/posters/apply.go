@@ -341,6 +341,14 @@ func (r *run) sinkIndex(ctx context.Context, sink string) (map[string]sinkItem, 
 	return cached.Items, r.env.Store.PutJSON(ctx, name, "index_"+sink, cached)
 }
 
+// put keeps one item per title key whatever the listing order (the lowest id): a title an app lists twice must not
+// move between its two items, and be sent again, each time the order changes.
+func put(index map[string]sinkItem, k string, it sinkItem) {
+	if cur, ok := index[k]; !ok || it.ID < cur.ID {
+		index[k] = it
+	}
+}
+
 func (r *run) plexIndex(ctx context.Context) (map[string]sinkItem, error) {
 	type listing struct {
 		Metadata []struct {
@@ -371,21 +379,21 @@ func (r *run) plexIndex(ctx context.Context) (map[string]sinkItem, error) {
 	for _, m := range movies.Metadata {
 		for _, g := range m.GUID {
 			for _, id := range parseIDs([]string{g.ID}) {
-				out[key(movie, id, 0)] = sinkItem{ID: m.RatingKey, Section: ms, Type: 1}
+				put(out, key(movie, id, 0), sinkItem{ID: m.RatingKey, Section: ms, Type: 1})
 			}
 		}
 	}
 	for _, m := range shows.Metadata {
 		for _, g := range m.GUID {
 			for _, id := range parseIDs([]string{g.ID}) {
-				out[key(show, id, 0)] = sinkItem{ID: m.RatingKey, Section: ts, Type: 2}
+				put(out, key(show, id, 0), sinkItem{ID: m.RatingKey, Section: ts, Type: 2})
 				showIDs[m.RatingKey] = append(showIDs[m.RatingKey], id)
 			}
 		}
 	}
 	for _, m := range seasons.Metadata {
 		for _, id := range showIDs[m.ParentRatingKey] {
-			out[key(season, id, m.Index)] = sinkItem{ID: m.RatingKey, Section: ts, Type: 3}
+			put(out, key(season, id, m.Index), sinkItem{ID: m.RatingKey, Section: ts, Type: 3})
 		}
 	}
 	return out, nil
@@ -428,9 +436,9 @@ func (r *run) jellyfinIndex(ctx context.Context) (map[string]sinkItem, error) {
 			id := library.ID{Source: strings.ToLower(src), Value: val}
 			switch it.Type {
 			case "Movie":
-				out[key(movie, id, 0)] = sinkItem{ID: it.ID}
+				put(out, key(movie, id, 0), sinkItem{ID: it.ID})
 			case "Series":
-				out[key(show, id, 0)] = sinkItem{ID: it.ID}
+				put(out, key(show, id, 0), sinkItem{ID: it.ID})
 				seriesIDs[it.ID] = append(seriesIDs[it.ID], id)
 			}
 		}
@@ -438,7 +446,7 @@ func (r *run) jellyfinIndex(ctx context.Context) (map[string]sinkItem, error) {
 	for _, it := range items {
 		if it.Type == "Season" && it.IndexNumber != nil {
 			for _, id := range seriesIDs[it.SeriesID] {
-				out[key(season, id, *it.IndexNumber)] = sinkItem{ID: it.ID}
+				put(out, key(season, id, *it.IndexNumber), sinkItem{ID: it.ID})
 			}
 		}
 	}

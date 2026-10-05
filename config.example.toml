@@ -99,8 +99,10 @@ partial_suffixes = [".part", ".!qB"] # in-progress files (and dot files): keep a
 # Candidates: the owner's poster (from a Plex DB backup and the export taken with it), TMDB and fanart.tv (the shared
 # clients). Judge: Claude on the owner's own Anthropic key (secrets_dir/anthropic_api_key), the model chosen by
 # [[llm.policy]], one vision call per title; a backlog goes through Message Batches (half price). Off until enabled:
-# even with dry_run, judging spends: the ~3,000-title backlog costs about $4.60 in batches with Sonnet 5.5 at low
-# effort ($0.0015 a title on the 12-title pilot, 2026-10-05), about half that with Haiku 4.5.
+# even with dry_run, judging spends: the 3,023-title backlog costs about $4.70 in batches with Sonnet 5.5 at low
+# effort ($0.00155 a title on the 12-title pilot, 2026-10-05), about half that with Haiku 4.5. A batch request holds
+# its worst case (about $0.0064) against budget_usd until it settles, so the first run submits about 1,880 titles and
+# a later run the rest; that wait is no alert.
 [stages.posters]
 enabled            = false
 every              = "6h"
