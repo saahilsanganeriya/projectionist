@@ -338,29 +338,23 @@ func TestPushCrossingAWrite(t *testing.T) {
 // Catches: Plex's echo of this stage's own write read as a push that crossed it. PUT /:/rate comes back as media.rate
 // (as any client's rating does); the sink then forgot what Plex holds, and every later run scrobbled Ran again for
 // roger (a view nobody can remove) and rated it again, which echoed again. Also: a real Plex scrobble crossing the
-// stage's progress write to the same film making it forget the play Plex then holds, so the next run scrobbles it
-// again (only the resume point is in doubt); and roger's own rating crossing the stage's lost, though Plex may hold
-// either.
-func TestPlexEchoesNeverRescrobble(t *testing.T) {
+// stage's progress write (saahil) or its scrobble (roger; Plex's play count is nobody's to set) making it forget the
+// play Plex then holds, so the next run scrobbles again; and roger's own rating crossing the stage's lost, though
+// Plex may hold either.
+func TestPlexPushesCrossingWrites(t *testing.T) {
 	h, w, _, _ := newHarness(t)
-	rerates := true
-	w.during["/:/rate"] = func(r *http.Request) {
-		account := "saahilsanganeriya"
-		if r.Header.Get("X-Plex-Token") == fake.PlexFriendToken {
-			account = "roger"
-		}
-		push(h, plexApp, plexPlay("media.rate", account, r.URL.Query().Get("key"), `,"userRating":`+r.URL.Query().Get("rating")))
-		if rerates { // roger rates Ran 9 in Plex as the stage's 7 lands
-			rerates = false
-			push(h, plexApp, plexPlay("media.rate", account, r.URL.Query().Get("key"), `,"userRating":9`))
+	first := map[string]bool{"/:/progress": true, "/:/scrobble": true, "/:/rate": true}
+	cross := func(r *http.Request, account, event, extra string) { // once per path, on Ran
+		if first[r.URL.Path] && r.URL.Query().Get("key") == "11" {
+			first[r.URL.Path] = false
+			push(h, plexApp, plexPlay(event, account, "11", extra))
 		}
 	}
-	finishes := true
-	w.during["/:/progress"] = func(r *http.Request) {
-		if finishes && r.URL.Query().Get("key") == "11" { // saahil finishes Ran in Plex as his Jellyfin resume point lands
-			finishes = false
-			push(h, plexApp, plexPlay("media.scrobble", "saahilsanganeriya", "11", ""))
-		}
+	w.during["/:/progress"] = func(r *http.Request) { cross(r, "saahilsanganeriya", "media.scrobble", "") }
+	w.during["/:/scrobble"] = func(r *http.Request) { cross(r, "roger", "media.scrobble", "") }
+	w.during["/:/rate"] = func(r *http.Request) { // roger's is the only rating the stage writes
+		push(h, plexApp, plexPlay("media.rate", "roger", "11", `,"userRating":`+r.URL.Query().Get("rating"))) // the echo
+		cross(r, "roger", "media.rate", `,"userRating":9`)
 	}
 	for range 4 {
 		run(t, h)
