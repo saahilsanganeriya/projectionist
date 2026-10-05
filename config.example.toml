@@ -60,7 +60,7 @@ plex_timeout    = "5s" # each Plex API call; a slower Plex never fails the run
 # answering when nobody is playing on it. New: no Python original. Needs /var/run/docker.sock (compose.yaml).
 [stages.health]
 every                 = "5m"
-timeout               = "30s"          # per probe; all probes run at once (Cloudflare: up to 9.8 s seen)
+timeout               = "30s"          # per probe, all at once (Cloudflare: up to 9.8 s seen); Plex/Jellyfin: also [plex]/[jellyfin] timeout
 fail_threshold        = 3              # consecutive failed runs before an alert (and a restart)
 restart_cooldown      = "1h"           # at most one restart per container per cooldown; at least 1h
 restartable           = ["jellyfin"]   # the ONLY containers projectionist may restart; left out or [] = alert only

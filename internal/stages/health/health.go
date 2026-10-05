@@ -2,9 +2,10 @@
 //
 // Every run probes, all at once and each within `timeout`: Plex /identity, Jellyfin /System/Info/Public and an
 // authenticated /Items?Limit=1, qBittorrent's API, the Cloudflare public hostnames (status compared, redirects not
-// followed), and Docker's view of the Jellyfin and qBittorrent containers. A service that fails `fail_threshold`
-// runs in a row raises an alert on every run until it passes. Its container is restarted through the Docker Engine
-// API only when all of these hold:
+// followed), and Docker's view of the Jellyfin and qBittorrent containers. The Plex and Jellyfin calls, /Sessions
+// too, also stop at their own client's [plex]/[jellyfin] `timeout` (20 s by default) when that is shorter. A service
+// that fails `fail_threshold` runs in a row raises an alert on every run until it passes, a failed restart included.
+// Its container is restarted through the Docker Engine API only when all of these hold:
 //   - the container is in the `restartable` allow-list (default: none);
 //   - every failure is one a restart can cure: no answer, a timeout, HTTP 5xx, Docker "unhealthy". A refused key,
 //     an unexpected status or a stopped container is alerted, never "fixed" by a restart;
@@ -43,14 +44,16 @@ const (
 	name = "health"
 	// Docker's wait between SIGTERM and SIGKILL. `docker restart`'s 10 s SIGKILLed a Jellyfin still cancelling a scan
 	// (2026-10-05), and its start half never ran.
-	stopGrace    = 120 * time.Second
-	callTimeout  = 5 * time.Minute // one Docker stop past its grace, or one start: a busybox restart took 111 s on the loaded NAS
+	stopGrace   = 120 * time.Second
+	callTimeout = 5 * time.Minute // one Docker stop past its grace, or one start: a busybox restart took 111 s on the loaded NAS
+	// The stop request's deadline. Docker 24 SIGKILLs the moment a stop's client gives up, so it must outlive the grace.
+	stopBound    = stopGrace + callTimeout
 	readyTimeout = 5 * time.Minute // from the start until the service answers again
 	readyPoll    = 5 * time.Second
 )
 
 type Options struct {
-	Timeout              time.Duration  `toml:"timeout"`        // per probe
+	Timeout              time.Duration  `toml:"timeout"`        // per probe; Plex and Jellyfin calls also stop at their client's timeout
 	FailThreshold        int            `toml:"fail_threshold"` // consecutive failed runs before an alert or a restart
 	RestartCooldown      time.Duration  `toml:"restart_cooldown"`
 	Restartable          []string       `toml:"restartable"` // the only containers this stage may restart
@@ -222,21 +225,26 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 func (s Stage) restart(ctx context.Context, env *stage.Env, dk *docker, st *State, svc, c string, ready probe,
 	timeout time.Duration, why string, rep *stage.Report) error {
 	asked := env.Now() // this restart's own time: one before it in the same run can take minutes
-	st.Streak[svc] = 0 // the next restart needs a fresh run of failures
 	st.LastRestart[c] = asked
 	// Recorded before acting: a crash in between can only skip a restart, never repeat one inside the cooldown, and
 	// one cut off after the stop is finished by resume.
 	if err := env.Store.PutJSON(context.WithoutCancel(ctx), name, "state", st); err != nil {
 		return err
 	}
-	return act(ctx, env, rep, "restart", c, why, func() error {
-		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopGrace+callTimeout)
+	cured, err := act(ctx, env, rep, "restart", c, why, func() error {
+		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopBound)
 		defer cancel()
 		if err := dk.stop(stopCtx, c); err != nil {
 			return fmt.Errorf("stop: %w", err) // nothing started: a container this did stop is resumed by the next run
 		}
 		return s.bringBack(ctx, env, dk, c, asked, ready, timeout)
 	})
+	if cured {
+		// The next restart needs a fresh run of failures. A failed one keeps the streak, so every later run alerts
+		// until the service passes; the cooldown stops a second restart.
+		st.Streak[svc] = 0
+	}
+	return err
 }
 
 // resume starts a container that a restart of ours stopped and nothing started again (projectionist died between
@@ -251,15 +259,18 @@ func (s Stage) resume(ctx context.Context, env *stage.Env, dk *docker, st State,
 	inspectCtx, cancel := context.WithTimeout(ctx, timeout) // a wedged dockerd must not hang this and every later run
 	cs, err := dk.inspect(inspectCtx, c)
 	cancel()
-	ours := !cs.FinishedAt.Before(asked) && cs.FinishedAt.Before(asked.Add(stopGrace+callTimeout))
+	// The minute covers the store write before the stop is sent and the SIGKILL dockerd sends when the stop's client
+	// gives up at stopBound.
+	ours := !cs.FinishedAt.Before(asked) && cs.FinishedAt.Before(asked.Add(stopBound+time.Minute))
 	if err != nil || cs.Status != "exited" || !cs.StartedAt.Before(asked) || !ours {
 		return nil // an inspect error is the probe's to report
 	}
 	rep.Alert("container %s stopped during this stage's restart at %s and never started again; starting it",
 		c, asked.Format(time.RFC3339))
-	return act(ctx, env, rep, "resume", c, "restart cut off after the stop", func() error {
+	_, err = act(ctx, env, rep, "resume", c, "restart cut off after the stop", func() error {
 		return s.bringBack(ctx, env, dk, c, asked, ready, timeout)
 	})
+	return err
 }
 
 // bringBack starts c and waits up to readyTimeout for ready to pass. No answer from Docker is proof: while ready
@@ -322,19 +333,20 @@ func (s Stage) sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// act runs one container action to its end, then alerts a failure, logs, counts and records it.
-func act(ctx context.Context, env *stage.Env, rep *stage.Report, action, c, why string, call func() error) error {
+// act runs one container action to its end, then alerts a failure, logs, counts and records it. ok: the action
+// worked; err: the record could not be stored.
+func act(ctx context.Context, env *stage.Env, rep *stage.Report, action, c, why string, call func() error) (ok bool, err error) {
 	start := time.Now()
-	err := call()
+	callErr := call()
 	outcome, level := "ok", slog.LevelWarn
-	if err != nil {
+	if callErr != nil {
 		outcome, level = "failed", slog.LevelError
-		rep.Alert("%s of container %s FAILED: %v", action, c, err)
+		rep.Alert("%s of container %s FAILED: %v", action, c, callErr)
 	}
 	env.Log.Log(ctx, level, "container "+action, "event", "container_action", "action", action, "container", c,
-		"outcome", outcome, "duration_ms", time.Since(start).Milliseconds(), "err", err)
+		"outcome", outcome, "duration_ms", time.Since(start).Milliseconds(), "err", callErr)
 	env.Metrics.Add("projectionist_health_container_actions_total", 1, "container", c, "action", action, "outcome", outcome)
-	return env.Store.AddEvent(context.WithoutCancel(ctx), env.Now(), name, c, action+"_"+outcome, map[string]any{"why": why})
+	return callErr == nil, env.Store.AddEvent(context.WithoutCancel(ctx), env.Now(), name, c, action+"_"+outcome, map[string]any{"why": why})
 }
 
 // restartCase is everything decide weighs for one service this run.

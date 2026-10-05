@@ -82,7 +82,8 @@ func TestDockerJudge(t *testing.T) {
 // recorded before it is sent, a followed redirect read as the hostname's answer, results missing from /health and
 // /metrics, a restart while Jellyfin answers /System/Info/Public but not /Sessions (a library scan can stall one and
 // not the other under a guest's stream), Docker's "running" taken for an answer from a Jellyfin that answers
-// nothing, and a restart when the config names no restartable container.
+// nothing, a restart when the config names no restartable container, and a restart that did not cure Jellyfin
+// resetting the streak, which turned /health back to ok for the next K-1 runs while Jellyfin was still down.
 func TestRunHealsJellyfin(t *testing.T) {
 	h := fake.NewEnv(t, nil)
 	jellyfinAnswers := func(info, items int) {
@@ -100,6 +101,7 @@ func TestRunHealsJellyfin(t *testing.T) {
 	t.Cleanup(tunnel.Close)
 
 	var restarts []time.Time
+	cures := true
 	dockerMux := http.NewServeMux()
 	dockerMux.HandleFunc("GET /containers/{name}/json", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"State":{"Status":"running"}}`))
@@ -111,16 +113,19 @@ func TestRunHealsJellyfin(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	dockerMux.HandleFunc("POST /containers/jellyfin/start", func(w http.ResponseWriter, _ *http.Request) {
-		jellyfinAnswers(200, 200) // the restart cured it
+		if cures {
+			jellyfinAnswers(200, 200)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 	opts := "fail_threshold = 2\ndocker_socket = \"" + serveUnix(t, dockerMux) + "\"\nqbittorrent_url = \"" + qbit.URL + "\"\n"
 	public := "[public]\n\"" + tunnel.URL + "/\" = 302\n"
 	h.SetOptions(opts + "restartable = [\"jellyfin\"]\n" + public)
 
+	advance := func(ctx context.Context, d time.Duration) error { h.Now = h.Now.Add(d); return ctx.Err() }
 	run := func() stage.Report {
 		var rep stage.Report
-		if err := (Stage{}).Run(context.Background(), h.Env, &rep); err != nil {
+		if err := (Stage{Sleep: advance}).Run(context.Background(), h.Env, &rep); err != nil {
 			t.Fatal(err)
 		}
 		return rep
@@ -172,10 +177,16 @@ func TestRunHealsJellyfin(t *testing.T) {
 	jellyfinAnswers(502, 502)
 	run()
 	expect("restartable left out", run(), 3, "the container is not in restartable")
+
+	h.SetOptions(opts + "restartable = [\"jellyfin\"]\n" + public)
+	h.Now, cures = h.Now.Add(2*time.Hour), false
+	h.Jellyfin.Handle("GET", "/Sessions", 200, `[]`)
+	expect("restart that does not cure", run(), 4, "restart of container jellyfin FAILED: jellyfin did not answer within 5m0s")
+	expect("still down after the failed restart", run(), 4, "failed 4 checks in a row")
 }
 
-// Catches: a restart cut off between Docker's stop and its start (projectionist killed mid-restart) leaving
-// Jellyfin stopped for good, and the opposite: starting a container the owner stopped (also after a restart of ours
+// Catches: a restart cut off between Docker's stop and its start (projectionist killed mid-restart, or the stop
+// request timing out, after which dockerd kills the container) leaving Jellyfin stopped for good, and the opposite: starting a container the owner stopped (also after a restart of ours
 // that never took effect), one Docker's restart policy is already bringing back, or one outside restartable. And a
 // dockerd that accepts the connection and never answers hanging the run, and with it every later run.
 func TestResumesACutOffRestart(t *testing.T) {
@@ -188,6 +199,7 @@ func TestResumesACutOffRestart(t *testing.T) {
 		hang              bool // inspect never answers
 	}{
 		{"stopped by our restart, never started again", "exited", -time.Hour, time.Minute, `["jellyfin"]`, 1, false},
+		{"killed when our stop's client gave up at its deadline", "exited", -time.Hour, stopBound + 5*time.Second, `["jellyfin"]`, 1, false},
 		{"stopped by the owner minutes after our restart", "exited", time.Minute, 5 * time.Minute, `["jellyfin"]`, 0, false},
 		{"stopped before we asked", "exited", -time.Hour, -time.Minute, `["jellyfin"]`, 0, false},
 		{"stopped by the owner, our restart having done nothing", "exited", -time.Hour, time.Hour, `["jellyfin"]`, 0, false},
@@ -286,7 +298,8 @@ func TestShutdownDuringViewerCheckHoldsTheRestart(t *testing.T) {
 // Catches the 2026-10-05 outage and its kin: a stop grace under 120 s (`docker restart`'s 10 s SIGKILLed a Jellyfin
 // cancelling a scan), no start sent right after the stop, a start Docker acknowledged but never ran left alone, a
 // restart given up at its first failed poll or waiting past 5 min, a service that never comes back not alerted, a
-// running container started again, a start after a refused stop, and a shutdown abandoning the stop or the start.
+// running container started again, a start after a refused stop, a shutdown abandoning the stop or the start, and
+// the stop request given up inside the grace (Docker 24 SIGKILLs the moment the stop's client goes).
 func TestRestartSequence(t *testing.T) {
 	notBack := "restart of container jellyfin FAILED: jellyfin did not answer within 5m0s of the start (jellyfin GET /System/Info/Public: HTTP 503); container "
 	polls := int(readyTimeout / readyPoll)
@@ -345,6 +358,14 @@ func TestRestartSequence(t *testing.T) {
 			w.WriteHeader(http.StatusNoContent)
 		})
 		dk := newDocker(serveUnix(t, mux))
+		var stopOpen time.Duration // how long after sending it the client would still wait for the stop's answer
+		unix := dk.http.Transport
+		dk.http.Transport = roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if d, ok := r.Context().Deadline(); ok && strings.HasSuffix(r.URL.Path, "/stop") {
+				stopOpen = time.Until(d)
+			}
+			return unix.RoundTrip(r)
+		})
 		ctx, cancel := context.WithCancel(context.Background())
 		if tc.shutdown {
 			cancel()
@@ -357,6 +378,9 @@ func TestRestartSequence(t *testing.T) {
 		got := strings.Join(rep.Alerts, " | ")
 		if err != nil || strings.Join(calls, " ") != tc.calls || (tc.alert == "") != (got == "") || !strings.Contains(got, tc.alert) {
 			t.Errorf("%s: err %v, calls %q, alerts %q; want calls %q, alert ~%q", tc.name, err, strings.Join(calls, " "), got, tc.calls, tc.alert)
+		}
+		if stopOpen <= stopGrace {
+			t.Errorf("%s: the stop request is given up %s after it is sent, inside the %s grace", tc.name, stopOpen.Round(time.Second), stopGrace)
 		}
 	}
 }
@@ -398,6 +422,10 @@ func TestSecondRestartRecordsItsOwnTime(t *testing.T) {
 		t.Fatalf("restarts recorded at %v; want jellyfin at %v, qbittorrent at %v (after Jellyfin's wait)", st.LastRestart, t0, want)
 	}
 }
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func btoi(b bool) int {
 	if b {
