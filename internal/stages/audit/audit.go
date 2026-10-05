@@ -437,7 +437,7 @@ func probeAll(ctx context.Context, env *stage.Env, workers int, videos []*video)
 			lastCheck = env.Now()
 			if err != nil || others > 0 { // unknown counts as busy
 				deferred = len(pending) - i
-				env.Log.Info("probes deferred: someone is watching", "event", "probe_deferred", "deferred", deferred, "others", others, "err", err)
+				env.Log.Info("probes deferred: a guest is watching or the servers did not answer", "event", "probe_deferred", "deferred", deferred, "others", others, "err", err)
 				break
 			}
 		}
@@ -685,7 +685,7 @@ func report(env *stage.Env, maxListed int, s *scan, shows []showCount, deferred,
 	fmt.Fprintf(&b, "Library audit, %s. Read-only: nothing was moved or deleted.\n", env.Now().In(loc).Format("2006-01-02 15:04 MST"))
 	fmt.Fprintf(&b, "%d videos in Movies/ and TV/.", len(s.videos))
 	if deferred > 0 {
-		fmt.Fprintf(&b, " %d not probed yet (someone was watching): the unreadable and English-subtitle counts are partial.", deferred)
+		fmt.Fprintf(&b, " %d not probed yet (a guest was watching, or Plex/Jellyfin did not answer): the unreadable and English-subtitle counts are partial.", deferred)
 	}
 	if waiting > 0 {
 		fmt.Fprintf(&b, " %d videos or findings changed in the last few minutes and are judged next run.", waiting)
