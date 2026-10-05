@@ -163,6 +163,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 			s.loop(ctx, job)
 		}()
 	}
+	<-ctx.Done() // with no jobs enabled the service must still stay up (and keep serving /health)
 	wg.Wait()
 }
 

@@ -20,6 +20,9 @@ services:
       - SETUID       # run Plex's transcoder as the Plex user for its GPU self-test
       - SETGID
     security_opt: ["no-new-privileges:true"]
+    # 6 GB / 4 cores shared with Plex and Jellyfin: they win any contention; a runaway encode cannot starve them.
+    mem_limit: 1g
+    cpu_shares: 256
     read_only: true
     tmpfs: [/tmp]
     volumes:
