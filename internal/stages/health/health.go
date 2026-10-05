@@ -52,7 +52,7 @@ type Options struct {
 
 func defaults() Options {
 	return Options{
-		Timeout:              10 * time.Second,
+		Timeout:              15 * time.Second, // the Cloudflare hostnames took up to 6.4 s under NAS I/O load 14
 		FailThreshold:        3,
 		RestartCooldown:      time.Hour,
 		Restartable:          []string{"jellyfin"},
