@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"projectionist/internal/config"
@@ -21,6 +22,12 @@ import (
 type Stage interface {
 	Name() string
 	Run(ctx context.Context, env *Env, rep *Report) error
+}
+
+// Hooker is a stage that also takes events pushed to the service's HTTP listener (e.g. Plex webhooks). The
+// handlers only record what arrived; the stage's next run acts on it. Mounted by `serve` for enabled stages.
+type Hooker interface {
+	Hooks(env *Env) map[string]http.Handler // "POST /hooks/<name>" → handler
 }
 
 // Env is everything a stage may use. Clients read their secrets from files on every call, never from env vars.

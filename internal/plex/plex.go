@@ -63,12 +63,16 @@ func (c *Client) token() (string, error) {
 	return prefs["PlexOnlineToken"], nil
 }
 
-// do sends the token as a header, never in the URL, so request logs cannot leak it.
 func (c *Client) do(ctx context.Context, method, path, accept string) ([]byte, error) {
 	tok, err := c.token()
 	if err != nil {
 		return nil, err
 	}
+	return c.send(ctx, tok, method, path, accept)
+}
+
+// send puts the token in a header, never in the URL, so request logs cannot leak it.
+func (c *Client) send(ctx context.Context, tok, method, path, accept string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.base+path, nil)
 	if err != nil {
 		return nil, err
@@ -95,6 +99,12 @@ func (c *Client) do(ctx context.Context, method, path, accept string) ([]byte, e
 // Do sends a request whose answer does not matter (PUT /:/prefs, scan requests).
 func (c *Client) Do(ctx context.Context, method, path string) error {
 	_, err := c.do(ctx, method, path, "")
+	return err
+}
+
+// DoAs is Do with another account's token, e.g. a friend's, to write that friend's watch state.
+func (c *Client) DoAs(ctx context.Context, token, method, path string) error {
+	_, err := c.send(ctx, token, method, path, "")
 	return err
 }
 

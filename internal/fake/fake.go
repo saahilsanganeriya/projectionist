@@ -18,8 +18,9 @@ import (
 )
 
 const (
-	PlexToken   = "test-plex-token"
-	JellyfinKey = "test-jellyfin-key"
+	PlexToken       = "test-plex-token"
+	PlexFriendToken = "test-plex-friend-token" // a shared user's token; fake Plex accepts it too
+	JellyfinKey     = "test-jellyfin-key"
 )
 
 type Call struct {
@@ -86,7 +87,10 @@ func (s *Server) Calls(method, path string) []Call {
 // Plex starts a fake Plex and writes a Preferences.xml holding PlexOnlineToken plus prefs; it returns the
 // server, a client for it, and the prefs file path (rewrite it with WritePrefs to simulate drift).
 func Plex(t testing.TB, prefs map[string]string) (*Server, *plex.Client, string) {
-	s := newServer(t, func(r *http.Request) bool { return r.Header.Get("X-Plex-Token") == PlexToken })
+	s := newServer(t, func(r *http.Request) bool {
+		tok := r.Header.Get("X-Plex-Token")
+		return tok == PlexToken || tok == PlexFriendToken
+	})
 	path := filepath.Join(t.TempDir(), "Preferences.xml")
 	WritePrefs(t, path, prefs)
 	return s, plex.New(s.URL, path, 5*time.Second), path
