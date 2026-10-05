@@ -334,7 +334,7 @@ func newAIFake(t *testing.T, h *fake.Harness, tasks map[string]llm.Task) *aiFake
 		return llmtest.Answer{Text: answer, Finish: finish, In: in, Out: out}
 	})
 	a.gw.Models = append(a.gw.Models, llmtest.Model{ID: "test/pricey", In: 20, Out: 20})
-	h.Env.LLM = llmtest.Client(t, a.gw, h.Env.Store, func() time.Time { return h.Env.Now() }, tasks)
+	h.Env.LLM = llmtest.Client(t, a.gw, h.Env.Store, func() time.Time { return h.Env.Now() }, llm.Config{Tasks: tasks})
 	return a
 }
 
@@ -884,6 +884,31 @@ func TestLostAnswerStaysCounted(t *testing.T) {
 	if w.ai.calls() != 4 || w.state(t).Spend["2026-10-05"] != counted || len(rep.Alerts) != 1 ||
 		!strings.Contains(rep.Alerts[0], "exceed the daily AI budget") {
 		t.Fatalf("run 2: %d attempts, $%.5f counted, alerts %q", w.ai.calls(), w.state(t).Spend["2026-10-05"], rep.Alerts)
+	}
+}
+
+// Catches: a gateway that refuses calls until the owner adds a card counted as spend (the day's cap used up by
+// nothing), its alert missing since when calls are refused, or the next run not asking again (the refusal is free).
+func TestGatewayRefusesForBilling(t *testing.T) {
+	w := newWorld(t, "", 0)
+	refuse := true
+	reply := w.ai.gw.Reply
+	w.ai.gw.Reply = func(n int, req llm.Request) llmtest.Answer {
+		if refuse {
+			return llmtest.Answer{Status: 403, Type: "customer_verification_required", Message: "requires a valid credit card on file"}
+		}
+		return reply(n, req)
+	}
+	rep := w.run(t)
+	if w.ai.calls() != 1 || w.state(t).Spend["2026-10-05"] != 0 || len(rep.Alerts) != 1 ||
+		!strings.Contains(rep.Alerts[0], "refused calls since 2026-10-05T15:00:00Z") {
+		t.Fatalf("%d calls, $%v spent, alerts %q; want one free call and one dated alert", w.ai.calls(), w.state(t).Spend["2026-10-05"], rep.Alerts)
+	}
+	refuse = false
+	w.ai.script(answer3(389, 346, 655))
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	if rep := w.run(t); len(rep.Alerts) != 0 || len(w.state(t).Picks) != 3 {
+		t.Fatalf("once the gateway accepts calls: alerts %q, picks %v", rep.Alerts, w.state(t).Picks)
 	}
 }
 

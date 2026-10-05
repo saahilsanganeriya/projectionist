@@ -466,6 +466,9 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 		return r, nil
 	}
 	r, err := call(1, p.Cost(req.InputTokens, req.MaxTokens))
+	if parked := s.Parked(); parked != nil {
+		return parked // a billing refusal says since when
+	}
 	if err != nil {
 		return err
 	}

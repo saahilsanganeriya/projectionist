@@ -143,10 +143,6 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 	if len(todo) == 0 {
 		return nil
 	}
-	if r.guestsWatching(ctx) {
-		r.count("judge_deferred", len(todo))
-		return nil
-	}
 	titles, collections := r.env.LLM.Session("posters"), r.env.LLM.Session("collections")
 	parallel(ctx, r.env.LLM.InFlight(), todo, func(it *row) {
 		s := titles
@@ -290,10 +286,15 @@ func answerFormat(k kind, n int) *llm.ResponseFormat {
 }
 
 // judgeNow judges one title: one call, and one more when the answer cannot be read; a second unreadable answer leaves
-// the title unjudged. Each call holds its worst case against the budget until it settles.
+// the title unjudged. Each call holds its worst case against the budget until it settles. While a guest watches, the
+// title waits for a later run: a call uploads its thumbnails.
 func (r *run) judgeNow(ctx context.Context, s *llm.Session, it *row) {
-	if s.Parked() != nil {
+	switch {
+	case s.Parked() != nil:
 		r.count("judge_parked", 1)
+		return
+	case r.guestsWatching(ctx):
+		r.count("judge_deferred", 1)
 		return
 	}
 	req, err := r.request(ctx, it)

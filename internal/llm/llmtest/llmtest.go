@@ -219,14 +219,15 @@ type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// Client is an llm client on g's server with tasks over the defaults, a key file holding "test-SECRET-gateway-key"
-// (a log that shows "SECRET" leaked it), and no backoff pauses.
-func Client(t testing.TB, g *Gateway, st llm.Store, now func() time.Time, tasks map[string]llm.Task) *llm.Client {
+// Client is an llm client on g's server with cfg over the defaults, a key file holding "test-SECRET-gateway-key" (a
+// log that shows "SECRET" leaked it), and no backoff pauses.
+func Client(t testing.TB, g *Gateway, st llm.Store, now func() time.Time, cfg llm.Config) *llm.Client {
 	key := filepath.Join(t.TempDir(), "ai_gateway_api_key")
 	if err := os.WriteFile(key, []byte("test-SECRET-gateway-key\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c := llm.New(llm.Config{API: g.Server(t).URL + "/v1", KeyFile: key, Tasks: tasks}, st, now)
+	cfg.API, cfg.KeyFile = g.Server(t).URL+"/v1", key
+	c := llm.New(cfg, st, now)
 	c.Backoff = func(int) time.Duration { return 0 }
 	return c
 }

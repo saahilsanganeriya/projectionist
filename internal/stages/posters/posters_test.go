@@ -210,7 +210,7 @@ func newWorld(t *testing.T, opts string) *world {
 		}
 		return answer(req)
 	})
-	w.h.Env.LLM = llmtest.Client(t, w.gateway, w.h.Env.Store, func() time.Time { return w.h.Env.Now() }, nil)
+	w.h.Env.LLM = llmtest.Client(t, w.gateway, w.h.Env.Store, func() time.Time { return w.h.Env.Now() }, llm.Config{})
 
 	w.opts = fmt.Sprintf(`movies_root = %q
 tv_root = %q
@@ -415,27 +415,31 @@ func TestUnusableAnswersStop(t *testing.T) {
 	}
 }
 
-// Catches: a call whose process died mid-call blocking its title and holding its reservation forever, or being
-// released at $0 though it may have been billed; and a call another run still has in flight being taken for dead.
+// Catches: a call whose process died mid-call, or a Message Batch from before the gateway that nobody collects now,
+// blocking its title and holding its reservation forever, or being released at $0 though it may have been billed; and
+// a call another run still has in flight being taken for dead.
 func TestInterruptedCalls(t *testing.T) {
 	w := newWorld(t, "dry_run = true\n")
 	w.set(func() { w.overloaded = true })
 	w.run(t) // gathers the pools; no judge call is answered
 	w.set(func() { w.overloaded = false })
 	db := w.h.Env.Store.DB()
-	for key, at := range map[string]time.Time{"movie:tmdb-1": w.h.Now.Add(-2 * time.Hour), "show:tmdb-3": w.h.Now} {
+	for _, c := range []struct {
+		key, batch string
+		at         time.Time
+	}{{"movie:tmdb-1", "", w.h.Now.Add(-2 * time.Hour)}, {"show:tmdb-3", "", w.h.Now}, {"movie:tmdb-1", "msgbatch_01", w.h.Now.Add(-26 * time.Hour)}} {
 		var raw string
 		var cands []Candidate
-		db.QueryRow(`SELECT cands FROM posters_items WHERE key=?`, key).Scan(&raw)
+		db.QueryRow(`SELECT cands FROM posters_items WHERE key=?`, c.key).Scan(&raw)
 		json.Unmarshal([]byte(raw), &cands)
 		db.Exec(`INSERT INTO posters_calls(at, item, of, model, mode, batch_id, state, input_tokens, output_tokens, reserved_usd,
-			cost_usd, llm_ms, error) VALUES (?, ?, ?, 'killed', 'sync', '', 'pending', 0, 0, 0.002, 0, 0, '')`, stamp(at), key, setID(cands))
+			cost_usd, llm_ms, error) VALUES (?, ?, ?, 'killed', 'sync', ?, 'pending', 0, 0, 0.002, 0, 0, '')`, stamp(c.at), c.key, setID(cands), c.batch)
 	}
 	w.run(t)
 	var cost float64
-	db.QueryRow(`SELECT cost_usd FROM posters_calls WHERE item='movie:tmdb-1' AND model='killed'`).Scan(&cost)
-	if alpha, gamma := w.verdict(t, "movie:tmdb-1"), w.verdict(t, "show:tmdb-3"); alpha.Rule != "judged" || cost != 0.002 || gamma.Rule != "" {
-		t.Fatalf("Alpha %q with its 2-hour-old call settled at $%v (want judged, $0.002); Gamma %q (want unjudged: its call is in flight)",
+	db.QueryRow(`SELECT sum(cost_usd) FROM posters_calls WHERE item='movie:tmdb-1' AND model='killed'`).Scan(&cost)
+	if alpha, gamma := w.verdict(t, "movie:tmdb-1"), w.verdict(t, "show:tmdb-3"); alpha.Rule != "judged" || cost != 0.004 || gamma.Rule != "" {
+		t.Fatalf("Alpha %q with its 2-hour-old call and its old batch settled at $%v (want judged, $0.004); Gamma %q (want unjudged: its call is in flight)",
 			alpha.Rule, cost, gamma.Rule)
 	}
 }
@@ -501,7 +505,8 @@ func guestLater(w *world) func() {
 }
 
 // Catches: a guest who starts watching after a long drain began not pausing the rest of it: the poster uploads (the
-// ~3,000-title backlog once dry_run is switched off).
+// ~3,000-title backlog once dry_run is switched off), and the judge calls (each uploads a title's thumbnails; the
+// backlog is hours of them).
 func TestGuestArrivesMidDrain(t *testing.T) {
 	t.Run("uploads", func(t *testing.T) {
 		w := newWorld(t, "apply_workers = 1\n")
@@ -509,6 +514,19 @@ func TestGuestArrivesMidDrain(t *testing.T) {
 		w.h.Plex.HandleFunc("POST", "/library/metadata/101/posters", func(http.ResponseWriter, *http.Request) { once.Do(arrive) })
 		if rep := w.run(t); rep.Counts["applied_plex"] != 1 || rep.Counts["applied_jellyfin"] != 1 || rep.Counts["apply_deferred"] != 3 {
 			t.Fatalf("counts %v; the guest arrived at Alpha's Plex upload, so the other 3 titles must wait", rep.Counts)
+		}
+	})
+	t.Run("judging", func(t *testing.T) {
+		w := newWorld(t, "dry_run = true\n")
+		arrive, once := guestLater(w), sync.Once{}
+		w.h.Env.LLM = llmtest.Client(t, w.gateway, w.h.Env.Store, w.h.Env.Now, llm.Config{InFlight: 1})
+		reply := w.gateway.Reply
+		w.gateway.Reply = func(n int, req llm.Request) llmtest.Answer {
+			once.Do(arrive)
+			return reply(n, req)
+		}
+		if rep := w.run(t); len(w.gateway.Calls()) != 1 || rep.Counts["judge_deferred"] != 1 {
+			t.Fatalf("%d judge calls, counts %v; the guest arrived at the first, so the second title must wait", len(w.gateway.Calls()), rep.Counts)
 		}
 	})
 }
@@ -695,21 +713,31 @@ func TestNewerOwnerExport(t *testing.T) {
 	}
 }
 
-// Catches: titles judged on another task's model, the fallbacks not sent (an outage of one model stopping all
+// Catches: a call in flight holding less than its worst case against the budget (calls in flight could then pass
+// it), titles judged on another task's model, the fallbacks not sent (an outage of one model stopping all
 // judging), the ledger naming the model asked rather than the one that answered (a fallback, billed at its own
 // price), a judge that reasons (the vision default takes "none"), and the answer's schema missing a letter the pool
 // uses.
 func TestJudgeTasks(t *testing.T) {
 	w := newWorld(t, "dry_run = true\n")
-	w.h.Env.LLM = llmtest.Client(t, w.gateway, w.h.Env.Store, w.h.Env.Now, map[string]llm.Task{
-		"posters": {Model: "google/gemma-4-31b-it", Fallbacks: []string{"zai/glm-5.3-flash"}}})
+	w.h.Env.LLM = llmtest.Client(t, w.gateway, w.h.Env.Store, w.h.Env.Now, llm.Config{Tasks: map[string]llm.Task{
+		"posters": {Model: "google/gemma-4-31b-it", Fallbacks: []string{"zai/glm-5.3-flash"}}}})
 	reply := w.gateway.Reply
+	var held []float64
 	w.gateway.Reply = func(n int, req llm.Request) llmtest.Answer {
+		var usd float64
+		w.h.Env.Store.DB().QueryRow(`SELECT coalesce(min(reserved_usd), 0) FROM posters_calls WHERE state='pending'`).Scan(&usd)
+		w.mu.Lock()
+		held = append(held, usd)
+		w.mu.Unlock()
 		a := reply(n, req)
 		a.Model = "zai/glm-5.3-flash"
 		return a
 	}
 	w.run(t)
+	if slices.Min(held) < 1024*0.5e-6 { // all of max_tokens at the dearer model's $0.50 per million output
+		t.Fatalf("calls in flight held $%v against the budget; want each its worst case", held)
+	}
 	var req llm.Request
 	for _, c := range w.gateway.Calls() {
 		if strings.HasPrefix(c.Messages[1].Content[0].Text, "MOVIE: Alpha") {

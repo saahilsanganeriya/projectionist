@@ -154,7 +154,7 @@ func TestCost(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			g := llmtest.New(func(n int, _ llm.Request) llmtest.Answer { return c.answers[n-1] })
 			g.Models = []llmtest.Model{cheap, dear}
-			s := llmtest.Client(t, g, &memStore{}, time.Now, tasks).Session("t")
+			s := llmtest.Client(t, g, &memStore{}, time.Now, llm.Config{Tasks: tasks}).Session("t")
 			worst, err := s.WorstCase(context.Background(), llm.Request{InputTokens: 1000, MaxTokens: 100})
 			if err != nil || math.Abs(worst-0.012) > 1e-12 {
 				t.Fatalf("worst case $%v, %v; want $0.012 (the dear fallback's price)", worst, err)
@@ -204,7 +204,7 @@ func TestSessionParks(t *testing.T) {
 	})
 	st := &memStore{}
 	clock := time.Date(2026, 10, 5, 23, 0, 0, 0, time.UTC)
-	c := llmtest.Client(t, g, st, func() time.Time { return clock }, nil)
+	c := llmtest.Client(t, g, st, func() time.Time { return clock }, llm.Config{})
 	ctx := context.Background()
 	set := func(f, b bool) { mu.Lock(); fail, billing = f, b; mu.Unlock() }
 
@@ -236,7 +236,7 @@ func TestSessionParks(t *testing.T) {
 		t.Fatalf("billing: %v then %v after %d calls, parked %v; want one call, parked since the refusal", err, again, len(g.Calls()), s.Parked())
 	}
 	clock = clock.Add(6 * time.Hour) // the next run: a new client, as after a restart, still refused
-	c = llmtest.Client(t, g, st, func() time.Time { return clock }, nil)
+	c = llmtest.Client(t, g, st, func() time.Time { return clock }, llm.Config{})
 	s = c.Session("tonight")
 	s.Chat(ctx, ask)
 	if !strings.Contains(s.Parked().Error(), "since 2026-10-05T23:00:00Z") {
@@ -273,7 +273,7 @@ func TestRequestShape(t *testing.T) {
 	for _, c := range cases {
 		g := llmtest.New(nil)
 		g.Models = []llmtest.Model{c.model}
-		s := llmtest.Client(t, g, &memStore{}, time.Now, map[string]llm.Task{"t": {Model: c.model.ID, Reasoning: c.effort}}).Session("t")
+		s := llmtest.Client(t, g, &memStore{}, time.Now, llm.Config{Tasks: map[string]llm.Task{"t": {Model: c.model.ID, Reasoning: c.effort}}}).Session("t")
 		if _, err := s.Chat(context.Background(), llm.Request{Messages: []llm.Message{llm.System("be brief"), llm.User(llm.Text("a"), llm.JPEG([]byte{1}))}}); err != nil {
 			t.Fatal(err)
 		}
@@ -299,7 +299,7 @@ func TestRequestShape(t *testing.T) {
 func TestCatalogueCachedDaily(t *testing.T) {
 	g := llmtest.New(nil)
 	clock := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
-	c := llmtest.Client(t, g, &memStore{}, func() time.Time { return clock }, nil)
+	c := llmtest.Client(t, g, &memStore{}, func() time.Time { return clock }, llm.Config{})
 	ctx := context.Background()
 	steps := []struct {
 		after   time.Duration
@@ -331,4 +331,14 @@ type failing struct{}
 
 func (failing) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, errors.New("connection refused")
+}
+
+// Catches a task table that sets only some keys (its fallbacks, say) sending an empty model, or the tonight task
+// losing its reasoning, because the table replaced the default wholesale.
+func TestPartialTaskKeepsItsDefaults(t *testing.T) {
+	c := llm.New(llm.Config{Tasks: map[string]llm.Task{"posters": {Fallbacks: []string{"google/gemma-4-31b-it"}}, "tonight": {Model: "m/x"}}}, nil, time.Now)
+	if p, n := c.Task("posters"), c.Task("tonight"); p.Model != llm.VisionModel || p.Reasoning != "off" || len(p.Fallbacks) != 1 ||
+		n.Model != "m/x" || n.Reasoning != "low" || c.Task("collections").Model != llm.VisionModel {
+		t.Fatalf("posters %+v, tonight %+v, collections %+v", p, n, c.Task("collections"))
+	}
 }
