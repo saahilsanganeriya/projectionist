@@ -319,8 +319,8 @@ collections_owner_file    = "/config/collections.owner.json"
 collections_approved_file = "/config/collections.approved.json"
 collection_dry_run        = true # judge only; review posters_items (keys "collection:<name>"), then set false to upload
 collection_budget_usd     = 5    # all collection judge calls ever; a hard stop, apart from budget_usd
-# commons_contact = ""           # a URL or e-mail for Wikimedia's User-Agent policy: 200 Commons calls a minute
-                                 # instead of 10 (unset, the stage waits 6.5 s between calls; about 4 per director)
+# commons_contact = ""           # a URL or e-mail for Wikimedia's User-Agent policy: 200 requests a minute instead
+                                 # of 10 (unset, Wikimedia requests go 6.5 s apart; about 10 per director)
 
 # Letterboxd lists as Plex collections and Jellyfin BoxSets: the canon plus the owner's own public lists, owned films
 # in list order, "On the NAS: N of M · seen S · <url>" summaries, generated posters, Plex Home rows for `home`.

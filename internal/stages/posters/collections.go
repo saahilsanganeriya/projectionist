@@ -16,7 +16,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"time"
 
 	"golang.org/x/image/draw"
 
@@ -263,15 +262,6 @@ func (r *run) directors(ctx context.Context, t Title) ([]tmdb.Person, error) {
 
 // ---- Wikimedia Commons (keyless; https://www.mediawiki.org/wiki/Wikimedia_APIs/Rate_limits) ----
 
-// CommonsPace is the least time between two Commons API calls: Wikimedia allows 10 a minute to a client whose
-// User-Agent names no contact, 200 to one that does (commons_contact). Tests set it to zero.
-var CommonsPace = func(contact bool) time.Duration {
-	if contact {
-		return 500 * time.Millisecond
-	}
-	return 6500 * time.Millisecond
-}
-
 // onSet finds the words a Commons title, description or category uses for a photo taken at work on a film.
 var onSet = regexp.MustCompile(`(?i)\b(on (the )?set|set of|film set|filming|shooting|directing|behind the scenes|making of|on location|dreharbeiten|rodaje|tournage|na planie|clapperboard)\b`)
 
@@ -400,21 +390,11 @@ func (r *run) commonsSearch(ctx context.Context, query string) ([]commonsFile, e
 	return resp.Query.Pages, err
 }
 
-// commons makes one Commons API call: one at a time across the run, CommonsPace apart.
+// commons makes one Commons API call (paced by fetch, like every request to Wikimedia).
 func (r *run) commons(ctx context.Context, q url.Values, out any) error {
 	q.Set("format", "json")
 	q.Set("formatversion", "2")
-	r.commonsMu.Lock()
-	defer r.commonsMu.Unlock()
-	if wait := time.Until(r.commonsLast.Add(CommonsPace(r.opt.CommonsContact != ""))); wait > 0 {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(wait):
-		}
-	}
 	body, err := r.fetch(ctx, r.opt.CommonsAPI+"?"+q.Encode())
-	r.commonsLast = time.Now()
 	if err != nil {
 		return fmt.Errorf("commons: %w", err)
 	}

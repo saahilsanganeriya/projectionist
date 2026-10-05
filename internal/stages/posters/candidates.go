@@ -347,23 +347,41 @@ var FetchDelay = func(n int) time.Duration {
 	return time.Duration(1<<n)*time.Second + rand.N(time.Second)
 }
 
-// fetch GETs u; 429, 5xx and dropped connections are retried twice. Errors never carry the URL, which may hold a key.
+// fetch GETs u; 429, 5xx and dropped connections are retried twice, after the server's Retry-After when it names one
+// (at most 2 minutes). Every request to Wikimedia (its API, its images) takes its turn on the run's pacer
+// (wikimediaTurn). Errors never carry the URL, which may hold a key.
 func (r *run) fetch(ctx context.Context, u string) ([]byte, error) {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return nil, errors.New("bad image URL")
+	}
+	paced := strings.HasSuffix(parsed.Hostname(), ".wikimedia.org")
 	for attempt := 0; ; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
 			return nil, errors.New("bad image URL")
 		}
 		req.Header.Set("User-Agent", "projectionist-posters/1 ("+cmp.Or(r.opt.CommonsContact, "home media server")+")")
+		done := func() {}
+		if paced {
+			if done, err = r.wikimediaTurn(ctx); err != nil {
+				return nil, err
+			}
+		}
 		resp, err := r.http.Do(req)
 		var body []byte
+		wait := FetchDelay(attempt + 1)
 		if err == nil {
 			body, err = io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 			resp.Body.Close()
 			if err == nil && resp.StatusCode/100 != 2 {
 				err = httpStatus(resp.StatusCode)
 			}
+			if s, convErr := strconv.Atoi(resp.Header.Get("Retry-After")); convErr == nil && s > 0 {
+				wait = min(time.Duration(s)*time.Second, 2*time.Minute)
+			}
 		}
+		done()
 		if ue := (*url.Error)(nil); errors.As(err, &ue) {
 			err = ue.Err
 		}
@@ -378,9 +396,33 @@ func (r *run) fetch(ctx context.Context, u string) ([]byte, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(FetchDelay(attempt + 1)):
+		case <-time.After(wait):
 		}
 	}
+}
+
+// WikimediaPace is the least time between two requests to Wikimedia: it allows 10 a minute to a client whose
+// User-Agent names no contact, 200 to one that does (commons_contact). Tests set it to zero.
+var WikimediaPace = func(contact bool) time.Duration {
+	if contact {
+		return 500 * time.Millisecond
+	}
+	return 6500 * time.Millisecond
+}
+
+// wikimediaTurn waits until the run's last Wikimedia request is WikimediaPace old and holds the turn; done records
+// the request's end and passes the turn on. Requests to Wikimedia go one at a time across the run.
+func (r *run) wikimediaTurn(ctx context.Context) (done func(), err error) {
+	r.commonsMu.Lock()
+	if wait := time.Until(r.commonsLast.Add(WikimediaPace(r.opt.CommonsContact != ""))); wait > 0 {
+		select {
+		case <-ctx.Done():
+			r.commonsMu.Unlock()
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return func() { r.commonsLast = time.Now(); r.commonsMu.Unlock() }, nil
 }
 
 func writeAtomic(path string, b []byte) error {

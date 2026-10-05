@@ -181,7 +181,7 @@ type run struct {
 	gateAt   time.Time
 	gateBusy bool
 
-	commonsMu   sync.Mutex // Commons API calls go one at a time, CommonsPace apart
+	commonsMu   sync.Mutex // requests to Wikimedia go one at a time, WikimediaPace apart (wikimediaTurn)
 	commonsLast time.Time
 }
 

@@ -19,7 +19,7 @@ import (
 	"projectionist/internal/fake"
 )
 
-func init() { CommonsPace = func(bool) time.Duration { return 0 } }
+func init() { WikimediaPace = func(bool) time.Duration { return 0 } }
 
 // collectionWorld adds to newWorld the owner's collection Alien (his poster: never touched), two approved franchises
 // and what TMDB, fanart.tv, Wikimedia Commons, Plex and Jellyfin say about them and about Paul Greengrass. Unless
