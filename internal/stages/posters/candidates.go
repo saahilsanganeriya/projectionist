@@ -57,7 +57,8 @@ const (
 	srcTMDBCollection   = "tmdb-collection"   // a franchise: made for its TMDB collection
 	srcFanartCollection = "fanart-collection" // a franchise: fanart.tv's for that collection
 	srcFilm             = "film"              // a franchise: its most acclaimed film's poster
-	srcCommons          = "commons"           // a director: a Wikimedia Commons photo
+	srcCommons          = "commons"           // a director: a Wikimedia Commons photo that depicts them or sits in their category
+	srcCommonsText      = "commons-text"      // a director: a Commons text search hit naming them (maybe a namesake)
 	srcTMDBTagged       = "tmdb-tagged"       // a director: a TMDB image they are tagged in
 	srcTMDBProfile      = "tmdb-profile"      // a director: a TMDB portrait
 
@@ -72,7 +73,7 @@ const (
 var thumbBox, photoBox = image.Rect(0, 0, 252, 392), image.Rect(0, 0, 512, 512)
 
 func boxFor(c Candidate) image.Rectangle {
-	if c.Source == srcCommons || c.Source == srcTMDBTagged || c.Source == srcTMDBProfile {
+	if c.Source == srcCommons || c.Source == srcCommonsText || c.Source == srcTMDBTagged || c.Source == srcTMDBProfile {
 		return photoBox
 	}
 	return thumbBox
@@ -362,7 +363,7 @@ func (r *run) fetch(ctx context.Context, u string) ([]byte, error) {
 			return nil, errors.New("bad image URL")
 		}
 		req.Header.Set("User-Agent", "projectionist-posters/1 ("+cmp.Or(r.opt.CommonsContact, "home media server")+")")
-		done := func() {}
+		done := func(time.Duration) {}
 		if paced {
 			if done, err = r.wikimediaTurn(ctx); err != nil {
 				return nil, err
@@ -370,7 +371,7 @@ func (r *run) fetch(ctx context.Context, u string) ([]byte, error) {
 		}
 		resp, err := r.http.Do(req)
 		var body []byte
-		wait := FetchDelay(attempt + 1)
+		wait, retryAfter := FetchDelay(attempt+1), time.Duration(0)
 		if err == nil {
 			body, err = io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 			resp.Body.Close()
@@ -378,10 +379,11 @@ func (r *run) fetch(ctx context.Context, u string) ([]byte, error) {
 				err = httpStatus(resp.StatusCode)
 			}
 			if s, convErr := strconv.Atoi(resp.Header.Get("Retry-After")); convErr == nil && s > 0 {
-				wait = min(time.Duration(s)*time.Second, 2*time.Minute)
+				retryAfter = min(time.Duration(s)*time.Second, 2*time.Minute)
+				wait = retryAfter
 			}
 		}
-		done()
+		done(retryAfter)
 		if ue := (*url.Error)(nil); errors.As(err, &ue) {
 			err = ue.Err
 		}
@@ -426,17 +428,28 @@ var WikimediaPace = func(contact bool) time.Duration {
 	return 6500 * time.Millisecond
 }
 
-// wikimediaTurn waits until the run's last Wikimedia request is WikimediaPace old and holds the turn; done records
-// the request's end and passes the turn on. Requests to Wikimedia go one at a time across the run.
-func (r *run) wikimediaTurn(ctx context.Context) (done func(), err error) {
+// wikimediaTurn waits until the run's last Wikimedia request is WikimediaPace old, and past any pause a Retry-After
+// asked for, and holds the turn; done records the request's end and the Retry-After it got (0 for none) and passes the
+// turn on. Requests to Wikimedia go one at a time across the run, so a Retry-After holds every one of them.
+func (r *run) wikimediaTurn(ctx context.Context) (done func(retryAfter time.Duration), err error) {
 	r.wikiMu.Lock()
-	if wait := r.wikiLast.Add(WikimediaPace(r.opt.CommonsContact != "")).Sub(r.env.Now()); wait > 0 {
+	next := r.wikiLast.Add(WikimediaPace(r.opt.CommonsContact != ""))
+	if r.wikiPause.After(next) {
+		next = r.wikiPause
+	}
+	if wait := next.Sub(r.env.Now()); wait > 0 {
 		if err := wikiSleep(ctx, wait); err != nil {
 			r.wikiMu.Unlock()
 			return nil, err
 		}
 	}
-	return func() { r.wikiLast = r.env.Now(); r.wikiMu.Unlock() }, nil
+	return func(retryAfter time.Duration) {
+		r.wikiLast = r.env.Now()
+		if retryAfter > 0 {
+			r.wikiPause = r.wikiLast.Add(retryAfter)
+		}
+		r.wikiMu.Unlock()
+	}, nil
 }
 
 func writeAtomic(path string, b []byte) error {

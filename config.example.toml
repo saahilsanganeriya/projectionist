@@ -319,6 +319,7 @@ collections_owner_file    = "/config/collections.owner.json"
 collections_approved_file = "/config/collections.approved.json"
 collection_dry_run        = true # judge only; review posters_items (keys "collection:<name>"), then set false to upload
 collection_budget_usd     = 5    # all collection judge calls ever; a hard stop, apart from budget_usd
+director_min_score        = 4    # a director's best photo needs this judge score (1-10), else no poster and an alert
 # commons_contact = ""           # a URL or e-mail for Wikimedia's User-Agent policy: 200 requests a minute instead
                                  # of 10 (unset, Wikimedia requests go 6.5 s apart; about 10 per director)
 

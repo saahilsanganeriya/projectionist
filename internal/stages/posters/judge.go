@@ -133,7 +133,10 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 		v, decided := shortcut(it.Cands)
 		if !decided && unusable[it.Title.Key+" "+of] >= 2 { // two paid-for answers that said nothing: stop paying
 			v, decided = Verdict{Choice: it.Cands[0].URL, Rule: "unjudged"}, true
-			r.alert("posters: %s got two unusable judge answers; it keeps its first candidate (%s)", it.Title.Key, it.Cands[0].Source)
+			if it.Title.Kind == director { // a photo no judge scored cannot clear the bar
+				v.Choice = ""
+			}
+			r.alert("posters: %s got two unusable judge answers; it keeps its first candidate (%s), a director none", it.Title.Key, it.Cands[0].Source)
 		}
 		if decided {
 			v.Of, v.At = of, r.env.Now()
@@ -167,12 +170,13 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 	return nil
 }
 
-// shortcut is the verdict that needs no judge: the owner's upload stays, and a lone candidate wins.
+// shortcut is the verdict that needs no judge: the owner's upload stays, and a lone candidate wins, unless it is a
+// Commons text hit, which no source vouches shows the director: that one is judged.
 func shortcut(cands []Candidate) (Verdict, bool) {
 	switch {
 	case cands[0].Owner == ownerUpload:
 		return Verdict{Choice: cands[0].URL, Rule: "upload"}, true
-	case len(cands) == 1:
+	case len(cands) == 1 && cands[0].Source != srcCommonsText:
 		return Verdict{Choice: cands[0].URL, Rule: "single"}, true
 	}
 	return Verdict{}, false
@@ -180,15 +184,19 @@ func shortcut(cands []Candidate) (Verdict, bool) {
 
 // decide applies the owner's policy to the judge's scores (by candidate index): Plex's own default poster yields to
 // any higher score, the owner's pick only to one at least two points higher; on a tie the earlier candidate (the
-// owner's, then the better-voted) stays.
-func decide(cands []Candidate, scores map[int]float64) (int, string) {
+// owner's, then the better-voted) stays. With a bar (a director's director_min_score), a pool whose best score is
+// below it has no choice (-1): the pool already holds every source, so no other source is left to fall back to.
+func decide(cands []Candidate, scores map[int]float64, bar float64) (int, string) {
 	best := -1
 	for i := range cands {
 		if s, ok := scores[i]; ok && (best < 0 || s > scores[best]) {
 			best = i
 		}
 	}
-	if best < 0 {
+	switch {
+	case bar > 0 && (best < 0 || scores[best] < bar):
+		return -1, "below_bar"
+	case best < 0:
 		return 0, "unjudged"
 	}
 	if cands[0].Source == srcOwner {
@@ -268,7 +276,7 @@ func (r *run) judgeNow(ctx context.Context, model llm.Model, it *row) {
 	held := r.reservation(model.ID, tokens, false)
 	id, err := r.reserve(ctx, it.Title.Key, setID(it.Cands), model.ID, "sync", held)
 	if err != nil {
-		r.budgetHit(err)
+		r.budgetHit(it.Title.Key, err)
 		return
 	}
 	start := time.Now()
@@ -312,15 +320,37 @@ func (r *run) record(ctx context.Context, it *row, model, text string, callID in
 			v.OnSet = append(v.OnSet, u)
 		}
 	}
-	choice, rule := decide(it.Cands, byIndex)
-	v.Choice, v.Rule = it.Cands[choice].URL, rule
+	bar := 0.0
+	if it.Title.Kind == director {
+		bar = r.opt.DirectorMinScore
+	}
+	choice, rule := decide(it.Cands, byIndex, bar)
+	source := "none"
+	if v.Rule = rule; choice >= 0 {
+		v.Choice, source = it.Cands[choice].URL, it.Cands[choice].Source
+	}
 	if err := r.saveVerdict(ctx, it, v); err != nil {
 		r.env.Log.Error("save verdict", "event", "store_error", "item", it.Title.Key, "err", err)
 		return
 	}
 	r.count("judged", 1)
-	r.env.Log.Info("judged", "event", "title_judged", "item", it.Title.Key, "rule", rule, "choice", it.Cands[choice].Source,
-		"score", byIndex[choice])
+	r.env.Log.Info("judged", "event", "title_judged", "item", it.Title.Key, "rule", rule, "choice", source, "score", byIndex[choice])
+}
+
+// noPoster alerts the director collections whose verdict chose nothing: no photo cleared director_min_score, or no
+// judge answer was usable. They stay without a poster until their pool changes.
+func (r *run) noPoster(rows []*row) {
+	var names []string
+	for _, it := range rows {
+		if it.Title.Kind == director && it.Verdict != nil && it.Verdict.Choice == "" && it.Verdict.Of == setID(it.Cands) {
+			names = append(names, it.Title.Name)
+		}
+	}
+	if len(names) > 0 {
+		slices.Sort(names)
+		r.alert("posters: %d director collection(s) have no photo scoring at least %g, so no poster: %s", len(names),
+			r.opt.DirectorMinScore, strings.Join(names, ", "))
+	}
 }
 
 // judgeAnswer is what the judge said, by letter; OnSet and Box come with a director's photos only.
@@ -395,14 +425,14 @@ func (r *run) submitBatches(ctx context.Context, model llm.Model, todo []*row) e
 				continue
 			}
 			id, err := r.reserve(ctx, it.Title.Key, setID(it.Cands), model.ID, "batch", r.reservation(model.ID, tokens, true))
-			if err != nil {
-				r.budgetHit(err)
-				break
+			if err != nil { // a spent title budget must not hold back the collections behind the titles: their budget is their own
+				r.budgetHit(it.Title.Key, err)
+				continue
 			}
 			reqs, ids = append(reqs, llm.BatchRequest{CustomID: "c" + strconv.FormatInt(id, 10), Params: req}), append(ids, id)
 		}
 		if len(reqs) == 0 {
-			return nil
+			continue
 		}
 		b, err := r.llm.CreateBatch(ctx, reqs)
 		if err != nil {
@@ -608,14 +638,16 @@ func spentUSD(ctx context.Context, db *sql.DB, collections bool) (float64, error
 	return spent, err
 }
 
-// budgetHit alerts once when real spend has reached the budget; a budget only held by calls in flight is no alert.
-func (r *run) budgetHit(err error) {
+// budgetHit alerts once a run per budget (titles', collections') when real spend has reached it; a budget only held
+// by calls in flight is no alert.
+func (r *run) budgetHit(item string, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.budgetAlerted {
+	collection := strings.HasPrefix(item, collectionPrefix)
+	if r.budgetAlerted[collection] {
 		return
 	}
-	r.budgetAlerted = true
+	r.budgetAlerted[collection] = true
 	if errors.Is(err, errBudgetHeld) {
 		r.env.Log.Info("judging waits for calls in flight to settle", "event", "budget_held", "err", err)
 		r.rep.Count("budget_held", 1)

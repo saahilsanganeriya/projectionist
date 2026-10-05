@@ -123,8 +123,8 @@ func (w *world) pool(key string) []Candidate {
 // while titles are dry and collections live; a collection poster sent to the wrong app item
 // or left unlocked in Plex; a director's poster not composed to 2:3 around the judge's box; a collection opened by an
 // arrival, or made in an app after the first listing, never getting its poster; a wait for the app counted as a failed
-// attempt (its backoff grows); Plex uploads and locks missing from the library changes health's optimize reads; and a
-// rerun paying or uploading again.
+// attempt (its backoff grows); Plex uploads and locks missing from the library changes health's optimize reads; the
+// stage's own Plex lock taken for someone else's; and a rerun paying or uploading again.
 func TestCollectionPosters(t *testing.T) {
 	w := collectionWorld(t, "dry_run = true\n", false)
 	film := `[{"url":"` + w.api.URL + `/t/p/original/green.jpg","thumb":"` + w.api.URL + `/t/p/w500/green.jpg","source":"tmdb"}]`
@@ -208,6 +208,14 @@ func TestCollectionPosters(t *testing.T) {
 		len(w.h.Plex.Calls("POST", "/library/metadata/601/posters")) != 1 || len(w.h.Jellyfin.Calls("POST", "/Items/jb2/Images/Primary")) != 1 {
 		t.Fatalf("Greengrass in Plex the next day: %d uploads (want 1, locked); %d judge calls in all (want 2: Scary Movie, Greengrass); reruns change nothing",
 			n, w.messages)
+	}
+
+	// Plex shows the lock the stage set on 601; Scary Movie's row is sent again: that lock is no one else's.
+	w.h.Plex.Handle("GET", "/library/metadata/601", 200, `{"MediaContainer":{"Metadata":[{"ratingKey":"601","Field":[{"locked":true,"name":"thumb"}]}]}}`)
+	db.Exec(`DELETE FROM posters_sinks WHERE item='collection:scary movie' AND sink='plex'`)
+	if rep := w.run(t); len(w.h.Plex.Calls("POST", "/library/metadata/601/posters")) != 2 || len(rep.Alerts) != 0 {
+		t.Fatalf("Scary Movie sent again to the 601 the stage locked: %d uploads (want 2), alerts %v (want none)",
+			len(w.h.Plex.Calls("POST", "/library/metadata/601/posters")), rep.Alerts)
 	}
 }
 
@@ -318,19 +326,21 @@ func TestOwnersAppCollectionsRefused(t *testing.T) {
 	}
 }
 
-// Catches: a collection that left the set (the owner adopted it: it is in his file now) getting a poster again when
-// an app re-creates it, from an outbox row this run did not ask for.
+// Catches: a collection that left the set (the owner adopted it: it is in his file now) getting a poster from an
+// outbox row this run did not ask for: a pending one, or one sent again because an app re-created the collection.
 func TestCollectionLeavingTheSetNeverUploads(t *testing.T) {
 	w := collectionWorld(t, "dry_run = true\ncollection_dry_run = false\n", false)
+	w.jellyfinLists(jellyfinItems + `, {"Id":"jb3","Type":"BoxSet","Name":"Evil Dead"}`) // no Scary Movie in Jellyfin yet
 	w.run(t)
+	w.jellyfinLists(jellyfinItems + `, {"Id":"jb1","Type":"BoxSet","Name":"Scary Movie"}, {"Id":"jb3","Type":"BoxSet","Name":"Evil Dead"}`)
 	os.WriteFile(w.ownerFile, []byte(`[{"ratingKey":"500","title":"Alien","titleSort":null,"members":[{"ids":["tmdb://348"]}]},
  {"ratingKey":"700","title":"Scary Movie","titleSort":null,"members":[{"ids":["tmdb://4247"]}]}]`), 0o644)
 	w.h.Plex.Handle("GET", "/library/sections/4/collections", 200, `{"MediaContainer":{"Metadata":[{"ratingKey":"6011","title":"Scary Movie"},
  {"ratingKey":"603","title":"Evil Dead"}]}}`)
 	w.h.Now = w.h.Now.Add(25 * time.Hour)
 	w.run(t)
-	if n := len(w.h.Plex.Calls("POST", "/library/metadata/6011/posters")); n != 0 {
-		t.Fatalf("Scary Movie, the owner's now, re-created in Plex as 6011, got %d uploads; want none", n)
+	if n, m := len(w.h.Plex.Calls("POST", "/library/metadata/6011/posters")), len(w.h.Jellyfin.Calls("POST", "/Items/jb1/Images/Primary")); n+m != 0 {
+		t.Fatalf("Scary Movie, the owner's now: %d uploads to Plex 6011 (re-created), %d to Jellyfin jb1 (pending); want none", n, m)
 	}
 }
 

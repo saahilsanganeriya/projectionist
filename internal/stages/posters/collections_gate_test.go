@@ -117,6 +117,8 @@ func TestCollectionGate(t *testing.T) {
 			status = "not gathered"
 		case len(pool) == 0:
 			status = "no candidates"
+		case v.Rule == "below_bar":
+			status = "below the bar"
 		case v.Choice == "":
 			status = "not judged"
 		}
@@ -135,7 +137,7 @@ func TestCollectionGate(t *testing.T) {
 				return "fanart"
 			case srcFilm:
 				return "film poster"
-			case srcCommons, srcTMDBTagged, srcTMDBProfile:
+			case srcCommons, srcCommonsText, srcTMDBTagged, srcTMDBProfile:
 				if slices.Contains(v.OnSet, cd.URL) {
 					return "director on-set (" + cd.Source + ")"
 				}

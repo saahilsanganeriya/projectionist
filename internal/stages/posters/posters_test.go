@@ -828,7 +828,7 @@ func TestDecide(t *testing.T) {
 		{"no owner: tie keeps the better voted", remote, map[int]float64{0: 7, 1: 7}, 0},
 	}
 	for _, c := range cases {
-		if got, _ := decide(c.cands, c.scores); got != c.want {
+		if got, _ := decide(c.cands, c.scores, 0); got != c.want {
 			t.Errorf("%s: chose %d, want %d", c.name, got, c.want)
 		}
 	}

@@ -11,6 +11,7 @@ import (
 	"image"
 	"math"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -42,11 +43,26 @@ func collectionKey(name string) string {
 
 func (k kind) collection() bool { return k == franchise || k == director }
 
-// collectionTitles lists the collections to give a poster.
-func collectionTitles(ctx context.Context, db *sql.DB, opt Options) ([]Title, error) {
+// collectionTitles lists the collections to give a poster, and the Plex ratingKeys of the owner's collections (his file
+// names them), which are never a target whatever they are called.
+func collectionTitles(ctx context.Context, db *sql.DB, opt Options) ([]Title, map[string]bool, error) {
 	cs, err := collections.PosterlessCollections(ctx, db, opt.CollectionsOwner, opt.CollectionsApproved)
 	if err != nil {
-		return nil, fmt.Errorf("collections: %w", err)
+		return nil, nil, err
+	}
+	raw, err := os.ReadFile(opt.CollectionsOwner)
+	if err != nil {
+		return nil, nil, err
+	}
+	var owner []struct {
+		RatingKey string `json:"ratingKey"`
+	}
+	if err := json.Unmarshal(raw, &owner); err != nil {
+		return nil, nil, fmt.Errorf("%s: %w", opt.CollectionsOwner, err)
+	}
+	keys := map[string]bool{}
+	for _, o := range owner {
+		keys[o.RatingKey] = true
 	}
 	out := make([]Title, 0, len(cs))
 	for _, c := range cs {
@@ -56,7 +72,7 @@ func collectionTitles(ctx context.Context, db *sql.DB, opt Options) ([]Title, er
 		}
 		out = append(out, Title{Key: collectionKey(c.Name), Kind: k, Name: c.Name, Members: c.Members, Sets: c.Sets})
 	}
-	return out, nil
+	return out, keys, nil
 }
 
 // ---- franchise collections ----
@@ -331,9 +347,12 @@ func (r *run) commonsPhotos(ctx context.Context, name, qid string) ([]Candidate,
 			if onSet.MatchString(text) {
 				rank++
 			}
-			found = append(found, ranked{Candidate{URL: rendering(ii.ThumbURL, ii.Width), Thumb: ii.ThumbURL, Source: srcCommons,
-				License: f.meta("LicenseShortName"),
-				Caption: fmt.Sprintf("Wikimedia Commons, %d×%d pixels: %q", ii.Width, ii.Height, caption)}, rank})
+			source, site := srcCommons, "Wikimedia Commons"
+			if !sure {
+				source, site = srcCommonsText, "Wikimedia Commons text search (may show someone of the same name)"
+			}
+			found = append(found, ranked{Candidate{URL: rendering(ii.ThumbURL, ii.Width), Thumb: ii.ThumbURL, Source: source,
+				License: f.meta("LicenseShortName"), Caption: fmt.Sprintf("%s, %d×%d pixels: %q", site, ii.Width, ii.Height, caption)}, rank})
 		}
 	}
 	if qid != "" {
