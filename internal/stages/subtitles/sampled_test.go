@@ -432,13 +432,14 @@ func TestSamplerStopsWhenAReadOverruns(t *testing.T) {
 		t.Skip("rchar is read from /proc/<pid>/io")
 	}
 	h := fake.NewEnv(t, nil)
-	h.Script(t, "ffmpeg", "head -c 80000000 /dev/zero > /dev/null\n") // 80 MB for one 90 s window of a 1 GB film
+	// 150 MB for one 90 s window of a 1 GiB, 100-minute film: its share is 16 MB, the allowance 4 times that plus 64 MiB
+	h.Script(t, "ffmpeg", "head -c 150000000 /dev/zero > /dev/null\n")
 	video := filepath.Join(t.TempDir(), "v.mkv")
 	os.WriteFile(video, []byte("v"), 0o644)
 	r := &run{env: h.Env, opt: Options{SampleWindows: 4, SampleLength: 90e9}, rep: &stage.Report{}}
 	s, _ := r.newSampler(&title{path: video, info: probe.Info{Duration: 6000, Size: 1 << 30, Audio: []probe.Audio{{Index: 1}}}})
 	why, err := s.readAll(context.Background())
-	if err != nil || !strings.Contains(why, "no usable index") || s.read < 80e6 || s.read > 81e6 {
-		t.Errorf("why %q err %v after %d bytes; want stopped after the first window's 80 MB", why, err, s.read)
+	if err != nil || !strings.Contains(why, "no usable index") || s.read < 150e6 || s.read > 151e6 {
+		t.Errorf("why %q err %v after %d bytes; want stopped after the first window's 150 MB", why, err, s.read)
 	}
 }
