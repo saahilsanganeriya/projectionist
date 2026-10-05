@@ -108,7 +108,7 @@ func TestJudgeSelfTest(t *testing.T) {
 
 // Catches: settings drift left unrepaired, a repair that drops Jellyfin's other encoding settings, an alert that
 // repeats every 15 min for the same transcode, a self-test that runs while someone watches or more than daily, and
-// a summary that calls drifted pins intact.
+// a summary that calls drifted pins intact or a failed self-test passed.
 func TestRunAgainstFakeServers(t *testing.T) {
 	h := fake.NewEnv(t, map[string]string{"HardwareDevicePath": "", "HardwareAcceleratedEncoders": "1"})
 	app := t.TempDir()
@@ -139,8 +139,12 @@ sample = "/samples/gpu_sample.mkv"`)
 	h.Plex.Handle("GET", "/status/sessions", 200, cpuTranscode)
 
 	var ran []*exec.Cmd
+	gpuBroken := false
 	s := Stage{Exec: func(_ context.Context, cmd *exec.Cmd) (int, string, error) {
 		ran = append(ran, cmd)
+		if gpuBroken {
+			return 1, "Failed to initialise VAAPI connection", nil
+		}
 		return 0, "frame=  121 fps=70", nil
 	}}
 	run := func() stage.Report {
@@ -189,6 +193,11 @@ sample = "/samples/gpu_sample.mkv"`)
 	run()
 	if len(ran) != 2 {
 		t.Fatal("self-test ran again within 24 h")
+	}
+
+	h.Now, gpuBroken = h.Now.Add(2*time.Hour), true
+	if rep := run(); len(rep.Alerts) != 2 || rep.Summary != "GPU pins intact; 0 playing; self-test failed" {
+		t.Fatalf("broken GPU: alerts=%q summary=%q; want both self-tests alerted and summarised as failed", rep.Alerts, rep.Summary)
 	}
 }
 
