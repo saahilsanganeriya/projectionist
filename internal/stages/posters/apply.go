@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"image/jpeg"
 	"net/http"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"projectionist/internal/library"
@@ -22,14 +24,20 @@ import (
 //
 // A row remembers the app item its poster went to, and an app that later lists the title under another item gets
 // the poster again: Jellyfin's item id is a hash of the path, so every folder or file rename re-creates the item,
-// and Plex re-creates items on some moves.
+// and Plex re-creates items on some moves. A collection is addressed by its name; one the collections stage has not
+// made in an app yet waits for that app's next daily listing. The owner's collections are never a target, whatever
+// they are called: in Plex by their ratingKeys (his file), in Jellyfin by the BoxSets the collections stage gave his
+// posters; and a Plex collection whose poster someone else locked keeps it.
 
 const (
 	sinkPlex     = "plex"
 	sinkJellyfin = "jellyfin"
+
+	plexCollection = 18 // Plex's metadata type for a collection
 )
 
-// enqueue puts every verdict's choice in the outbox; a row already holding that choice is left alone.
+// enqueue puts every verdict's choice in the outbox; a row already holding that choice is left alone. A director
+// collection's row names the photo and where the director is in it (composeURL).
 func (r *run) enqueue(ctx context.Context, rows []*row) error {
 	tx, err := r.env.Store.DB().BeginTx(ctx, nil)
 	if err != nil {
@@ -38,14 +46,18 @@ func (r *run) enqueue(ctx context.Context, rows []*row) error {
 	defer tx.Rollback()
 	now := stamp(r.env.Now())
 	for _, it := range rows {
-		if it.Verdict == nil {
+		if it.Verdict == nil || it.Verdict.Choice == "" { // a director no photo of whom cleared the bar
 			continue
+		}
+		send := it.Verdict.Choice
+		if it.Title.Kind == director {
+			send = composeURL(send, it.Verdict.Boxes[send])
 		}
 		for _, s := range []string{sinkJellyfin, sinkPlex} {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO posters_sinks(item, sink, url, state, target, attempts, next_at, last_error)
 				VALUES (?, ?, ?, 'pending', '', 0, ?, '') ON CONFLICT(item, sink) DO UPDATE SET url=excluded.url, state='pending',
 				target='', attempts=0, next_at=excluded.next_at, last_error='' WHERE posters_sinks.url != excluded.url`,
-				it.Title.Key, s, it.Verdict.Choice, now); err != nil {
+				it.Title.Key, s, send, now); err != nil {
 				return err
 			}
 		}
@@ -59,8 +71,9 @@ type outboxRow struct {
 }
 
 // apply refreshes each app's item index when it is due, with or without uploads waiting, sends back to the outbox
-// every title the app now lists under another item, then drains the due rows. The viewer gate is asked before each
-// title's download and uploads: a guest watching defers that title to a later run.
+// every title the app now lists under another item, then drains the due rows of the kinds that are live (titles,
+// collections). The viewer gate is asked before each title's download and uploads: a guest watching defers that
+// title to a later run.
 func (r *run) apply(ctx context.Context) error {
 	index := map[string]map[string]sinkItem{}
 	for _, s := range []string{sinkPlex, sinkJellyfin} {
@@ -76,8 +89,18 @@ func (r *run) apply(ctx context.Context) error {
 			return err
 		}
 	}
+	var plexChanges atomic.Int64 // Plex uploads and locks: changes to Plex's database that health's optimize counts
+	defer func() {
+		if n := plexChanges.Load(); n > 0 {
+			if err := r.env.Store.AddLibraryChanges(context.WithoutCancel(ctx), name, int(n)); err != nil {
+				r.env.Log.Error("library changes", "event", "store_error", "err", err)
+			}
+		}
+	}()
+	live := r.live()
 	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT item, sink, url, state, attempts FROM posters_sinks
-		WHERE state IN ('pending', 'uploaded') AND next_at <= ? ORDER BY item, sink`, stamp(r.env.Now()))
+		WHERE state IN ('pending', 'uploaded') AND next_at <= ? AND (item LIKE 'collection:%') IN (?, ?) ORDER BY item, sink`,
+		stamp(r.env.Now()), !live[false], live[true])
 	if err != nil {
 		return err
 	}
@@ -88,6 +111,9 @@ func (r *run) apply(ctx context.Context) error {
 		if err := rows.Scan(&o.Item, &o.Sink, &o.URL, &o.State, &o.Attempts); err != nil {
 			rows.Close()
 			return err
+		}
+		if !r.ours(o.Item) {
+			continue
 		}
 		if byItem[o.Item] == nil {
 			items = append(items, o.Item)
@@ -107,8 +133,18 @@ func (r *run) apply(ctx context.Context) error {
 			}
 			target, ok := index[o.Sink][item]
 			if !ok {
-				r.retryLater(ctx, o, "not in "+o.Sink+" yet", r.opt.SinkIndexEvery)
+				r.waitForApp(ctx, o)
 				continue
+			}
+			if o.State == "pending" && o.Sink == sinkPlex && target.Type == plexCollection {
+				if refuse, err := r.lockedElsewhere(ctx, target.ID); err != nil {
+					r.retryLater(ctx, o, err.Error(), backoff(o.Attempts))
+					continue
+				} else if refuse {
+					r.setState(ctx, o, "refused", target.ID)
+					r.alert("posters: Plex collection %s (%s) has a poster someone locked; it keeps it", target.ID, item)
+					continue
+				}
 			}
 			if o.State == "pending" {
 				img, ok := images[o.URL]
@@ -124,6 +160,9 @@ func (r *run) apply(ctx context.Context) error {
 					r.retryLater(ctx, o, err.Error(), backoff(o.Attempts))
 					continue
 				}
+				if o.Sink == sinkPlex {
+					plexChanges.Add(1)
+				}
 				r.setState(ctx, o, "uploaded", target.ID)
 			}
 			if o.Sink == sinkPlex {
@@ -131,6 +170,12 @@ func (r *run) apply(ctx context.Context) error {
 					target.Section, target.Type, target.ID)); err != nil {
 					r.retryLater(ctx, o, "lock: "+err.Error(), backoff(o.Attempts))
 					continue
+				}
+				plexChanges.Add(1)
+				if target.Type == plexCollection {
+					if err := r.env.Store.PutJSON(context.WithoutCancel(ctx), name, "plex_locked/"+target.ID, true); err != nil {
+						r.env.Log.Error("lock record", "event", "store_error", "err", err)
+					}
 				}
 			}
 			r.setState(ctx, o, "done", target.ID)
@@ -207,6 +252,49 @@ func (r *run) sinkHealth(ctx context.Context, sink string, listErr error) error 
 
 func backoff(attempts int) time.Duration { return min(24*time.Hour, time.Minute<<min(attempts, 11)) }
 
+// ours is whether this run may send an outbox row: every title's, and a collection's only while it is in this run's
+// set (one the owner has since adopted is his).
+func (r *run) ours(item string) bool {
+	return !strings.HasPrefix(item, collectionPrefix) || r.collections[item]
+}
+
+// waitForApp puts off a row whose title the app does not list yet until its next listing. It is no failed attempt:
+// the backoff of a later real failure starts from the first.
+func (r *run) waitForApp(ctx context.Context, o outboxRow) {
+	r.count("waiting_for_"+o.Sink, 1)
+	if _, err := r.env.Store.DB().ExecContext(context.WithoutCancel(ctx), `UPDATE posters_sinks SET next_at=?, last_error=?
+		WHERE item=? AND sink=? AND url=?`, stamp(r.env.Now().Add(r.opt.SinkIndexEvery)), "not in "+o.Sink+" yet", o.Item, o.Sink, o.URL); err != nil {
+		r.env.Log.Error("outbox", "event", "store_error", "err", err)
+	}
+}
+
+// lockedElsewhere is whether a Plex collection's poster is locked by someone other than this stage (which records each
+// collection it locks): Plex's listing does not show locks, its item does.
+func (r *run) lockedElsewhere(ctx context.Context, ratingKey string) (bool, error) {
+	var ours bool
+	if found, err := r.env.Store.GetJSON(ctx, name, "plex_locked/"+ratingKey, &ours); err != nil || found {
+		return false, err
+	}
+	type field struct {
+		Name   string `json:"name"`
+		Locked bool   `json:"locked"`
+	}
+	var item struct {
+		Metadata []struct {
+			Field []field `json:"Field"`
+		} `json:"Metadata"`
+	}
+	if err := r.env.Plex.GetJSON(ctx, "/library/metadata/"+ratingKey, &item); err != nil {
+		return false, err
+	}
+	for _, m := range item.Metadata {
+		if slices.ContainsFunc(m.Field, func(f field) bool { return f.Name == "thumb" && f.Locked }) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (r *run) retryLater(ctx context.Context, o outboxRow, msg string, after time.Duration) {
 	r.env.Log.Warn("poster upload failed", "event", "apply_failed", "item", o.Item, "sink", o.Sink, "attempt", o.Attempts+1, "err", msg)
 	r.count("apply_failed", 1)
@@ -239,19 +327,27 @@ func (r *run) upload(ctx context.Context, sink string, target sinkItem, img []by
 	return r.env.Plex.Send(ctx, http.MethodPost, "/library/metadata/"+target.ID+"/posters", "image/jpeg", img)
 }
 
-// prepare is the full-size image as a JPEG, carrying the stage's EXIF mark when marked. Plex lists every upload
-// alike, and its export keeps an upload's bytes, so the mark is how a later export tells the stage's uploads from
-// the owner's (importOwners). The owner's own upload therefore goes back unmarked; a kept pick or Plex default is
-// marked, or the next export would read it as his upload.
+// prepare is the full-size image as a JPEG (a director's poster composed from its photo), carrying the stage's EXIF
+// mark when marked. Plex lists every upload alike, and its export keeps an upload's bytes, so the mark is how a later
+// export tells the stage's uploads from the owner's (importOwners). The owner's own upload therefore goes back
+// unmarked; a kept pick or Plex default is marked, or the next export would read it as his upload.
 func (r *run) prepare(ctx context.Context, u string, marked bool) ([]byte, error) {
+	spec, composed := strings.CutPrefix(u, composePrefix)
+	var box string
+	if composed {
+		box, u, _ = strings.Cut(spec, " ")
+	}
 	b, err := r.original(ctx, u)
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.HasPrefix(b, []byte{0xFF, 0xD8}) {
+	if composed || !bytes.HasPrefix(b, []byte{0xFF, 0xD8}) {
 		img, err := decode(b)
 		if err != nil {
 			return nil, err
+		}
+		if composed {
+			img = compose(img, parseBox(box))
 		}
 		var buf bytes.Buffer
 		if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 92}); err != nil {
@@ -312,7 +408,7 @@ func mark(jpg []byte, desc string) ([]byte, error) {
 type sinkItem struct {
 	ID      string `json:"id"`
 	Section int    `json:"section,omitempty"` // Plex only
-	Type    int    `json:"type,omitempty"`    // Plex metadata type: 1 movie, 2 show, 3 season
+	Type    int    `json:"type,omitempty"`    // Plex metadata type: 1 movie, 2 show, 3 season, 18 collection
 }
 
 // sinkIndex maps title keys to the app's items from one listing per app, refreshed every SinkIndexEvery.
@@ -355,7 +451,10 @@ func (r *run) plexIndex(ctx context.Context) (map[string]sinkItem, error) {
 			RatingKey       string `json:"ratingKey"`
 			ParentRatingKey string `json:"parentRatingKey"`
 			Index           int    `json:"index"`
-			GUID            []struct {
+			// Plex sends the item's own "guid" (a string) beside the "Guid" list. encoding/json matches keys
+			// case-insensitively, so without a field of its own "guid" lands in GUID and the listing fails to decode.
+			PlexGUID string `json:"guid"`
+			GUID     []struct {
 				ID string `json:"id"`
 			} `json:"Guid"`
 		} `json:"Metadata"`
@@ -396,6 +495,24 @@ func (r *run) plexIndex(ctx context.Context) (map[string]sinkItem, error) {
 			put(out, key(season, id, m.Index), sinkItem{ID: m.RatingKey, Section: ts, Type: 3})
 		}
 	}
+	if r.opt.CollectionsApproved != "" {
+		var colls struct {
+			Metadata []struct {
+				RatingKey string `json:"ratingKey"`
+				Title     string `json:"title"`
+			} `json:"Metadata"`
+		}
+		if err := r.env.Plex.GetJSON(ctx, fmt.Sprintf("/library/sections/%d/collections", ms), &colls); err != nil {
+			return nil, err
+		}
+		for _, c := range colls.Metadata {
+			if r.ownerKeys[c.RatingKey] { // the owner's, whatever it is called now
+				r.env.Log.Info("owner's collection is no target", "event", "owner_collection_refused", "sink", sinkPlex, "id", c.RatingKey, "title", c.Title)
+				continue
+			}
+			put(out, collectionKey(c.Title), sinkItem{ID: c.RatingKey, Section: ms, Type: plexCollection})
+		}
+	}
 	return out, nil
 }
 
@@ -409,13 +526,18 @@ var jellyfinPage = 200
 func (r *run) jellyfinIndex(ctx context.Context) (map[string]sinkItem, error) {
 	type item struct {
 		ID          string            `json:"Id"`
+		Name        string            `json:"Name"`
 		Type        string            `json:"Type"`
 		ProviderIDs map[string]string `json:"ProviderIds"`
 		SeriesID    string            `json:"SeriesId"`
 		IndexNumber *int              `json:"IndexNumber"`
 	}
 	var items []item
-	for _, typ := range []string{"Movie", "Series", "Season"} {
+	types := []string{"Movie", "Series", "Season"}
+	if r.opt.CollectionsApproved != "" {
+		types = append(types, "BoxSet")
+	}
+	for _, typ := range types {
 		for start := 0; ; start += jellyfinPage {
 			var page struct{ Items []item }
 			if err := r.env.Jellyfin.GetJSON(ctx, fmt.Sprintf("/Items?Recursive=true&IncludeItemTypes=%s&Fields=ProviderIds"+
@@ -432,6 +554,16 @@ func (r *run) jellyfinIndex(ctx context.Context) (map[string]sinkItem, error) {
 	out := map[string]sinkItem{}
 	seriesIDs := map[string][]library.ID{}
 	for _, it := range items {
+		if it.Type == "BoxSet" {
+			var poster string // the collections stage records each BoxSet it gave one of the owner's posters
+			if found, err := r.env.Store.GetJSON(ctx, "collections", "poster/jellyfin/"+it.ID, &poster); err != nil {
+				return nil, err
+			} else if found {
+				r.env.Log.Info("owner's collection is no target", "event", "owner_collection_refused", "sink", sinkJellyfin, "id", it.ID, "title", it.Name)
+				continue
+			}
+			put(out, collectionKey(it.Name), sinkItem{ID: it.ID})
+		}
 		for src, val := range it.ProviderIDs {
 			id := library.ID{Source: strings.ToLower(src), Value: val}
 			switch it.Type {

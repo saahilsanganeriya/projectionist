@@ -50,3 +50,38 @@ func (c *Client) Directed(ctx context.Context, personID int) ([]int, error) {
 	}
 	return out, nil
 }
+
+// PersonImages lists a person's profile photos (portraits).
+func (c *Client) PersonImages(ctx context.Context, personID int) ([]Image, error) {
+	var resp struct {
+		Profiles []Image `json:"profiles"`
+	}
+	err := c.get(ctx, fmt.Sprintf("/person/%d/images", personID), nil, &resp)
+	return resp.Profiles, err
+}
+
+// TaggedImage is an image a person is tagged in: a still, a backdrop or a poster of a film or show.
+type TaggedImage struct {
+	Image
+	ImageType string `json:"image_type"` // still | backdrop | poster | ...
+	Media     struct {
+		Title string `json:"title"` // films
+		Name  string `json:"name"`  // shows
+	} `json:"media"`
+}
+
+// TaggedImages lists the first page (TMDB's 20 best) of the images a person is tagged in.
+func (c *Client) TaggedImages(ctx context.Context, personID int) ([]TaggedImage, error) {
+	var resp struct {
+		Results []TaggedImage `json:"results"`
+	}
+	err := c.get(ctx, fmt.Sprintf("/person/%d/tagged_images", personID), nil, &resp)
+	return resp.Results, err
+}
+
+// PersonExternalIDs is a person's ids elsewhere; Wikidata is the one Wikimedia Commons keys its files by.
+func (c *Client) PersonExternalIDs(ctx context.Context, personID int) (ExternalIDs, error) {
+	var out ExternalIDs
+	err := c.get(ctx, fmt.Sprintf("/person/%d/external_ids", personID), nil, &out)
+	return out, err
+}

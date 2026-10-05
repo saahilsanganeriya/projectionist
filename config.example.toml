@@ -311,6 +311,17 @@ sink_index_every   = "24h"           # one item listing per app per day maps tit
 sink_alert_after   = "72h"           # an app whose listing fails this long raises an alert (its posters wait)
 mark               = "poster-curator 2026-10" # EXIF ImageDescription on the images the stage uploads, the owner's own
                                      # uploads excepted; a later export reads a marked upload as the stage's
+# Collections: every Movies collection the owner gave no poster (the approved ones, and those arrivals open) gets one:
+# a franchise its TMDB collection's or fanart.tv's poster or its most acclaimed film's; a director a textless 1000x1500
+# poster composed from a photo (Wikimedia Commons, on-set first, then TMDB). One judge call per collection, about 150
+# for the approved list (under $1 with Sonnet 5.5). The owner's collections are never touched. Both files on = collections on.
+collections_owner_file    = "/config/collections.owner.json"
+collections_approved_file = "/config/collections.approved.json"
+collection_dry_run        = true # judge only; review posters_items (keys "collection:<name>"), then set false to upload
+collection_budget_usd     = 5    # all collection judge calls ever; a hard stop, apart from budget_usd
+director_min_score        = 4    # a director's best photo needs this judge score (1-10), else no poster and an alert
+# commons_contact = ""           # a URL or e-mail for Wikimedia's User-Agent policy: 200 requests a minute instead
+                                 # of 10 (unset, Wikimedia requests go 6.5 s apart; about 10 per director)
 
 # Letterboxd lists as Plex collections and Jellyfin BoxSets: the canon plus the owner's own public lists, owned films
 # in list order, "On the NAS: N of M · seen S · <url>" summaries, generated posters, Plex Home rows for `home`.

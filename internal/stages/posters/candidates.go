@@ -43,6 +43,10 @@ type Candidate struct {
 	Hash   uint64  `json:"dhash"`
 	W      int     `json:"w"` // thumbnail size: the judge's token cost
 	H      int     `json:"h"`
+	// Collections only: what the judge reads beside the image (where it comes from; a photo's size and caption), and
+	// a Commons file's licence.
+	Caption string `json:"caption,omitempty"`
+	License string `json:"license,omitempty"`
 }
 
 const (
@@ -50,19 +54,41 @@ const (
 	srcTMDB   = "tmdb"
 	srcFanart = "fanart"
 
+	srcTMDBCollection   = "tmdb-collection"   // a franchise: made for its TMDB collection
+	srcFanartCollection = "fanart-collection" // a franchise: fanart.tv's for that collection
+	srcFilm             = "film"              // a franchise: its most acclaimed film's poster
+	srcCommons          = "commons"           // a director: a Wikimedia Commons photo that depicts them or sits in their category
+	srcCommonsText      = "commons-text"      // a director: a Commons text search hit naming them (maybe a namesake)
+	srcTMDBTagged       = "tmdb-tagged"       // a director: a TMDB image they are tagged in
+	srcTMDBProfile      = "tmdb-profile"      // a director: a TMDB portrait
+
 	poolSize   = 6  // the owner's + 5 others: about 1,000 input tokens a title with thumbBox
 	tryAtMost  = 12 // remote posters fetched per title before giving up on filling the pool
 	sameArt    = 6  // dHash bits within which two posters are the same art (another crop, size or compression)
 	priorVotes = 5  // TMDB ratings are pulled towards 5/10 as if by this many votes: sparse votes count less
 )
 
-// thumbBox is the most a thumbnail measures: ⌈252/28⌉×⌈392/28⌉ = 126 visual tokens at most.
-var thumbBox = image.Rect(0, 0, 252, 392)
+// thumbBox is the most a poster's thumbnail measures: ⌈252/28⌉×⌈392/28⌉ = 126 visual tokens at most. A photo of a
+// director gets photoBox (at most 19×19 = 361 tokens): the judge reads who and what is in it, and where.
+var thumbBox, photoBox = image.Rect(0, 0, 252, 392), image.Rect(0, 0, 512, 512)
+
+func boxFor(c Candidate) image.Rectangle {
+	if c.Source == srcCommons || c.Source == srcCommonsText || c.Source == srcTMDBTagged || c.Source == srcTMDBProfile {
+		return photoBox
+	}
+	return thumbBox
+}
 
 // gather builds a title's candidate pool. An owner upload is never replaced, so it needs no other candidate. An owner
 // poster that cannot be read stops the title: without it any candidate would win, with no margin over the owner's.
 func (r *run) gather(ctx context.Context, it *row) error {
 	t := it.Title
+	switch t.Kind {
+	case franchise:
+		return r.gatherFranchise(ctx, it)
+	case director:
+		return r.gatherDirector(ctx, it)
+	}
 	var pool []Candidate
 	if p, ok := r.owners[t.Key]; ok {
 		owner := Candidate{URL: "owner:" + p.File, Thumb: "owner:" + p.File, Source: srcOwner, Owner: p.State}
@@ -91,16 +117,20 @@ func (r *run) gather(ctx context.Context, it *row) error {
 	return nil
 }
 
-// fill takes TMDB's and fanart.tv's posters in turn, each list best first, and keeps those that are not the same art
-// as one already kept, until the pool is full. A poster that cannot be fetched is skipped, never fatal.
-func (r *run) fill(ctx context.Context, pool, tmdbPosters, fanart []Candidate) []Candidate {
+// fill takes the lists' candidates in turn (TMDB's and fanart.tv's posters, say), each list best first, and keeps
+// those that are not the same art as one already kept, until the pool is full. A candidate that cannot be fetched is
+// skipped, never fatal.
+func (r *run) fill(ctx context.Context, pool []Candidate, lists ...[]Candidate) []Candidate {
 	var order []Candidate
-	for i := 0; i < max(len(tmdbPosters), len(fanart)); i++ {
-		if i < len(tmdbPosters) {
-			order = append(order, tmdbPosters[i])
+	for i := 0; ; i++ {
+		n := len(order)
+		for _, l := range lists {
+			if i < len(l) {
+				order = append(order, l[i])
+			}
 		}
-		if i < len(fanart) {
-			order = append(order, fanart[i])
+		if len(order) == n {
+			break
 		}
 	}
 	for i, c := range order {
@@ -260,8 +290,8 @@ func (r *run) thumb(ctx context.Context, c Candidate) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	b := img.Bounds()
-	scale := min(1, float64(thumbBox.Dx())/float64(b.Dx()), float64(thumbBox.Dy())/float64(b.Dy()))
+	b, box := img.Bounds(), boxFor(c)
+	scale := min(1, float64(box.Dx())/float64(b.Dx()), float64(box.Dy())/float64(b.Dy()))
 	dst := image.NewRGBA(image.Rect(0, 0, max(1, int(float64(b.Dx())*scale)), max(1, int(float64(b.Dy())*scale))))
 	draw.CatmullRom.Scale(dst, dst.Bounds(), img, b, draw.Src, nil)
 	var buf bytes.Buffer
@@ -318,23 +348,42 @@ var FetchDelay = func(n int) time.Duration {
 	return time.Duration(1<<n)*time.Second + rand.N(time.Second)
 }
 
-// fetch GETs u; 429, 5xx and dropped connections are retried twice. Errors never carry the URL, which may hold a key.
+// fetch GETs u; 429, 5xx and dropped connections are retried twice, after the server's Retry-After when it names one
+// (at most 2 minutes). Every request to Wikimedia (its API, its images) takes its turn on the run's pacer
+// (wikimediaTurn). Errors never carry the URL, which may hold a key.
 func (r *run) fetch(ctx context.Context, u string) ([]byte, error) {
+	parsed, err := url.Parse(u)
+	if err != nil {
+		return nil, errors.New("bad image URL")
+	}
+	paced := strings.HasSuffix(parsed.Hostname(), ".wikimedia.org")
 	for attempt := 0; ; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
 			return nil, errors.New("bad image URL")
 		}
-		req.Header.Set("User-Agent", "projectionist-posters/1")
+		req.Header.Set("User-Agent", "projectionist-posters/1 ("+cmp.Or(r.opt.CommonsContact, "home media server")+")")
+		done := func(time.Duration) {}
+		if paced {
+			if done, err = r.wikimediaTurn(ctx); err != nil {
+				return nil, err
+			}
+		}
 		resp, err := r.http.Do(req)
 		var body []byte
+		wait, retryAfter := FetchDelay(attempt+1), time.Duration(0)
 		if err == nil {
 			body, err = io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 			resp.Body.Close()
 			if err == nil && resp.StatusCode/100 != 2 {
 				err = httpStatus(resp.StatusCode)
 			}
+			if s, convErr := strconv.Atoi(resp.Header.Get("Retry-After")); convErr == nil && s > 0 {
+				retryAfter = min(time.Duration(s)*time.Second, 2*time.Minute)
+				wait = retryAfter
+			}
 		}
+		done(retryAfter)
 		if ue := (*url.Error)(nil); errors.As(err, &ue) {
 			err = ue.Err
 		}
@@ -346,12 +395,61 @@ func (r *run) fetch(ctx context.Context, u string) ([]byte, error) {
 		if permanent || attempt == 2 || ctx.Err() != nil {
 			return nil, err
 		}
+		if paced {
+			if err := wikiSleep(ctx, wait); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(FetchDelay(attempt + 1)):
+		case <-time.After(wait):
 		}
 	}
+}
+
+// wikiSleep waits d, or until ctx ends; a test replaces it to move a fake clock instead.
+var wikiSleep = func(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
+}
+
+// WikimediaPace is the least time between two requests to Wikimedia: it allows 10 a minute to a client whose
+// User-Agent names no contact, 200 to one that does (commons_contact). Tests set it to zero.
+var WikimediaPace = func(contact bool) time.Duration {
+	if contact {
+		return 500 * time.Millisecond
+	}
+	return 6500 * time.Millisecond
+}
+
+// wikimediaTurn waits until the run's last Wikimedia request is WikimediaPace old, and past any pause a Retry-After
+// asked for, and holds the turn; done records the request's end and the Retry-After it got (0 for none) and passes the
+// turn on. Requests to Wikimedia go one at a time across the run, so a Retry-After holds every one of them.
+func (r *run) wikimediaTurn(ctx context.Context) (done func(retryAfter time.Duration), err error) {
+	r.wikiMu.Lock()
+	next := r.wikiLast.Add(WikimediaPace(r.opt.CommonsContact != ""))
+	if r.wikiPause.After(next) {
+		next = r.wikiPause
+	}
+	if wait := next.Sub(r.env.Now()); wait > 0 {
+		if err := wikiSleep(ctx, wait); err != nil {
+			r.wikiMu.Unlock()
+			return nil, err
+		}
+	}
+	return func(retryAfter time.Duration) {
+		r.wikiLast = r.env.Now()
+		if retryAfter > 0 {
+			r.wikiPause = r.wikiLast.Add(retryAfter)
+		}
+		r.wikiMu.Unlock()
+	}, nil
 }
 
 func writeAtomic(path string, b []byte) error {
