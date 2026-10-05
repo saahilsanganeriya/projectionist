@@ -19,7 +19,7 @@ import (
 
 const (
 	PlexToken       = "test-plex-token"
-	PlexFriendToken = "test-plex-friend-token" // a shared user's token; fake Plex accepts it too
+	PlexFriendToken = "test-plex-friend-token" // a shared user's token: fake Plex takes it for watch-state writes only
 	JellyfinKey     = "test-jellyfin-key"
 )
 
@@ -84,12 +84,15 @@ func (s *Server) Calls(method, path string) []Call {
 	return out
 }
 
+// friendPaths are what a shared user's token may call: that user's own watch state.
+var friendPaths = map[string]bool{"/:/scrobble": true, "/:/unscrobble": true, "/:/progress": true, "/:/rate": true}
+
 // Plex starts a fake Plex and writes a Preferences.xml holding PlexOnlineToken plus prefs; it returns the
 // server, a client for it, and the prefs file path (rewrite it with WritePrefs to simulate drift).
 func Plex(t testing.TB, prefs map[string]string) (*Server, *plex.Client, string) {
 	s := newServer(t, func(r *http.Request) bool {
 		tok := r.Header.Get("X-Plex-Token")
-		return tok == PlexToken || tok == PlexFriendToken
+		return tok == PlexToken || (tok == PlexFriendToken && friendPaths[r.URL.Path])
 	})
 	path := filepath.Join(t.TempDir(), "Preferences.xml")
 	WritePrefs(t, path, prefs)
