@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"projectionist/internal/config"
 	"projectionist/internal/probe"
@@ -22,7 +21,7 @@ const peakWindow = 10 // seconds
 
 // peakBitrate is the highest bitrate over any 10 s window (1 s steps), counting every packet of every stream:
 // Direct Play sends the file's bytes as they are, unused audio tracks included. One sequential read of the whole
-// file at the lowest priority; memory is one counter per second of film.
+// file (the caller runs it in background); memory is one counter per second of film.
 func peakBitrate(ctx context.Context, ffprobe, path string) (kbps int64, atS int, err error) {
 	cmd := exec.CommandContext(ctx, ffprobe, "-v", "error", "-show_entries", "packet=pts_time,dts_time,size", "-of", "compact=p=0", path)
 	out, err := cmd.StdoutPipe()
@@ -32,7 +31,6 @@ func peakBitrate(ctx context.Context, ffprobe, path string) (kbps int64, atS int
 	if err := cmd.Start(); err != nil {
 		return 0, 0, err
 	}
-	idle(cmd.Process.Pid)
 	perSecond := []int64{}
 	base := math.NaN()
 	sc := bufio.NewScanner(out)
@@ -118,9 +116,7 @@ func decodeCheck(ctx context.Context, ff config.FFmpeg, path string, v *probe.Vi
 	if v.Duration > 0 {
 		duration = v.Duration
 	}
-	var off, size int64
-	var found bool
-	err = idleIO(func() error { off, size, found, err = holeAt(ctx, path); return err })
+	off, size, found, err := holeAt(ctx, path)
 	switch {
 	case err != nil && (errors.Is(err, fs.ErrNotExist) || ctx.Err() != nil):
 		return false, "", err
@@ -200,7 +196,6 @@ func decodeSample(ctx context.Context, ff config.FFmpeg, path string, v *probe.V
 	if err := cmd.Start(); err != nil {
 		return "", err
 	}
-	idle(cmd.Process.Pid)
 	runErr := cmd.Wait()
 	if ctx.Err() != nil {
 		return "", ctx.Err()
@@ -231,11 +226,4 @@ func decodeSample(ctx context.Context, ff config.FFmpeg, path string, v *probe.V
 		return fmt.Sprintf("%d decode errors, first: %s", len(errs), errs[0]), nil
 	}
 	return "", nil
-}
-
-// idle puts a child process at nice 19 and, on Linux, at the lowest best-effort I/O priority (the NAS disks use
-// CFQ, which honours it), so Plex and Jellyfin reads win.
-func idle(pid int) {
-	syscall.Setpriority(syscall.PRIO_PROCESS, pid, 19)
-	ioIdle(pid)
 }

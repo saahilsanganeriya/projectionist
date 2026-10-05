@@ -6,7 +6,8 @@
 // whose text changed. New ffprobe runs, peak-bitrate scans and decode checks are bounded per run and cached by
 // (path, size, mtime), so a run resumes where the last one stopped; the newest files go first. Heavy work (the
 // whole-file packet scan, the hole probe and decode samples) comes after every note is in place, so a 45-minute
-// scan never holds back a new file's note, and runs only while nobody but the owner is watching.
+// scan never holds back a new file's note, and runs only while nobody but the owner is watching. Every ffprobe and
+// ffmpeg it starts runs at nice 19 and the lowest best-effort I/O priority (see background).
 //
 // Facts other stages can query:
 //
@@ -248,7 +249,7 @@ func (r *run) one(ctx context.Context, v video, row *fileRow) error {
 		}
 		r.probes--
 		r.rep.Count("probed", 1)
-		info, err = r.env.Probe.Probe(ctx, v.path)
+		background(func() { info, err = r.env.Probe.Probe(ctx, v.path) })
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -393,7 +394,7 @@ func (r *run) heavy(ctx context.Context, fn func(context.Context) error) (done b
 			}
 		}
 	}()
-	err = fn(hctx)
+	background(func() { err = fn(hctx) })
 	switch {
 	case ctx.Err() != nil:
 		return false, ctx.Err()
