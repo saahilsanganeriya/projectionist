@@ -1,0 +1,10 @@
+Title:           Evil Does Not Exist (2023) {tmdb-1156125}
+Original name:   Evil Does Not Exist 2023 1080p Japanese BluRay HEVC x265 5.1 BONE.mkv
+Original folder: Movies
+Resolution:      1800x1080 (1080p)
+Video:           x265 (HEVC) · 8-bit · SDR · 24 fps · 1.7 Mb/s
+Audio:           jpn AAC 5.1
+Subtitles:       eng ass; chi ass; chi ass
+Container:       matroska · 1.34 GB · 1h 46m · 0 chapters
+Source · group:  BluRay · unknown
+Identity:        tmdb-1156125

@@ -1,0 +1,375 @@
+{
+    "streams": [
+        {
+            "index": 0,
+            "codec_name": "hevc",
+            "codec_long_name": "H.265 / HEVC (High Efficiency Video Coding)",
+            "profile": "Main 10",
+            "codec_type": "video",
+            "codec_tag_string": "[0][0][0][0]",
+            "codec_tag": "0x0000",
+            "width": 1920,
+            "height": 800,
+            "coded_width": 1920,
+            "coded_height": 800,
+            "has_b_frames": 2,
+            "sample_aspect_ratio": "1:1",
+            "display_aspect_ratio": "12:5",
+            "pix_fmt": "yuv420p10le",
+            "level": 120,
+            "color_range": "tv",
+            "chroma_location": "left",
+            "view_ids_available": "",
+            "view_pos_available": "",
+            "r_frame_rate": "24000/1001",
+            "avg_frame_rate": "24000/1001",
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "start_time": "0.000000",
+            "extradata_size": 2505,
+            "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+            },
+            "tags": {
+                "BPS": "6994773",
+                "DURATION": "01:45:38.874000000",
+                "NUMBER_OF_FRAMES": "151981",
+                "NUMBER_OF_BYTES": "5542373603",
+                "_STATISTICS_WRITING_APP": "mkvmerge v85.0 ('Shame For You') 64-bit",
+                "_STATISTICS_WRITING_DATE_UTC": "2024-09-01 01:39:09",
+                "_STATISTICS_TAGS": "BPS DURATION NUMBER_OF_FRAMES NUMBER_OF_BYTES"
+            }
+        },
+        {
+            "index": 1,
+            "codec_name": "eac3",
+            "codec_long_name": "ATSC A/52B (AC-3, E-AC-3)",
+            "codec_type": "audio",
+            "codec_tag_string": "[0][0][0][0]",
+            "codec_tag": "0x0000",
+            "mime_codec_string": "ec-3",
+            "sample_fmt": "fltp",
+            "sample_rate": "48000",
+            "channels": 6,
+            "channel_layout": "5.1(side)",
+            "bits_per_sample": 0,
+            "initial_padding": 0,
+            "dmix_mode": "0",
+            "ltrt_cmixlev": "0.000000",
+            "ltrt_surmixlev": "0.000000",
+            "loro_cmixlev": "0.000000",
+            "loro_surmixlev": "0.000000",
+            "r_frame_rate": "0/0",
+            "avg_frame_rate": "0/0",
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "start_time": "0.000000",
+            "bit_rate": "640000",
+            "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+            },
+            "tags": {
+                "language": "eng",
+                "BPS": "640000",
+                "DURATION": "01:45:38.912000000",
+                "NUMBER_OF_FRAMES": "198091",
+                "NUMBER_OF_BYTES": "507112960",
+                "_STATISTICS_WRITING_APP": "mkvmerge v85.0 ('Shame For You') 64-bit",
+                "_STATISTICS_WRITING_DATE_UTC": "2024-09-01 01:39:09",
+                "_STATISTICS_TAGS": "BPS DURATION NUMBER_OF_FRAMES NUMBER_OF_BYTES"
+            }
+        },
+        {
+            "index": 2,
+            "codec_name": "ac3",
+            "codec_long_name": "ATSC A/52A (AC-3)",
+            "codec_type": "audio",
+            "codec_tag_string": "[0][0][0][0]",
+            "codec_tag": "0x0000",
+            "mime_codec_string": "ac-3",
+            "sample_fmt": "fltp",
+            "sample_rate": "48000",
+            "channels": 2,
+            "channel_layout": "stereo",
+            "bits_per_sample": 0,
+            "initial_padding": 0,
+            "dmix_mode": "0",
+            "ltrt_cmixlev": "0.000000",
+            "ltrt_surmixlev": "0.000000",
+            "loro_cmixlev": "0.000000",
+            "loro_surmixlev": "0.000000",
+            "r_frame_rate": "0/0",
+            "avg_frame_rate": "0/0",
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "start_time": "0.000000",
+            "bit_rate": "192000",
+            "disposition": {
+                "default": 0,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+            },
+            "tags": {
+                "language": "eng",
+                "title": "Descriptive",
+                "BPS": "192000",
+                "DURATION": "01:45:38.848000000",
+                "NUMBER_OF_FRAMES": "198089",
+                "NUMBER_OF_BYTES": "152132352",
+                "_STATISTICS_WRITING_APP": "mkvmerge v85.0 ('Shame For You') 64-bit",
+                "_STATISTICS_WRITING_DATE_UTC": "2024-09-01 01:39:09",
+                "_STATISTICS_TAGS": "BPS DURATION NUMBER_OF_FRAMES NUMBER_OF_BYTES"
+            }
+        },
+        {
+            "index": 3,
+            "codec_name": "hdmv_pgs_subtitle",
+            "codec_long_name": "HDMV Presentation Graphic Stream subtitles",
+            "codec_type": "subtitle",
+            "codec_tag_string": "[0][0][0][0]",
+            "codec_tag": "0x0000",
+            "r_frame_rate": "0/0",
+            "avg_frame_rate": "0/0",
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "start_time": "0.000000",
+            "duration_ts": 6338912,
+            "duration": "6338.912000",
+            "disposition": {
+                "default": 0,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+            },
+            "tags": {
+                "language": "eng",
+                "BPS": "29175",
+                "DURATION": "01:44:37.938000000",
+                "NUMBER_OF_FRAMES": "2726",
+                "NUMBER_OF_BYTES": "22895601",
+                "_STATISTICS_WRITING_APP": "mkvmerge v85.0 ('Shame For You') 64-bit",
+                "_STATISTICS_WRITING_DATE_UTC": "2024-09-01 01:39:09",
+                "_STATISTICS_TAGS": "BPS DURATION NUMBER_OF_FRAMES NUMBER_OF_BYTES"
+            }
+        }
+    ],
+    "chapters": [
+        {
+            "id": 2376073273919369501,
+            "time_base": "1/1000000000",
+            "start": 0,
+            "start_time": "0.000000",
+            "end": 513763250000,
+            "end_time": "513.763250",
+            "tags": {
+                "title": "Chapter 01"
+            }
+        },
+        {
+            "id": 714513573846067821,
+            "time_base": "1/1000000000",
+            "start": 513763250000,
+            "start_time": "513.763250",
+            "end": 1355270583333,
+            "end_time": "1355.270583",
+            "tags": {
+                "title": "Chapter 02"
+            }
+        },
+        {
+            "id": 423643236187719202,
+            "time_base": "1/1000000000",
+            "start": 1355270583333,
+            "start_time": "1355.270583",
+            "end": 1870952416666,
+            "end_time": "1870.952417",
+            "tags": {
+                "title": "Chapter 03"
+            }
+        },
+        {
+            "id": -2565797303699541529,
+            "time_base": "1/1000000000",
+            "start": 1870952416666,
+            "start_time": "1870.952417",
+            "end": 2442356583333,
+            "end_time": "2442.356583",
+            "tags": {
+                "title": "Chapter 04"
+            }
+        },
+        {
+            "id": 1853053438451827128,
+            "time_base": "1/1000000000",
+            "start": 2442356583333,
+            "start_time": "2442.356583",
+            "end": 2867114250000,
+            "end_time": "2867.114250",
+            "tags": {
+                "title": "Chapter 05"
+            }
+        },
+        {
+            "id": -8976092503158339642,
+            "time_base": "1/1000000000",
+            "start": 2867114250000,
+            "start_time": "2867.114250",
+            "end": 3254834916666,
+            "end_time": "3254.834917",
+            "tags": {
+                "title": "Chapter 06"
+            }
+        },
+        {
+            "id": 650105200613342232,
+            "time_base": "1/1000000000",
+            "start": 3254834916666,
+            "start_time": "3254.834917",
+            "end": 3631628000000,
+            "end_time": "3631.628000",
+            "tags": {
+                "title": "Chapter 07"
+            }
+        },
+        {
+            "id": -1909170010530985328,
+            "time_base": "1/1000000000",
+            "start": 3631628000000,
+            "start_time": "3631.628000",
+            "end": 4209580375000,
+            "end_time": "4209.580375",
+            "tags": {
+                "title": "Chapter 08"
+            }
+        },
+        {
+            "id": 6956685936579856967,
+            "time_base": "1/1000000000",
+            "start": 4209580375000,
+            "start_time": "4209.580375",
+            "end": 4635964666666,
+            "end_time": "4635.964667",
+            "tags": {
+                "title": "Chapter 09"
+            }
+        },
+        {
+            "id": -2430400922104708456,
+            "time_base": "1/1000000000",
+            "start": 4635964666666,
+            "start_time": "4635.964667",
+            "end": 5005208541666,
+            "end_time": "5005.208542",
+            "tags": {
+                "title": "Chapter 10"
+            }
+        },
+        {
+            "id": 4974671401674050957,
+            "time_base": "1/1000000000",
+            "start": 5005208541666,
+            "start_time": "5005.208542",
+            "end": 5373409708333,
+            "end_time": "5373.409708",
+            "tags": {
+                "title": "Chapter 11"
+            }
+        },
+        {
+            "id": 8414127270958227314,
+            "time_base": "1/1000000000",
+            "start": 5373409708333,
+            "start_time": "5373.409708",
+            "end": 6338874208333,
+            "end_time": "6338.874208",
+            "tags": {
+                "title": "Chapter 12"
+            }
+        }
+    ],
+    "format": {
+        "filename": "/volume1/media/Movies/All of Us Strangers (2023) {tmdb-994108}/All of Us Strangers (2023) {tmdb-994108}.mkv",
+        "nb_streams": 4,
+        "nb_programs": 0,
+        "nb_stream_groups": 0,
+        "format_name": "matroska,webm",
+        "format_long_name": "Matroska / WebM",
+        "start_time": "0.000000",
+        "duration": "6338.912000",
+        "size": "6213622443",
+        "bit_rate": "7841878",
+        "probe_score": 100,
+        "tags": {
+            "title": "ALL OF US STRANGERS",
+            "encoder": "libebml v1.4.5 + libmatroska v1.7.1",
+            "creation_time": "2024-09-01T01:39:09.000000Z"
+        }
+    }
+}

@@ -23,6 +23,11 @@ func New(baseURL, keyFile string, timeout time.Duration) *Client {
 	return &Client{base: baseURL, keyFile: keyFile, http: &http.Client{Timeout: timeout}}
 }
 
+// WithTimeout is a copy of c whose requests each get timeout instead (see plex.Client.WithTimeout).
+func (c *Client) WithTimeout(timeout time.Duration) *Client {
+	return &Client{base: c.base, keyFile: c.keyFile, http: &http.Client{Timeout: timeout}}
+}
+
 func (c *Client) do(ctx context.Context, method, path string, in any, out any) error {
 	if in == nil {
 		return c.send(ctx, method, path, "", nil, out)
@@ -61,7 +66,7 @@ func (c *Client) send(ctx context.Context, method, path, contentType string, bod
 		return fmt.Errorf("jellyfin %s %s: %w", method, path, err)
 	}
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("jellyfin %s %s: HTTP %d", method, path, resp.StatusCode)
+		return &StatusError{Method: method, Path: path, Code: resp.StatusCode}
 	}
 	if out == nil || len(bytes.TrimSpace(raw)) == 0 {
 		return nil
@@ -70,6 +75,16 @@ func (c *Client) send(ctx context.Context, method, path, contentType string, bod
 		return fmt.Errorf("jellyfin %s %s: %w", method, path, err)
 	}
 	return nil
+}
+
+// StatusError is a non-2xx answer; Code tells an outage (5xx) from a refusal (401/403).
+type StatusError struct {
+	Method, Path string
+	Code         int
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("jellyfin %s %s: HTTP %d", e.Method, e.Path, e.Code)
 }
 
 func (c *Client) GetJSON(ctx context.Context, path string, out any) error {

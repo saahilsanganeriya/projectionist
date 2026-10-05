@@ -1,0 +1,393 @@
+{
+    "streams": [
+        {
+            "index": 0,
+            "codec_name": "h264",
+            "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+            "profile": "High",
+            "codec_type": "video",
+            "codec_tag_string": "[0][0][0][0]",
+            "codec_tag": "0x0000",
+            "mime_codec_string": "avc1.640029",
+            "width": 1920,
+            "height": 1080,
+            "coded_width": 1920,
+            "coded_height": 1080,
+            "has_b_frames": 2,
+            "sample_aspect_ratio": "1:1",
+            "display_aspect_ratio": "16:9",
+            "pix_fmt": "yuv420p",
+            "level": 41,
+            "color_range": "tv",
+            "color_space": "bt709",
+            "chroma_location": "left",
+            "field_order": "progressive",
+            "is_avc": "true",
+            "nal_length_size": "4",
+            "r_frame_rate": "24000/1001",
+            "avg_frame_rate": "24000/1001",
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "start_time": "0.000000",
+            "bits_per_raw_sample": "8",
+            "extradata_size": 46,
+            "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+            },
+            "tags": {
+                "language": "eng",
+                "BPS": "15161506",
+                "DURATION": "01:32:13.987000000",
+                "NUMBER_OF_FRAMES": "132683",
+                "NUMBER_OF_BYTES": "10487947292",
+                "_STATISTICS_WRITING_APP": "mkvmerge v90.0 ('Hanging On') 64-bit",
+                "_STATISTICS_TAGS": "BPS DURATION NUMBER_OF_FRAMES NUMBER_OF_BYTES"
+            }
+        },
+        {
+            "index": 1,
+            "codec_name": "dts",
+            "codec_long_name": "DCA (DTS Coherent Acoustics)",
+            "profile": "DTS-HD MA",
+            "codec_type": "audio",
+            "codec_tag_string": "[0][0][0][0]",
+            "codec_tag": "0x0000",
+            "sample_fmt": "s16p",
+            "sample_rate": "48000",
+            "channels": 6,
+            "channel_layout": "5.1(side)",
+            "bits_per_sample": 0,
+            "initial_padding": 0,
+            "r_frame_rate": "0/0",
+            "avg_frame_rate": "0/0",
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "start_time": "0.000000",
+            "bits_per_raw_sample": "16",
+            "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+            },
+            "tags": {
+                "language": "spa",
+                "BPS": "1546908",
+                "DURATION": "01:38:56.278000000",
+                "NUMBER_OF_FRAMES": "556526",
+                "NUMBER_OF_BYTES": "1147859844",
+                "_STATISTICS_WRITING_APP": "mkvmerge v90.0 ('Hanging On') 64-bit",
+                "_STATISTICS_TAGS": "BPS DURATION NUMBER_OF_FRAMES NUMBER_OF_BYTES"
+            }
+        },
+        {
+            "index": 2,
+            "codec_name": "subrip",
+            "codec_long_name": "SubRip subtitle",
+            "codec_type": "subtitle",
+            "codec_tag_string": "[0][0][0][0]",
+            "codec_tag": "0x0000",
+            "r_frame_rate": "0/0",
+            "avg_frame_rate": "0/0",
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "start_time": "0.000000",
+            "duration_ts": 5936278,
+            "duration": "5936.278000",
+            "disposition": {
+                "default": 1,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 1,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+            },
+            "tags": {
+                "language": "eng",
+                "title": "English (FORCED SRT)",
+                "BPS": "14",
+                "DURATION": "01:21:25.130000000",
+                "NUMBER_OF_FRAMES": "325",
+                "NUMBER_OF_BYTES": "9126",
+                "_STATISTICS_WRITING_APP": "mkvmerge v90.0 ('Hanging On') 64-bit",
+                "_STATISTICS_TAGS": "BPS DURATION NUMBER_OF_FRAMES NUMBER_OF_BYTES"
+            }
+        },
+        {
+            "index": 3,
+            "codec_name": "hdmv_pgs_subtitle",
+            "codec_long_name": "HDMV Presentation Graphic Stream subtitles",
+            "codec_type": "subtitle",
+            "codec_tag_string": "[0][0][0][0]",
+            "codec_tag": "0x0000",
+            "r_frame_rate": "0/0",
+            "avg_frame_rate": "0/0",
+            "time_base": "1/1000",
+            "start_pts": 0,
+            "start_time": "0.000000",
+            "duration_ts": 5936278,
+            "duration": "5936.278000",
+            "disposition": {
+                "default": 0,
+                "dub": 0,
+                "original": 0,
+                "comment": 0,
+                "lyrics": 0,
+                "karaoke": 0,
+                "forced": 0,
+                "hearing_impaired": 0,
+                "visual_impaired": 0,
+                "clean_effects": 0,
+                "attached_pic": 0,
+                "timed_thumbnails": 0,
+                "non_diegetic": 0,
+                "captions": 0,
+                "descriptions": 0,
+                "metadata": 0,
+                "dependent": 0,
+                "still_image": 0,
+                "multilayer": 0
+            },
+            "tags": {
+                "language": "eng",
+                "title": "English (FORCED)",
+                "BPS": "10564",
+                "DURATION": "01:21:25.130000000",
+                "NUMBER_OF_FRAMES": "650",
+                "NUMBER_OF_BYTES": "6451353",
+                "_STATISTICS_WRITING_APP": "mkvmerge v90.0 ('Hanging On') 64-bit",
+                "_STATISTICS_TAGS": "BPS DURATION NUMBER_OF_FRAMES NUMBER_OF_BYTES"
+            }
+        }
+    ],
+    "chapters": [
+        {
+            "id": 2356772509754471906,
+            "time_base": "1/1000000000",
+            "start": 0,
+            "start_time": "0.000000",
+            "end": 227436000000,
+            "end_time": "227.436000",
+            "tags": {
+                "title": "Chapter 01"
+            }
+        },
+        {
+            "id": 8207936969369991547,
+            "time_base": "1/1000000000",
+            "start": 227436000000,
+            "start_time": "227.436000",
+            "end": 631965000000,
+            "end_time": "631.965000",
+            "tags": {
+                "title": "Chapter 02"
+            }
+        },
+        {
+            "id": -1327805936743806371,
+            "time_base": "1/1000000000",
+            "start": 631965000000,
+            "start_time": "631.965000",
+            "end": 1001792000000,
+            "end_time": "1001.792000",
+            "tags": {
+                "title": "Chapter 03"
+            }
+        },
+        {
+            "id": -4671727622429868247,
+            "time_base": "1/1000000000",
+            "start": 1001792000000,
+            "start_time": "1001.792000",
+            "end": 1545085000000,
+            "end_time": "1545.085000",
+            "tags": {
+                "title": "Chapter 04"
+            }
+        },
+        {
+            "id": 4714651768753802838,
+            "time_base": "1/1000000000",
+            "start": 1545085000000,
+            "start_time": "1545.085000",
+            "end": 1765889000000,
+            "end_time": "1765.889000",
+            "tags": {
+                "title": "Chapter 05"
+            }
+        },
+        {
+            "id": 7632402197504283595,
+            "time_base": "1/1000000000",
+            "start": 1765889000000,
+            "start_time": "1765.889000",
+            "end": 2066856000000,
+            "end_time": "2066.856000",
+            "tags": {
+                "title": "Chapter 06"
+            }
+        },
+        {
+            "id": 7667429618012781571,
+            "time_base": "1/1000000000",
+            "start": 2066856000000,
+            "start_time": "2066.856000",
+            "end": 2432388000000,
+            "end_time": "2432.388000",
+            "tags": {
+                "title": "Chapter 07"
+            }
+        },
+        {
+            "id": 7391987462499129290,
+            "time_base": "1/1000000000",
+            "start": 2432388000000,
+            "start_time": "2432.388000",
+            "end": 3094758000000,
+            "end_time": "3094.758000",
+            "tags": {
+                "title": "Chapter 08"
+            }
+        },
+        {
+            "id": 2911320567201185858,
+            "time_base": "1/1000000000",
+            "start": 3094758000000,
+            "start_time": "3094.758000",
+            "end": 3586124000000,
+            "end_time": "3586.124000",
+            "tags": {
+                "title": "Chapter 09"
+            }
+        },
+        {
+            "id": 92720321034761532,
+            "time_base": "1/1000000000",
+            "start": 3586124000000,
+            "start_time": "3586.124000",
+            "end": 3996826000000,
+            "end_time": "3996.826000",
+            "tags": {
+                "title": "Chapter 10"
+            }
+        },
+        {
+            "id": 2647990765290775305,
+            "time_base": "1/1000000000",
+            "start": 3996826000000,
+            "start_time": "3996.826000",
+            "end": 4332245000000,
+            "end_time": "4332.245000",
+            "tags": {
+                "title": "Chapter 11"
+            }
+        },
+        {
+            "id": 3505443244844193347,
+            "time_base": "1/1000000000",
+            "start": 4332245000000,
+            "start_time": "4332.245000",
+            "end": 4669915000000,
+            "end_time": "4669.915000",
+            "tags": {
+                "title": "Chapter 12"
+            }
+        },
+        {
+            "id": -2628209371258320663,
+            "time_base": "1/1000000000",
+            "start": 4669915000000,
+            "start_time": "4669.915000",
+            "end": 4850095000000,
+            "end_time": "4850.095000",
+            "tags": {
+                "title": "Chapter 13"
+            }
+        },
+        {
+            "id": -8575240642593420241,
+            "time_base": "1/1000000000",
+            "start": 4850095000000,
+            "start_time": "4850.095000",
+            "end": 5193980000000,
+            "end_time": "5193.980000",
+            "tags": {
+                "title": "Chapter 14"
+            }
+        },
+        {
+            "id": 272906379379019920,
+            "time_base": "1/1000000000",
+            "start": 5193980000000,
+            "start_time": "5193.980000",
+            "end": 5936278000000,
+            "end_time": "5936.278000",
+            "tags": {
+                "title": "Chapter 15"
+            }
+        }
+    ],
+    "format": {
+        "filename": "/volume1/media/Movies/Cronos (1993) {tmdb-11655}/Cronos (1993) {tmdb-11655}.mkv",
+        "nb_streams": 4,
+        "nb_programs": 0,
+        "nb_stream_groups": 0,
+        "format_name": "matroska,webm",
+        "format_long_name": "Matroska / WebM",
+        "start_time": "0.000000",
+        "duration": "5936.278000",
+        "size": "11640125869",
+        "bit_rate": "15686766",
+        "probe_score": 100,
+        "tags": {
+            "title": "Cronos (1992)",
+            "encoder": "libebml v1.4.5 + libmatroska v1.7.1"
+        }
+    }
+}

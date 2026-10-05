@@ -7,6 +7,9 @@ services:
     container_name: projectionist
     network_mode: host # Plex 127.0.0.1:32400, Jellyfin 127.0.0.1:8096, /health on 127.0.0.1:8097
     restart: unless-stopped
+    # Docker's default 10 s would SIGKILL a health stage in the middle of restarting Jellyfin (a 120 s stop grace,
+    # then the start). Other stages return promptly on SIGTERM (stage.Stage's contract), so they exit as before.
+    stop_grace_period: 3m
     user: "0:0" # renames must keep each file's owner and set Synology ACLs; capabilities are trimmed below
     group_add: ["937"] # videodriver: owns /dev/dri/renderD128
     devices:
@@ -36,12 +39,23 @@ services:
       # GPU self-test sample and the old scripts' state files (imported once at cutover): read-only.
       - /volume1/PlexMediaServer/scripts:/volume1/PlexMediaServer/scripts:ro
       - /volume1/PlexMediaServer/remote4k:/volume1/PlexMediaServer/remote4k # STATUS.txt the owner reads
+      # The Python renamers' logs (undo.tsv, undo_auto.tsv): each video's original name for its .details note.
+      # Read-only; the rename stage's own logs live under /volume1/media/.projectionist/rename.
+      - /volume1/PlexMediaServer/rename:/volume1/PlexMediaServer/rename:ro
+      # health stage: inspect containers, restart the ones in [stages.health].restartable. The socket is root on the
+      # host and ":ro" would not limit its API; the allow-list in code is the bound.
+      - /var/run/docker.sock:/var/run/docker.sock
       # ssdmirror: the USB SSD, and fill.py's folder whose PROGRESS.txt it takes over. DSM's mounts are private (no
       # propagation): stop the container before ejecting the SSD and start it after plugging it back in. Started
       # without the SSD, Docker makes an empty folder at that path and the stage refuses ("SSD not mounted").
       - /volumeUSB1/usbshare1-2:/volumeUSB1/usbshare1-2
       - /volume1/PlexMediaServer/ssd-copy:/volume1/PlexMediaServer/ssd-copy
-    secrets: [jellyfin_key, tmdb_read_token, tmdb_api_key, fanart_api_key] # /run/secrets/<name>, read-only
+      # subtitles: subfetch2.py's quota.csv and downloads.csv, imported once at cutover (OpenSubtitles' per-IP quota).
+      # rename: the aligner's log2.csv (its aligned copy takes the primary subtitle name).
+      - /volume1/PlexMediaServer/subtitle-downloads:/volume1/PlexMediaServer/subtitle-downloads:ro
+      # posters: the owner's poster exports and the Plex DB backups they are matched with, read when they change.
+      - /volume1/PlexMediaServer/backups:/volume1/PlexMediaServer/backups:ro
+    secrets: [jellyfin_key, tmdb_read_token, tmdb_api_key, fanart_api_key, anthropic_api_key] # /run/secrets/<name>, read-only
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
@@ -55,3 +69,5 @@ secrets:
     file: /volume1/docker/projectionist/secrets/tmdb_api_key
   fanart_api_key:
     file: /volume1/docker/projectionist/secrets/fanart_api_key
+  anthropic_api_key: # the owner's personal Anthropic key
+    file: /volume1/docker/projectionist/secrets/anthropic_api_key

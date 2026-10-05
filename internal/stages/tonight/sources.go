@@ -428,7 +428,7 @@ func movieFacts(ctx context.Context, tc *tmdb.Client, id int) (film, error) {
 	if err != nil {
 		return film{}, err
 	}
-	f := film{TMDB: id, TMDBTitle: d.Title, OriginalTitle: d.OriginalTitle, Directors: dirs, Runtime: d.Runtime,
+	f := film{TMDB: id, TMDBTitle: d.Title, OriginalTitle: d.OriginalTitle, Runtime: d.Runtime,
 		Language: d.Language, Overview: firstSentence(d.Overview, 140), PosterPath: d.PosterPath, Vote: d.VoteAverage,
 		Votes: d.VoteCount}
 	if d.OriginalTitle == d.Title {
@@ -439,6 +439,9 @@ func movieFacts(ctx context.Context, tc *tmdb.Client, id int) (film, error) {
 	}
 	for _, c := range d.Countries {
 		f.Countries = append(f.Countries, c.ISO)
+	}
+	for _, p := range dirs {
+		f.Directors = append(f.Directors, p.Name)
 	}
 	return f, nil
 }

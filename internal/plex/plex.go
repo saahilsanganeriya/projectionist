@@ -29,6 +29,12 @@ func New(baseURL, prefsPath string, timeout time.Duration) *Client {
 	return &Client{base: baseURL, prefsPath: prefsPath, http: &http.Client{Timeout: timeout}}
 }
 
+// WithTimeout is a copy of c whose requests each get timeout instead: for a stage whose slow calls hold up no one but
+// itself, while the viewer gate and the other stages keep the short process-wide bound.
+func (c *Client) WithTimeout(timeout time.Duration) *Client {
+	return &Client{base: c.base, prefsPath: c.prefsPath, http: &http.Client{Timeout: timeout}}
+}
+
 // ReadPrefs returns the attributes of Preferences.xml's root element. It never touches the API.
 func ReadPrefs(path string) (map[string]string, error) {
 	f, err := os.Open(path)
@@ -183,12 +189,4 @@ func ParseSessions(body []byte) ([]Session, error) {
 		out = append(out, Session{Type: it.Type, Title: it.Title, User: it.User.Title, Transcode: it.Transcode})
 	}
 	return out, nil
-}
-
-// WithTimeout is a copy of the client whose requests may each take up to d: for a rare large read, such as a
-// whole section, that Plex answers slowly during a scan.
-func (c *Client) WithTimeout(d time.Duration) *Client {
-	cp := *c
-	cp.http = &http.Client{Timeout: d}
-	return &cp
 }

@@ -258,26 +258,6 @@ func (c *Client) Details(ctx context.Context, kind Kind, id int) (Details, error
 	return d, nil
 }
 
-// Directors names a film's directors, from its credits.
-func (c *Client) Directors(ctx context.Context, id int) ([]string, error) {
-	var credits struct {
-		Crew []struct {
-			Job  string `json:"job"`
-			Name string `json:"name"`
-		} `json:"crew"`
-	}
-	if err := c.get(ctx, fmt.Sprintf("/movie/%d/credits", id), url.Values{}, &credits); err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, p := range credits.Crew {
-		if p.Job == "Director" {
-			out = append(out, p.Name)
-		}
-	}
-	return out, nil
-}
-
 // Episodes lists one season of a show; season 0 is the specials.
 func (c *Client) Episodes(ctx context.Context, showID, season int) ([]Episode, error) {
 	var resp struct {
