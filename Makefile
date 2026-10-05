@@ -7,9 +7,11 @@ export GOFLAGS = -p=4 -trimpath
 test:
 	go test ./...
 
-# Same tests on linux/amd64 (renameat2, FICLONE paths) in a throwaway golang container.
+# Same tests on Linux (renameat2, FICLONE code paths) in a throwaway golang container at the host's native arch:
+# the Linux code is arch-independent, and emulating amd64 only makes it slower.
 test-linux:
-	docker run --rm --platform linux/amd64 -e GOFLAGS="$(GOFLAGS)" -v "$(CURDIR)":/src -w /src golang:1.26 go test ./...
+	docker run --rm -e GOFLAGS="$(GOFLAGS)" -v "$(CURDIR)":/src -v projectionist-gocache:/root/.cache \
+	  -v projectionist-gomod:/go/pkg/mod -w /src golang:1.26 go test ./...
 
 vet:
 	go vet ./...
