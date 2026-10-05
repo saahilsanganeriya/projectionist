@@ -23,6 +23,11 @@ func New(baseURL, keyFile string, timeout time.Duration) *Client {
 	return &Client{base: baseURL, keyFile: keyFile, http: &http.Client{Timeout: timeout}}
 }
 
+// WithTimeout is a copy of c whose requests each get timeout instead (see plex.Client.WithTimeout).
+func (c *Client) WithTimeout(timeout time.Duration) *Client {
+	return &Client{base: c.base, keyFile: c.keyFile, http: &http.Client{Timeout: timeout}}
+}
+
 func (c *Client) do(ctx context.Context, method, path string, in any, out any) error {
 	if in == nil {
 		return c.send(ctx, method, path, "", nil, out)
