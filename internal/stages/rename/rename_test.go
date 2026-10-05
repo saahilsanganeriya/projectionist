@@ -3,9 +3,9 @@ package rename
 import (
 	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,29 +17,26 @@ import (
 	"projectionist/internal/stage"
 )
 
-// fakeTMDB answers GET <path>[?query=..&year=..] from routes keyed "path" or "path?query" (TMDB's own query text).
-func fakeTMDB(t *testing.T, routes map[string]string) *httptest.Server {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("api_key") != "test-tmdb-key" {
-			http.Error(w, "bad key", http.StatusUnauthorized)
-			return
-		}
-		key := r.URL.Path
-		if q := r.URL.Query().Get("query"); q != "" {
-			key += "?" + q
-		}
-		body, ok := routes[key]
-		if !ok {
-			body, ok = routes[r.URL.Path]
-		}
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		fmt.Fprint(w, body)
-	}))
-	t.Cleanup(srv.Close)
-	return srv
+// tmdbRoutes answers the harness's fake TMDB from bodies keyed "path" or "path?query" (the search text).
+func tmdbRoutes(h *fake.Harness, routes map[string]string) {
+	paths := map[string]bool{}
+	for k := range routes {
+		p, _, _ := strings.Cut(k, "?")
+		paths[p] = true
+	}
+	for p := range paths {
+		h.TMDB.HandleFunc("GET", p, func(w http.ResponseWriter, r *http.Request) {
+			body, ok := routes[p+"?"+r.URL.Query().Get("query")]
+			if !ok {
+				body, ok = routes[p]
+			}
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			io.WriteString(w, body)
+		})
+	}
 }
 
 func write(t *testing.T, p, body string) {
@@ -78,16 +75,13 @@ func englishSRT(cues int) string {
 type library4test struct {
 	h                     *fake.Harness
 	root, undoLog, review string
-	tmdbCalls             func() int
 }
 
 func newLibrary(t *testing.T) *library4test {
 	h := fake.NewEnv(t, nil)
 	h.Now = time.Date(2100, 1, 1, 0, 0, 0, 0, time.UTC) // every file below is settled
 	root := t.TempDir()
-	keyFile := filepath.Join(t.TempDir(), "tmdb_api_key")
-	write(t, keyFile, "test-tmdb-key\n")
-	srv := fakeTMDB(t, map[string]string{
+	tmdbRoutes(h, map[string]string{
 		"/search/movie?Heat": `{"results":[{"id":949,"title":"Heat","original_title":"Heat","release_date":"1995-12-15"},
 			{"id":5,"title":"Heat Wave","release_date":"1995-01-01"}]}`,
 		"/search/movie?Mystery": `{"results":[{"id":10,"title":"Mystery","release_date":"2001-03-01"},
@@ -98,13 +92,7 @@ func newLibrary(t *testing.T) *library4test {
 			{"season_number":1,"episode_number":3,"name":"Wait for It"}]}`,
 	})
 	l := &library4test{h: h, root: root, undoLog: filepath.Join(root, ".projectionist", "rename", "undo.tsv"), review: filepath.Join(root, "_needs-review.txt")}
-	h.SetOptions(fmt.Sprintf(`root = %q
-undo_log = %q
-ghost_logs = []
-review_file = %q
-tmdb_key_file = %q
-tmdb_api = %q
-aligned_log = ""`, root, l.undoLog, l.review, keyFile, srv.URL))
+	l.setOptions("")
 	for _, f := range []string{"dv8_hevc.json", "hlg_h264_8bit.json"} { // 3840x2160 HEVC, 1920x1080 H.264
 		raw, _ := os.ReadFile("../../probe/testdata/" + f)
 		write(t, filepath.Join(h.Env.FFmpeg.Dir, f), string(raw))
@@ -121,6 +109,9 @@ aligned_log = ""`, root, l.undoLog, l.review, keyFile, srv.URL))
 	write(t, filepath.Join(movies, "Mystery.2001.mkv"), "unmatched")
 	write(t, filepath.Join(movies, "Gone.2010", "@eaDir", "thumb.jpg"), "a shell left by an earlier move")
 	write(t, filepath.Join(movies, "Gone.2010", ".DS_Store"), "")
+	// earlier archives already hold these names: the new ones must not be skipped forever
+	write(t, filepath.Join(root, "_archive", "clutter", "Movies", "Gone.2010", ".DS_Store"), "an older one")
+	write(t, filepath.Join(root, "_archive", "junk", "Movies", "Heat.1995.1080p.BluRay.x264-GRP", "SITEA.txt"), "an older one")
 	write(t, filepath.Join(movies, "Kept.2011", "#recycle", "x.mkv"), "the recycle bin is not clutter")
 	write(t, filepath.Join(movies, "Unknown.Thing.2001", "Unknown.Thing.2001.mkv"), "unmatched")
 	write(t, filepath.Join(movies, "Unknown.Thing.2001", "Unknown.Thing.2001.nfo"), "stays with its video")
@@ -129,6 +120,11 @@ aligned_log = ""`, root, l.undoLog, l.review, keyFile, srv.URL))
 	write(t, filepath.Join(tv, "Show.S01.1080p.WEB-GRP", "Show.S01E01.1080p.WEB-GRP.mkv"), "ep1")
 	write(t, filepath.Join(tv, "Show.S01.1080p.WEB-GRP", "Show.S01E02.1080p.WEB-GRP.mkv"), "ep2")
 	return l
+}
+
+func (l *library4test) setOptions(extra string) {
+	l.h.SetOptions(fmt.Sprintf("root = %q\nundo_log = %q\nghost_logs = []\nreview_file = %q\naligned_log = \"\"\n%s",
+		l.root, l.undoLog, l.review, extra))
 }
 
 func (l *library4test) run(t *testing.T) stage.Report {
@@ -142,11 +138,12 @@ func (l *library4test) run(t *testing.T) stage.Report {
 
 // Catches, end to end: a new film or show not reaching its scheme name (TMDB identity, two versions labelled by
 // the resolutions ffprobe reads — and nothing else probed —, episode titles, subtitle language from its text, junk
-// archived, the emptied folder pruned), an ambiguous TMDB match being renamed instead of
-// listed for review, junk archived out of a folder whose video waits for review, an episode already named being
-// renamed to TMDB's spelling, an empty shell (only @eaDir/.DS_Store) left behind or a recycle bin swept, clutter
-// deleted instead of archived, Jellyfin not told, a second run changing anything, and undo not restoring the tree
-// exactly (clutter included).
+// archived, the emptied folder pruned), an ambiguous TMDB match being renamed instead of listed for review, junk
+// archived out of a folder whose video waits for review, an episode already named being renamed to TMDB's spelling,
+// an empty shell (only @eaDir/.DS_Store) left behind or a recycle bin swept, clutter deleted instead of archived, an
+// archive skipped (every run, silently) because an older archive holds its name, Jellyfin not told, a second run
+// changing anything, undo not restoring the tree exactly (clutter included), a second undo run writing to the log
+// again, and apply redoing what undo put back (it must wait until the owner renames it, or sets redo_undone).
 func TestRunNewArrivalsThenUndo(t *testing.T) {
 	l := newLibrary(t)
 	before := tree(t, l.root)
@@ -164,9 +161,11 @@ func TestRunNewArrivalsThenUndo(t *testing.T) {
 		"TV/Show (2019) {tmdb-77}/Season 01/Show (2019) - S01E01 - Pilot.mkv",
 		"TV/Show (2019) {tmdb-77}/Season 01/Show (2019) - S01E02 - Second.mkv",
 		"TV/Show (2019) {tmdb-77}/Season 01/Show (2019) - S01E03 - Wait For It.mkv",
-		"_archive/clutter/Movies/Gone.2010/.DS_Store", // a shell's clutter is archived, never deleted
+		"_archive/clutter/Movies/Gone.2010/.DS_Store",
+		"_archive/clutter/Movies/Gone.2010/.DS_Store (2)", // a shell's clutter is archived, never deleted
 		"_archive/clutter/Movies/Gone.2010/@eaDir/thumb.jpg",
 		"_archive/clutter/Movies/Heat.1995.1080p.BluRay.x264-GRP/@eaDir/x.jpg",
+		"_archive/junk/Movies/Heat.1995.1080p.BluRay.x264-GRP/SITEA (2).txt",
 		"_archive/junk/Movies/Heat.1995.1080p.BluRay.x264-GRP/SITEA.txt",
 		"_needs-review.txt",
 	}
@@ -185,31 +184,50 @@ func TestRunNewArrivalsThenUndo(t *testing.T) {
 		!strings.Contains(string(calls[0].Body), `Heat.1995.1080p.BluRay.x264-GRP","UpdateType":"Deleted"`) {
 		t.Fatalf("jellyfin calls = %+v", calls)
 	}
-
-	log1, _ := os.ReadFile(l.undoLog)
-	rep := l.run(t)
-	if log2, _ := os.ReadFile(l.undoLog); string(log2) != string(log1) || rep.Counts["units_done"] != 0 {
-		t.Fatalf("second run acted: units_done=%d, undo log grew by %q", rep.Counts["units_done"], strings.TrimPrefix(string(log2), string(log1)))
+	unchanged := func(step string) {
+		t.Helper()
+		log1, _ := os.ReadFile(l.undoLog)
+		rep := l.run(t)
+		if log2, _ := os.ReadFile(l.undoLog); string(log2) != string(log1) || rep.Counts["units_done"] != 0 || len(rep.Alerts) > 0 {
+			t.Fatalf("%s acted: units_done=%d alerts=%v, undo log grew by %q", step, rep.Counts["units_done"], rep.Alerts,
+				strings.TrimPrefix(string(log2), string(log1)))
+		}
 	}
+	unchanged("second run")
 
-	l.h.SetOptions(fmt.Sprintf("mode = \"undo\"\nroot = %q\nundo_log = %q", l.root, l.undoLog))
+	l.setOptions(`mode = "undo"`)
 	if rep := l.run(t); len(rep.Alerts) > 0 {
 		t.Fatalf("undo alerts: %v", rep.Alerts)
 	}
-	after := tree(t, l.root)
-	var restored []string
-	for _, p := range after {
-		if p != ".projectionist/rename/undo.tsv" && p != "_needs-review.txt" {
-			restored = append(restored, p)
+	restored := func() string {
+		var out []string
+		for _, p := range tree(t, l.root) {
+			if p != ".projectionist/rename/undo.tsv" && p != "_needs-review.txt" {
+				out = append(out, p)
+			}
 		}
+		return strings.Join(out, "\n")
 	}
-	if strings.Join(restored, "\n") != strings.Join(before, "\n") {
-		t.Fatalf("after undo:\n%s\nwant:\n%s", strings.Join(restored, "\n"), strings.Join(before, "\n"))
+	if got := restored(); got != strings.Join(before, "\n") {
+		t.Fatalf("after undo:\n%s\nwant:\n%s", got, strings.Join(before, "\n"))
 	}
-	for _, d := range []string{"Movies/Heat (1995) {tmdb-949}", "_archive/junk"} {
-		if _, err := os.Stat(filepath.Join(l.root, d)); !os.IsNotExist(err) {
-			t.Errorf("%s still exists after undo", d)
-		}
+	if lexists(filepath.Join(l.root, "Movies/Heat (1995) {tmdb-949}")) {
+		t.Error("the scheme folder is still there after undo")
+	}
+	unchanged("second undo run")
+
+	l.setOptions("") // back to apply: what undo put back stays put
+	unchanged("apply after undo")
+	if got := restored(); got != strings.Join(before, "\n") {
+		t.Fatalf("apply after undo redid it:\n%s", got)
+	}
+	if review, _ := os.ReadFile(l.review); !strings.Contains(string(review), "Show.S01E01.1080p.WEB-GRP.mkv\tput back by undo") {
+		t.Fatalf("review file names nothing held:\n%s", review)
+	}
+	l.setOptions("redo_undone = true")
+	l.run(t)
+	if got := tree(t, l.root); strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("redo_undone:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
 
@@ -230,18 +248,18 @@ func TestProblemBlocksOnlyItsFolder(t *testing.T) {
 	}
 }
 
-// Catches: moving files while a guest is watching (the owner's own viewing must not block), and moving a folder
-// that is still arriving (written to within the quiet window).
+// Catches: moving files or sweeping a shell while a guest is watching (the owner's own viewing must not block), and
+// moving a folder that is still arriving (written to within the quiet window).
 func TestRunWaitsForViewersAndArrivals(t *testing.T) {
 	cases := []struct {
-		name     string
-		sessions string
-		touch    string // a file whose mtime is pushed inside the quiet window
-		moved    bool
+		name         string
+		sessions     string
+		touch        string // a file whose mtime is pushed inside the quiet window
+		moved, swept bool
 	}{
-		{"guest watching", `<MediaContainer size="1"><Video><User title="roger"/></Video></MediaContainer>`, "", false},
-		{"owner watching", `<MediaContainer size="1"><Video><User title="saahil"/></Video></MediaContainer>`, "", true},
-		{"still arriving", `<MediaContainer size="0"></MediaContainer>`, "TV/Show.S01.1080p.WEB-GRP/Show.S01E02.1080p.WEB-GRP.mkv", false},
+		{"guest watching", `<MediaContainer size="1"><Video><User title="roger"/></Video></MediaContainer>`, "", false, false},
+		{"owner watching", `<MediaContainer size="1"><Video><User title="saahil"/></Video></MediaContainer>`, "", true, true},
+		{"still arriving", `<MediaContainer size="0"></MediaContainer>`, "TV/Show.S01.1080p.WEB-GRP/Show.S01E02.1080p.WEB-GRP.mkv", false, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -251,9 +269,10 @@ func TestRunWaitsForViewersAndArrivals(t *testing.T) {
 			}
 			l.h.Plex.Handle("GET", "/status/sessions", 200, c.sessions)
 			l.run(t)
-			_, err := os.Stat(filepath.Join(l.root, "TV/Show (2019) {tmdb-77}/Season 01/Show (2019) - S01E02 - Second.mkv"))
-			if moved := err == nil; moved != c.moved {
-				t.Fatalf("show moved = %v, want %v (tree %v)", moved, c.moved, tree(t, l.root))
+			moved := lexists(filepath.Join(l.root, "TV/Show (2019) {tmdb-77}/Season 01/Show (2019) - S01E02 - Second.mkv"))
+			swept := !lexists(filepath.Join(l.root, "Movies/Gone.2010"))
+			if moved != c.moved || swept != c.swept {
+				t.Fatalf("show moved = %v, shell swept = %v; want %v, %v (tree %v)", moved, swept, c.moved, c.swept, tree(t, l.root))
 			}
 		})
 	}

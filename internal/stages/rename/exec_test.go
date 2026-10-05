@@ -37,12 +37,11 @@ func TestRunUnitRefusals(t *testing.T) {
 	write(t, filepath.Join(m, "c/C.srt"), "s")
 	log := &countingLog{}
 	x := newExecutor(root, log)
-	touched := map[string]bool{}
 
-	err := x.runUnit(context.Background(), "movie:tmdb-1", []Op{
+	_, err := x.runUnit(context.Background(), "movie:tmdb-1", []Op{
 		{"movie:tmdb-1", "move", filepath.Join(m, "a/A.srt"), filepath.Join(m, "A (2000) {tmdb-1}/A (2000) {tmdb-1}.en.srt"), ""},
 		{"movie:tmdb-1", "move", filepath.Join(m, "a/A.mkv"), filepath.Join(m, "A (2000) {tmdb-1}/A (2000) {tmdb-1}.mkv"), ""},
-	}, touched)
+	})
 	if !errors.Is(err, ErrUnitStopped) || !strings.Contains(err.Error(), "target exists") {
 		t.Fatalf("overwrite: err = %v, want ErrUnitStopped naming the existing target", err)
 	}
@@ -50,16 +49,16 @@ func TestRunUnitRefusals(t *testing.T) {
 		t.Fatal("a refused unit moved or overwrote something")
 	}
 
-	if err := x.runUnit(context.Background(), "movie:tmdb-2", []Op{
+	if _, err := x.runUnit(context.Background(), "movie:tmdb-2", []Op{
 		{"movie:tmdb-2", "delete", filepath.Join(m, "b/copy/B.mkv"), filepath.Join(m, "b/B.mkv"), ""},
-	}, touched); err != nil || x.stats["delete_refused"] != 1 || !lexists(filepath.Join(m, "b/copy/B.mkv")) {
+	}); err != nil || x.stats["delete_refused"] != 1 || !lexists(filepath.Join(m, "b/copy/B.mkv")) {
 		t.Fatalf("different twin: err=%v refused=%d, still there=%v", err, x.stats["delete_refused"], lexists(filepath.Join(m, "b/copy/B.mkv")))
 	}
 
-	if err := x.runUnit(context.Background(), "movie:tmdb-3", []Op{
+	if _, err := x.runUnit(context.Background(), "movie:tmdb-3", []Op{
 		{"movie:tmdb-3", "move", filepath.Join(m, "c/C.mkv"), filepath.Join(m, "C (2001) {tmdb-3}/C (2001) {tmdb-3}.mkv"), ""},
 		{"movie:tmdb-3", "move", filepath.Join(m, "c/C.srt"), filepath.Join(m, "C (2001) {tmdb-3}/C (2001) {tmdb-3}.en.srt"), ""},
-	}, touched); err != nil {
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if log.syncs != 1 || strings.Count(log.String(), "\tmove\t") != 2 || lexists(filepath.Join(m, "c")) {
@@ -77,15 +76,67 @@ func TestResumeAndUndoNeverOverwrite(t *testing.T) {
 	log := &countingLog{}
 	x := newExecutor(root, log)
 	ops := []Op{{"movie:tmdb-4", "move", src, dst, ""}}
-	if err := x.runUnit(context.Background(), "movie:tmdb-4", ops, map[string]bool{}); err != nil || x.stats["already_done"] != 1 || log.syncs != 0 {
+	if _, err := x.runUnit(context.Background(), "movie:tmdb-4", ops); err != nil || x.stats["already_done"] != 1 || log.syncs != 0 {
 		t.Fatalf("resume: err=%v already_done=%d syncs=%d", err, x.stats["already_done"], log.syncs)
 	}
 	write(t, src, "a new download at the old path")
-	notUndone, err := x.undoUnits(context.Background(), []undoEntry{{"move", src, dst, "movie:tmdb-4"}}, nil, map[string]bool{})
+	notUndone, _, err := x.undoUnits(context.Background(), []undoEntry{{"move", src, dst, "movie:tmdb-4"}}, nil, func() bool { return false })
 	if err != nil || len(notUndone) != 1 {
 		t.Fatalf("undo: err=%v notUndone=%v", err, notUndone)
 	}
 	if got, _ := os.ReadFile(src); string(got) != "a new download at the old path" || !lexists(dst) {
 		t.Fatal("undo overwrote the file at the original path")
+	}
+}
+
+// Catches undo moving files while a guest watches (the gate is asked before each unit, so a viewer arriving mid-undo
+// stops the rest), a later run not finishing what a stopped one left, a file moved twice by one unit not going back
+// all the way, a move that cannot be undone being reported again on every run, a run with nothing left to undo still
+// asking the gate or writing to the log (undo mode stays on, every 15 minutes), and the files undo put back not being
+// held from the next apply.
+func TestUndoGatedPerUnitAndOnce(t *testing.T) {
+	root := t.TempDir()
+	m := filepath.Join(root, "Movies")
+	a0, a1, a2 := filepath.Join(m, "a/A.mkv"), filepath.Join(m, "a1/A.mkv"), filepath.Join(m, "A (2000) {tmdb-1}/A.mkv")
+	b0, b1 := filepath.Join(m, "b/B.mkv"), filepath.Join(m, "B (2001) {tmdb-2}/B.mkv")
+	write(t, a2, "a")
+	write(t, b1, "b")
+	logPath := filepath.Join(root, "undo.tsv")
+	at := time.Unix(0, 0)
+	write(t, logPath, undoRow(at, "move", a0, a1, "movie:tmdb-1")+undoRow(at, "move", a1, a2, "movie:tmdb-1")+
+		undoRow(at, "move", filepath.Join(m, "g/G.mkv"), filepath.Join(m, "G (2003) {tmdb-3}/G.mkv"), "movie:tmdb-3")+ // both gone
+		undoRow(at, "move", b0, b1, "movie:tmdb-2"))
+	asks := 0
+	pass := func(gate func() bool) ([]string, bool) {
+		t.Helper()
+		rows, _ := readUndo(logPath)
+		f, err := os.OpenFile(logPath, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		notUndone, waited, err := newExecutor(root, f).undoUnits(context.Background(), rows, nil, gate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return notUndone, waited
+	}
+	if _, waited := pass(func() bool { asks++; return asks > 1 }); !waited || !lexists(b0) || lexists(a0) {
+		t.Fatalf("guest arrives after the first unit: waited=%v, B back=%v (want true), A back=%v (want false)", waited, lexists(b0), lexists(a0))
+	}
+	open := func() bool { asks++; return false }
+	if notUndone, waited := pass(open); waited || !lexists(a0) || lexists(a1) || len(notUndone) != 1 {
+		t.Fatalf("second run: waited=%v, A back=%v, A left half-way=%v, not undone=%v (want the G row only)", waited, lexists(a0), lexists(a1), notUndone)
+	}
+	before, _ := os.ReadFile(logPath)
+	asked := asks
+	if notUndone, _ := pass(open); len(notUndone) > 0 || asks != asked {
+		t.Fatalf("nothing left to undo: not undone=%v, gate asked %d more time(s)", notUndone, asks-asked)
+	}
+	if after, _ := os.ReadFile(logPath); string(after) != string(before) {
+		t.Fatalf("nothing left to undo, yet the log grew by %q", strings.TrimPrefix(string(after), string(before)))
+	}
+	if held, _ := heldPaths(logPath); len(held) != 2 || !held[a0] || !held[b0] {
+		t.Fatalf("held = %v, want A and B where undo put them", held)
 	}
 }

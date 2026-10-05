@@ -6,10 +6,12 @@ package rename
 //	2 foresee the folders the unit empties; their clutter (.DS_Store, @eaDir) is archived too, never deleted
 //	3 write the unit's intents to the undo log and fsync it once
 //	4 act: deletes, then videos, then the rest; mkdir (no chmod: it strips the Synology ACL), renameat2 NOREPLACE
-//	5 archive the clutter, remove the emptied folders, fsync every touched folder once; append "unit-done"
+//	5 archive the clutter, remove the emptied folders, fsync the unit's touched folders once; append "unit-done"
 //
-// A unit stops at its first error and stays half-done; the next run re-plans from the disk and finishes it. The
-// undo log keeps apply_ops.py's format (ts, op, src, dst, unit) so either tool can read the other's log.
+// A unit stops at its first error and stays half-done; the next run re-plans from the disk and finishes it. An archive
+// whose name an earlier archive already holds gets " (2)", " (3)"… so it converges instead of being skipped every run.
+// The undo log keeps apply_ops.py's format (ts, op, src, dst, unit) so either tool can read the other's log; undo adds
+// "undone" and "not-undone" rows, which apply_ops.py ignores.
 
 import (
 	"bufio"
@@ -64,8 +66,9 @@ func lexists(p string) bool {
 	return err == nil
 }
 
-// runUnit executes one unit's ops; touched collects the folders it changed.
-func (x *executor) runUnit(ctx context.Context, unit string, ops []Op, touched map[string]bool) error {
+// runUnit executes one unit's ops and returns the folders it changed.
+func (x *executor) runUnit(ctx context.Context, unit string, ops []Op) (touched map[string]bool, err error) {
+	touched = map[string]bool{}
 	rank := func(o Op) int {
 		switch {
 		case o.Op == "delete":
@@ -89,30 +92,32 @@ func (x *executor) runUnit(ctx context.Context, unit string, ops []Op, touched m
 			}
 			x.count("missing_src")
 			if isVideo(o.Src) && o.Op != "delete" {
-				return fmt.Errorf("%w: planned video missing (listing stale): %s", ErrUnitStopped, o.Src)
+				return touched, fmt.Errorf("%w: planned video missing (listing stale): %s", ErrUnitStopped, o.Src)
 			}
 			continue
 		}
 		if o.Op == "delete" {
 			same, err := identical(ctx, o.Src, o.Dst)
 			if err != nil {
-				return err
+				return touched, err
 			}
 			if !same {
 				x.count("delete_refused") // archive-not-delete: only a byte-identical copy may go
 				continue
 			}
+		} else if o.Op == "archive" {
+			o.Dst = archiveDst(o.Dst)
 		} else if lexists(o.Dst) {
 			x.count("target_exists")
 			if isVideo(o.Src) {
-				return fmt.Errorf("%w: a video's target exists, so its sidecars stay too: %s", ErrUnitStopped, o.Dst)
+				return touched, fmt.Errorf("%w: a video's target exists, so its sidecars stay too: %s", ErrUnitStopped, o.Dst)
 			}
 			continue
 		}
 		todo = append(todo, o)
 	}
 	if len(todo) == 0 {
-		return nil
+		return touched, nil
 	}
 	gone, srcDirs := map[string]bool{}, map[string]bool{}
 	var landing []string
@@ -125,23 +130,23 @@ func (x *executor) runUnit(ctx context.Context, unit string, ops []Op, touched m
 	emptied := x.emptied(sortedKeys(srcDirs), gone, landing)
 	sweepOps := x.clutterOps(emptied)
 	if err := x.logIntents(unit, append(todo, sweepOps...)); err != nil {
-		return err
+		return touched, err
 	}
 	for _, o := range todo {
 		if err := ctx.Err(); err != nil {
-			return err
+			return touched, err
 		}
 		if o.Op == "delete" {
 			if err := os.Remove(o.Src); err != nil {
-				return fmt.Errorf("%w: %v", ErrUnitStopped, err)
+				return touched, fmt.Errorf("%w: %v", ErrUnitStopped, err)
 			}
 			x.count("deleted")
 		} else {
 			if err := mkdirs(path.Dir(o.Dst), touched); err != nil {
-				return fmt.Errorf("%w: %v", ErrUnitStopped, err)
+				return touched, fmt.Errorf("%w: %v", ErrUnitStopped, err)
 			}
 			if err := fsx.RenameNoReplace(o.Src, o.Dst); err != nil {
-				return fmt.Errorf("%w: %v", ErrUnitStopped, err)
+				return touched, fmt.Errorf("%w: %v", ErrUnitStopped, err)
 			}
 			touched[path.Dir(o.Dst)] = true
 			x.count(o.Op + "d") // moved / archived
@@ -149,10 +154,41 @@ func (x *executor) runUnit(ctx context.Context, unit string, ops []Op, touched m
 		touched[path.Dir(o.Src)] = true
 	}
 	if err := x.finishEmptied(sweepOps, emptied, touched); err != nil {
-		return err
+		return touched, err
 	}
-	_, err := x.undo.WriteString(undoRow(x.now(), "unit-done", "", "", unit))
-	return err
+	_, err = x.undo.WriteString(undoRow(x.now(), "unit-done", "", "", unit))
+	return touched, err
+}
+
+// sweepUnit archives the clutter of folders that hold nothing else and removes them, as one logged unit.
+func (x *executor) sweepUnit(emptied []string) (map[string]bool, error) {
+	touched := map[string]bool{}
+	ops := x.clutterOps(emptied)
+	if err := x.logIntents("sweep", ops); err != nil {
+		return touched, err
+	}
+	if err := x.finishEmptied(ops, emptied, touched); err != nil {
+		return touched, err
+	}
+	_, err := x.undo.WriteString(undoRow(x.now(), "unit-done", "", "", "sweep"))
+	return touched, err
+}
+
+// archiveDst is dst, or dst with " (2)", " (3)"… before its extension when an earlier archive already holds the name.
+func archiveDst(dst string) string {
+	if !lexists(dst) {
+		return dst
+	}
+	dir, base := path.Split(dst)
+	ext := path.Ext(base)
+	if ext == base { // a dotfile: .DS_Store
+		ext = ""
+	}
+	for n := 2; ; n++ {
+		if c := fmt.Sprintf("%s%s (%d)%s", dir, strings.TrimSuffix(base, ext), n, ext); !lexists(c) {
+			return c
+		}
+	}
 }
 
 // logIntents writes ops to the undo log and fsyncs it: the log is durable before anything moves (one fsync per unit).
@@ -246,7 +282,7 @@ func (x *executor) clutterOps(emptied []string) []Op {
 		for _, e := range entries {
 			if isClutter(e.Name()) {
 				src := d + "/" + e.Name()
-				ops = append(ops, Op{Op: "archive", Src: src, Dst: x.media + "/_archive/clutter/" + strings.TrimPrefix(src, x.media+"/")})
+				ops = append(ops, Op{Op: "archive", Src: src, Dst: archiveDst(x.media + "/_archive/clutter/" + strings.TrimPrefix(src, x.media+"/"))})
 			}
 		}
 	}
@@ -254,15 +290,16 @@ func (x *executor) clutterOps(emptied []string) []Op {
 }
 
 // finishEmptied moves the clutter out, removes the emptied folders (deepest first) and fsyncs every touched folder.
-// A folder that gained an entry meanwhile simply stays.
+// A folder that gained an entry meanwhile simply stays; clutter that vanished meanwhile (the indexer's own) is fine.
 func (x *executor) finishEmptied(clutterOps []Op, emptied []string, touched map[string]bool) error {
 	for _, o := range clutterOps {
 		if err := mkdirs(path.Dir(o.Dst), touched); err != nil {
-			return err
+			return fmt.Errorf("%w: %v", ErrUnitStopped, err)
 		}
-		if err := fsx.RenameNoReplace(o.Src, o.Dst); err == nil {
-			touched[path.Dir(o.Dst)] = true
+		if err := fsx.RenameNoReplace(o.Src, o.Dst); err != nil && lexists(o.Src) {
+			return fmt.Errorf("%w: %v", ErrUnitStopped, err)
 		}
+		touched[path.Dir(o.Dst)] = true
 	}
 	for _, d := range emptied {
 		if os.Remove(d) == nil { // rmdir: only an empty folder goes; it stays in touched so Jellyfin hears it is gone
@@ -375,56 +412,100 @@ func readUndo(file string) ([]undoEntry, error) {
 	return rows, nil
 }
 
-// undoUnits replays moves and archives backwards (dst → src), all units or only the wanted ones. Deletes removed
-// byte-identical copies and are not restored. A move whose dst is gone or whose src is taken again is reported.
-func (x *executor) undoUnits(ctx context.Context, rows []undoEntry, wanted map[string]bool, touched map[string]bool) (notUndone []string, err error) {
-	var units []string
-	seen := map[string]bool{}
-	for i := len(rows) - 1; i >= 0; i-- {
-		r := rows[i]
-		if len(wanted) > 0 && !wanted[r.unit] {
-			continue
+// undoUnits replays moves and archives backwards (dst → src), all units or only the wanted ones, one unit's run of
+// rows at a time behind the viewer gate (watching). Each run is logged and fsynced before it acts: "undone" (src holds
+// the file again, and apply leaves it there) or "not-undone" (dst is gone or src is taken again; reported once).
+// A move already reversed (src there, dst gone) is skipped, so undo mode can stay on: a run with nothing left to undo
+// writes nothing. Deletes removed byte-identical copies and are not restored.
+func (x *executor) undoUnits(ctx context.Context, rows []undoEntry, wanted map[string]bool, watching func() bool) (notUndone []string, waited bool, err error) {
+	settled := map[[2]string]int{} // a move's last "undone"/"not-undone" row: what an earlier run already did or said
+	for i, r := range rows {
+		if r.op == "undone" || r.op == "not-undone" {
+			settled[[2]string{r.src, r.dst}] = i
 		}
-		if !seen[r.unit] {
-			seen[r.unit] = true
-			units = append(units, r.unit)
+	}
+	sim := map[string]bool{} // paths a pending reversal fills or empties: a chain X→Y→Z reverses in one run
+	exists := func(p string) bool {
+		if v, ok := sim[p]; ok {
+			return v
 		}
-		if r.op != "move" && r.op != "archive" {
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			return notUndone, err
-		}
-		if dst, src := lexists(r.dst), lexists(r.src); !dst || src {
-			if dst == src { // both there (src taken again) or both gone; src-only is an intent that never ran
-				notUndone = append(notUndone, r.src+" <- "+r.dst)
+		return lexists(p)
+	}
+	for i := len(rows) - 1; i >= 0; {
+		unit, back, bad := "", []undoEntry(nil), []undoEntry(nil)
+		for ; i >= 0; i-- {
+			r := rows[i]
+			if (r.op != "move" && r.op != "archive") || (len(wanted) > 0 && !wanted[r.unit]) {
+				continue
 			}
+			if unit != "" && r.unit != unit {
+				break
+			}
+			unit = r.unit
+			j, done := settled[[2]string{r.src, r.dst}]
+			switch dst, src := exists(r.dst), exists(r.src); {
+			case dst && !src: // reversible, even if an earlier run logged it and then failed
+				back = append(back, r)
+				sim[r.dst], sim[r.src] = false, true
+			case dst == src && (!done || j < i): // both there (src taken again) or both gone, and not yet reported
+				bad = append(bad, r)
+			} // src only: reversed already, or an intent that never ran
+		}
+		if len(back)+len(bad) == 0 {
 			continue
 		}
-		if err := mkdirs(path.Dir(r.src), touched); err != nil {
-			return notUndone, err
+		if watching() {
+			return notUndone, true, nil
 		}
-		if err := fsx.RenameNoReplace(r.dst, r.src); err != nil {
-			return notUndone, err
+		var b strings.Builder
+		for _, r := range back {
+			b.WriteString(undoRow(x.now(), "undone", r.src, r.dst, r.unit))
 		}
-		touched[path.Dir(r.src)], touched[path.Dir(r.dst)] = true, true
-		x.count("undone")
-		x.rmdirUp(path.Dir(r.dst))
-	}
-	for dir := range touched {
-		if lexists(dir) {
-			if err := fsx.SyncDir(dir); err != nil {
-				return notUndone, err
+		for _, r := range bad {
+			b.WriteString(undoRow(x.now(), "not-undone", r.src, r.dst, r.unit))
+			notUndone = append(notUndone, r.src+" <- "+r.dst)
+		}
+		if _, err := x.undo.WriteString(b.String()); err != nil {
+			return notUndone, false, fmt.Errorf("undo log: %w", err)
+		}
+		if err := x.undo.Sync(); err != nil {
+			return notUndone, false, fmt.Errorf("undo log: %w", err)
+		}
+		touched := map[string]bool{}
+		for _, r := range back {
+			if err := ctx.Err(); err != nil {
+				return notUndone, false, err
+			}
+			if err := mkdirs(path.Dir(r.src), touched); err != nil {
+				return notUndone, false, err
+			}
+			if err := fsx.RenameNoReplace(r.dst, r.src); err != nil {
+				return notUndone, false, err
+			}
+			touched[path.Dir(r.src)], touched[path.Dir(r.dst)] = true, true
+			x.count("undone")
+			x.rmdirUp(path.Dir(r.dst))
+		}
+		for dir := range touched {
+			if lexists(dir) {
+				if err := fsx.SyncDir(dir); err != nil {
+					return notUndone, false, err
+				}
 			}
 		}
 	}
-	sort.Strings(units)
-	var b strings.Builder
-	for _, u := range units { // undone units are no longer done
-		b.WriteString(undoRow(x.now(), "unit-undone", "", "", u))
+	return notUndone, false, nil
+}
+
+// heldPaths are the files undo put back that are still where it put them: apply leaves them until the owner renames
+// or moves them, so undoing a wrong match is not redone by the next run.
+func heldPaths(undoLog string) (map[string]bool, error) {
+	rows, err := readUndo(undoLog)
+	held := map[string]bool{}
+	for _, r := range rows {
+		if r.op == "undone" && lexists(r.src) {
+			held[r.src] = true
+		}
 	}
-	if _, err := x.undo.WriteString(b.String()); err != nil {
-		return notUndone, err
-	}
-	return notUndone, x.undo.Sync()
+	return held, err
 }

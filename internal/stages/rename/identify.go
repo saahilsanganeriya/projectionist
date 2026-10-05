@@ -3,23 +3,23 @@ package rename
 // Identity: which film or show each video is, and the episode rows of each TV video.
 //
 //	1. a scheme folder ("Title (Year) {tmdb-N}") or a tag in the name ({tmdb-N}, {imdb-ttN}, {tvdb-N})
-//	2. the library's own scheme folders: the parsed name equals exactly one title already there (a new season pack)
-//	3. TMDB search, direct: accepted only when exactly one hit has the same normalized title and a year within ±1,
+//	2. TMDB search, direct: accepted only when exactly one hit has the same normalized title and a year within ±1,
 //	   or the search returns a single hit
-//	4. otherwise the video stays where it is and goes to _needs-review.txt with the top 3 candidates
+//	3. otherwise the video stays where it is and goes to _needs-review.txt with the top 3 candidates
 //
-// A title already present as a scheme folder keeps that folder's name and year, so nothing already named churns when
-// TMDB spells it differently. Lookups are cached in the store: hits for good, misses for Options.Retry.
+// The library's own folders never name a new arrival (a UK pack of "The Office" is not the US show already there);
+// they only lend their spelling: a title already present as a scheme folder keeps that folder's name and year, so
+// nothing already named churns when TMDB spells it differently. Nothing is cached here: env.TMDB keeps every answer
+// for a day, so a miss is asked again tomorrow and a hit costs nothing until then.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
-	"time"
 
 	"projectionist/internal/tmdb"
 )
@@ -34,32 +34,35 @@ var (
 // reviewItem is one line of _needs-review.txt.
 type reviewItem struct{ Path, Why string }
 
-type cachedIdentity struct {
-	Title      Title     `json:"title"`
-	Why        string    `json:"why,omitempty"` // set when no title was accepted
-	Candidates []string  `json:"candidates,omitempty"`
-	At         time.Time `json:"at"`
+type identity struct {
+	Title      Title
+	Why        string // set when no title was accepted
+	Candidates []string
 }
 
 // identifier resolves identities for one run. kind is "movie" or "show".
 type identifier struct {
-	tmdb    *tmdb.Client
-	cache   kvCache
-	now     time.Time
-	retry   time.Duration
-	library map[string][]Title // kind:normalized name → titles present as scheme folders
-	byID    map[string]Title   // kind:id → the scheme folder's title, the name everything else adopts. Keyed by kind:
+	tmdb *tmdb.Client
+	byID map[string]Title // kind:id → the scheme folder's title, the name everything else adopts. Keyed by kind:
 	// TMDB's film and TV ids overlap (film 1398 is "Stalker", show 1398 "The Sopranos").
 }
 
-// kvCache is the slice of the store the identifier needs (get/put JSON under a key).
-type kvCache interface {
-	get(ctx context.Context, key string, v any) bool
-	put(ctx context.Context, key string, v any)
+func newIdentifier(c *tmdb.Client) *identifier {
+	return &identifier{tmdb: c, byID: map[string]Title{}}
 }
 
-func newIdentifier(c *tmdb.Client, cache kvCache, now time.Time, retry time.Duration) *identifier {
-	return &identifier{tmdb: c, cache: cache, now: now, retry: retry, library: map[string][]Title{}, byID: map[string]Title{}}
+func kindOf(kind string) tmdb.Kind {
+	if kind == "show" {
+		return tmdb.TV
+	}
+	return tmdb.Movie
+}
+
+func yearOf(r tmdb.Result) int {
+	if r.Date.IsZero() {
+		return 0
+	}
+	return r.Date.Year()
 }
 
 // learn records the scheme folders already in the library.
@@ -73,10 +76,8 @@ func (id *identifier) learn(kind string, tops []string) {
 		if m == nil || (m[3] != "tmdb" && m[3] != "tvdb") {
 			continue
 		}
-		t := Title{ID: m[3] + "-" + m[4], Name: m[1], Year: atoi(m[2])}
-		if _, seen := id.byID[kind+":"+t.ID]; !seen {
-			id.byID[kind+":"+t.ID] = t
-			id.library[kind+":"+normTitle(t.Name)] = append(id.library[kind+":"+normTitle(t.Name)], t)
+		if _, seen := id.byID[kind+":"+m[3]+"-"+m[4]]; !seen {
+			id.byID[kind+":"+m[3]+"-"+m[4]] = Title{ID: m[3] + "-" + m[4], Name: m[1], Year: atoi(m[2])}
 		}
 	}
 }
@@ -92,7 +93,7 @@ func (id *identifier) canonical(kind string, t Title) Title {
 
 // resolve names the film or show a top-level folder (or loose file) holds; Why is set when it cannot. videos are the
 // folder's video paths: a name without a year borrows one from them ('Shogun/S01/Shogun.2024.S01E01...').
-func (id *identifier) resolve(ctx context.Context, kind, top string, videos []string) (cachedIdentity, error) {
+func (id *identifier) resolve(ctx context.Context, kind, top string, videos []string) (identity, error) {
 	name := path.Base(top)
 	if strings.Contains(name, ".") && videoExt[lowerExt(name)] { // a loose file
 		name = stem(name)
@@ -102,23 +103,14 @@ func (id *identifier) resolve(ctx context.Context, kind, top string, videos []st
 		re = schemeShowDir
 	}
 	if m := re.FindStringSubmatch(name); m != nil && (m[3] == "tmdb" || (kind == "show" && m[3] == "tvdb")) {
-		return cachedIdentity{Title: id.canonical(kind, Title{ID: m[3] + "-" + m[4], Name: m[1], Year: atoi(m[2])})}, nil
+		return identity{Title: id.canonical(kind, Title{ID: m[3] + "-" + m[4], Name: m[1], Year: atoi(m[2])})}, nil
 	}
-	var c cachedIdentity
-	key := "identity:" + kind + ":" + top
-	if !id.cache.get(ctx, key, &c) || (c.Why != "" && id.now.Sub(c.At) >= id.retry) {
-		var err error
-		if c, err = id.lookup(ctx, kind, name, videos); err != nil {
-			return cachedIdentity{}, err // TMDB unreachable: nothing is cached, the next run asks again
-		}
-		c.At = id.now
-		id.cache.put(ctx, key, c)
-	}
+	c, err := id.lookup(ctx, kind, name, videos)
 	c.Title = id.canonical(kind, c.Title)
-	return c, nil
+	return c, err
 }
 
-func (id *identifier) lookup(ctx context.Context, kind, name string, videos []string) (cachedIdentity, error) {
+func (id *identifier) lookup(ctx context.Context, kind, name string, videos []string) (identity, error) {
 	title, year := parseRelease(name)
 	for _, v := range videos {
 		if year != 0 {
@@ -132,34 +124,21 @@ func (id *identifier) lookup(ctx context.Context, kind, name string, videos []st
 		return id.byTag(ctx, kind, m[1], m[2], title, year)
 	}
 	if title == "" {
-		return cachedIdentity{Why: "no title in the name"}, nil
+		return identity{Why: "no title in the name"}, nil
 	}
-	var mine []Title // step 2: exactly one scheme folder with this name (and year)
-	for _, t := range id.library[kind+":"+normTitle(title)] {
-		if year == 0 || abs(t.Year-year) <= 1 {
-			mine = append(mine, t)
-		}
-	}
-	if len(mine) == 1 {
-		return cachedIdentity{Title: mine[0]}, nil
-	}
-	search := id.tmdb.SearchMovie
-	if kind == "show" {
-		search = id.tmdb.SearchTV
-	}
-	hits, err := search(ctx, title, year)
+	hits, err := id.tmdb.Search(ctx, kindOf(kind), title, year)
 	if err == nil && len(hits) == 0 && year > 0 {
-		hits, err = search(ctx, title, 0)
+		hits, err = id.tmdb.Search(ctx, kindOf(kind), title, 0)
 	}
 	if err != nil {
-		return cachedIdentity{}, err
+		return identity{}, err
 	}
 	if r, ok := confident(hits, title, year); ok {
-		return cachedIdentity{Title: Title{ID: fmt.Sprintf("tmdb-%d", r.ID), Name: r.Name, Original: r.Original, Year: r.Year}}, nil
+		return identity{Title: Title{ID: fmt.Sprintf("tmdb-%d", r.ID), Name: r.Title, Original: r.OriginalTitle, Year: yearOf(r)}}, nil
 	}
-	c := cachedIdentity{Why: fmt.Sprintf("no confident TMDB match for %s", withYear(title, year))}
+	c := identity{Why: fmt.Sprintf("no confident TMDB match for %s", withYear(title, year))}
 	for _, r := range hits[:min(3, len(hits))] {
-		c.Candidates = append(c.Candidates, fmt.Sprintf("%s (%d) {tmdb-%d}", r.Name, r.Year, r.ID))
+		c.Candidates = append(c.Candidates, fmt.Sprintf("%s (%d) {tmdb-%d}", r.Title, yearOf(r), r.ID))
 	}
 	if len(c.Candidates) == 0 {
 		c.Why += ": TMDB lists nothing"
@@ -168,33 +147,33 @@ func (id *identifier) lookup(ctx context.Context, kind, name string, videos []st
 }
 
 // byTag maps a tag in the name to a TMDB title; an id TMDB cannot map stays as it is (the planner leaves it).
-func (id *identifier) byTag(ctx context.Context, kind, source, value, title string, year int) (cachedIdentity, error) {
+func (id *identifier) byTag(ctx context.Context, kind, source, value, title string, year int) (identity, error) {
 	switch {
 	case source == "tmdb":
-		return cachedIdentity{Title: Title{ID: "tmdb-" + value, Name: title, Year: year}}, nil
+		return identity{Title: Title{ID: "tmdb-" + value, Name: title, Year: year}}, nil
 	case source == "tvdb" && kind == "show":
 		if t, ok := id.byID["show:tvdb-"+value]; ok {
-			return cachedIdentity{Title: t}, nil
+			return identity{Title: t}, nil
 		}
 	}
 	external := map[string]string{"imdb": "imdb_id", "tvdb": "tvdb_id"}[source]
 	movies, shows, err := id.tmdb.Find(ctx, value, external)
-	if err != nil {
-		return cachedIdentity{}, err
+	if err != nil && !errors.Is(err, tmdb.ErrNotFound) {
+		return identity{}, err
 	}
 	hits := movies
 	if kind == "show" {
 		hits = shows
 	}
 	if len(hits) == 0 {
-		return cachedIdentity{Title: Title{ID: source + "-" + value, Name: title, Year: year},
+		return identity{Title: Title{ID: source + "-" + value, Name: title, Year: year},
 			Why: fmt.Sprintf("TMDB knows no %s for {%s-%s}", kind, source, value)}, nil
 	}
 	r := hits[0]
 	if title == "" { // the folder's own name wins (the owner's spelling); TMDB's otherwise
-		title, year = r.Name, r.Year
+		title, year = r.Title, yearOf(r)
 	}
-	return cachedIdentity{Title: Title{ID: fmt.Sprintf("tmdb-%d", r.ID), Name: title, Original: r.Original, Year: year}}, nil
+	return identity{Title: Title{ID: fmt.Sprintf("tmdb-%d", r.ID), Name: title, Original: r.OriginalTitle, Year: year}}, nil
 }
 
 // confident is the acceptance rule: one exact title within a year, else the only hit.
@@ -202,7 +181,8 @@ func confident(hits []tmdb.Result, title string, year int) (tmdb.Result, bool) {
 	want := normTitle(title)
 	var exact []tmdb.Result
 	for _, r := range hits {
-		if (normTitle(r.Name) == want || normTitle(r.Original) == want) && year > 0 && r.Year > 0 && abs(r.Year-year) <= 1 {
+		y := yearOf(r)
+		if (normTitle(r.Title) == want || normTitle(r.OriginalTitle) == want) && year > 0 && y > 0 && abs(y-year) <= 1 {
 			exact = append(exact, r)
 		}
 	}
@@ -255,73 +235,40 @@ func parseRelease(name string) (string, int) {
 
 // ---- episode rows
 
-type cachedSeason struct {
-	Episodes []tmdb.Episode `json:"episodes"`
-	Found    bool           `json:"found"`
-	At       time.Time      `json:"at"`
-}
-
-const seasonTTL = 7 * 24 * time.Hour
-
-// season lists a TMDB season, cached for a week (a missing one for a day: new seasons appear).
-func (id *identifier) season(ctx context.Context, show, n int) ([]Episode, error) {
-	key := fmt.Sprintf("tmdb:season:%d:%d", show, n)
-	var c cachedSeason
-	if !id.cache.get(ctx, key, &c) || id.now.Sub(c.At) > seasonTTL || (!c.Found && id.now.Sub(c.At) > 24*time.Hour) {
-		eps, found, err := id.tmdb.Season(ctx, show, n)
-		if err != nil {
-			return nil, err
-		}
-		c = cachedSeason{eps, found, id.now}
-		id.cache.put(ctx, key, c)
+// showDetails is a TMDB show's record; found is false when TMDB has no such show.
+func (id *identifier) showDetails(ctx context.Context, show int) (tmdb.Details, bool, error) {
+	d, err := id.tmdb.Details(ctx, tmdb.TV, show)
+	if errors.Is(err, tmdb.ErrNotFound) {
+		return d, false, nil
 	}
-	out := make([]Episode, 0, len(c.Episodes))
-	for _, e := range c.Episodes {
-		out = append(out, Episode{e.Season, e.Episode, e.Name})
-	}
-	return out, nil
+	return d, err == nil, err
 }
 
-type cachedShow struct {
-	Show  tmdb.Show `json:"show"`
-	Found bool      `json:"found"`
-	At    time.Time `json:"at"`
-}
-
-func (id *identifier) show(ctx context.Context, show int) (tmdb.Show, bool, error) {
-	key := fmt.Sprintf("tmdb:tv:%d", show)
-	var c cachedShow
-	if !id.cache.get(ctx, key, &c) || id.now.Sub(c.At) > seasonTTL {
-		s, found, err := id.tmdb.TV(ctx, show)
-		if err != nil {
-			return tmdb.Show{}, false, err
-		}
-		c = cachedShow{s, found, id.now}
-		id.cache.put(ctx, key, c)
-	}
-	return c.Show, c.Found, nil
-}
-
-// episodeList is every episode TMDB lists for a show, in (season, episode) order; empty for a non-TMDB id.
+// episodeList is every episode TMDB lists for a show in the given seasons (nil: all of them, specials included), in
+// (season, episode) order; empty for a non-TMDB id. A season TMDB does not have lists nothing.
 func (id *identifier) episodeList(ctx context.Context, show Title, seasons []int) ([]Episode, error) {
-	n, err := strconv.Atoi(strings.TrimPrefix(show.ID, "tmdb-"))
-	if err != nil || !strings.HasPrefix(show.ID, "tmdb-") {
+	n, err := numericID(show.ID)
+	if err != nil {
 		return nil, nil
 	}
 	if seasons == nil {
-		s, found, err := id.show(ctx, n)
+		d, found, err := id.showDetails(ctx, n)
 		if err != nil || !found {
 			return nil, err
 		}
-		seasons = s.Seasons
+		for _, s := range d.Seasons {
+			seasons = append(seasons, s.Number)
+		}
 	}
 	var out []Episode
 	for _, s := range seasons {
-		eps, err := id.season(ctx, n, s)
-		if err != nil {
+		eps, err := id.tmdb.Episodes(ctx, n, s)
+		if err != nil && !errors.Is(err, tmdb.ErrNotFound) {
 			return nil, err
 		}
-		out = append(out, eps...)
+		for _, e := range eps {
+			out = append(out, Episode{e.Season, e.Number, e.Name})
+		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Season != out[j].Season {

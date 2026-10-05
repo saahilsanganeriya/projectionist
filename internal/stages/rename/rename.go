@@ -2,12 +2,12 @@
 // new-arrival half of autorename.py). Each run is a reconciler: it lists Movies/ and TV/, works out what every file
 // should be called, and moves only what differs, so it is idempotent, resumable and safe to trigger early.
 //
-//	walk ─► identity (names, library, TMDB) ─► episode rows (names, TMDB) ─► facts (ffprobe, subtitle bytes)
-//	     ─► Build (pure planner) ─► units with work, settled, no problems ─► executor (viewer gate per unit)
-//	     ─► empty shells swept ─► _needs-review.txt, Jellyfin told which folders changed
+//	walk ─► identity (names, TMDB) ─► episode rows (names, TMDB) ─► facts (ffprobe, subtitle bytes)
+//	     ─► Build (pure planner) ─► units with work, settled, not held by an undo, no problems
+//	     ─► executor (viewer gate per unit) ─► empty shells swept (gated too) ─► _needs-review.txt, Jellyfin told
 //
-// Sources: the files themselves and TMDB, directly. Plex is never asked anything (it watches the disk); Jellyfin
-// only receives one /Library/Media/Updated push per run, queued and retried, never failing the stage.
+// Sources: the files themselves and TMDB, directly (env.TMDB). Plex is never asked anything (it watches the disk);
+// Jellyfin only receives one /Library/Media/Updated push per run, queued and retried, never failing the stage.
 package rename
 
 import (
@@ -27,40 +27,35 @@ import (
 	"time"
 
 	"projectionist/internal/stage"
-	"projectionist/internal/tmdb"
 )
 
 const name = "rename"
 
 type Options struct {
-	Root        string        `toml:"root"`          // the media share: Movies/, TV/, _archive/ live here
-	Mode        string        `toml:"mode"`          // apply (default) | plan (write the plan to plan_dir, touch nothing) | undo
-	PlanDir     string        `toml:"plan_dir"`      // plan mode output: ops.tsv, review.tsv, problems.tsv
-	UndoLog     string        `toml:"undo_log"`      // apply_ops.py format; written before acting, one fsync per unit
-	UndoUnits   []string      `toml:"undo_units"`    // undo mode: only these units ([] = everything in the log)
-	GhostLogs   []string      `toml:"ghost_logs"`    // older rename logs: where moved videos used to live
-	ReviewFile  string        `toml:"review_file"`   // what was left for the owner, rewritten when it changes
-	TMDBKeyFile string        `toml:"tmdb_key_file"` // v3 key or v4 read token
-	TMDBAPI     string        `toml:"tmdb_api"`      // "" = https://api.themoviedb.org/3 (tests point it elsewhere)
-	AlignedLog  string        `toml:"aligned_log"`   // the subtitle aligner's CSV log ("retimed ... -> X.srt")
-	SubLangFile string        `toml:"sublang_file"`  // optional JSON {path: {lang, sdh}} from a text classifier
-	Notify      bool          `toml:"notify"`        // tell Jellyfin which folders changed (off for a sandbox run)
-	Quiet       time.Duration `toml:"quiet"`         // a folder written to more recently is still arriving
-	Retry       time.Duration `toml:"retry"`         // how long a failed identity lookup is remembered
+	Root        string        `toml:"root"`         // the media share: Movies/, TV/, _archive/ live here
+	Mode        string        `toml:"mode"`         // apply (default) | plan (write the plan to plan_dir, touch nothing) | undo
+	PlanDir     string        `toml:"plan_dir"`     // plan mode output: ops.tsv, review.tsv, problems.tsv
+	UndoLog     string        `toml:"undo_log"`     // apply_ops.py format; written before acting, one fsync per unit
+	UndoUnits   []string      `toml:"undo_units"`   // undo mode: only these units ([] = everything in the log)
+	RedoUndone  bool          `toml:"redo_undone"`  // apply plans files undo put back (default: left until renamed or moved)
+	GhostLogs   []string      `toml:"ghost_logs"`   // older rename logs: where moved videos used to live
+	ReviewFile  string        `toml:"review_file"`  // what was left for the owner, rewritten when it changes
+	AlignedLog  string        `toml:"aligned_log"`  // the subtitle aligner's CSV log ("retimed ... -> X.srt")
+	SubLangFile string        `toml:"sublang_file"` // optional JSON {path: {lang, sdh}} from a text classifier
+	Notify      bool          `toml:"notify"`       // tell Jellyfin which folders changed (off for a sandbox run)
+	Quiet       time.Duration `toml:"quiet"`        // a folder written to more recently is still arriving
 }
 
 func defaults() Options {
 	return Options{
-		Root:        "/volume1/media",
-		Mode:        "apply",
-		UndoLog:     "/volume1/media/.projectionist/rename/undo.tsv",
-		GhostLogs:   []string{"/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv"},
-		ReviewFile:  "/volume1/media/_needs-review.txt",
-		TMDBKeyFile: "/run/secrets/tmdb_api_key",
-		AlignedLog:  "/volume1/PlexMediaServer/subtitle-downloads/log2.csv",
-		Notify:      true,
-		Quiet:       10 * time.Minute,
-		Retry:       6 * time.Hour,
+		Root:       "/volume1/media",
+		Mode:       "apply",
+		UndoLog:    "/volume1/media/.projectionist/rename/undo.tsv",
+		GhostLogs:  []string{"/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv"},
+		ReviewFile: "/volume1/media/_needs-review.txt",
+		AlignedLog: "/volume1/PlexMediaServer/subtitle-downloads/log2.csv",
+		Notify:     true,
+		Quiet:      10 * time.Minute,
 	}
 }
 
@@ -85,9 +80,15 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if opt.Mode == "undo" {
 		return undo(ctx, env, rep, opt)
 	}
-	lib, err := scan(opt.Root, env.Now().Add(-opt.Quiet))
+	lib, err := scan(ctx, opt.Root, env.Now().Add(-opt.Quiet))
 	if err != nil {
 		return err
+	}
+	held := map[string]bool{}
+	if !opt.RedoUndone {
+		if held, err = heldPaths(opt.UndoLog); err != nil {
+			return err
+		}
 	}
 	in, review, err := gather(ctx, env, rep, opt, lib)
 	if err != nil {
@@ -98,7 +99,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		rep.Count("probed", probed)
 		plan = Build(in)
 	}
-	units, blocked, problems := selectUnits(plan, lib)
+	units, blocked, problems := selectUnits(plan, lib, held)
 	for _, b := range blocked {
 		rep.Count("units_"+b.why, 1)
 		if b.why == "problem" {
@@ -106,13 +107,16 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		}
 	}
 	review = append(review, leftItems(plan, lib)...)
+	for _, p := range sortedKeys(held) {
+		review = append(review, reviewItem{p, "put back by undo: left here until you rename or move it (or set redo_undone)"})
+	}
 	if opt.Mode == "plan" {
 		return writePlan(opt.PlanDir, plan, units, problems, review, lib.shells)
 	}
 	writeReview(env, opt.ReviewFile, review)
 	touched, err := apply(ctx, env, rep, opt, units)
 	if err == nil {
-		err = sweep(env, rep, opt, lib)
+		err = sweep(ctx, env, rep, opt, lib, held, touched)
 	}
 	if opt.Notify {
 		pushJellyfin(ctx, env, opt, touched)
@@ -144,7 +148,7 @@ func (l *library) top(p string) string {
 	return ""
 }
 
-func scan(root string, settled time.Time) (*library, error) {
+func scan(ctx context.Context, root string, settled time.Time) (*library, error) {
 	l := &library{root: root, movies: root + "/Movies", tv: root + "/TV", files: map[string]int64{}, busy: map[string]bool{}}
 	dirs, content := map[string]bool{}, map[string]bool{}
 	holds := func(p string) { // p's folders hold something that is not clutter
@@ -154,6 +158,9 @@ func scan(root string, settled time.Time) (*library, error) {
 	}
 	for _, lib := range []string{l.movies, l.tv} {
 		err := filepath.WalkDir(lib, func(p string, d fs.DirEntry, err error) error {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if err != nil {
 				if errors.Is(err, fs.ErrNotExist) {
 					return nil // vanished mid-walk: still settling
@@ -215,7 +222,7 @@ func gather(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options,
 	if in.Subs, err = subFacts(ctx, env, lib.files); err != nil {
 		return nil, nil, err
 	}
-	id := newIdentifier(&tmdb.Client{KeyFile: opt.TMDBKeyFile, API: opt.TMDBAPI}, storeCache{env}, env.Now(), opt.Retry)
+	id := newIdentifier(env.TMDB)
 	tops := map[string][]string{} // kind:top → videos the identity covers
 	for _, f := range sortedKeys(lib.files) {
 		if !isVideo(f) {
@@ -316,8 +323,8 @@ func episodeRows(ctx context.Context, env *stage.Env, id *identifier, lib *libra
 		return err
 	}
 	if n, err := numericID(show.ID); err == nil && show.Original == "" { // the same-show guard reads both names
-		if s, found, err := id.show(ctx, n); err == nil && found {
-			show.Original = s.Original
+		if d, found, err := id.showDetails(ctx, n); err == nil && found {
+			show.Original = d.OriginalTitle
 		}
 	}
 	for _, f := range pending {
@@ -477,11 +484,11 @@ func subLangs(env *stage.Env, file string) map[string]SubLang {
 
 type blockedUnit struct{ unit, why string }
 
-// selectUnits picks the units to run: they have work, their folders have settled, the safety checks found no
-// problem with them, and (for loose leftovers) their folder holds no video left for review. Leftover junk runs per
-// top-level folder ("misc:<top>"), so one busy or broken folder never holds back another; the checks are re-run on
-// those units, so a problem names the folder it is in.
-func selectUnits(plan Plan, lib *library) (units map[string][]Op, blocked []blockedUnit, problems map[string][]string) {
+// selectUnits picks the units to run: they have work, no file of theirs was put back by an undo, their folders have
+// settled, the safety checks found no problem with them, and (for loose leftovers) their folder holds no video left
+// for review. Leftover junk runs per top-level folder ("misc:<top>"), so one busy or broken folder never holds back
+// another; the checks are re-run on those units, so a problem names the folder it is in.
+func selectUnits(plan Plan, lib *library, held map[string]bool) (units map[string][]Op, blocked []blockedUnit, problems map[string][]string) {
 	byUnit := map[string][]Op{}
 	var order []string
 	hasLeave := map[string]bool{}
@@ -502,13 +509,16 @@ func selectUnits(plan Plan, lib *library) (units map[string][]Op, blocked []bloc
 	problems = check(ops, lib.files)
 	units = map[string][]Op{}
 	for _, u := range order {
-		ops, work, busy := byUnit[u], false, false
+		ops, work, busy, isHeld := byUnit[u], false, false, false
 		for _, o := range ops {
 			work = work || o.Op == "move" || o.Op == "archive" || o.Op == "delete"
 			busy = busy || lib.busy[lib.top(o.Src)] || (o.Dst != "" && lib.busy[lib.top(o.Dst)])
+			isHeld = isHeld || held[o.Src]
 		}
 		switch {
 		case !work:
+		case isHeld:
+			blocked = append(blocked, blockedUnit{u, "held"})
 		case len(problems[u]) > 0:
 			blocked = append(blocked, blockedUnit{u, "problem"})
 		case busy:
@@ -536,16 +546,32 @@ func leftItems(plan Plan, lib *library) []reviewItem {
 	return out
 }
 
-// apply runs the selected units; it stops at the first one a guest is watching through (the next run continues).
+// othersWatching is the viewer gate: true while anyone but the owner is playing (an unknown count is busy too).
+func othersWatching(ctx context.Context, env *stage.Env, rep *stage.Report) bool {
+	others, err := env.Viewers.Count(ctx)
+	if err != nil || others > 0 {
+		env.Log.Info("viewers: the rest waits for the next run", "event", "viewer_wait", "others", others, "err", err)
+		rep.Count("units_viewer_wait", 1)
+		return true
+	}
+	return false
+}
+
+func openUndoLog(file string) (*os.File, error) {
+	if err := os.MkdirAll(path.Dir(file), 0o777); err != nil {
+		return nil, err
+	}
+	return os.OpenFile(file, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
+}
+
+// apply runs the selected units, each behind the viewer gate; it stops at the first one a guest is watching through
+// (the next run continues). touched collects every folder the units changed, for Jellyfin.
 func apply(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, units map[string][]Op) (map[string]bool, error) {
 	touched := map[string]bool{}
 	if len(units) == 0 {
 		return touched, nil
 	}
-	if err := os.MkdirAll(path.Dir(opt.UndoLog), 0o777); err != nil {
-		return touched, err
-	}
-	logf, err := os.OpenFile(opt.UndoLog, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
+	logf, err := openUndoLog(opt.UndoLog)
 	if err != nil {
 		return touched, err
 	}
@@ -558,13 +584,14 @@ func apply(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, 
 	}()
 	for _, u := range sortedKeys(units) {
 		started := time.Now()
-		if others, err := env.Viewers.Count(ctx); err != nil || others > 0 { // unknown counts as busy
-			env.Log.Info("viewers: units wait for the next run", "event", "viewer_wait", "others", others, "err", err)
-			rep.Count("units_viewer_wait", 1)
+		if othersWatching(ctx, env, rep) {
 			return touched, nil
 		}
 		gated := time.Now()
-		err := x.runUnit(ctx, u, units[u], touched)
+		changed, err := x.runUnit(ctx, u, units[u])
+		for d := range changed {
+			touched[d] = true
+		}
 		timing := []any{"gate_ms", gated.Sub(started).Milliseconds(), "act_ms", time.Since(gated).Milliseconds()}
 		switch {
 		case errors.Is(err, ErrUnitStopped):
@@ -581,60 +608,66 @@ func apply(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, 
 	return touched, nil
 }
 
-// sweep removes settled folders left holding only clutter (apply_ops.py --sweep); their clutter is archived under
-// one logged unit, re-checked on disk.
-func sweep(env *stage.Env, rep *stage.Report, opt Options, lib *library) error {
+// sweep removes settled folders left holding only clutter (apply_ops.py --sweep), behind the viewer gate; their
+// clutter is archived under one logged unit, re-checked on disk. A folder holding a file undo put back stays.
+func sweep(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, lib *library, held, touched map[string]bool) error {
 	var dirs []string
 	for _, d := range lib.shells {
-		if !lib.busy[lib.top(d)] {
+		if !lib.busy[lib.top(d)] && !holdsAny(d, held) {
 			dirs = append(dirs, d)
 		}
 	}
 	x := newExec(opt.Root, nil, env.Now)
 	emptied := x.emptied(dirs, nil, nil) // the disk decides: a folder holding a recycle bin is not a shell
-	if len(emptied) == 0 {
+	if len(emptied) == 0 || othersWatching(ctx, env, rep) {
 		return nil
 	}
-	logf, err := os.OpenFile(opt.UndoLog, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
+	logf, err := openUndoLog(opt.UndoLog)
 	if err != nil {
 		return err
 	}
 	defer logf.Close()
 	x.undo = logf
-	ops := x.clutterOps(emptied)
-	if err := x.logIntents("sweep", ops); err != nil {
-		return err
-	}
-	if err := x.finishEmptied(ops, emptied, map[string]bool{}); err != nil {
-		return err
+	changed, err := x.sweepUnit(emptied)
+	for d := range changed {
+		touched[d] = true
 	}
 	rep.Count("swept", x.stats["pruned"])
-	_, err = logf.WriteString(undoRow(env.Now(), "unit-done", "", "", "sweep"))
+	if errors.Is(err, ErrUnitStopped) {
+		rep.Count("units_stopped", 1)
+		rep.Alert("sweep stopped: %v", err)
+		return nil
+	}
 	return err
+}
+
+func holdsAny(dir string, held map[string]bool) bool {
+	for p := range held {
+		if strings.HasPrefix(p, dir+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 func libraryRoots(root string) []string {
 	return []string{root + "/Movies", root + "/TV", root + "/_archive", root + "/_assets"}
 }
 
-// undo replays the undo log backwards (all units, or Options.UndoUnits).
+// undo replays the undo log backwards (all units, or Options.UndoUnits), each unit behind the viewer gate.
 func undo(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options) error {
 	rows, err := readUndo(opt.UndoLog)
 	if err != nil || len(rows) == 0 {
 		rep.Summary = "nothing to undo"
 		return err
 	}
-	if others, err := env.Viewers.Count(ctx); err != nil || others > 0 {
-		return fmt.Errorf("rename undo: someone is watching (others=%d, err=%v): try again later", others, err)
-	}
 	logf, err := os.OpenFile(opt.UndoLog, os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
 	}
 	defer logf.Close()
-	wanted := set(opt.UndoUnits...)
 	x := newExec(opt.Root, logf, env.Now)
-	notUndone, err := x.undoUnits(ctx, rows, wanted, map[string]bool{})
+	notUndone, waited, err := x.undoUnits(ctx, rows, set(opt.UndoUnits...), func() bool { return othersWatching(ctx, env, rep) })
 	for k, v := range x.stats {
 		rep.Count(k, v)
 	}
@@ -642,6 +675,9 @@ func undo(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options) e
 		rep.Alert("not undone: %s", n)
 	}
 	rep.Summary = fmt.Sprintf("%d move(s) undone, %d not", x.stats["undone"], len(notUndone))
+	if waited {
+		rep.Summary += "; the rest waits for viewers"
+	}
 	return err
 }
 

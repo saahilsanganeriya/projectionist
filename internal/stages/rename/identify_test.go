@@ -2,10 +2,10 @@ package rename
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
+	"projectionist/internal/fake"
 	"projectionist/internal/tmdb"
 )
 
@@ -36,7 +36,9 @@ func TestParseRelease(t *testing.T) {
 // Catches the acceptance rule letting a guess through: two exact titles within a year (remakes) must be refused,
 // an exact title two years off is not exact, and a lone hit is accepted whatever its title.
 func TestConfident(t *testing.T) {
-	r := func(id int, name string, year int) tmdb.Result { return tmdb.Result{ID: id, Name: name, Year: year} }
+	r := func(id int, name string, year int) tmdb.Result {
+		return tmdb.Result{ID: id, Title: name, Date: tmdb.Date{Time: time.Date(year, 6, 1, 0, 0, 0, 0, time.UTC)}}
+	}
 	cases := []struct {
 		name  string
 		hits  []tmdb.Result
@@ -59,39 +61,35 @@ func TestConfident(t *testing.T) {
 	}
 }
 
-type mapCache map[string]any
-
-func (m mapCache) get(_ context.Context, key string, v any) bool { return false }
-func (m mapCache) put(_ context.Context, key string, v any)      { m[key] = v }
-
-// Catches a show taking the name of a film with the same TMDB id (the two id spaces overlap), and identity sources
-// out of order: a season pack of a show already in the library must take that show's folder
-// without asking TMDB (which would also list "Breaking Bad: Original Minisodes"), an {imdb-tt} tag must become the
-// TMDB id TMDB maps it to under the folder's own spelling, and a folder without a year takes it from its episodes
-// (two "Shōgun" on TMDB: only the year tells them apart).
+// Catches a show taking the name of a film with the same TMDB id (the two id spaces overlap); a new arrival named
+// after a same-titled show already in the library instead of through TMDB's acceptance rule (the UK "The Office" pack
+// is not the US show the library holds: TMDB lists both, so it goes to review with both); an {imdb-tt} tag not
+// becoming the TMDB id TMDB maps it to, under the folder's own spelling; and a folder without a year not taking it
+// from its episodes (two "Shōgun" on TMDB: only the year tells them apart).
 func TestResolveOrder(t *testing.T) {
-	srv := fakeTMDB(t, map[string]string{
+	h := fake.NewEnv(t, nil)
+	tmdbRoutes(h, map[string]string{
 		"/find/tt0113277": `{"movie_results":[{"id":949,"title":"Heat","release_date":"1995-12-15"}]}`,
 		"/search/tv?Shogun": `{"results":[{"id":126308,"name":"Shōgun","first_air_date":"2024-02-27"},
 			{"id":13862,"name":"Shōgun","first_air_date":"1980-09-15"}]}`,
+		"/search/tv?The Office": `{"results":[{"id":2316,"name":"The Office","first_air_date":"2005-03-24"},
+			{"id":2996,"name":"The Office","first_air_date":"2001-07-09"}]}`,
 	})
-	key := filepath.Join(t.TempDir(), "key")
-	write(t, key, "test-tmdb-key")
-	id := newIdentifier(&tmdb.Client{KeyFile: key, API: srv.URL}, mapCache{}, time.Unix(0, 0), time.Hour)
+	ctx := context.Background()
+	id := newIdentifier(h.Env.TMDB)
 	id.learn("movie", []string{"/lib/Movies/Stalker (1979) {tmdb-1398}"}) // TMDB film 1398 is not TMDB show 1398
-	id.learn("show", []string{"/lib/TV/Breaking Bad (2008) {tmdb-1396}", "/lib/TV/The Sopranos (1999) {tmdb-1398}"})
-	if c, err := id.resolve(context.Background(), "show", "/lib/TV/The Sopranos (1999) {tmdb-1398}", nil); err != nil || c.Title.Name != "The Sopranos" {
+	id.learn("show", []string{"/lib/TV/The Office (2005) {tmdb-2316}", "/lib/TV/The Sopranos (1999) {tmdb-1398}"})
+	if c, err := id.resolve(ctx, "show", "/lib/TV/The Sopranos (1999) {tmdb-1398}", nil); err != nil || c.Title.Name != "The Sopranos" {
 		t.Fatalf("show named after a film with the same id: %+v, %v", c, err)
 	}
-	c, err := id.resolve(context.Background(), "show", "/lib/TV/Breaking.Bad.S05.1080p.BluRay.x264-ROVERS", nil)
-	if err != nil || c.Title != (Title{ID: "tmdb-1396", Name: "Breaking Bad", Year: 2008}) {
-		t.Fatalf("season pack: %+v, %v", c, err)
+	if c, err := id.resolve(ctx, "show", "/lib/TV/The.Office.S01.1080p.BluRay.x264-UK", nil); err != nil || c.Title.ID != "" || len(c.Candidates) != 2 {
+		t.Fatalf("UK pack beside the US show: %+v, %v; want review with both candidates", c, err)
 	}
-	c, err = id.resolve(context.Background(), "movie", "/lib/Movies/Remote Versions/Heat (1995) {imdb-tt0113277}", nil)
+	c, err := id.resolve(ctx, "movie", "/lib/Movies/Remote Versions/Heat (1995) {imdb-tt0113277}", nil)
 	if err != nil || c.Title.ID != "tmdb-949" || c.Title.Name != "Heat" || c.Title.Year != 1995 {
 		t.Fatalf("imdb tag: %+v, %v", c, err)
 	}
-	c, err = id.resolve(context.Background(), "show", "/lib/TV/Shogun", []string{"/lib/TV/Shogun/S01/Shogun.2024.S01E01.1080p.x265-AMBER.mkv"})
+	c, err = id.resolve(ctx, "show", "/lib/TV/Shogun", []string{"/lib/TV/Shogun/S01/Shogun.2024.S01E01.1080p.x265-AMBER.mkv"})
 	if err != nil || c.Title.ID != "tmdb-126308" {
 		t.Fatalf("year from the episode names: %+v, %v", c, err)
 	}
