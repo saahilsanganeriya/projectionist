@@ -1,0 +1,3808 @@
+[
+ {
+  "name": "Scary Movie",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Scary Movie Collection"
+  ],
+  "tmdb_set_size": 6,
+  "note": null,
+  "members": [
+   {
+    "title": "Scary Movie",
+    "year": 2000,
+    "tmdb": 4247
+   },
+   {
+    "title": "Scary Movie 2",
+    "year": 2001,
+    "tmdb": 4248
+   },
+   {
+    "title": "Scary Movie 3",
+    "year": 2003,
+    "tmdb": 4256
+   },
+   {
+    "title": "Scary Movie 4",
+    "year": 2006,
+    "tmdb": 4257
+   },
+   {
+    "title": "Scary Movie 5",
+    "year": 2013,
+    "tmdb": 4258
+   },
+   {
+    "title": "Scary Movie",
+    "year": 2026,
+    "tmdb": 1273221
+   }
+  ]
+ },
+ {
+  "name": "Final Destination",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Final Destination Collection"
+  ],
+  "tmdb_set_size": 7,
+  "note": null,
+  "members": [
+   {
+    "title": "Final Destination",
+    "year": 2000,
+    "tmdb": 9532
+   },
+   {
+    "title": "Final Destination 2",
+    "year": 2003,
+    "tmdb": 9358
+   },
+   {
+    "title": "Final Destination 3",
+    "year": 2006,
+    "tmdb": 9286
+   },
+   {
+    "title": "The Final Destination",
+    "year": 2009,
+    "tmdb": 19912
+   },
+   {
+    "title": "Final Destination 5",
+    "year": 2011,
+    "tmdb": 55779
+   },
+   {
+    "title": "Final Destination: Bloodlines",
+    "year": 2025,
+    "tmdb": 574475
+   }
+  ]
+ },
+ {
+  "name": "Evil Dead",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Evil Dead (Reboot) Collection",
+   "Evil Dead Collection"
+  ],
+  "tmdb_set_size": 6,
+  "note": "merges TMDB 'Evil Dead' + 'Evil Dead (Reboot)', as Alien/AVP and Rocky/Creed are merged",
+  "members": [
+   {
+    "title": "The Evil Dead",
+    "year": 1981,
+    "tmdb": 764
+   },
+   {
+    "title": "Evil Dead II",
+    "year": 1987,
+    "tmdb": 765
+   },
+   {
+    "title": "Army of Darkness",
+    "year": 1992,
+    "tmdb": 766
+   },
+   {
+    "title": "Evil Dead",
+    "year": 2013,
+    "tmdb": 109428
+   },
+   {
+    "title": "Evil Dead Burn",
+    "year": 2026,
+    "tmdb": 1212763
+   }
+  ]
+ },
+ {
+  "name": "Batman",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Batman Collection"
+  ],
+  "tmdb_set_size": 4,
+  "note": null,
+  "members": [
+   {
+    "title": "Batman",
+    "year": 1989,
+    "tmdb": 268
+   },
+   {
+    "title": "Batman Returns",
+    "year": 1992,
+    "tmdb": 364
+   },
+   {
+    "title": "Batman Forever",
+    "year": 1995,
+    "tmdb": 414
+   },
+   {
+    "title": "Batman & Robin",
+    "year": 1997,
+    "tmdb": 415
+   }
+  ]
+ },
+ {
+  "name": "The Naked Gun",
+  "kind": "franchise",
+  "sort_title": "Naked Gun",
+  "tmdb_collection": [
+   "The Naked Gun Collection"
+  ],
+  "tmdb_set_size": 4,
+  "note": null,
+  "members": [
+   {
+    "title": "The Naked Gun: From the Files of Police Squad!",
+    "year": 1988,
+    "tmdb": 37136
+   },
+   {
+    "title": "The Naked Gun 2½: The Smell of Fear",
+    "year": 1991,
+    "tmdb": 37137
+   },
+   {
+    "title": "Naked Gun 33 1/3: The Final Insult",
+    "year": 1994,
+    "tmdb": 36593
+   },
+   {
+    "title": "The Naked Gun",
+    "year": 2025,
+    "tmdb": 1035259
+   }
+  ]
+ },
+ {
+  "name": "Shrek",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Shrek Collection"
+  ],
+  "tmdb_set_size": 5,
+  "note": null,
+  "members": [
+   {
+    "title": "Shrek",
+    "year": 2001,
+    "tmdb": 808
+   },
+   {
+    "title": "Shrek 2",
+    "year": 2004,
+    "tmdb": 809
+   },
+   {
+    "title": "Shrek the Third",
+    "year": 2007,
+    "tmdb": 810
+   },
+   {
+    "title": "Shrek Forever After",
+    "year": 2010,
+    "tmdb": 10192
+   }
+  ]
+ },
+ {
+  "name": "Faces of Death",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Faces of Death Collection"
+  ],
+  "tmdb_set_size": 6,
+  "note": null,
+  "members": [
+   {
+    "title": "Faces of Death",
+    "year": 1978,
+    "tmdb": 12237
+   },
+   {
+    "title": "Faces of Death II",
+    "year": 1981,
+    "tmdb": 15900
+   },
+   {
+    "title": "Faces of Death III",
+    "year": 1985,
+    "tmdb": 15901
+   },
+   {
+    "title": "Faces of Death",
+    "year": 2026,
+    "tmdb": 855435
+   }
+  ]
+ },
+ {
+  "name": "Back to the Future",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Back to the Future Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Back to the Future",
+    "year": 1985,
+    "tmdb": 105
+   },
+   {
+    "title": "Back to the Future Part II",
+    "year": 1989,
+    "tmdb": 165
+   },
+   {
+    "title": "Back to the Future Part III",
+    "year": 1990,
+    "tmdb": 196
+   }
+  ]
+ },
+ {
+  "name": "Bhool Bhulaiyaa",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Bhool Bhulaiyaa Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Bhool Bhulaiyaa",
+    "year": 2007,
+    "tmdb": 19025
+   },
+   {
+    "title": "Bhool Bhulaiyaa 2",
+    "year": 2022,
+    "tmdb": 695962
+   },
+   {
+    "title": "Bhool Bhulaiyaa 3",
+    "year": 2024,
+    "tmdb": 980599
+   }
+  ]
+ },
+ {
+  "name": "The Dark Knight Trilogy",
+  "kind": "franchise",
+  "sort_title": "Dark Knight Trilogy",
+  "tmdb_collection": [
+   "The Dark Knight Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Batman Begins",
+    "year": 2005,
+    "tmdb": 272
+   },
+   {
+    "title": "The Dark Knight",
+    "year": 2008,
+    "tmdb": 155
+   },
+   {
+    "title": "The Dark Knight Rises",
+    "year": 2012,
+    "tmdb": 49026
+   }
+  ]
+ },
+ {
+  "name": "Downton Abbey",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Downton Abbey (Films) Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Downton Abbey",
+    "year": 2019,
+    "tmdb": 535544
+   },
+   {
+    "title": "Downton Abbey: A New Era",
+    "year": 2022,
+    "tmdb": 820446
+   },
+   {
+    "title": "Downton Abbey: The Grand Finale",
+    "year": 2025,
+    "tmdb": 1289936
+   }
+  ]
+ },
+ {
+  "name": "Fifty Shades",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Fifty Shades Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Fifty Shades of Grey",
+    "year": 2015,
+    "tmdb": 216015
+   },
+   {
+    "title": "Fifty Shades Darker",
+    "year": 2017,
+    "tmdb": 341174
+   },
+   {
+    "title": "Fifty Shades Freed",
+    "year": 2018,
+    "tmdb": 337167
+   }
+  ]
+ },
+ {
+  "name": "The Godfather Trilogy",
+  "kind": "franchise",
+  "sort_title": "Godfather Trilogy",
+  "tmdb_collection": [
+   "The Godfather Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "The Godfather",
+    "year": 1972,
+    "tmdb": 238
+   },
+   {
+    "title": "The Godfather Part II",
+    "year": 1974,
+    "tmdb": 240
+   },
+   {
+    "title": "The Godfather Part III",
+    "year": 1990,
+    "tmdb": 242
+   }
+  ]
+ },
+ {
+  "name": "The Hangover",
+  "kind": "franchise",
+  "sort_title": "Hangover",
+  "tmdb_collection": [
+   "The Hangover Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "The Hangover",
+    "year": 2009,
+    "tmdb": 18785
+   },
+   {
+    "title": "The Hangover Part II",
+    "year": 2011,
+    "tmdb": 45243
+   },
+   {
+    "title": "The Hangover Part III",
+    "year": 2013,
+    "tmdb": 109439
+   }
+  ]
+ },
+ {
+  "name": "Jolly LLB",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Jolly LLB Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Jolly LLB",
+    "year": 2013,
+    "tmdb": 177358
+   },
+   {
+    "title": "Jolly LLB 2",
+    "year": 2017,
+    "tmdb": 412090
+   },
+   {
+    "title": "Jolly LLB 3",
+    "year": 2025,
+    "tmdb": 1015981
+   }
+  ]
+ },
+ {
+  "name": "Knives Out",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Knives Out Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Knives Out",
+    "year": 2019,
+    "tmdb": 546554
+   },
+   {
+    "title": "Glass Onion",
+    "year": 2022,
+    "tmdb": 661374
+   },
+   {
+    "title": "Wake Up Dead Man",
+    "year": 2025,
+    "tmdb": 812583
+   }
+  ]
+ },
+ {
+  "name": "Love Trilogy",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Love Trilogy"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Days of Being Wild",
+    "year": 1990,
+    "tmdb": 18311
+   },
+   {
+    "title": "In the Mood for Love",
+    "year": 2000,
+    "tmdb": 843
+   },
+   {
+    "title": "2046",
+    "year": 2004,
+    "tmdb": 844
+   }
+  ]
+ },
+ {
+  "name": "Magic Mike",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Magic Mike Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Magic Mike",
+    "year": 2012,
+    "tmdb": 77930
+   },
+   {
+    "title": "Magic Mike XXL",
+    "year": 2015,
+    "tmdb": 264999
+   },
+   {
+    "title": "Magic Mike's Last Dance",
+    "year": 2023,
+    "tmdb": 906221
+   }
+  ]
+ },
+ {
+  "name": "Men in Black",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Men in Black Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Men in Black",
+    "year": 1997,
+    "tmdb": 607
+   },
+   {
+    "title": "Men in Black II",
+    "year": 2002,
+    "tmdb": 608
+   },
+   {
+    "title": "Men in Black 3",
+    "year": 2012,
+    "tmdb": 41154
+   }
+  ]
+ },
+ {
+  "name": "Ocean's",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Ocean's Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Ocean's Eleven",
+    "year": 2001,
+    "tmdb": 161
+   },
+   {
+    "title": "Ocean's Twelve",
+    "year": 2004,
+    "tmdb": 163
+   },
+   {
+    "title": "Ocean's Thirteen",
+    "year": 2007,
+    "tmdb": 298
+   }
+  ]
+ },
+ {
+  "name": "Pitch Perfect",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Pitch Perfect Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Pitch Perfect",
+    "year": 2012,
+    "tmdb": 114150
+   },
+   {
+    "title": "Pitch Perfect 2",
+    "year": 2015,
+    "tmdb": 254470
+   },
+   {
+    "title": "Pitch Perfect 3",
+    "year": 2017,
+    "tmdb": 353616
+   }
+  ]
+ },
+ {
+  "name": "Pusher Trilogy",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Pusher Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Pusher",
+    "year": 1996,
+    "tmdb": 2061
+   },
+   {
+    "title": "Pusher II",
+    "year": 2004,
+    "tmdb": 11328
+   },
+   {
+    "title": "Pusher III",
+    "year": 2005,
+    "tmdb": 11330
+   }
+  ]
+ },
+ {
+  "name": "The Souvenir",
+  "kind": "franchise",
+  "sort_title": "Souvenir",
+  "tmdb_collection": [
+   "The Souvenir Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "The Souvenir",
+    "year": 2019,
+    "tmdb": 473019
+   },
+   {
+    "title": "The Souvenir: Part II",
+    "year": 2021,
+    "tmdb": 473021
+   },
+   {
+    "title": "The Eternal Daughter",
+    "year": 2022,
+    "tmdb": 790867
+   }
+  ]
+ },
+ {
+  "name": "Spider-Man Trilogy",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Spider-Man Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": "non-MCU Marvel: could fold into Marvel Legacy instead",
+  "members": [
+   {
+    "title": "Spider-Man",
+    "year": 2002,
+    "tmdb": 557
+   },
+   {
+    "title": "Spider-Man 2",
+    "year": 2004,
+    "tmdb": 558
+   },
+   {
+    "title": "Spider-Man 3",
+    "year": 2007,
+    "tmdb": 559
+   }
+  ]
+ },
+ {
+  "name": "Three Colors Trilogy",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Three Colors Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Three Colors: Blue",
+    "year": 1993,
+    "tmdb": 108
+   },
+   {
+    "title": "Three Colors: Red",
+    "year": 1994,
+    "tmdb": 110
+   },
+   {
+    "title": "Three Colors: White",
+    "year": 1994,
+    "tmdb": 109
+   }
+  ]
+ },
+ {
+  "name": "Tron",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "TRON Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Tron",
+    "year": 1982,
+    "tmdb": 97
+   },
+   {
+    "title": "Tron: Legacy",
+    "year": 2010,
+    "tmdb": 20526
+   },
+   {
+    "title": "Tron: Ares",
+    "year": 2025,
+    "tmdb": 533533
+   }
+  ]
+ },
+ {
+  "name": "Venom",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Venom Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": "non-MCU Marvel: could fold into Marvel Legacy instead",
+  "members": [
+   {
+    "title": "Venom",
+    "year": 2018,
+    "tmdb": 335983
+   },
+   {
+    "title": "Venom: Let There Be Carnage",
+    "year": 2021,
+    "tmdb": 580489
+   },
+   {
+    "title": "Venom: The Last Dance",
+    "year": 2024,
+    "tmdb": 912649
+   }
+  ]
+ },
+ {
+  "name": "Beverly Hills Cop",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Beverly Hills Cop Collection"
+  ],
+  "tmdb_set_size": 4,
+  "note": null,
+  "members": [
+   {
+    "title": "Beverly Hills Cop",
+    "year": 1984,
+    "tmdb": 90
+   },
+   {
+    "title": "Beverly Hills Cop II",
+    "year": 1987,
+    "tmdb": 96
+   },
+   {
+    "title": "Beverly Hills Cop III",
+    "year": 1994,
+    "tmdb": 306
+   }
+  ]
+ },
+ {
+  "name": "Jumanji",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Jumanji Collection"
+  ],
+  "tmdb_set_size": 4,
+  "note": null,
+  "members": [
+   {
+    "title": "Jumanji",
+    "year": 1995,
+    "tmdb": 8844
+   },
+   {
+    "title": "Jumanji: Welcome to the Jungle",
+    "year": 2017,
+    "tmdb": 353486
+   },
+   {
+    "title": "Jumanji: The Next Level",
+    "year": 2019,
+    "tmdb": 512200
+   }
+  ]
+ },
+ {
+  "name": "Now You See Me",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Now You See Me Collection"
+  ],
+  "tmdb_set_size": 4,
+  "note": null,
+  "members": [
+   {
+    "title": "Now You See Me",
+    "year": 2013,
+    "tmdb": 75656
+   },
+   {
+    "title": "Now You See Me 2",
+    "year": 2016,
+    "tmdb": 291805
+   },
+   {
+    "title": "Now You See Me: Now You Don't",
+    "year": 2025,
+    "tmdb": 425274
+   }
+  ]
+ },
+ {
+  "name": "Paddington",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Paddington Collection"
+  ],
+  "tmdb_set_size": 4,
+  "note": null,
+  "members": [
+   {
+    "title": "Paddington",
+    "year": 2014,
+    "tmdb": 116149
+   },
+   {
+    "title": "Paddington 2",
+    "year": 2017,
+    "tmdb": 346648
+   },
+   {
+    "title": "Paddington in Peru",
+    "year": 2024,
+    "tmdb": 516729
+   }
+  ]
+ },
+ {
+  "name": "Psycho",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Psycho Collection"
+  ],
+  "tmdb_set_size": 4,
+  "note": null,
+  "members": [
+   {
+    "title": "Psycho",
+    "year": 1960,
+    "tmdb": 539
+   },
+   {
+    "title": "Psycho II",
+    "year": 1983,
+    "tmdb": 10576
+   },
+   {
+    "title": "Psycho III",
+    "year": 1986,
+    "tmdb": 12662
+   }
+  ]
+ },
+ {
+  "name": "Riddick",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "The Chronicles of Riddick Collection"
+  ],
+  "tmdb_set_size": 4,
+  "note": null,
+  "members": [
+   {
+    "title": "Pitch Black",
+    "year": 2000,
+    "tmdb": 2787
+   },
+   {
+    "title": "The Chronicles of Riddick",
+    "year": 2004,
+    "tmdb": 2789
+   },
+   {
+    "title": "Riddick",
+    "year": 2013,
+    "tmdb": 87421
+   }
+  ]
+ },
+ {
+  "name": "Rush Hour",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Rush Hour Collection"
+  ],
+  "tmdb_set_size": 4,
+  "note": null,
+  "members": [
+   {
+    "title": "Rush Hour",
+    "year": 1998,
+    "tmdb": 2109
+   },
+   {
+    "title": "Rush Hour 2",
+    "year": 2001,
+    "tmdb": 5175
+   },
+   {
+    "title": "Rush Hour 3",
+    "year": 2007,
+    "tmdb": 5174
+   }
+  ]
+ },
+ {
+  "name": "Terrifier",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Terrifier Collection"
+  ],
+  "tmdb_set_size": 4,
+  "note": null,
+  "members": [
+   {
+    "title": "Terrifier",
+    "year": 2016,
+    "tmdb": 420634
+   },
+   {
+    "title": "Terrifier 2",
+    "year": 2022,
+    "tmdb": 663712
+   },
+   {
+    "title": "Terrifier 3",
+    "year": 2024,
+    "tmdb": 1034541
+   }
+  ]
+ },
+ {
+  "name": "Avatar",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Avatar Collection"
+  ],
+  "tmdb_set_size": 5,
+  "note": null,
+  "members": [
+   {
+    "title": "Avatar",
+    "year": 2009,
+    "tmdb": 19995
+   },
+   {
+    "title": "Avatar: The Way of Water",
+    "year": 2022,
+    "tmdb": 76600
+   },
+   {
+    "title": "Avatar: Fire and Ash",
+    "year": 2025,
+    "tmdb": 83533
+   }
+  ]
+ },
+ {
+  "name": "Insidious",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Insidious Collection"
+  ],
+  "tmdb_set_size": 6,
+  "note": null,
+  "members": [
+   {
+    "title": "Insidious",
+    "year": 2010,
+    "tmdb": 49018
+   },
+   {
+    "title": "Insidious: Chapter 2",
+    "year": 2013,
+    "tmdb": 91586
+   },
+   {
+    "title": "Insidious: Chapter 3",
+    "year": 2015,
+    "tmdb": 280092
+   }
+  ]
+ },
+ {
+  "name": "The Accountant",
+  "kind": "franchise",
+  "sort_title": "Accountant",
+  "tmdb_collection": [
+   "The Accountant Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "The Accountant",
+    "year": 2016,
+    "tmdb": 302946
+   },
+   {
+    "title": "The Accountant 2",
+    "year": 2025,
+    "tmdb": 870028
+   }
+  ]
+ },
+ {
+  "name": "The Amazing Spider-Man",
+  "kind": "franchise",
+  "sort_title": "Amazing Spider-Man",
+  "tmdb_collection": [
+   "The Amazing Spider-Man Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": "non-MCU Marvel: could fold into Marvel Legacy instead",
+  "members": [
+   {
+    "title": "The Amazing Spider-Man",
+    "year": 2012,
+    "tmdb": 1930
+   },
+   {
+    "title": "The Amazing Spider-Man 2",
+    "year": 2014,
+    "tmdb": 102382
+   }
+  ]
+ },
+ {
+  "name": "Anchorman",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Anchorman Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Anchorman: The Legend of Ron Burgundy",
+    "year": 2004,
+    "tmdb": 8699
+   },
+   {
+    "title": "Anchorman 2: The Legend Continues",
+    "year": 2013,
+    "tmdb": 109443
+   }
+  ]
+ },
+ {
+  "name": "Awarapan",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Awarapan Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Awarapan",
+    "year": 2007,
+    "tmdb": 22448
+   },
+   {
+    "title": "Awarapan 2",
+    "year": 2026,
+    "tmdb": 1444466
+   }
+  ]
+ },
+ {
+  "name": "The Bad Guys",
+  "kind": "franchise",
+  "sort_title": "Bad Guys",
+  "tmdb_collection": [
+   "The Bad Guys Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "The Bad Guys",
+    "year": 2022,
+    "tmdb": 629542
+   },
+   {
+    "title": "The Bad Guys 2",
+    "year": 2025,
+    "tmdb": 1175942
+   }
+  ]
+ },
+ {
+  "name": "The Black Phone",
+  "kind": "franchise",
+  "sort_title": "Black Phone",
+  "tmdb_collection": [
+   "The Black Phone Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "The Black Phone",
+    "year": 2022,
+    "tmdb": 756999
+   },
+   {
+    "title": "Black Phone 2",
+    "year": 2025,
+    "tmdb": 1197137
+   }
+  ]
+ },
+ {
+  "name": "Blade Runner",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Blade Runner Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Blade Runner",
+    "year": 1982,
+    "tmdb": 78
+   },
+   {
+    "title": "Blade Runner 2049",
+    "year": 2017,
+    "tmdb": 335984
+   }
+  ]
+ },
+ {
+  "name": "Borat",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Borat Moviefilms Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Borat",
+    "year": 2006,
+    "tmdb": 496
+   },
+   {
+    "title": "Borat Subsequent Moviefilm",
+    "year": 2020,
+    "tmdb": 740985
+   }
+  ]
+ },
+ {
+  "name": "Cocktail",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Cocktail Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Cocktail",
+    "year": 2012,
+    "tmdb": 118051
+   },
+   {
+    "title": "Cocktail 2",
+    "year": 2026,
+    "tmdb": 1392469
+   }
+  ]
+ },
+ {
+  "name": "The Darjeeling Limited",
+  "kind": "franchise",
+  "sort_title": "Darjeeling Limited",
+  "tmdb_collection": [
+   "The Darjeeling Limited Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": "feature + its prologue short (Hotel Chevalier)",
+  "members": [
+   {
+    "title": "Hotel Chevalier",
+    "year": 2007,
+    "tmdb": 6418
+   },
+   {
+    "title": "The Darjeeling Limited",
+    "year": 2007,
+    "tmdb": 4538
+   }
+  ]
+ },
+ {
+  "name": "De De Pyaar De",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "De De Pyaar De Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "De De Pyaar De",
+    "year": 2019,
+    "tmdb": 590401
+   },
+   {
+    "title": "De De Pyaar De 2",
+    "year": 2025,
+    "tmdb": 1214835
+   }
+  ]
+ },
+ {
+  "name": "The Devil Wears Prada",
+  "kind": "franchise",
+  "sort_title": "Devil Wears Prada",
+  "tmdb_collection": [
+   "The Devil Wears Prada Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "The Devil Wears Prada",
+    "year": 2006,
+    "tmdb": 350
+   },
+   {
+    "title": "The Devil Wears Prada 2",
+    "year": 2026,
+    "tmdb": 1314481
+   }
+  ]
+ },
+ {
+  "name": "Dhurandhar",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Dhurandhar Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Dhurandhar",
+    "year": 2025,
+    "tmdb": 1291608
+   },
+   {
+    "title": "Dhurandhar: The Revenge",
+    "year": 2026,
+    "tmdb": 1582770
+   }
+  ]
+ },
+ {
+  "name": "Freaky Friday",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Freaky Friday Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Freaky Friday",
+    "year": 2003,
+    "tmdb": 10330
+   },
+   {
+    "title": "Freakier Friday",
+    "year": 2025,
+    "tmdb": 1125257
+   }
+  ]
+ },
+ {
+  "name": "Greenland",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Greenland Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Greenland",
+    "year": 2020,
+    "tmdb": 524047
+   },
+   {
+    "title": "Greenland 2: Migration",
+    "year": 2026,
+    "tmdb": 840464
+   }
+  ]
+ },
+ {
+  "name": "Hellboy",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Hellboy Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Hellboy",
+    "year": 2004,
+    "tmdb": 1487
+   },
+   {
+    "title": "Hellboy II: The Golden Army",
+    "year": 2008,
+    "tmdb": 11253
+   }
+  ]
+ },
+ {
+  "name": "It",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "It Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "It",
+    "year": 2017,
+    "tmdb": 346364
+   },
+   {
+    "title": "It: Chapter Two",
+    "year": 2019,
+    "tmdb": 474350
+   }
+  ]
+ },
+ {
+  "name": "Iwo Jima",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Clint Eastwood's Iwo Jima Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Flags of Our Fathers",
+    "year": 2006,
+    "tmdb": 3683
+   },
+   {
+    "title": "Letters from Iwo Jima",
+    "year": 2006,
+    "tmdb": 1251
+   }
+  ]
+ },
+ {
+  "name": "Joker",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Joker Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Joker",
+    "year": 2019,
+    "tmdb": 475557
+   },
+   {
+    "title": "Joker: Folie à Deux",
+    "year": 2024,
+    "tmdb": 889737
+   }
+  ]
+ },
+ {
+  "name": "The Lego Movie",
+  "kind": "franchise",
+  "sort_title": "Lego Movie",
+  "tmdb_collection": [
+   "The Lego Movie Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "The Lego Movie",
+    "year": 2014,
+    "tmdb": 137106
+   },
+   {
+    "title": "The Lego Movie 2: The Second Part",
+    "year": 2019,
+    "tmdb": 280217
+   }
+  ]
+ },
+ {
+  "name": "M3GAN",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "M3GAN Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "M3GAN",
+    "year": 2022,
+    "tmdb": 536554
+   },
+   {
+    "title": "M3GAN 2.0",
+    "year": 2025,
+    "tmdb": 1071585
+   }
+  ]
+ },
+ {
+  "name": "Man of Steel",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Man of Steel Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Man of Steel",
+    "year": 2013,
+    "tmdb": 49521
+   },
+   {
+    "title": "Batman v Superman: Dawn of Justice",
+    "year": 2016,
+    "tmdb": 209112
+   }
+  ]
+ },
+ {
+  "name": "Nishaanchi",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Nishaanchi Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Nishaanchi",
+    "year": 2025,
+    "tmdb": 1499082
+   },
+   {
+    "title": "Nishaanchi 2",
+    "year": 2025,
+    "tmdb": 1580286
+   }
+  ]
+ },
+ {
+  "name": "Nobody",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Nobody Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Nobody",
+    "year": 2021,
+    "tmdb": 615457
+   },
+   {
+    "title": "Nobody 2",
+    "year": 2025,
+    "tmdb": 1007734
+   }
+  ]
+ },
+ {
+  "name": "The Pink Panther",
+  "kind": "franchise",
+  "sort_title": "Pink Panther",
+  "tmdb_collection": [
+   "The Pink Panther (Steve Martin) Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "The Pink Panther",
+    "year": 2006,
+    "tmdb": 12096
+   },
+   {
+    "title": "The Pink Panther 2",
+    "year": 2009,
+    "tmdb": 15159
+   }
+  ]
+ },
+ {
+  "name": "Ready or Not",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Ready or Not Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Ready or Not",
+    "year": 2019,
+    "tmdb": 567609
+   },
+   {
+    "title": "Ready or Not 2: Here I Come",
+    "year": 2026,
+    "tmdb": 1266127
+   }
+  ]
+ },
+ {
+  "name": "The Shining",
+  "kind": "franchise",
+  "sort_title": "Shining",
+  "tmdb_collection": [
+   "The Shining Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "The Shining",
+    "year": 1980,
+    "tmdb": 694
+   },
+   {
+    "title": "Doctor Sleep",
+    "year": 2019,
+    "tmdb": 501170
+   }
+  ]
+ },
+ {
+  "name": "A Simple Favor",
+  "kind": "franchise",
+  "sort_title": "Simple Favor",
+  "tmdb_collection": [
+   "A Simple Favor Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "A Simple Favor",
+    "year": 2018,
+    "tmdb": 484247
+   },
+   {
+    "title": "Another Simple Favor",
+    "year": 2025,
+    "tmdb": 974573
+   }
+  ]
+ },
+ {
+  "name": "Sin City",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Sin City Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Sin City",
+    "year": 2005,
+    "tmdb": 187
+   },
+   {
+    "title": "Sin City: A Dame to Kill For",
+    "year": 2014,
+    "tmdb": 189
+   }
+  ]
+ },
+ {
+  "name": "Sisu",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Sisu Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Sisu",
+    "year": 2022,
+    "tmdb": 840326
+   },
+   {
+    "title": "Sisu: Road to Revenge",
+    "year": 2025,
+    "tmdb": 1223601
+   }
+  ]
+ },
+ {
+  "name": "Smile",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Smile Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Smile",
+    "year": 2022,
+    "tmdb": 882598
+   },
+   {
+    "title": "Smile 2",
+    "year": 2024,
+    "tmdb": 1100782
+   }
+  ]
+ },
+ {
+  "name": "Space Odyssey",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "The Space Odyssey Series"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "2001: A Space Odyssey",
+    "year": 1968,
+    "tmdb": 62
+   },
+   {
+    "title": "2010: The Year We Make Contact",
+    "year": 1984,
+    "tmdb": 4437
+   }
+  ]
+ },
+ {
+  "name": "Spinal Tap",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "This Is Spinal Tap Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "This Is Spinal Tap",
+    "year": 1984,
+    "tmdb": 11031
+   },
+   {
+    "title": "Spinal Tap II: The End Continues",
+    "year": 2025,
+    "tmdb": 975225
+   }
+  ]
+ },
+ {
+  "name": "Stree",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Stree Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Stree",
+    "year": 2018,
+    "tmdb": 533991
+   },
+   {
+    "title": "Stree 2",
+    "year": 2024,
+    "tmdb": 1112426
+   }
+  ]
+ },
+ {
+  "name": "Suicide Squad",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Suicide Squad Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Suicide Squad",
+    "year": 2016,
+    "tmdb": 297761
+   },
+   {
+    "title": "The Suicide Squad",
+    "year": 2021,
+    "tmdb": 436969
+   }
+  ]
+ },
+ {
+  "name": "Super Mario",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "The Super Mario Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "The Super Mario Bros. Movie",
+    "year": 2023,
+    "tmdb": 502356
+   },
+   {
+    "title": "The Super Mario Galaxy Movie",
+    "year": 2026,
+    "tmdb": 1226863
+   }
+  ]
+ },
+ {
+  "name": "Tanu Weds Manu",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Tanu Weds Manu Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Tanu Weds Manu",
+    "year": 2011,
+    "tmdb": 58333
+   },
+   {
+    "title": "Tanu Weds Manu: Returns",
+    "year": 2015,
+    "tmdb": 336211
+   }
+  ]
+ },
+ {
+  "name": "Ted",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Ted Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Ted",
+    "year": 2012,
+    "tmdb": 72105
+   },
+   {
+    "title": "Ted 2",
+    "year": 2015,
+    "tmdb": 214756
+   }
+  ]
+ },
+ {
+  "name": "Trainspotting",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Trainspotting Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Trainspotting",
+    "year": 1996,
+    "tmdb": 627
+   },
+   {
+    "title": "T2 Trainspotting",
+    "year": 2017,
+    "tmdb": 180863
+   }
+  ]
+ },
+ {
+  "name": "Twister",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Twister Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Twister",
+    "year": 1996,
+    "tmdb": 664
+   },
+   {
+    "title": "Twisters",
+    "year": 2024,
+    "tmdb": 718821
+   }
+  ]
+ },
+ {
+  "name": "Vadh",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Vadh Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Vadh",
+    "year": 2022,
+    "tmdb": 1046991
+   },
+   {
+    "title": "Vadh 2",
+    "year": 2026,
+    "tmdb": 1595507
+   }
+  ]
+ },
+ {
+  "name": "Wall Street",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Wall Street Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Wall Street",
+    "year": 1987,
+    "tmdb": 10673
+   },
+   {
+    "title": "Wall Street: Money Never Sleeps",
+    "year": 2010,
+    "tmdb": 33909
+   }
+  ]
+ },
+ {
+  "name": "Wicked",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Wicked Collection"
+  ],
+  "tmdb_set_size": 2,
+  "note": null,
+  "members": [
+   {
+    "title": "Wicked",
+    "year": 2024,
+    "tmdb": 402431
+   },
+   {
+    "title": "Wicked: For Good",
+    "year": 2025,
+    "tmdb": 967941
+   }
+  ]
+ },
+ {
+  "name": "Batman: The Animated Series",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Batman (DC Universe Animated) Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Batman: Mask of the Phantasm",
+    "year": 1993,
+    "tmdb": 14919
+   },
+   {
+    "title": "Batman & Mr. Freeze: SubZero",
+    "year": 1998,
+    "tmdb": 15805
+   }
+  ]
+ },
+ {
+  "name": "Beetlejuice",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Beetlejuice Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Beetlejuice",
+    "year": 1988,
+    "tmdb": 4011
+   },
+   {
+    "title": "Beetlejuice Beetlejuice",
+    "year": 2024,
+    "tmdb": 917496
+   }
+  ]
+ },
+ {
+  "name": "Den of Thieves",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Den of Thieves Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Den of Thieves",
+    "year": 2018,
+    "tmdb": 449443
+   },
+   {
+    "title": "Den of Thieves 2: Pantera",
+    "year": 2025,
+    "tmdb": 604685
+   }
+  ]
+ },
+ {
+  "name": "Drishyam",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Drishyam Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Drishyam",
+    "year": 2015,
+    "tmdb": 352173
+   },
+   {
+    "title": "Drishyam 2",
+    "year": 2022,
+    "tmdb": 1029827
+   }
+  ]
+ },
+ {
+  "name": "Dune",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Dune Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Dune",
+    "year": 2021,
+    "tmdb": 438631
+   },
+   {
+    "title": "Dune: Part Two",
+    "year": 2024,
+    "tmdb": 693134
+   }
+  ]
+ },
+ {
+  "name": "Five Nights at Freddy's",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Five Nights at Freddy's Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Five Nights at Freddy's",
+    "year": 2023,
+    "tmdb": 507089
+   },
+   {
+    "title": "Five Nights at Freddy's 2",
+    "year": 2025,
+    "tmdb": 1228246
+   }
+  ]
+ },
+ {
+  "name": "Gladiator",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Gladiator Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Gladiator",
+    "year": 2000,
+    "tmdb": 98
+   },
+   {
+    "title": "Gladiator II",
+    "year": 2024,
+    "tmdb": 558449
+   }
+  ]
+ },
+ {
+  "name": "Hannibal Lecter",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "The Hannibal Lecter Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "The Silence of the Lambs",
+    "year": 1991,
+    "tmdb": 274
+   },
+   {
+    "title": "Hannibal",
+    "year": 2001,
+    "tmdb": 9740
+   }
+  ]
+ },
+ {
+  "name": "How to Train Your Dragon",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "How to Train Your Dragon Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "How to Train Your Dragon",
+    "year": 2010,
+    "tmdb": 10191
+   },
+   {
+    "title": "How to Train Your Dragon 2",
+    "year": 2014,
+    "tmdb": 82702
+   }
+  ]
+ },
+ {
+  "name": "The Human Condition",
+  "kind": "franchise",
+  "sort_title": "Human Condition",
+  "tmdb_collection": [
+   "The Human Condition Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "The Human Condition II: Road to Eternity",
+    "year": 1959,
+    "tmdb": 34528
+   },
+   {
+    "title": "The Human Condition III: A Soldier's Prayer",
+    "year": 1961,
+    "tmdb": 34530
+   }
+  ]
+ },
+ {
+  "name": "Jump Street",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Jump Street Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "21 Jump Street",
+    "year": 2012,
+    "tmdb": 64688
+   },
+   {
+    "title": "22 Jump Street",
+    "year": 2014,
+    "tmdb": 187017
+   }
+  ]
+ },
+ {
+  "name": "Kantara",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Kantara Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Kantara",
+    "year": 2022,
+    "tmdb": 858485
+   },
+   {
+    "title": "Kantara - A Legend: Chapter 1",
+    "year": 2025,
+    "tmdb": 1083637
+   }
+  ]
+ },
+ {
+  "name": "Mortal Kombat",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Mortal Kombat (Reboot) Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Mortal Kombat",
+    "year": 2021,
+    "tmdb": 460465
+   },
+   {
+    "title": "Mortal Kombat II",
+    "year": 2026,
+    "tmdb": 931285
+   }
+  ]
+ },
+ {
+  "name": "Ne Zha",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Ne Zha Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Ne Zha",
+    "year": 2019,
+    "tmdb": 615453
+   },
+   {
+    "title": "Ne Zha II",
+    "year": 2025,
+    "tmdb": 980477
+   }
+  ]
+ },
+ {
+  "name": "Pushpa",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Pushpa Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Pushpa: The Rise",
+    "year": 2021,
+    "tmdb": 690957
+   },
+   {
+    "title": "Pushpa 2 - The Rule",
+    "year": 2024,
+    "tmdb": 857598
+   }
+  ]
+ },
+ {
+  "name": "A Quiet Place",
+  "kind": "franchise",
+  "sort_title": "Quiet Place",
+  "tmdb_collection": [
+   "A Quiet Place Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "A Quiet Place",
+    "year": 2018,
+    "tmdb": 447332
+   },
+   {
+    "title": "A Quiet Place Part II",
+    "year": 2021,
+    "tmdb": 520763
+   }
+  ]
+ },
+ {
+  "name": "Robert Langdon",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Robert Langdon Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "The Da Vinci Code",
+    "year": 2006,
+    "tmdb": 591
+   },
+   {
+    "title": "Angels & Demons",
+    "year": 2009,
+    "tmdb": 13448
+   }
+  ]
+ },
+ {
+  "name": "Rosemary's Baby",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Rosemary's Baby Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Rosemary's Baby",
+    "year": 1968,
+    "tmdb": 805
+   },
+   {
+    "title": "Apartment 7A",
+    "year": 2024,
+    "tmdb": 807339
+   }
+  ]
+ },
+ {
+  "name": "Sarkar",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Sarkar Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Sarkar Raj",
+    "year": 2008,
+    "tmdb": 14394
+   },
+   {
+    "title": "Sarkar 3",
+    "year": 2017,
+    "tmdb": 441868
+   }
+  ]
+ },
+ {
+  "name": "Sherlock Holmes",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Sherlock Holmes Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Sherlock Holmes",
+    "year": 2009,
+    "tmdb": 10528
+   },
+   {
+    "title": "Sherlock Holmes: A Game of Shadows",
+    "year": 2011,
+    "tmdb": 58574
+   }
+  ]
+ },
+ {
+  "name": "Sicario",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Sicario Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Sicario",
+    "year": 2015,
+    "tmdb": 273481
+   },
+   {
+    "title": "Sicario: Day of the Soldado",
+    "year": 2018,
+    "tmdb": 400535
+   }
+  ]
+ },
+ {
+  "name": "Silent Hill",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Silent Hill Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Silent Hill",
+    "year": 2006,
+    "tmdb": 588
+   },
+   {
+    "title": "Return to Silent Hill",
+    "year": 2026,
+    "tmdb": 680493
+   }
+  ]
+ },
+ {
+  "name": "Spider-Verse",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Spider-Man: Spider-Verse Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": "non-MCU Marvel: could fold into Marvel Legacy instead",
+  "members": [
+   {
+    "title": "Spider-Man: Into the Spider-Verse",
+    "year": 2018,
+    "tmdb": 324857
+   },
+   {
+    "title": "Spider-Man: Across the Spider-Verse",
+    "year": 2023,
+    "tmdb": 569094
+   }
+  ]
+ },
+ {
+  "name": "Super Troopers",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Super Troopers Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Super Troopers",
+    "year": 2001,
+    "tmdb": 39939
+   },
+   {
+    "title": "Super Troopers 2",
+    "year": 2018,
+    "tmdb": 50022
+   }
+  ]
+ },
+ {
+  "name": "Top Gun",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Top Gun Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Top Gun",
+    "year": 1986,
+    "tmdb": 744
+   },
+   {
+    "title": "Top Gun: Maverick",
+    "year": 2022,
+    "tmdb": 361743
+   }
+  ]
+ },
+ {
+  "name": "Welcome",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Welcome Collection"
+  ],
+  "tmdb_set_size": 3,
+  "note": null,
+  "members": [
+   {
+    "title": "Welcome",
+    "year": 2007,
+    "tmdb": 20294
+   },
+   {
+    "title": "Welcome to the Jungle",
+    "year": 2026,
+    "tmdb": 1169516
+   }
+  ]
+ },
+ {
+  "name": "Bridget Jones",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Bridget Jones Collection"
+  ],
+  "tmdb_set_size": 4,
+  "note": null,
+  "members": [
+   {
+    "title": "Bridget Jones's Diary",
+    "year": 2001,
+    "tmdb": 634
+   },
+   {
+    "title": "Bridget Jones: Mad About the Boy",
+    "year": 2025,
+    "tmdb": 1272149
+   }
+  ]
+ },
+ {
+  "name": "Home Alone",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Home Alone Collection"
+  ],
+  "tmdb_set_size": 4,
+  "note": null,
+  "members": [
+   {
+    "title": "Home Alone",
+    "year": 1990,
+    "tmdb": 771
+   },
+   {
+    "title": "Home Alone 2: Lost in New York",
+    "year": 1992,
+    "tmdb": 772
+   }
+  ]
+ },
+ {
+  "name": "I Know What You Did Last Summer",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "I Know What You Did Last Summer Collection"
+  ],
+  "tmdb_set_size": 4,
+  "note": null,
+  "members": [
+   {
+    "title": "I Know What You Did Last Summer",
+    "year": 1997,
+    "tmdb": 3597
+   },
+   {
+    "title": "I Know What You Did Last Summer",
+    "year": 2025,
+    "tmdb": 1083433
+   }
+  ]
+ },
+ {
+  "name": "Meet the Parents",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Meet the Parents Collection"
+  ],
+  "tmdb_set_size": 4,
+  "note": null,
+  "members": [
+   {
+    "title": "Meet the Parents",
+    "year": 2000,
+    "tmdb": 1597
+   },
+   {
+    "title": "Meet the Fockers",
+    "year": 2004,
+    "tmdb": 693
+   }
+  ]
+ },
+ {
+  "name": "The Mummy",
+  "kind": "franchise",
+  "sort_title": "Mummy",
+  "tmdb_collection": [
+   "The Mummy Collection"
+  ],
+  "tmdb_set_size": 4,
+  "note": null,
+  "members": [
+   {
+    "title": "The Mummy",
+    "year": 1999,
+    "tmdb": 564
+   },
+   {
+    "title": "The Mummy Returns",
+    "year": 2001,
+    "tmdb": 1734
+   }
+  ]
+ },
+ {
+  "name": "Superman",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "Superman Collection"
+  ],
+  "tmdb_set_size": 4,
+  "note": null,
+  "members": [
+   {
+    "title": "Superman",
+    "year": 1978,
+    "tmdb": 1924
+   },
+   {
+    "title": "Superman II",
+    "year": 1980,
+    "tmdb": 8536
+   }
+  ]
+ },
+ {
+  "name": "Terminator",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "The Terminator Collection"
+  ],
+  "tmdb_set_size": 6,
+  "note": null,
+  "members": [
+   {
+    "title": "The Terminator",
+    "year": 1984,
+    "tmdb": 218
+   },
+   {
+    "title": "Terminator 2: Judgment Day",
+    "year": 1991,
+    "tmdb": 280
+   }
+  ]
+ },
+ {
+  "name": "A Nightmare on Elm Street",
+  "kind": "franchise",
+  "sort_title": "Nightmare on Elm Street",
+  "tmdb_collection": [
+   "A Nightmare on Elm Street Collection"
+  ],
+  "tmdb_set_size": 7,
+  "note": null,
+  "members": [
+   {
+    "title": "A Nightmare on Elm Street",
+    "year": 1984,
+    "tmdb": 377
+   },
+   {
+    "title": "A Nightmare on Elm Street 3: Dream Warriors",
+    "year": 1987,
+    "tmdb": 10072
+   }
+  ]
+ },
+ {
+  "name": "V/H/S",
+  "kind": "franchise",
+  "sort_title": null,
+  "tmdb_collection": [
+   "V/H/S Collection"
+  ],
+  "tmdb_set_size": 10,
+  "note": null,
+  "members": [
+   {
+    "title": "V/H/S/Beyond",
+    "year": 2024,
+    "tmdb": 1190868
+   },
+   {
+    "title": "V/H/S/Halloween",
+    "year": 2025,
+    "tmdb": 1373445
+   }
+  ]
+ },
+ {
+  "name": "Paul Greengrass",
+  "kind": "director",
+  "sort_title": "zzPaul Greengrass",
+  "basis": "Berlin Golden Bear 2002 (Bloody Sunday); Best Director Oscar nominee (United 93)",
+  "note": null,
+  "members": [
+   {
+    "title": "The Bourne Supremacy",
+    "year": 2004,
+    "tmdb": 2502
+   },
+   {
+    "title": "United 93",
+    "year": 2006,
+    "tmdb": 9829
+   },
+   {
+    "title": "The Bourne Ultimatum",
+    "year": 2007,
+    "tmdb": 2503
+   },
+   {
+    "title": "Captain Phillips",
+    "year": 2013,
+    "tmdb": 109424
+   },
+   {
+    "title": "Jason Bourne",
+    "year": 2016,
+    "tmdb": 324668
+   },
+   {
+    "title": "The Lost Bus",
+    "year": 2025,
+    "tmdb": 1236470
+   },
+   {
+    "title": "The Uprising",
+    "year": 2026,
+    "tmdb": 977942
+   }
+  ]
+ },
+ {
+  "name": "Vishal Bhardwaj",
+  "kind": "director",
+  "sort_title": "zzVishal Bhardwaj",
+  "basis": "multiple National Film Awards; Shakespeare trilogy (Maqbool, Omkara, Haider)",
+  "note": null,
+  "members": [
+   {
+    "title": "Maqbool",
+    "year": 2003,
+    "tmdb": 21265
+   },
+   {
+    "title": "Omkara",
+    "year": 2006,
+    "tmdb": 14705
+   },
+   {
+    "title": "Kaminey",
+    "year": 2009,
+    "tmdb": 20688
+   },
+   {
+    "title": "Haider",
+    "year": 2014,
+    "tmdb": 280795
+   },
+   {
+    "title": "Khufiya",
+    "year": 2023,
+    "tmdb": 878926
+   },
+   {
+    "title": "Lust Stories 3",
+    "year": 2026,
+    "tmdb": 1451944
+   },
+   {
+    "title": "O'Romeo",
+    "year": 2026,
+    "tmdb": 1275574
+   }
+  ]
+ },
+ {
+  "name": "George Miller",
+  "kind": "director",
+  "sort_title": "zzGeorge Miller",
+  "basis": "TSPDT 21st-century Top 100 #49; TSPDT Top 250 #171",
+  "note": null,
+  "members": [
+   {
+    "title": "Mad Max",
+    "year": 1979,
+    "tmdb": 9659
+   },
+   {
+    "title": "Mad Max 2: The Road Warrior",
+    "year": 1981,
+    "tmdb": 8810
+   },
+   {
+    "title": "Mad Max: Beyond Thunderdome",
+    "year": 1985,
+    "tmdb": 9355
+   },
+   {
+    "title": "Mad Max: Fury Road",
+    "year": 2015,
+    "tmdb": 76341
+   },
+   {
+    "title": "Three Thousand Years of Longing",
+    "year": 2022,
+    "tmdb": 556694
+   },
+   {
+    "title": "Furiosa: A Mad Max Saga",
+    "year": 2024,
+    "tmdb": 786892
+   }
+  ]
+ },
+ {
+  "name": "Robert Zemeckis",
+  "kind": "director",
+  "sort_title": "zzRobert Zemeckis",
+  "basis": "TSPDT Top 250 #125",
+  "note": null,
+  "members": [
+   {
+    "title": "Back to the Future",
+    "year": 1985,
+    "tmdb": 105
+   },
+   {
+    "title": "Back to the Future Part II",
+    "year": 1989,
+    "tmdb": 165
+   },
+   {
+    "title": "Back to the Future Part III",
+    "year": 1990,
+    "tmdb": 196
+   },
+   {
+    "title": "Forrest Gump",
+    "year": 1994,
+    "tmdb": 13
+   },
+   {
+    "title": "Contact",
+    "year": 1997,
+    "tmdb": 686
+   },
+   {
+    "title": "Here",
+    "year": 2024,
+    "tmdb": 940139
+   }
+  ]
+ },
+ {
+  "name": "Nicolas Winding Refn",
+  "kind": "director",
+  "sort_title": "zzNicolas Winding Refn",
+  "basis": "Cannes Best Director 2011 (Drive)",
+  "note": null,
+  "members": [
+   {
+    "title": "Pusher",
+    "year": 1996,
+    "tmdb": 2061
+   },
+   {
+    "title": "Pusher II",
+    "year": 2004,
+    "tmdb": 11328
+   },
+   {
+    "title": "Pusher III",
+    "year": 2005,
+    "tmdb": 11330
+   },
+   {
+    "title": "Drive",
+    "year": 2011,
+    "tmdb": 64690
+   },
+   {
+    "title": "The Neon Demon",
+    "year": 2016,
+    "tmdb": 301365
+   },
+   {
+    "title": "Her Private Hell",
+    "year": 2026,
+    "tmdb": 1469342
+   }
+  ]
+ },
+ {
+  "name": "Hayao Miyazaki",
+  "kind": "director",
+  "sort_title": "zzHayao Miyazaki",
+  "basis": "TSPDT 21st-century Top 100 #10; TSPDT Top 250 #69",
+  "note": null,
+  "members": [
+   {
+    "title": "My Neighbor Totoro",
+    "year": 1988,
+    "tmdb": 8392
+   },
+   {
+    "title": "Princess Mononoke",
+    "year": 1997,
+    "tmdb": 128
+   },
+   {
+    "title": "Spirited Away",
+    "year": 2001,
+    "tmdb": 129
+   },
+   {
+    "title": "Howl's Moving Castle",
+    "year": 2004,
+    "tmdb": 4935
+   },
+   {
+    "title": "The Boy and the Heron",
+    "year": 2023,
+    "tmdb": 508883
+   }
+  ]
+ },
+ {
+  "name": "Ang Lee",
+  "kind": "director",
+  "sort_title": "zzAng Lee",
+  "basis": "TSPDT 21st-century Top 100 #26; TSPDT Top 250 #152",
+  "note": null,
+  "members": [
+   {
+    "title": "Eat Drink Man Woman",
+    "year": 1994,
+    "tmdb": 10451
+   },
+   {
+    "title": "Crouching Tiger, Hidden Dragon",
+    "year": 2000,
+    "tmdb": 146
+   },
+   {
+    "title": "Brokeback Mountain",
+    "year": 2005,
+    "tmdb": 142
+   },
+   {
+    "title": "Lust, Caution",
+    "year": 2007,
+    "tmdb": 4588
+   },
+   {
+    "title": "Life of Pi",
+    "year": 2012,
+    "tmdb": 87827
+   }
+  ]
+ },
+ {
+  "name": "Todd Haynes",
+  "kind": "director",
+  "sort_title": "zzTodd Haynes",
+  "basis": "TSPDT 21st-century Top 100 #46; TSPDT Top 250 #144",
+  "note": null,
+  "members": [
+   {
+    "title": "Safe",
+    "year": 1995,
+    "tmdb": 32646
+   },
+   {
+    "title": "I'm Not There",
+    "year": 2007,
+    "tmdb": 3902
+   },
+   {
+    "title": "Carol",
+    "year": 2015,
+    "tmdb": 258480
+   },
+   {
+    "title": "Dark Waters",
+    "year": 2019,
+    "tmdb": 552178
+   },
+   {
+    "title": "May December",
+    "year": 2023,
+    "tmdb": 839369
+   }
+  ]
+ },
+ {
+  "name": "Lynne Ramsay",
+  "kind": "director",
+  "sort_title": "zzLynne Ramsay",
+  "basis": "TSPDT 21st-century Top 100 #50; TSPDT Top 250 #196",
+  "note": null,
+  "members": [
+   {
+    "title": "Ratcatcher",
+    "year": 1999,
+    "tmdb": 29698
+   },
+   {
+    "title": "Morvern Callar",
+    "year": 2002,
+    "tmdb": 18602
+   },
+   {
+    "title": "We Need to Talk About Kevin",
+    "year": 2011,
+    "tmdb": 71859
+   },
+   {
+    "title": "You Were Never Really Here",
+    "year": 2017,
+    "tmdb": 398181
+   },
+   {
+    "title": "Die My Love",
+    "year": 2025,
+    "tmdb": 1033148
+   }
+  ]
+ },
+ {
+  "name": "Andrew Stanton",
+  "kind": "director",
+  "sort_title": "zzAndrew Stanton",
+  "basis": "TSPDT 21st-century Top 100 #71",
+  "note": null,
+  "members": [
+   {
+    "title": "Finding Nemo",
+    "year": 2003,
+    "tmdb": 12
+   },
+   {
+    "title": "WALL·E",
+    "year": 2008,
+    "tmdb": 10681
+   },
+   {
+    "title": "Finding Dory",
+    "year": 2016,
+    "tmdb": 127380
+   },
+   {
+    "title": "In the Blink of an Eye",
+    "year": 2026,
+    "tmdb": 1032892
+   },
+   {
+    "title": "Toy Story 5",
+    "year": 2026,
+    "tmdb": 1084244
+   }
+  ]
+ },
+ {
+  "name": "Kathryn Bigelow",
+  "kind": "director",
+  "sort_title": "zzKathryn Bigelow",
+  "basis": "TSPDT 21st-century Top 100 #89; TSPDT Top 250 #221",
+  "note": null,
+  "members": [
+   {
+    "title": "Point Break",
+    "year": 1991,
+    "tmdb": 1089
+   },
+   {
+    "title": "The Hurt Locker",
+    "year": 2008,
+    "tmdb": 12162
+   },
+   {
+    "title": "Zero Dark Thirty",
+    "year": 2012,
+    "tmdb": 97630
+   },
+   {
+    "title": "Detroit",
+    "year": 2017,
+    "tmdb": 407448
+   },
+   {
+    "title": "A House of Dynamite",
+    "year": 2025,
+    "tmdb": 1290159
+   }
+  ]
+ },
+ {
+  "name": "The Wachowskis",
+  "kind": "director",
+  "sort_title": "zzWachowskis",
+  "basis": "TSPDT Top 250 #192",
+  "note": null,
+  "members": [
+   {
+    "title": "Bound",
+    "year": 1996,
+    "tmdb": 9303
+   },
+   {
+    "title": "The Matrix",
+    "year": 1999,
+    "tmdb": 603
+   },
+   {
+    "title": "The Matrix Reloaded",
+    "year": 2003,
+    "tmdb": 604
+   },
+   {
+    "title": "The Matrix Revolutions",
+    "year": 2003,
+    "tmdb": 605
+   },
+   {
+    "title": "The Matrix Resurrections",
+    "year": 2021,
+    "tmdb": 624860
+   }
+  ]
+ },
+ {
+  "name": "Joachim Trier",
+  "kind": "director",
+  "sort_title": "zzJoachim Trier",
+  "basis": "Cannes Grand Prix 2025 (Sentimental Value)",
+  "note": null,
+  "members": [
+   {
+    "title": "Oslo, August 31st",
+    "year": 2011,
+    "tmdb": 75233
+   },
+   {
+    "title": "Louder Than Bombs",
+    "year": 2015,
+    "tmdb": 157827
+   },
+   {
+    "title": "Thelma",
+    "year": 2017,
+    "tmdb": 401898
+   },
+   {
+    "title": "The Worst Person in the World",
+    "year": 2021,
+    "tmdb": 660120
+   },
+   {
+    "title": "Sentimental Value",
+    "year": 2025,
+    "tmdb": 1124566
+   }
+  ]
+ },
+ {
+  "name": "Steve McQueen",
+  "kind": "director",
+  "sort_title": "zzSteve McQueen",
+  "basis": "TSPDT 21st-century Top 100 #35",
+  "note": null,
+  "members": [
+   {
+    "title": "Hunger",
+    "year": 2008,
+    "tmdb": 10360
+   },
+   {
+    "title": "Shame",
+    "year": 2011,
+    "tmdb": 76025
+   },
+   {
+    "title": "12 Years a Slave",
+    "year": 2013,
+    "tmdb": 76203
+   },
+   {
+    "title": "Blitz",
+    "year": 2024,
+    "tmdb": 896151
+   }
+  ]
+ },
+ {
+  "name": "Gus Van Sant",
+  "kind": "director",
+  "sort_title": "zzGus Van Sant",
+  "basis": "TSPDT 21st-century Top 100 #43; TSPDT Top 250 #162",
+  "note": null,
+  "members": [
+   {
+    "title": "My Own Private Idaho",
+    "year": 1991,
+    "tmdb": 468
+   },
+   {
+    "title": "Good Will Hunting",
+    "year": 1997,
+    "tmdb": 489
+   },
+   {
+    "title": "Milk",
+    "year": 2008,
+    "tmdb": 10139
+   },
+   {
+    "title": "Dead Man's Wire",
+    "year": 2025,
+    "tmdb": 1263012
+   }
+  ]
+ },
+ {
+  "name": "Gaspar Noé",
+  "kind": "director",
+  "sort_title": "zzGaspar Noe",
+  "basis": "TSPDT 21st-century Top 100 #77",
+  "note": null,
+  "members": [
+   {
+    "title": "Irreversible",
+    "year": 2002,
+    "tmdb": 979
+   },
+   {
+    "title": "Enter the Void",
+    "year": 2009,
+    "tmdb": 34647
+   },
+   {
+    "title": "Love",
+    "year": 2015,
+    "tmdb": 292431
+   },
+   {
+    "title": "Climax",
+    "year": 2018,
+    "tmdb": 507076
+   }
+  ]
+ },
+ {
+  "name": "Chloé Zhao",
+  "kind": "director",
+  "sort_title": "zzChloe Zhao",
+  "basis": "TSPDT 21st-century Top 100 #94",
+  "note": null,
+  "members": [
+   {
+    "title": "Songs My Brothers Taught Me",
+    "year": 2015,
+    "tmdb": 308640
+   },
+   {
+    "title": "Eternals",
+    "year": 2021,
+    "tmdb": 524434
+   },
+   {
+    "title": "Nomadland",
+    "year": 2021,
+    "tmdb": 581734
+   },
+   {
+    "title": "Hamnet",
+    "year": 2025,
+    "tmdb": 858024
+   }
+  ]
+ },
+ {
+  "name": "Sean Baker",
+  "kind": "director",
+  "sort_title": "zzSean Baker",
+  "basis": "Palme d'Or 2024 + Best Director Oscar (Anora)",
+  "note": null,
+  "members": [
+   {
+    "title": "Tangerine",
+    "year": 2015,
+    "tmdb": 308084
+   },
+   {
+    "title": "The Florida Project",
+    "year": 2017,
+    "tmdb": 394117
+   },
+   {
+    "title": "Red Rocket",
+    "year": 2021,
+    "tmdb": 763329
+   },
+   {
+    "title": "Anora",
+    "year": 2024,
+    "tmdb": 1064213
+   }
+  ]
+ },
+ {
+  "name": "Barry Jenkins",
+  "kind": "director",
+  "sort_title": "zzBarry Jenkins",
+  "basis": "TSPDT 21st-century Top 100 #24; TSPDT Top 250 #199",
+  "note": null,
+  "members": [
+   {
+    "title": "Moonlight",
+    "year": 2016,
+    "tmdb": 376867
+   },
+   {
+    "title": "If Beale Street Could Talk",
+    "year": 2018,
+    "tmdb": 465914
+   },
+   {
+    "title": "Mufasa: The Lion King",
+    "year": 2024,
+    "tmdb": 762509
+   }
+  ]
+ },
+ {
+  "name": "David Lean",
+  "kind": "director",
+  "sort_title": "zzDavid Lean",
+  "basis": "TSPDT Top 250 #39",
+  "note": null,
+  "members": [
+   {
+    "title": "Brief Encounter",
+    "year": 1945,
+    "tmdb": 851
+   },
+   {
+    "title": "The Bridge on the River Kwai",
+    "year": 1957,
+    "tmdb": 826
+   },
+   {
+    "title": "Lawrence of Arabia",
+    "year": 1962,
+    "tmdb": 947
+   }
+  ]
+ },
+ {
+  "name": "Roman Polanski",
+  "kind": "director",
+  "sort_title": "zzRoman Polanski",
+  "basis": "TSPDT Top 250 #44",
+  "note": null,
+  "members": [
+   {
+    "title": "Rosemary's Baby",
+    "year": 1968,
+    "tmdb": 805
+   },
+   {
+    "title": "Chinatown",
+    "year": 1974,
+    "tmdb": 829
+   },
+   {
+    "title": "The Pianist",
+    "year": 2002,
+    "tmdb": 423
+   }
+  ]
+ },
+ {
+  "name": "David Cronenberg",
+  "kind": "director",
+  "sort_title": "zzDavid Cronenberg",
+  "basis": "TSPDT 21st-century Top 100 #59; TSPDT Top 250 #93",
+  "note": null,
+  "members": [
+   {
+    "title": "Crash",
+    "year": 1996,
+    "tmdb": 884
+   },
+   {
+    "title": "Crimes of the Future",
+    "year": 2022,
+    "tmdb": 819876
+   },
+   {
+    "title": "The Shrouds",
+    "year": 2025,
+    "tmdb": 970947
+   }
+  ]
+ },
+ {
+  "name": "Edward Yang",
+  "kind": "director",
+  "sort_title": "zzEdward Yang",
+  "basis": "TSPDT Top 250 #66",
+  "note": null,
+  "members": [
+   {
+    "title": "Taipei Story",
+    "year": 1985,
+    "tmdb": 106380
+   },
+   {
+    "title": "A Brighter Summer Day",
+    "year": 1991,
+    "tmdb": 15804
+   },
+   {
+    "title": "Yi Yi",
+    "year": 2000,
+    "tmdb": 25538
+   }
+  ]
+ },
+ {
+  "name": "Alexander Payne",
+  "kind": "director",
+  "sort_title": "zzAlexander Payne",
+  "basis": "TSPDT 21st-century Top 100 #70",
+  "note": null,
+  "members": [
+   {
+    "title": "Election",
+    "year": 1999,
+    "tmdb": 9451
+   },
+   {
+    "title": "Sideways",
+    "year": 2004,
+    "tmdb": 9675
+   },
+   {
+    "title": "The Holdovers",
+    "year": 2023,
+    "tmdb": 840430
+   }
+  ]
+ },
+ {
+  "name": "Kenneth Lonergan",
+  "kind": "director",
+  "sort_title": "zzKenneth Lonergan",
+  "basis": "TSPDT 21st-century Top 100 #73",
+  "note": null,
+  "members": [
+   {
+    "title": "You Can Count on Me",
+    "year": 2000,
+    "tmdb": 14295
+   },
+   {
+    "title": "Margaret",
+    "year": 2011,
+    "tmdb": 44754
+   },
+   {
+    "title": "Manchester by the Sea",
+    "year": 2016,
+    "tmdb": 334541
+   }
+  ]
+ },
+ {
+  "name": "Miloš Forman",
+  "kind": "director",
+  "sort_title": "zzMilos Forman",
+  "basis": "TSPDT Top 250 #85",
+  "note": null,
+  "members": [
+   {
+    "title": "One Flew Over the Cuckoo's Nest",
+    "year": 1975,
+    "tmdb": 510
+   },
+   {
+    "title": "Amadeus",
+    "year": 1984,
+    "tmdb": 279
+   },
+   {
+    "title": "Man on the Moon",
+    "year": 1999,
+    "tmdb": 1850
+   }
+  ]
+ },
+ {
+  "name": "Jacques Demy",
+  "kind": "director",
+  "sort_title": "zzJacques Demy",
+  "basis": "TSPDT Top 250 #92",
+  "note": null,
+  "members": [
+   {
+    "title": "Lola",
+    "year": 1961,
+    "tmdb": 40641
+   },
+   {
+    "title": "The Umbrellas of Cherbourg",
+    "year": 1964,
+    "tmdb": 5967
+   },
+   {
+    "title": "The Young Girls of Rochefort",
+    "year": 1967,
+    "tmdb": 2433
+   }
+  ]
+ },
+ {
+  "name": "John Carpenter",
+  "kind": "director",
+  "sort_title": "zzJohn Carpenter",
+  "basis": "TSPDT Top 250 #105",
+  "note": null,
+  "members": [
+   {
+    "title": "Halloween",
+    "year": 1978,
+    "tmdb": 948
+   },
+   {
+    "title": "The Thing",
+    "year": 1982,
+    "tmdb": 1091
+   },
+   {
+    "title": "Big Trouble in Little China",
+    "year": 1986,
+    "tmdb": 6978
+   }
+  ]
+ },
+ {
+  "name": "Peter Weir",
+  "kind": "director",
+  "sort_title": "zzPeter Weir",
+  "basis": "TSPDT Top 250 #138",
+  "note": null,
+  "members": [
+   {
+    "title": "Dead Poets Society",
+    "year": 1989,
+    "tmdb": 207
+   },
+   {
+    "title": "The Truman Show",
+    "year": 1998,
+    "tmdb": 37165
+   },
+   {
+    "title": "Master and Commander: The Far Side of the World",
+    "year": 2003,
+    "tmdb": 8619
+   }
+  ]
+ },
+ {
+  "name": "Robert Wise",
+  "kind": "director",
+  "sort_title": "zzRobert Wise",
+  "basis": "TSPDT Top 250 #181",
+  "note": null,
+  "members": [
+   {
+    "title": "West Side Story",
+    "year": 1961,
+    "tmdb": 1725
+   },
+   {
+    "title": "The Sound of Music",
+    "year": 1965,
+    "tmdb": 15121
+   },
+   {
+    "title": "Star Trek: The Motion Picture",
+    "year": 1979,
+    "tmdb": 152
+   }
+  ]
+ },
+ {
+  "name": "Elaine May",
+  "kind": "director",
+  "sort_title": "zzElaine May",
+  "basis": "Honorary Academy Award 2022; Criterion editions",
+  "note": null,
+  "members": [
+   {
+    "title": "A New Leaf",
+    "year": 1971,
+    "tmdb": 36850
+   },
+   {
+    "title": "The Heartbreak Kid",
+    "year": 1972,
+    "tmdb": 40687
+   },
+   {
+    "title": "Mikey and Nicky",
+    "year": 1976,
+    "tmdb": 59143
+   }
+  ]
+ },
+ {
+  "name": "Julia Ducournau",
+  "kind": "director",
+  "sort_title": "zzJulia Ducournau",
+  "basis": "Palme d'Or 2021 (Titane)",
+  "note": null,
+  "members": [
+   {
+    "title": "Raw",
+    "year": 2017,
+    "tmdb": 393519
+   },
+   {
+    "title": "Titane",
+    "year": 2021,
+    "tmdb": 630240
+   },
+   {
+    "title": "Alpha",
+    "year": 2025,
+    "tmdb": 1284460
+   }
+  ]
+ },
+ {
+  "name": "Masaki Kobayashi",
+  "kind": "director",
+  "sort_title": "zzMasaki Kobayashi",
+  "basis": "Cannes Jury Prize 1963 (Harakiri)",
+  "note": null,
+  "members": [
+   {
+    "title": "The Human Condition II: Road to Eternity",
+    "year": 1959,
+    "tmdb": 34528
+   },
+   {
+    "title": "The Human Condition III: A Soldier's Prayer",
+    "year": 1961,
+    "tmdb": 34530
+   },
+   {
+    "title": "Harakiri",
+    "year": 1962,
+    "tmdb": 14537
+   }
+  ]
+ },
+ {
+  "name": "Pablo Larraín",
+  "kind": "director",
+  "sort_title": "zzPablo Larrain",
+  "basis": "Venice Best Screenplay 2016 (Jackie); Berlin Grand Jury Prize 2015 (The Club)",
+  "note": null,
+  "members": [
+   {
+    "title": "Jackie",
+    "year": 2016,
+    "tmdb": 376866
+   },
+   {
+    "title": "Spencer",
+    "year": 2021,
+    "tmdb": 716612
+   },
+   {
+    "title": "Maria",
+    "year": 2024,
+    "tmdb": 1038263
+   }
+  ]
+ },
+ {
+  "name": "Satoshi Kon",
+  "kind": "director",
+  "sort_title": "zzSatoshi Kon",
+  "basis": "Venice competition 2006 (Paprika); Perfect Blue canonised",
+  "note": null,
+  "members": [
+   {
+    "title": "Perfect Blue",
+    "year": 1997,
+    "tmdb": 10494
+   },
+   {
+    "title": "Tokyo Godfathers",
+    "year": 2003,
+    "tmdb": 13398
+   },
+   {
+    "title": "Paprika",
+    "year": 2006,
+    "tmdb": 4977
+   }
+  ]
+ }
+]
