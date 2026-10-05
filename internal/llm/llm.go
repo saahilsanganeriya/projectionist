@@ -35,11 +35,10 @@ type Client struct {
 // ---- Messages ----
 
 type Request struct {
-	Model        string        `json:"model"`
-	MaxTokens    int           `json:"max_tokens"`
-	System       string        `json:"system,omitempty"`
-	Messages     []Message     `json:"messages"`
-	OutputConfig *OutputConfig `json:"output_config,omitempty"`
+	Model     string    `json:"model"`
+	MaxTokens int       `json:"max_tokens"`
+	System    string    `json:"system,omitempty"`
+	Messages  []Message `json:"messages"`
 }
 
 type Message struct {
@@ -57,17 +56,6 @@ type ImageSource struct {
 	Type      string `json:"type"`
 	MediaType string `json:"media_type"`
 	Data      string `json:"data"`
-}
-
-// OutputConfig.Format constrains the answer to a JSON schema (structured outputs; every object needs
-// "additionalProperties": false).
-type OutputConfig struct {
-	Format *Format `json:"format,omitempty"`
-}
-
-type Format struct {
-	Type   string          `json:"type"` // "json_schema"
-	Schema json.RawMessage `json:"schema"`
 }
 
 func Text(s string) Block { return Block{Type: "text", Text: s} }

@@ -33,6 +33,7 @@ var pilotKeys = []string{"movie:tmdb-422", "movie:tmdb-389", "movie:tmdb-147", "
 	"season:tmdb-125935:2", "season:tmdb-90669:1"}
 
 func TestPilotGate(t *testing.T) {
+	t.Logf("gate run %s", os.Getenv("POSTERS_GATE_RUN")) // a new value per run keeps go test from replaying a cached result
 	dir := os.Getenv("POSTERS_GATE_DIR")
 	if dir == "" {
 		t.Fatal("POSTERS_GATE_DIR unset")

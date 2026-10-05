@@ -75,10 +75,10 @@ func answer(req llm.Request) llm.Response {
 		}
 		if b.Type == "image" {
 			raw, _ := base64.StdEncoding.DecodeString(b.Source.Data)
-			scores = append(scores, fmt.Sprintf(`{"letter":%q,"score":%d}`, label, scoreOf(raw)))
+			scores = append(scores, fmt.Sprintf(`%q: %d`, label, scoreOf(raw)))
 		}
 	}
-	return llm.Response{Content: []llm.Block{llm.Text(`{"scores":[` + strings.Join(scores, ",") + `],"reason":"red wins"}`)},
+	return llm.Response{Content: []llm.Block{llm.Text(`{"scores": {` + strings.Join(scores, ", ") + `}, "reason": "red wins"} {"extra": 1}`)},
 		Usage: llm.Usage{InputTokens: 1000, OutputTokens: 100}}
 }
 

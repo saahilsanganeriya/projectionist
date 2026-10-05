@@ -30,15 +30,8 @@ and "premieres" or "now streaming" lines; TV network or streaming-service logos;
 or the title's own; watermarks; blurry, stretched or badly cropped images; art for a different title; and, for a
 season, art for the complete series or another season instead of this one.
 
-Score near-duplicates (the same art cropped, resized or recoloured) the same. The reason is one clause of at most
-15 words on why the best candidate wins.`
-
-// answerSchema is the structured output every judge call must return.
-var answerSchema = json.RawMessage(`{"type":"object","properties":{` +
-	`"scores":{"type":"array","items":{"type":"object","properties":{` +
-	`"letter":{"type":"string","enum":["A","B","C","D","E","F"]},"score":{"type":"integer"}},` +
-	`"required":["letter","score"],"additionalProperties":false}},` +
-	`"reason":{"type":"string"}},"required":["scores","reason"],"additionalProperties":false}`)
+Score near-duplicates (the same art cropped, resized or recoloured) the same. Answer with JSON only, in exactly this
+shape: {"scores": {"A": 7, "B": 4}, "reason": "<at most 15 words on why the best one wins>"}`
 
 // Verdict is the decision for one candidate set; a different set (another source, a new poster) is judged again.
 type Verdict struct {
@@ -170,7 +163,7 @@ func (r *run) request(ctx context.Context, model string, it *row) (llm.Request, 
 	what := map[kind]string{movie: "MOVIE", show: "TV SHOW", season: "TV SEASON"}[t.Kind]
 	head := fmt.Sprintf("%s: %s (%d). %d candidate posters follow.", what, t.Name, t.Year, len(it.Cands))
 	content := []llm.Block{llm.Text(head)}
-	tokens := (len(systemPrompt)+len(head)+40)/3 + 400 // text at ≤3 chars a token, plus the schema's overhead
+	tokens := (len(systemPrompt)+len(head)+40)/3 + 100 // text at ≤3 chars a token, plus the message framing
 	for li, ci := range order(t.Key, len(it.Cands)) {
 		c := it.Cands[ci]
 		thumb, err := r.thumb(ctx, c)
@@ -181,11 +174,8 @@ func (r *run) request(ctx context.Context, model string, it *row) (llm.Request, 
 		tokens += ((c.W + 27) / 28) * ((c.H + 27) / 28)
 	}
 	content = append(content, llm.Text("Score every candidate."))
-	return llm.Request{
-		Model: model, MaxTokens: r.opt.MaxTokens, System: systemPrompt,
-		Messages:     []llm.Message{{Role: "user", Content: content}},
-		OutputConfig: &llm.OutputConfig{Format: &llm.Format{Type: "json_schema", Schema: answerSchema}},
-	}, tokens, nil
+	return llm.Request{Model: model, MaxTokens: r.opt.MaxTokens, System: systemPrompt,
+		Messages: []llm.Message{{Role: "user", Content: content}}}, tokens, nil
 }
 
 func (r *run) reservation(model string, inputTokens int, batch bool) float64 {
@@ -252,19 +242,16 @@ func parseAnswer(text string) (map[string]float64, string, error) {
 		return nil, "", fmt.Errorf("no JSON in %q", clip(text))
 	}
 	var a struct {
-		Scores []struct {
-			Letter string  `json:"letter"`
-			Score  float64 `json:"score"`
-		} `json:"scores"`
-		Reason string `json:"reason"`
+		Scores map[string]float64 `json:"scores"`
+		Reason string             `json:"reason"`
 	}
 	if err := json.NewDecoder(strings.NewReader(text[i:])).Decode(&a); err != nil {
 		return nil, "", fmt.Errorf("%w in %q", err, clip(text))
 	}
 	out := map[string]float64{}
-	for _, s := range a.Scores {
-		if l := strings.ToUpper(strings.TrimSpace(s.Letter)); len(l) == 1 && strings.Contains(letters, l) {
-			out[l] = s.Score
+	for l, score := range a.Scores {
+		if l = strings.ToUpper(strings.TrimSpace(l)); len(l) == 1 && strings.Contains(letters, l) {
+			out[l] = score
 		}
 	}
 	if len(out) == 0 {
