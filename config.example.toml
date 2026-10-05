@@ -53,3 +53,25 @@ small_kbps      = 20000
 work_dir        = "/volume1/media/.projectionist/remote4k" # same share as the library: publish = one rename
 status_file     = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
 default_section = 4
+
+# The most artistic poster for every movie, show and season, on Jellyfin and Plex; replaces posters/posters.py.
+# Candidates: the owner's poster (pre-rename backup), TMDB (direct) and fanart.tv. Judge: Claude on the owner's own
+# Anthropic key, one vision call per title; a backlog goes through Message Batches (half price). Secrets are files in
+# secrets_dir: tmdb_read_token (or tmdb_api_key), fanart_api_key (optional), anthropic_api_key.
+[stages.posters]
+every              = "6h"
+dry_run            = false
+model              = "haiku:latest"  # the newest model whose id contains "haiku", checked daily
+budget_usd         = 5               # all judge calls ever; a hard stop
+max_tokens         = 400
+batch_min          = 25              # fewer titles to judge than this: the normal API
+batch_size         = 200
+secrets_dir        = "/run/secrets"
+cache_dir          = "/state/posters" # thumbnails
+owner_items        = "/volume1/PlexMediaServer/backups/customizations/items.json"
+owner_posters      = "/volume1/PlexMediaServer/backups/customizations/posters"
+owner_backup_db    = "/volume1/PlexMediaServer/backups/pre-rename-20261005T0328Z/com.plexapp.plugins.library.db" # read once
+plex_movie_section = 4
+plex_tv_section    = 2
+sink_index_every   = "24h"           # one item listing per app per day maps titles to the apps' ids
+mark               = "poster-curator 2026-10" # EXIF ImageDescription on every uploaded image
