@@ -219,15 +219,13 @@ func (p *plexSink) retire(ctx context.Context, keys []string) {
 		}) {
 			return
 		}
-		if !gone && len(found.Metadata) != 1 {
-			continue // an answer that is neither the collection nor a 404 confirms nothing
-		}
-		if !gone && strings.HasPrefix(found.Metadata[0].Summary, summaryMarker) {
+		switch {
+		case gone:
+		case len(found.Metadata) == 0:
+			continue // Plex answers the collection or 404; anything else confirms nothing
+		case strings.HasPrefix(found.Metadata[0].Summary, summaryMarker):
 			if !p.w.write(ctx, "retire "+found.Metadata[0].Title, func(ctx context.Context) error {
-				if err := p.env.Plex.Do(ctx, "DELETE", "/library/collections/"+row.ID); !errors.Is(err, plex.ErrNotFound) {
-					return err
-				}
-				return nil
+				return p.env.Plex.Do(ctx, "DELETE", "/library/collections/"+row.ID)
 			}) {
 				return
 			}
@@ -358,9 +356,8 @@ func (p *plexSink) children(ctx context.Context, key string) ([]string, bool) {
 }
 
 // adoptOrCreate finds the shelf's collection when the state lost track of it, or makes it. A collection with the
-// shelf's title is adopted only when it is provably this stage's: it carries the stage's summary, or — when no
-// other collection holds the title — Plex made it within adoptWindow of a create this stage sent. Any other is
-// the owner's and is left alone.
+// shelf's title is adopted only when it is provably this stage's: it carries the stage's summary, or Plex made it
+// within adoptWindow of a create this stage sent. Any other is the owner's and is left alone.
 func (p *plexSink) adoptOrCreate(ctx context.Context, s shelf, row *sinkRow, colls []plexColl, want []string) *plexColl {
 	db := p.env.Store.DB()
 	if c := p.adoptable(s, row, colls); c != nil {
@@ -405,21 +402,14 @@ func (p *plexSink) adoptOrCreate(ctx context.Context, s shelf, row *sinkRow, col
 	return nil
 }
 
-// adoptable returns the collection that is provably the shelf's: one with its title carrying the stage's summary,
-// else the only one with its title, made in answer to the shelf's pending create.
+// adoptable returns the collection with the shelf's title that is provably the shelf's: it carries the stage's
+// summary, or Plex made it in answer to the shelf's pending create. Plex holds one collection per title, ignoring
+// case (a second create joins the first).
 func (p *plexSink) adoptable(s shelf, row *sinkRow, colls []plexColl) *plexColl {
-	var same []int
 	for i, c := range colls {
-		if !sameTitle(c.Title, s.Title) {
-			continue
-		}
-		if strings.HasPrefix(c.Summary, summaryMarker) {
+		if sameTitle(c.Title, s.Title) && (strings.HasPrefix(c.Summary, summaryMarker) || answersCreate(time.Unix(c.AddedAt, 0), row.IntentAt)) {
 			return &colls[i]
 		}
-		same = append(same, i)
-	}
-	if len(same) == 1 && answersCreate(time.Unix(colls[same[0]].AddedAt, 0), row.IntentAt) {
-		return &colls[same[0]]
 	}
 	return nil
 }

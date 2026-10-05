@@ -214,15 +214,11 @@ func (j *jellyfinSink) retire(ctx context.Context, keys []string) {
 			return
 		}
 		switch {
-		case gone && j.scanning, !gone && b.ID != row.ID:
+		case gone && j.scanning:
 			continue
-		case !gone && strings.HasPrefix(b.Overview, summaryMarker):
-			if !j.w.write(ctx, "retire "+b.Name, func(ctx context.Context) error {
-				if err := j.env.Jellyfin.Delete(ctx, "/Items/"+row.ID); !errors.Is(err, jellyfin.ErrNotFound) {
-					return err
-				}
-				return nil
-			}) {
+		case gone:
+		case strings.HasPrefix(b.Overview, summaryMarker):
+			if !j.w.write(ctx, "retire "+b.Name, func(ctx context.Context) error { return j.env.Jellyfin.Delete(ctx, "/Items/"+row.ID) }) {
 				return
 			}
 			j.retired++
