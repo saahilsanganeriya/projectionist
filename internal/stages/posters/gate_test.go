@@ -23,6 +23,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
+	"projectionist/internal/fake"
 	"projectionist/internal/obs"
 	"projectionist/internal/stage"
 	"projectionist/internal/store"
@@ -64,11 +65,10 @@ budget_usd = 0.10
 `, filepath.Join(dir, "lib/Movies"), filepath.Join(dir, "lib/TV"), `"`+strings.Join(pilotKeys, `", "`)+`"`,
 		filepath.Join(dir, "cache"), filepath.Join(dir, "backup/items.json"), filepath.Join(dir, "backup/posters"),
 		filepath.Join(dir, "backup/plex-backup-extract.db"), api, model)
-	env := &stage.Env{
-		Log: obs.NewLogger(os.Stderr, "text", "info").With("stage", name), Store: st,
-		Now: func() time.Time { return time.Now().UTC() }, Loc: time.UTC,
-		Options: func(v any) error { return decodeTOML(opts, v) },
-	}
+	env := fake.NewEnv(t, nil).Env // fake Plex and Jellyfin: nobody watching, and dry-run uploads nothing
+	env.Log, env.Store = obs.NewLogger(os.Stderr, "text", "info").With("stage", name), st
+	env.Now = func() time.Time { return time.Now().UTC() }
+	env.Options = func(v any) error { return decodeTOML(opts, v) }
 	secrets := map[string]string{"tmdb_read_token": "GATE_TMDB", "fanart_api_key": "GATE_FANART", "anthropic_api_key": "GATE_ANTHROPIC"}
 	s := Stage{Secret: func(n string) (string, error) {
 		if v := os.Getenv(secrets[n]); v != "" {

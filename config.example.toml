@@ -60,7 +60,7 @@ default_section = 4
 # secrets_dir: tmdb_read_token (or tmdb_api_key), fanart_api_key (optional), anthropic_api_key.
 [stages.posters]
 every              = "6h"
-dry_run            = false
+dry_run            = true            # judge only; review posters_items, then set false to upload
 model              = "haiku:latest"  # the newest model whose id contains "haiku", checked daily
 budget_usd         = 5               # all judge calls ever; a hard stop
 max_tokens         = 400

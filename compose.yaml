@@ -50,5 +50,5 @@ secrets:
     file: /volume1/docker/projectionist/secrets/tmdb_read_token
   fanart_api_key:
     file: /volume1/docker/projectionist/secrets/fanart_api_key
-  anthropic_api_key: # the owner's personal key; must exist before the project starts
+  anthropic_api_key: # the owner's personal Anthropic key
     file: /volume1/docker/projectionist/secrets/anthropic_api_key
