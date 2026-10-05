@@ -24,10 +24,12 @@ func newDocker(socket string) *docker {
 }
 
 type containerState struct {
-	Status string `json:"Status"` // running, exited, restarting, paused, ...
-	Health *struct {
-		Status string `json:"Status"` // starting, healthy, unhealthy
-	} `json:"Health"` // nil when the image has no HEALTHCHECK
+	Status string       `json:"Status"` // running, exited, restarting, paused, ...
+	Health *healthState `json:"Health"` // nil when the image has no HEALTHCHECK
+}
+
+type healthState struct {
+	Status string `json:"Status"` // starting, healthy, unhealthy
 }
 
 // judge counts only a running container that Docker calls unhealthy as down. A stopped, paused or restarting one

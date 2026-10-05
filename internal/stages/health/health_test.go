@@ -3,6 +3,7 @@ package health
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -54,22 +55,15 @@ func TestDecide(t *testing.T) {
 
 // Catches: starting a container the owner stopped (or racing Docker's restart policy), and missing "unhealthy".
 func TestDockerJudge(t *testing.T) {
-	health := func(s string) *struct {
-		Status string `json:"Status"`
-	} {
-		return &struct {
-			Status string `json:"Status"`
-		}{s}
-	}
 	cases := []struct {
 		state containerState
 		want  fault
 	}{
-		{containerState{Status: "running", Health: health("unhealthy")}, down},
-		{containerState{Status: "running", Health: health("starting")}, passed},
-		{containerState{Status: "running"}, passed},
-		{containerState{Status: "exited"}, wrong},
-		{containerState{Status: "restarting", Health: health("unhealthy")}, wrong},
+		{containerState{"running", &healthState{"unhealthy"}}, down},
+		{containerState{"running", &healthState{"starting"}}, passed},
+		{containerState{"running", nil}, passed},
+		{containerState{"exited", nil}, wrong},
+		{containerState{"restarting", &healthState{"unhealthy"}}, wrong},
 	}
 	for _, c := range cases {
 		if detail, f := c.state.judge(); f != c.want {
@@ -80,7 +74,8 @@ func TestDockerJudge(t *testing.T) {
 
 // Catches: no restart after K failed runs on a 5xx, the streak not reset by a restart, a second restart inside the
 // cooldown or under a viewer, the restart not recorded before it is sent (a crash could then repeat it), a
-// followed redirect read as the hostname's answer, and results missing from /health and /metrics.
+// followed redirect read as the hostname's answer, results missing from /health and /metrics, and a restart once
+// the container is dropped from restartable.
 func TestRunHealsJellyfin(t *testing.T) {
 	h := fake.NewEnv(t, nil)
 	jfStatus := http.StatusServiceUnavailable
@@ -108,10 +103,9 @@ func TestRunHealsJellyfin(t *testing.T) {
 		restarts = append(restarts, st.LastRestart["jellyfin"])
 		w.WriteHeader(http.StatusNoContent)
 	})
-	h.SetOptions(`docker_socket = "` + serveUnix(t, dockerMux) + `"
-qbittorrent_url = "` + qbit.URL + `"
-[public]
-"` + tunnel.URL + `/" = 302`)
+	opts := "docker_socket = \"" + serveUnix(t, dockerMux) + "\"\nqbittorrent_url = \"" + qbit.URL + "\"\n"
+	public := "[public]\n\"" + tunnel.URL + "/\" = 302\n"
+	h.SetOptions(opts + public)
 
 	run := func() stage.Report {
 		var rep stage.Report
@@ -152,6 +146,43 @@ qbittorrent_url = "` + qbit.URL + `"
 	if !strings.Contains(metrics.String(), `projectionist_health_restarts_total{container="jellyfin",outcome="restarted"} 2`) ||
 		!strings.Contains(metrics.String(), `projectionist_health_up{probe="jellyfin"} 1`) {
 		t.Fatalf("metrics:\n%s", metrics.String())
+	}
+
+	h.SetOptions(opts + "restartable = []\n" + public)
+	h.Now, jfStatus = h.Now.Add(2*time.Hour), http.StatusBadGateway
+	run()
+	run()
+	expect("dropped from restartable", run(), 2, "the container is not in restartable")
+}
+
+// Catches: fail_threshold = 0 accepted; every run would then restart a healthy Jellyfin once per cooldown.
+func TestRefusesZeroThreshold(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	h.SetOptions(`fail_threshold = 0`)
+	if err := (Stage{}).Run(context.Background(), h.Env, &stage.Report{}); err == nil || !strings.Contains(err.Error(), "fail_threshold >= 1") {
+		t.Fatalf("err = %v, want the fail_threshold refusal", err)
+	}
+}
+
+// Catches: a shutdown mid-run recorded as every service failing, which brings the next restart forward.
+func TestShutdownMidRunIsNotAFailure(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	h.SetOptions(`docker_socket = "/nonexistent.sock"
+qbittorrent_url = "http://127.0.0.1:1"`)
+	ctx, cancel := context.WithCancel(context.Background())
+	h.Jellyfin.HandleFunc("GET", "/System/Info/Public", func(http.ResponseWriter, *http.Request) { cancel() }) // SIGTERM lands
+	err := (Stage{}).Run(ctx, h.Env, &stage.Report{})
+	if found, _ := h.Env.Store.GetJSON(context.Background(), name, "state", &State{}); !errors.Is(err, context.Canceled) || found {
+		t.Fatalf("err = %v, state stored = %v; want context.Canceled and nothing stored", err, found)
+	}
+}
+
+// Catches: a service that accepts the connection and never answers hanging the stage, and with it every later
+// health run (the scheduler never starts a second copy of a stage).
+func TestHungProbeTimesOut(t *testing.T) {
+	hung := probe{"hung", "jellyfin", func(ctx context.Context) (string, fault) { <-ctx.Done(); return ctx.Err().Error(), down }}
+	if r := runProbes(context.Background(), time.Millisecond, []probe{hung}); r[0].fault != down {
+		t.Fatalf("result %+v", r[0])
 	}
 }
 
