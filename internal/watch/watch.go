@@ -61,14 +61,17 @@ type Event struct {
 	Rating     *float64
 }
 
-// State is one person's state for one item.
+// State is one person's state for one item. A field nothing has said anything about is not known: a resume point
+// that only Plex pushed says nothing about whether the item was ever played, so its Played=false is no "unplayed".
 type State struct {
-	Played     bool
-	Plays      int
-	PositionMs int64
-	Rating     *float64
-	At         time.Time // when the newest event that changed the state happened
-	Source     string    // that event's source, i.e. who wrote last
+	Played        bool
+	Plays         int
+	PositionMs    int64
+	Rating        *float64
+	KnowsPlay     bool      // Played and Plays come from an event (Finished or Snapshot)
+	KnowsPosition bool      // PositionMs comes from an event (any kind but Rated)
+	At            time.Time // when the newest event that changed the state happened
+	Source        string    // that event's source, i.e. who wrote last
 }
 
 // Apply folds e into s. An event that changes nothing (an app echoing a state it was given) leaves At and Source
@@ -77,11 +80,11 @@ func (s State) Apply(e Event) State {
 	n := s
 	switch e.Kind {
 	case Finished:
-		n.Played, n.Plays, n.PositionMs = true, s.Plays+1, 0
+		n.Played, n.Plays, n.PositionMs, n.KnowsPlay, n.KnowsPosition = true, s.Plays+1, 0, true, true
 	case Stopped:
-		n.PositionMs = e.PositionMs
+		n.PositionMs, n.KnowsPosition = e.PositionMs, true
 	case Snapshot:
-		n.Played, n.Plays, n.PositionMs = e.Played, e.Plays, e.PositionMs
+		n.Played, n.Plays, n.PositionMs, n.KnowsPlay, n.KnowsPosition = e.Played, e.Plays, e.PositionMs, true, true
 	}
 	if e.Rating != nil || e.Kind == Rated {
 		n.Rating = e.Rating
@@ -93,9 +96,10 @@ func (s State) Apply(e Event) State {
 	return n
 }
 
-// Same compares the watch state only, not who wrote it or when.
+// Same compares the watch state and what is known of it, not who wrote it or when.
 func (s State) Same(o State) bool {
 	return s.Played == o.Played && s.Plays == o.Plays && s.PositionMs == o.PositionMs &&
+		s.KnowsPlay == o.KnowsPlay && s.KnowsPosition == o.KnowsPosition &&
 		(s.Rating == nil) == (o.Rating == nil) && (s.Rating == nil || *s.Rating == *o.Rating)
 }
 
