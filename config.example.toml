@@ -53,3 +53,15 @@ small_kbps      = 20000
 work_dir        = "/volume1/media/.projectionist/remote4k" # same share as the library: publish = one rename
 status_file     = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
 default_section = 4
+
+# Read-only library audit: names outside the scheme, unreadable videos, orphan sidecars, identical copies, episodes
+# without English subtitles. Writes <root>/_audit.txt and alerts when a category grows; never moves or deletes.
+[stages.audit]
+every         = "24h"
+window        = "04:00-07:00"
+root          = "/volume1/media"          # holds Movies/ and TV/
+report        = "/volume1/media/_audit.txt"
+max_listed    = 50                             # examples per category in the report
+settle        = "15m"                          # younger files may still be arriving: judged next run
+probe_workers = 2                              # ffprobes on cache misses, only while no guest is watching
+quiet         = ["missing_english_subs"]       # grows with every download until the subtitles stage catches up

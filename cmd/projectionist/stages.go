@@ -2,6 +2,7 @@ package main
 
 import (
 	"projectionist/internal/stage"
+	"projectionist/internal/stages/audit"
 	"projectionist/internal/stages/gpuguard"
 	"projectionist/internal/stages/remote4k"
 )
@@ -10,6 +11,7 @@ import (
 // One line per stage, kept sorted, so parallel branches merge cleanly.
 func stages() []stage.Stage {
 	return []stage.Stage{
+		audit.Stage{},
 		gpuguard.Stage{},
 		remote4k.Stage{},
 	}
