@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -27,6 +28,7 @@ import (
 	"projectionist/internal/fake"
 	"projectionist/internal/llm"
 	"projectionist/internal/stage"
+	"projectionist/internal/tmdb"
 )
 
 func init() { FetchDelay, llm.RetryDelay = zeroDelay, zeroDelay }
@@ -614,6 +616,17 @@ func TestExampleConfig(t *testing.T) {
 	if err != nil || sched.Enabled || len(cfg.LLM.Policy) == 0 || before != "sonnet:latest" || after != "haiku:latest" {
 		t.Fatalf("posters enabled=%v (%v); policy %v gives %q then %q; want disabled, sonnet:latest until 2026-11-05T08:00Z, then haiku:latest",
 			sched.Enabled, err, cfg.LLM.Policy, before, after)
+	}
+}
+
+// Catches: a missing TMDB key logged as one warning per title (3,000 of them) while the run reports success, instead
+// of failing the run, which /health shows.
+func TestMissingKeyStopsRun(t *testing.T) {
+	w := newWorld(t, "dry_run = true\n")
+	w.h.Env.TMDB = tmdb.New(tmdb.Options{ReadTokenFile: filepath.Join(t.TempDir(), "absent"), BaseURL: w.h.TMDB.URL}, nil)
+	err := Stage{}.Run(context.Background(), w.h.Env, &stage.Report{})
+	if !errors.Is(err, tmdb.ErrNoCredentials) {
+		t.Fatalf("run with no TMDB key: %v, want tmdb.ErrNoCredentials", err)
 	}
 }
 
