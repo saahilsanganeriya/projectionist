@@ -94,7 +94,8 @@ func newLibrary(t *testing.T) *library4test {
 			{"id":11,"title":"Mystery","release_date":"2002-05-01"}]}`,
 		"/search/tv?Show": `{"results":[{"id":77,"name":"Show","original_name":"Show","first_air_date":"2019-01-01"}]}`,
 		"/tv/77":          `{"id":77,"name":"Show","original_name":"Show","first_air_date":"2019-01-01","seasons":[{"season_number":1}]}`,
-		"/tv/77/season/1": `{"episodes":[{"season_number":1,"episode_number":1,"name":"Pilot"},{"season_number":1,"episode_number":2,"name":"Second"}]}`,
+		"/tv/77/season/1": `{"episodes":[{"season_number":1,"episode_number":1,"name":"Pilot"},{"season_number":1,"episode_number":2,"name":"Second"},
+			{"season_number":1,"episode_number":3,"name":"Wait for It"}]}`,
 	})
 	l := &library4test{h: h, root: root, undoLog: filepath.Join(root, ".projectionist", "rename", "undo.tsv"), review: filepath.Join(root, "_needs-review.txt")}
 	h.SetOptions(fmt.Sprintf(`root = %q
@@ -115,6 +116,8 @@ aligned_log = ""`, root, l.undoLog, l.review, keyFile, srv.URL))
 	write(t, filepath.Join(movies, "Mystery.2001.mkv"), "unmatched")
 	write(t, filepath.Join(movies, "Unknown.Thing.2001", "Unknown.Thing.2001.mkv"), "unmatched")
 	write(t, filepath.Join(movies, "Unknown.Thing.2001", "Unknown.Thing.2001.nfo"), "stays with its video")
+	// already named; TMDB spells its title differently, which must not rename it
+	write(t, filepath.Join(tv, "Show (2019) {tmdb-77}", "Season 01", "Show (2019) - S01E03 - Wait For It.mkv"), "ep3")
 	write(t, filepath.Join(tv, "Show.S01.1080p.WEB-GRP", "Show.S01E01.1080p.WEB-GRP.mkv"), "ep1")
 	write(t, filepath.Join(tv, "Show.S01.1080p.WEB-GRP", "Show.S01E02.1080p.WEB-GRP.mkv"), "ep2")
 	return l
@@ -131,8 +134,8 @@ func (l *library4test) run(t *testing.T) stage.Report {
 
 // Catches, end to end: a new film or show not reaching its scheme name (TMDB identity, episode titles, subtitle
 // language from its text, junk archived, the emptied folder pruned), an ambiguous TMDB match being renamed instead of
-// listed for review, junk archived out of a folder whose video waits for review, Jellyfin not told, a second run
-// changing anything, and undo not restoring the tree exactly.
+// listed for review, junk archived out of a folder whose video waits for review, an episode already named being
+// renamed to TMDB's spelling, Jellyfin not told, a second run changing anything, and undo not restoring the tree.
 func TestRunNewArrivalsThenUndo(t *testing.T) {
 	l := newLibrary(t)
 	before := tree(t, l.root)
@@ -147,6 +150,7 @@ func TestRunNewArrivalsThenUndo(t *testing.T) {
 		"Movies/Unknown.Thing.2001/Unknown.Thing.2001.nfo",
 		"TV/Show (2019) {tmdb-77}/Season 01/Show (2019) - S01E01 - Pilot.mkv",
 		"TV/Show (2019) {tmdb-77}/Season 01/Show (2019) - S01E02 - Second.mkv",
+		"TV/Show (2019) {tmdb-77}/Season 01/Show (2019) - S01E03 - Wait For It.mkv",
 		"_archive/junk/Movies/Heat.1995.1080p.BluRay.x264-GRP/SITEA.txt",
 		"_needs-review.txt",
 	}
@@ -183,7 +187,7 @@ func TestRunNewArrivalsThenUndo(t *testing.T) {
 	if strings.Join(restored, "\n") != strings.Join(before, "\n") {
 		t.Fatalf("after undo:\n%s\nwant:\n%s", strings.Join(restored, "\n"), strings.Join(before, "\n"))
 	}
-	for _, d := range []string{"Movies/Heat (1995) {tmdb-949}", "TV/Show (2019) {tmdb-77}", "_archive/junk"} {
+	for _, d := range []string{"Movies/Heat (1995) {tmdb-949}", "_archive/junk"} {
 		if _, err := os.Stat(filepath.Join(l.root, d)); !os.IsNotExist(err) {
 			t.Errorf("%s still exists after undo", d)
 		}
