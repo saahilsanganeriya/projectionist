@@ -69,9 +69,10 @@ func TestWants(t *testing.T) {
 	if _, missing, _, _ := f.wants(); len(missing) != 0 {
 		t.Errorf("newer crawl kept the export's Okja: %+v", missing)
 	}
-	f.watchlist.At = exportAt.Add(-time.Hour)
-	if _, missing, _, _ := f.wants(); len(missing) != 1 {
-		t.Errorf("older crawl replaced the newer export: %+v", missing)
+	f.watchlist = &watchlistSnapshot{At: exportAt.Add(-time.Hour), Films: []gridFilm{{Slug: "stale", Title: "Stale", Year: 1999}}}
+	f.films["stale"] = filmFacts{1111, "movie"}
+	if _, missing, _, _ := f.wants(); !reflect.DeepEqual(missing, []missingFilm{{Title: "Okja", Year: 2017, Slug: "okja"}}) {
+		t.Errorf("an older crawl was used over the newer export: %+v", missing)
 	}
 }
 
