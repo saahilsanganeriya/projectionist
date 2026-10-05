@@ -602,12 +602,20 @@ func TestUnreadablePagesChangeNothing(t *testing.T) {
 
 // Catches: a retired shelf's record forgotten while its collection still exists — because this run's listing left it
 // out (Plex), or because Jellyfin, mid-scan, answered 404 for a BoxSet it still holds — after which nothing deletes
-// the orphan, and a list gone private stays on a library every shared account sees.
+// the orphan, and a list gone private stays on a library every shared account sees; and the record of a create
+// never confirmed forgotten, though nothing confirmed its result gone.
 func TestRetireForgetsOnlyConfirmedGone(t *testing.T) {
 	w := newWorld(t)
 	w.run(t)
 	px, jf := w.plexColl(t, "nolan · Letterboxd"), w.boxSet(t, "nolan · Letterboxd")
 	delete(w.lb.pages, "/saahilsan/list/nolan/") // made private
+	// a canon list dropped from the config whose create was refused: no collection, no id to confirm anything by
+	const unconfirmed = "https://letterboxd.com/x/list/dropped/"
+	for _, app := range []string{"plex", "jellyfin"} {
+		if err := putRow(context.Background(), w.h.Env.Store.DB(), app, unconfirmed, sinkRow{IntentAt: w.clock.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	w.px.hidden[px.key] = true
 	w.jf.hidden[jf.id], w.jf.scanning = true, "task"
 	w.clock.Sleep(context.Background(), 21*time.Hour) // past own_refresh
@@ -621,6 +629,11 @@ func TestRetireForgetsOnlyConfirmedGone(t *testing.T) {
 	if b := w.jf.set(jf.id); b != nil {
 		t.Errorf("jellyfin BoxSet of a private list left: %+v", b)
 	}
+	var n int
+	w.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM lists_sinks WHERE list=?`, unconfirmed).Scan(&n)
+	if n != 2 {
+		t.Errorf("records of a create never confirmed: %d left, want 2 (kept)", n)
+	}
 }
 
 // Catches: adoption by intent that is unbounded or skips the title check — a collection the owner (or the
@@ -632,25 +645,34 @@ func TestAdoptsOnlyItsOwnCreate(t *testing.T) {
 	ctx := context.Background()
 	t.Run("lost answer adopted on the next run", func(t *testing.T) {
 		w := newWorld(t)
-		w.jf.loseOn = "POST /Collections" // the first create, Top's: Jellyfin makes it, the answer never arrives
+		// the first create in each app, Top's: the app makes it, the answer never arrives
+		w.px.loseOn, w.jf.loseOn = "POST /library/collections", "POST /Collections"
 		w.run(t)
-		w.jf.loseOn = ""
+		w.px.loseOn, w.jf.loseOn = "", ""
 		w.clock.Sleep(ctx, 24*time.Hour)
 		w.run(t)
 		w.clock.Sleep(ctx, time.Hour)
-		before := len(w.jf.writes())
+		pxBefore, jfBefore := len(w.px.writes()), len(w.jf.writes())
 		w.run(t)
-		if got := w.jf.writes()[before:]; len(got) > 0 {
-			t.Errorf("third run wrote to Jellyfin: %v", got)
+		if got := append(w.px.writes()[pxBefore:], w.jf.writes()[jfBefore:]...); len(got) > 0 {
+			t.Errorf("third run wrote: %v", got)
 		}
-		n := 0
-		for _, s := range w.jf.sets {
-			if strings.HasPrefix(strings.ToLower(s.name), "top") {
-				n++
+		px, jf := 0, 0
+		for _, c := range w.px.colls {
+			if strings.HasPrefix(strings.ToLower(c.title), "top") {
+				px++
 			}
 		}
-		if top := w.boxSet(t, "Top"); n != 1 || !strings.HasPrefix(top.overview, summaryMarker) {
-			t.Errorf("%d Top BoxSets; Top overview %q", n, top.overview)
+		for _, s := range w.jf.sets {
+			if strings.HasPrefix(strings.ToLower(s.name), "top") {
+				jf++
+			}
+		}
+		if top := w.plexColl(t, "Top"); px != 1 || !strings.HasPrefix(top.summary, summaryMarker) {
+			t.Errorf("%d Top collections; Top summary %q", px, top.summary)
+		}
+		if top := w.boxSet(t, "Top"); jf != 1 || !strings.HasPrefix(top.overview, summaryMarker) {
+			t.Errorf("%d Top BoxSets; Top overview %q", jf, top.overview)
 		}
 	})
 	t.Run("a collection made a day later is never adopted", func(t *testing.T) {

@@ -13,8 +13,7 @@ import (
 
 // Catches: a package that talks to Letterboxd (a string naming letterboxd.com or boxd.it) with its own pacing instead
 // of waiting on Shared — two such stages in one process would together send faster than one request per 2 s. It
-// reads every non-test Go file of the module, so a stage merged without the shared limiter fails here. Struct tags
-// (XML namespaces) are not requests.
+// reads every non-test Go file of the module, so a stage merged without the shared limiter fails here.
 func TestEveryLetterboxdClientWaitsOnShared(t *testing.T) {
 	host := regexp.MustCompile(`letterboxd\.com|boxd\.it`)
 	names, waits := map[string]bool{}, map[string]bool{} // package dir → names a host, uses lbpace.Shared
@@ -31,13 +30,11 @@ func TestEveryLetterboxdClientWaitsOnShared(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		dir, tags := filepath.Dir(path), map[*ast.BasicLit]bool{}
+		dir := filepath.Dir(path)
 		ast.Inspect(f, func(n ast.Node) bool {
 			switch n := n.(type) {
-			case *ast.Field:
-				tags[n.Tag] = true
 			case *ast.BasicLit:
-				if n.Kind == token.STRING && !tags[n] && host.MatchString(n.Value) {
+				if n.Kind == token.STRING && host.MatchString(n.Value) {
 					names[dir] = true
 				}
 			case *ast.SelectorExpr:

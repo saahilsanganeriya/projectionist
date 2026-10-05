@@ -60,6 +60,7 @@ type fakePlex struct {
 	failAt  int             // answer 500 to section listings starting here (0 = never)
 	hold    chan struct{}   // when set, every request waits until it is closed: a Plex too busy to answer
 	failOn  string          // answer 500 to requests starting with this "METHOD /path"
+	loseOn  string          // like failOn, but the request is applied first: its answer is lost
 	hidden  map[string]bool // collections left out of the section's collections listing
 }
 
@@ -289,6 +290,11 @@ func newFakePlex(t *testing.T, movies map[string]int, now func() int64) *fakePle
 		}
 		if p.fail || (p.failOn != "" && strings.HasPrefix(r.Method+" "+r.URL.Path, p.failOn)) {
 			http.Error(w, "busy", http.StatusInternalServerError)
+			return
+		}
+		if p.loseOn != "" && strings.HasPrefix(r.Method+" "+r.URL.Path, p.loseOn) {
+			mux.ServeHTTP(httptest.NewRecorder(), r)
+			http.Error(w, "timeout", http.StatusGatewayTimeout)
 			return
 		}
 		mux.ServeHTTP(w, r)
