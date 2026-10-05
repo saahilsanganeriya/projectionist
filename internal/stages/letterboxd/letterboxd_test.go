@@ -3,6 +3,7 @@ package letterboxd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,17 +28,20 @@ type fakeLetterboxd struct {
 	mu        sync.Mutex
 	hits      map[string]int
 	challenge map[string]bool // paths answered with Cloudflare's 403
+	feed      []byte          // the RSS body, served with ETag etag
+	etag      string
 }
 
 func newLetterboxd(t *testing.T) *fakeLetterboxd {
 	lids := map[string]string{"qTKY": "licorice-pizza", "aAst": "ad-astra-2019", "okja1": "okja"}
 	tmdb := map[string]int{"the-ring-2002": 565, "what-happened-was": 18, "okja": 387426, "primetime-2026": 999001, "licorice-pizza": 718032}
-	files := map[string]string{"/saahilsan/rss/": "rss.xml", "/saahilsan/watchlist/": "watchlist.html", "/saahilsan/films/": "films.html"}
-	lb := &fakeLetterboxd{hits: map[string]int{}, challenge: map[string]bool{}}
+	files := map[string]string{"/saahilsan/watchlist/": "watchlist.html", "/saahilsan/films/": "films.html"}
+	lb := &fakeLetterboxd{hits: map[string]int{}, challenge: map[string]bool{}, feed: fixture(t, "rss.xml"), etag: `"v1"`}
 	lb.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lb.mu.Lock()
 		lb.hits[r.URL.Path]++
 		blocked := lb.challenge[r.URL.Path]
+		feed, etag := lb.feed, lb.etag
 		lb.mu.Unlock()
 		if !strings.Contains(r.Header.Get("User-Agent"), "Mozilla/5.0") {
 			http.Error(w, "no UA", http.StatusBadRequest)
@@ -46,8 +50,11 @@ func newLetterboxd(t *testing.T) *fakeLetterboxd {
 		switch slug := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/film/"), "/"); {
 		case blocked:
 			http.Error(w, "<title>Just a moment...</title>", http.StatusForbidden)
-		case r.URL.Path == "/saahilsan/rss/" && r.Header.Get("If-None-Match") == `"v1"`:
+		case r.URL.Path == "/saahilsan/rss/" && r.Header.Get("If-None-Match") == etag:
 			w.WriteHeader(http.StatusNotModified)
+		case r.URL.Path == "/saahilsan/rss/":
+			w.Header().Set("ETag", etag)
+			w.Write(feed)
 		case files[r.URL.Path] != "":
 			w.Header().Set("ETag", `"v1"`)
 			w.Write(fixture(t, files[r.URL.Path]))
@@ -63,6 +70,19 @@ func newLetterboxd(t *testing.T) *fakeLetterboxd {
 	}))
 	t.Cleanup(lb.Close)
 	return lb
+}
+
+// logRing puts a new diary entry for The Ring (TMDB 565, watched 2026-10-04, ★★★★) at the top of the feed.
+func (lb *fakeLetterboxd) logRing() {
+	lb.mu.Lock()
+	defer lb.mu.Unlock()
+	item := `<item> <title>The Ring, 2002</title> <link>https://letterboxd.com/saahilsan/film/the-ring-2002/</link>` +
+		` <guid isPermaLink="false">letterboxd-watch-1530000000</guid> <pubDate>Mon, 5 Oct 2026 19:00:00 +1300</pubDate>` +
+		` <letterboxd:watchedDate>2026-10-04</letterboxd:watchedDate> <letterboxd:rewatch>No</letterboxd:rewatch>` +
+		` <letterboxd:filmTitle>The Ring</letterboxd:filmTitle> <letterboxd:filmYear>2002</letterboxd:filmYear>` +
+		` <letterboxd:memberRating>4.0</letterboxd:memberRating> <tmdb:movieId>565</tmdb:movieId> </item>`
+	lb.feed = []byte(strings.Replace(string(lb.feed), "<channel>", "<channel>"+item, 1))
+	lb.etag = `"v2"`
 }
 
 func (lb *fakeLetterboxd) total() int {
@@ -116,6 +136,9 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 		var md []map[string]any
 		for _, k := range sortedKeys(a.plex) {
 			f := a.plex[k]
+			if c := r.URL.Query().Get("collection"); c != "" && (c != "9000" || !slices.Contains(a.collection, k)) {
+				continue // filtered on a collection's tag id: its members only
+			}
 			// Real Plex sends both "guid" (a string) and "Guid" (a list); Go's case-insensitive keys must not mix them.
 			md = append(md, map[string]any{"ratingKey": k, "guid": "plex://movie/" + k, "viewCount": f.views, "userRating": f.rating,
 				"Guid": []map[string]string{{"id": "imdb://tt0"}, {"id": fmt.Sprintf("tmdb://%d", f.tmdb)}}})
@@ -127,7 +150,7 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 		defer a.mu.Unlock()
 		md := []map[string]any{{"ratingKey": "800", "title": "Pixar"}}
 		if a.collection != nil {
-			md = append(md, map[string]any{"ratingKey": "900", "title": "Watchlist"})
+			md = append(md, map[string]any{"ratingKey": "900", "title": "Watchlist", "index": 9000})
 		}
 		reply(w, map[string]any{"Metadata": md})
 	})
@@ -159,21 +182,13 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 		}
 		a.collection = append(a.collection, keys(r)...)
 	})
-	px.HandleFunc("GET", "/library/collections/900/children", func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		var md []map[string]any
-		for _, k := range a.collection {
-			md = append(md, map[string]any{"ratingKey": k})
-		}
-		reply(w, map[string]any{"Metadata": md})
-	})
-	px.HandleFunc("GET", "/hubs/sections/4/manage", func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		reply(w, map[string]any{"Hub": []map[string]any{{"identifier": "movie.recentlyadded", "promotedToOwnHome": true},
-			{"identifier": "custom.collection.4.900", "promotedToOwnHome": a.promoted}}})
-	})
+	for k := range a.plex {
+		px.HandleFunc("DELETE", "/library/collections/900/items/"+k, func(w http.ResponseWriter, r *http.Request) {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			a.collection = slices.DeleteFunc(a.collection, func(c string) bool { return c == k })
+		})
+	}
 	px.HandleFunc("POST", "/hubs/sections/4/manage", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
@@ -258,6 +273,12 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 		a.jfSet = strings.Split(r.URL.Query().Get("ids"), ",")
 		io.WriteString(w, `{"Id":"c1"}`)
 	})
+	jf.HandleFunc("DELETE", "/Collections/c1/Items", func(w http.ResponseWriter, r *http.Request) {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		gone := strings.Split(r.URL.Query().Get("ids"), ",")
+		a.jfSet = slices.DeleteFunc(a.jfSet, func(id string) bool { return slices.Contains(gone, id) })
+	})
 	return a
 }
 
@@ -323,11 +344,12 @@ func (w *world) run(t *testing.T, extra string) stage.Report {
 func writes(h *fake.Harness) int {
 	n := 0
 	for _, c := range [][]fake.Call{h.Plex.Calls("PUT", "/:/scrobble"), h.Plex.Calls("GET", "/:/scrobble"), h.Plex.Calls("PUT", "/:/rate"), h.Plex.Calls("POST", "/library/collections"),
-		h.Plex.Calls("POST", "/hubs/sections/4/manage"), h.Jellyfin.Calls("POST", "/Collections")} {
+		h.Plex.Calls("PUT", "/library/collections/900/items"), h.Plex.Calls("POST", "/hubs/sections/4/manage"), h.Jellyfin.Calls("POST", "/Collections"),
+		h.Jellyfin.Calls("DELETE", "/Collections/c1/Items")} {
 		n += len(c)
 	}
-	for _, id := range []string{"j10", "j20", "j30", "j40"} {
-		n += len(h.Jellyfin.Calls("POST", "/UserItems/"+id+"/UserData"))
+	for _, k := range []string{"10", "20", "30", "40"} {
+		n += len(h.Plex.Calls("DELETE", "/library/collections/900/items/"+k)) + len(h.Jellyfin.Calls("POST", "/UserItems/j"+k+"/UserData"))
 	}
 	return n
 }
@@ -335,8 +357,10 @@ func writes(h *fake.Harness) int {
 // Catches, end to end against a fake Letterboxd and stateful fake Plex/Jellyfin: a dry run that writes, a wrong
 // diff count in any category, a play count lowered or a viewing counted twice (export + feed), a Jellyfin write
 // that resets favourites, a Plex play count set without scrobbles, the Watchlist collection not created or not on
-// Home, Letterboxd hit faster than one request per interval or for pages it has cached, and a second run (or a
-// run after the daily re-read) writing anything.
+// Home, Letterboxd hit faster than one request per interval or for pages it has cached, a second run (or a run
+// after the daily re-read) writing anything, the snapshot read in a run that then writes being stored with an
+// older time (so Plex is paged again next run), Jellyfin not re-read every run, and the collection put back on
+// his Home after he took it off.
 func TestRunEndToEnd(t *testing.T) {
 	w := newWorld(t)
 	dry := w.run(t, "dry_run = true\n")
@@ -362,6 +386,7 @@ func TestRunEndToEnd(t *testing.T) {
 		}
 	}
 
+	w.h.Now = w.h.Now.Add(25 * time.Hour) // the apply's own Plex read is due, so its time must survive the create and promotion
 	w.run(t, "")
 	a := w.apps
 	if f := a.plex["10"]; f.views != 3 || f.rating != 10 {
@@ -395,11 +420,11 @@ func TestRunEndToEnd(t *testing.T) {
 		t.Errorf("missing file = %q", text)
 	}
 
-	w.h.Now = w.h.Now.Add(time.Minute) // within both refresh periods: nothing is re-read
+	w.h.Now = w.h.Now.Add(time.Minute) // Plex was read by the run that wrote; nothing to do, so no re-read
 	before, hits := writes(w.h), w.lb.total()
 	again := w.run(t, "")
-	if again.Counts["plex.snapshot"]+again.Counts["jellyfin.snapshot"] != 0 {
-		t.Errorf("an app re-read inside its refresh period: %v", again.Counts)
+	if again.Counts["plex.snapshot"] != 0 || again.Counts["jellyfin.snapshot"] != 1 {
+		t.Errorf("want Plex not re-read and Jellyfin re-read: %v", again.Counts)
 	}
 	if n := writes(w.h) - before; n != 0 {
 		t.Errorf("second run made %d writes (counts %v)", n, again.Counts)
@@ -408,11 +433,7 @@ func TestRunEndToEnd(t *testing.T) {
 		t.Errorf("second run made %d Letterboxd requests, want 1 conditional feed read", n)
 	}
 
-	w.h.Now = w.h.Now.Add(31 * time.Minute) // Jellyfin is still indexing the library: its films must show up within the hour
-	if jfr := w.run(t, ""); jfr.Counts["jellyfin.snapshot"] != 1 || jfr.Counts["plex.snapshot"] != 0 {
-		t.Errorf("after 31 min: counts %v; want a Jellyfin re-read and no Plex re-read", jfr.Counts)
-	}
-
+	w.apps.promoted = false               // he takes the Watchlist off his Home
 	w.h.Now = w.h.Now.Add(25 * time.Hour) // the daily re-read of both apps must agree with what was written
 	day := w.run(t, "")
 	if n := writes(w.h) - before; n != 0 || day.Counts["plex.snapshot"] != 1 || day.Counts["jellyfin.snapshot"] != 1 {
@@ -490,7 +511,7 @@ func TestLostScrobbleAnswerNeverRepeats(t *testing.T) {
 	w := newWorld(t)
 	w.apps.dropScrobble = true
 	rep := w.run(t, "")
-	if rep.Counts["plex.scrobble_unconfirmed"] != 2 || w.apps.plex["10"].views != 2 || w.apps.plex["20"].views != 1 {
+	if rep.Counts["plex.unconfirmed"] != 2 || w.apps.plex["10"].views != 2 || w.apps.plex["20"].views != 1 {
 		t.Fatalf("views %d, %d; counts %v", w.apps.plex["10"].views, w.apps.plex["20"].views, rep.Counts)
 	}
 	w.apps.dropScrobble = false
@@ -540,17 +561,69 @@ func TestPlexWatchlistMirror(t *testing.T) {
 	}
 }
 
-// Catches: a Plex collection create that took effect but whose answer was lost being followed by a re-add of
-// the same films (real Plex answers that with HTTP 500, as on the NAS), so the collection is never recorded,
-// filled or promoted.
+// Catches: a Plex collection create that took effect but whose answer was lost being sent again (a second
+// "Watchlist"), the film it put there being re-added (real Plex answers that with HTTP 500, as on the NAS), and the
+// "added by this stage" mark lost on the way, so the film could never leave the collection.
 func TestCollectionCreateAnswerLost(t *testing.T) {
 	w := newWorld(t)
 	w.apps.loseCreateAnswer = true
+	if rep := w.run(t, ""); rep.Counts["plex.unconfirmed"] != 1 {
+		t.Errorf("lost create answer: counts %v", rep.Counts)
+	}
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
 	rep := w.run(t, "")
 	if len(w.apps.collection) != 1 || !w.apps.promoted || rep.Counts["plex.failed"] != 0 {
 		t.Errorf("collection %v promoted=%v counts %v", w.apps.collection, w.apps.promoted, rep.Counts)
 	}
-	if n := len(w.h.Plex.Calls("POST", "/library/collections")); n != 1 {
-		t.Errorf("collection created %d times", n)
+	if n, m := len(w.h.Plex.Calls("POST", "/library/collections")), len(w.h.Plex.Calls("PUT", "/library/collections/900/items")); n != 1 || m != 0 {
+		t.Errorf("collection created %d times, added to %d times", n, m)
+	}
+	var added int
+	if err := w.h.Env.Store.DB().QueryRow(`SELECT added FROM letterboxd_sink WHERE app='plex' AND tmdb=565`).Scan(&added); err != nil || added != 1 {
+		t.Errorf("The Ring added mark = %d (%v)", added, err)
+	}
+}
+
+// Catches: a film he watched in Plex and then logged on Letterboxd being scrobbled again from a listing read
+// before he watched it (a second view that could never be taken back), a watched film left in either app's
+// Watchlist collection (before these fakes had DELETE routes, both removal calls could be wrong and every test
+// still passed), an existing collection's members misread (every film taken for one, so none is ever added),
+// a film he put there himself taken out, and a removal overwriting the same film's just-written rating in the
+// stored row, so the next run pages Plex again.
+func TestWatchedInPlexThenLogged(t *testing.T) {
+	w := newWorld(t)
+	w.apps.collection = []string{"40"} // his Watchlist already exists, holding Digger, which he put there and has watched
+	w.run(t, "")                       // The Ring is on his watchlist, unwatched: in both Watchlist collections
+	if !slices.Contains(w.apps.collection, "30") || !slices.Contains(w.apps.jfSet, "j30") {
+		t.Fatalf("setup: collections plex %v, jellyfin %v", w.apps.collection, w.apps.jfSet)
+	}
+	w.apps.mu.Lock()
+	w.apps.plex["30"].views = 1 // he watches it in Plex...
+	w.apps.mu.Unlock()
+	w.lb.logRing() // ...and logs it on Letterboxd
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	rep := w.run(t, "")
+	if v := w.apps.plex["30"].views; v != 1 || rep.Counts["plex.scrobbles"] != 0 {
+		t.Errorf("one viewing became %d Plex views (counts %v)", v, rep.Counts)
+	}
+	if strings.Join(w.apps.collection, ",") != "40" || slices.Contains(w.apps.jfSet, "j30") {
+		t.Errorf("collections: plex %v (want only his own 40), jellyfin %v (counts %v)", w.apps.collection, w.apps.jfSet, rep.Counts)
+	}
+	if f := w.apps.jf["j30"]; !f.played || f.plays != 1 {
+		t.Errorf("jellyfin The Ring = %+v, want played once", f)
+	}
+	w.h.Now = w.h.Now.Add(time.Minute)
+	before := writes(w.h)
+	if again := w.run(t, ""); writes(w.h) != before || again.Counts["plex.snapshot"] != 0 {
+		t.Errorf("the run after made %d writes (counts %v)", writes(w.h)-before, again.Counts)
+	}
+}
+
+// Catches: a config that would ask Letterboxd for more than one page per 2 s being run instead of refused.
+func TestRefusesFasterThanPolite(t *testing.T) {
+	w := newWorld(t)
+	w.h.SetOptions(w.opts + "interval = \"1s\"\n")
+	if err := w.st.Run(context.Background(), w.h.Env, &stage.Report{}); !errors.Is(err, errTooFast) || w.lb.total() != 0 {
+		t.Errorf("err = %v after %d Letterboxd requests; want errTooFast before any", err, w.lb.total())
 	}
 }

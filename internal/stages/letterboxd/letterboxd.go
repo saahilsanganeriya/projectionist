@@ -5,8 +5,8 @@
 // 2 s, every answer that can be cached is): the RSS feed (every run), the watchlist and watched-films grid pages
 // (daily), the film pages (TMDB id, cached forever), and the account export unzipped on the NAS (the backfill).
 // Films join the library on the TMDB id in the folder names. Per app the stage keeps a snapshot of what the app
-// holds (Plex: one paged listing at most daily; Jellyfin: every run, it is cheap) and updates it after each
-// write, so a rerun writes nothing.
+// holds (Plex: one paged listing, re-read daily and before any run that writes to it; Jellyfin: every run, it is
+// cheap) and updates it after each write, so a rerun writes nothing.
 //
 // Never: unwatch, lower a play count, clear a rating, or remove anything this stage did not add. Plex takes no
 // last-played date (a scrobble stamps "now"). Reviews are not synced: a Plex review is shown to everyone his
@@ -37,14 +37,14 @@ type Options struct {
 	LetterboxdURL string        `toml:"letterboxd_url"`
 	BoxdURL       string        `toml:"boxd_url"`
 	UserAgent     string        `toml:"user_agent"`
-	Interval      time.Duration `toml:"interval"`    // between two Letterboxd requests
+	Interval      time.Duration `toml:"interval"`    // between two Letterboxd requests; at least minInterval
 	MaxFetches    int           `toml:"max_fetches"` // Letterboxd requests per run; the backfill resumes next run
 	PagesEvery    time.Duration `toml:"pages_every"` // watchlist + watched grid crawl
 	ExportDir     string        `toml:"export_dir"`  // holds letterboxd-<user>-<date>-utc/ folders; newest wins
 	MoviesDir     string        `toml:"movies_dir"`
 	MissingFile   string        `toml:"missing_file"`     // watchlist films not on the NAS; "" = none
-	SinkRefresh   time.Duration `toml:"sink_refresh"`     // re-read what Plex and plex.tv hold at most this often
-	JFRefresh     time.Duration `toml:"jellyfin_refresh"` // Jellyfin's listing is cheap and it is still indexing: more often
+	SinkRefresh   time.Duration `toml:"sink_refresh"`     // re-read what Plex and plex.tv hold this often (Plex also before writing)
+	JFRefresh     time.Duration `toml:"jellyfin_refresh"` // 0 = every run: Jellyfin's listing is cheap and it is still indexing
 
 	PlexSection   int    `toml:"plex_section"`
 	JellyfinUser  string `toml:"jellyfin_user"`
@@ -62,14 +62,13 @@ func defaults() Options {
 		LetterboxdURL: "https://letterboxd.com",
 		BoxdURL:       "https://boxd.it",
 		UserAgent:     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36 (projectionist; personal sync of one member's own public diary)",
-		Interval:      2 * time.Second,
+		Interval:      minInterval,
 		MaxFetches:    400,
 		PagesEvery:    24 * time.Hour,
 		ExportDir:     "/volume1/docker/projectionist/data/letterboxd",
 		MoviesDir:     "/volume1/media/Movies",
 		MissingFile:   "/volume1/media/_watchlist-missing.txt",
 		SinkRefresh:   24 * time.Hour,
-		JFRefresh:     30 * time.Minute,
 		PlexSection:   4,
 		JellyfinUser:  "saahil",
 		Collection:    "Watchlist",
@@ -87,6 +86,11 @@ CREATE TABLE IF NOT EXISTS letterboxd_sink (app TEXT NOT NULL, tmdb INTEGER NOT 
   plays INTEGER NOT NULL, rating INTEGER NOT NULL, last TEXT NOT NULL, member INTEGER NOT NULL, added INTEGER NOT NULL,
   PRIMARY KEY (app, tmdb));
 `
+
+// minInterval is the politeness floor: never more than one Letterboxd request per 2 s.
+const minInterval = 2 * time.Second
+
+var errTooFast = errors.New("letterboxd: interval below the 2 s politeness floor")
 
 // Stage is registered as letterboxd.Stage{}; tests set sleep so nothing waits on the wall clock.
 type Stage struct {
@@ -118,6 +122,9 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	opt := defaults()
 	if err := env.Options(&opt); err != nil {
 		return err
+	}
+	if opt.Interval < minInterval {
+		return fmt.Errorf("%w: %v", errTooFast, opt.Interval)
 	}
 	if _, err := env.Store.DB().ExecContext(ctx, schema); err != nil {
 		return err

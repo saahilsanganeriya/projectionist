@@ -59,14 +59,14 @@ default_section = 4
 [stages.letterboxd]
 every          = "30m"                    # the RSS feed is read every run; grid pages once per pages_every
 user           = "saahilsan"
-interval       = "2s"                     # between two Letterboxd requests (letterboxd.com and boxd.it together)
+interval       = "2s"                     # between two Letterboxd requests (letterboxd.com and boxd.it together); 2s is the floor
 max_fetches    = 400                      # Letterboxd requests per run; the first backfill resumes over a few runs
 pages_every    = "24h"                    # watchlist + watched-films grid crawl
 export_dir     = "/volume1/docker/projectionist/data/letterboxd" # unzipped account exports; the newest folder wins
 movies_dir     = "/volume1/media/Movies"
 missing_file   = "/volume1/media/_watchlist-missing.txt" # watchlist films not on the NAS; "" = none
-sink_refresh   = "24h"                    # re-read what Plex (one paged listing) and plex.tv hold at most this often
-jellyfin_refresh = "30m"                  # Jellyfin's listing takes a second: re-read it every run
+sink_refresh   = "24h"                    # re-read what Plex (one paged listing) and plex.tv hold this often; Plex also before any write
+jellyfin_refresh = "0s"                   # 0 = re-read Jellyfin every run (its listing takes a second)
 plex_section   = 4
 jellyfin_user  = "saahil"
 collection     = "Watchlist"              # "" = no Watchlist collection
