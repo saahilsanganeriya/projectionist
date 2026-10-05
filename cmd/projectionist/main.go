@@ -132,6 +132,7 @@ func run(cfgPath, only string) int {
 		log.Error("unknown stage", "event", "config_error", "stage", only)
 		return 2
 	}
+	sched = &scheduler.Scheduler{Jobs: jobs, Runner: runner, Loc: cfg.Location()} // before any goroutine can call Trigger
 	log.Info("serving", "event", "start", "listen", cfg.Listen, "stages", len(jobs))
 	go func() {
 		if err := server.Serve(ctx, cfg.Listen, server.Handler(runner, st, metrics)); err != nil {
@@ -139,7 +140,6 @@ func run(cfgPath, only string) int {
 			stop()
 		}
 	}()
-	sched = &scheduler.Scheduler{Jobs: jobs, Runner: runner, Loc: cfg.Location()}
 	sched.Run(ctx)
 	log.Info("stopped", "event", "stop")
 	return 0
