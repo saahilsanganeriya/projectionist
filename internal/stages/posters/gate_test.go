@@ -104,6 +104,7 @@ budget_usd = 0.10
 			python[pyKey[p.Title]] = "owner:" + filepath.Join(dir, "backup/posters", f)
 		}
 	}
+	tally := map[string]int{}
 	for _, k := range pilotKeys {
 		var cands, verdict string
 		st.DB().QueryRow(`SELECT coalesce(cands, ''), coalesce(verdict, '') FROM posters_items WHERE key=?`, k).Scan(&cands, &verdict)
@@ -126,8 +127,10 @@ budget_usd = 0.10
 		if python[k] == v.Choice {
 			same = "SAME"
 		}
+		tally[same]++
 		t.Logf("%-22s rule=%-8s ours=[%s] python=[%s] %s | %s", k, v.Rule, label(v.Choice), label(python[k]), same, v.Reason)
 	}
+	t.Logf("picks vs the Python pilot: %d SAME, %d DIFFERENT of %d", tally["SAME"], tally["DIFFERENT"], len(pilotKeys))
 	var calls, in, out int
 	var cost, held float64
 	var model string
