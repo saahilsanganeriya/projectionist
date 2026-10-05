@@ -541,7 +541,7 @@ func TestGuestDefersJudging(t *testing.T) {
 }
 
 // Catches: an owner's poster that cannot be read dropping out of the pool (so any candidate replaces Plex's default,
-// with no margin) or sent to the apps; its alert raised on every run, which held /health at 503 for good (a truncated
+// with no margin) or, an upload, sent to the apps; its alert raised on every run, which held /health at 503 for good (a truncated
 // JPEG in the real export), or not raised again once the file changes; and the owner's WebP posters (one movie in the
 // real backup) being unreadable.
 func TestOwnerPosterUnreadable(t *testing.T) {
@@ -555,22 +555,26 @@ func TestOwnerPosterUnreadable(t *testing.T) {
 	}
 
 	w = newWorld(t, "")
-	alpha = filepath.Join(w.backup, "posters/movie/11.jpg")
+	alpha, beta := filepath.Join(w.backup, "posters/movie/11.jpg"), filepath.Join(w.backup, "posters/movie/12.jpg") // default, upload
+	os.WriteFile(beta, poster("blue")[:2000], 0o644)                                                                // truncated
 	for i, c := range []struct {
-		file      []byte
-		wantAlert bool
-	}{{[]byte("not an image"), true}, {nil, false}, {poster("red")[:2000], true}} { // nil: the file is left alone
-		if c.file != nil {
-			os.WriteFile(alpha, c.file, 0o644)
+		alpha      []byte // nil: the file is left alone
+		wantAlerts int
+	}{{[]byte("not an image"), 2}, {nil, 0}, {poster("red")[:2000], 1}} {
+		if c.alpha != nil {
+			os.WriteFile(alpha, c.alpha, 0o644)
 		}
 		rep := w.run(t)
-		alerted := len(rep.Alerts) == 1 && strings.Contains(rep.Alerts[0], "unreadable")
-		if v := w.verdict(t, "movie:tmdb-1"); v.Rule != "" || alerted != c.wantAlert || !c.wantAlert && len(rep.Alerts) != 0 {
-			t.Errorf("run %d: Alpha rule %q, alerts %v; want no verdict, and an alert: %v", i+1, v.Rule, rep.Alerts, c.wantAlert)
+		a, b := w.verdict(t, "movie:tmdb-1"), w.verdict(t, "movie:tmdb-2")
+		if a.Rule != "" || b.Rule != "" || len(rep.Alerts) != c.wantAlerts || c.wantAlerts > 0 && !strings.Contains(rep.Alerts[0], "unreadable") {
+			t.Errorf("run %d: Alpha rule %q, Beta %q, alerts %v; want no verdicts and %d alerts", i+1, a.Rule, b.Rule, rep.Alerts, c.wantAlerts)
 		}
 	}
-	if n, m := len(w.h.Plex.Calls("POST", "/library/metadata/101/posters")), len(w.h.Jellyfin.Calls("POST", "/Items/j1/Images/Primary")); n+m != 0 {
-		t.Fatalf("Alpha, whose owner poster is unreadable, got %d Plex and %d Jellyfin uploads; the apps must keep what they show", n, m)
+	for _, path := range []string{"/library/metadata/101/posters", "/library/metadata/102/posters"} {
+		if n := len(w.h.Plex.Calls("POST", path)); n != 0 || len(w.h.Jellyfin.Calls("POST", "/Items/j1/Images/Primary"))+
+			len(w.h.Jellyfin.Calls("POST", "/Items/j2/Images/Primary")) != 0 {
+			t.Fatalf("%s: %d uploads of a title whose owner poster is unreadable; the apps must keep what they show", path, n)
+		}
 	}
 }
 
