@@ -32,7 +32,8 @@ import (
 //	Dune    already has Dune.en.srt                    -> untouched, never probed
 //	Show    English audio, nothing anywhere            -> no_candidates
 //
-// The fake alass writes realign.srt (srt(ts, 1)) as any alignment, or the candidate unchanged once that is removed.
+// The fake alass hears speech.srt in any audio and writes realign.srt (both srt(ts, 1)) as any alignment, or the
+// candidate unchanged once realign.srt is removed.
 type fixture struct {
 	h        *fake.Harness
 	st       Stage
@@ -88,13 +89,14 @@ func newFixture(t *testing.T) *fixture {
 	put("ran.framecrc", framecrc(f.ts))
 	put("heat.srt", srt(f.ts, 0))
 	put("realign.srt", srt(f.ts, 1))
+	put("speech.srt", srt(f.ts, 1))
 	f.h.Script(t, "ffprobe", `echo "$*" >> "`+ff+`/ffprobe.calls"
 for n in Ran Heat Clerks Show; do case "$*" in *"/$n "*) cat "`+ff+`/$n.json"; exit 0;; esac; done; exit 1
 `)
 	f.h.Script(t, "ffmpeg", `case "$*" in *framecrc*) cat "`+ff+`/ran.framecrc";; *"-f srt"*) cat "`+ff+`/heat.srt";; *) exit 1;; esac
 `)
 	// alass's real CLI: <reference> <incorrect> <output> [--index <audio stream>]; it exits 1 on any other flag.
-	f.h.Script(t, "alass", `if [ "$2" = "_" ]; then [ "$4 $5" = "--index 1" ] || exit 1; cp "`+ff+`/realign.srt" "$3"; exit 0; fi
+	f.h.Script(t, "alass", `if [ "$2" = "_" ]; then [ "$4 $5" = "--index 1" ] || exit 1; cp "`+ff+`/speech.srt" "$3"; exit 0; fi
 cp "`+ff+`/realign.srt" "$3" 2>/dev/null || cp "$2" "$3"; echo "info: 'reference file FPS/input file FPS' ratio is 1"
 `)
 	f.h.TMDB.Handle("GET", "/movie/11645", 200, `{"id":11645,"external_ids":{"imdb_id":"tt0089881"}}`)
