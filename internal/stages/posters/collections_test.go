@@ -2,6 +2,7 @@ package posters
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"image/color"
 	"image/jpeg"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -33,6 +36,7 @@ func collectionWorld(t *testing.T, opts string, keepTitles bool) *world {
  {"name":"Evil Dead","kind":"franchise","sort_title":null,"tmdb_collection":["Evil Dead Collection"],"members":[{"tmdb":764}]}]`), 0o644)
 	w := newWorld(t, fmt.Sprintf("collections_owner_file = %q\ncollections_approved_file = %q\n", filepath.Join(dir, "owner.json"),
 		filepath.Join(dir, "approved.json"))+opts)
+	w.ownerFile = filepath.Join(dir, "owner.json")
 	w.opts += fmt.Sprintf("commons_api = %q\n", w.api.URL+"/w/api.php")
 	w.h.SetOptions(w.opts)
 	if !keepTitles {
@@ -92,8 +96,9 @@ func collectionWorld(t *testing.T, opts string, keepTitles bool) *world {
  {"ratingKey":"603","title":"Evil Dead"},{"ratingKey":"500","title":"Alien"}]}}`)
 	w.jellyfinLists(jellyfinItems + `, {"Id":"jb1","Type":"BoxSet","Name":"Scary Movie"}, {"Id":"jb3","Type":"BoxSet","Name":"Evil Dead"},
  {"Id":"jb2","Type":"BoxSet","Name":"Paul Greengrass"}, {"Id":"jb0","Type":"BoxSet","Name":"Alien"}`)
-	for _, rk := range []string{"500", "601", "602", "603"} {
+	for _, rk := range []string{"500", "601", "602", "603", "6011"} {
 		w.h.Plex.Handle("POST", "/library/metadata/"+rk+"/posters", 200, "")
+		w.h.Plex.Handle("GET", "/library/metadata/"+rk, 200, `{"MediaContainer":{"Metadata":[{"ratingKey":"`+rk+`","Field":[{"locked":true,"name":"title"}]}]}}`)
 	}
 	for _, id := range []string{"jb0", "jb1", "jb2", "jb3"} {
 		w.h.Jellyfin.Handle("POST", "/Items/"+id+"/Images/Primary", 204, "")
@@ -117,7 +122,9 @@ func (w *world) pool(key string) []Candidate {
 // rendering than the photo allows; a co-director of one film taken for the director; a title's poster sent
 // while titles are dry and collections live; a collection poster sent to the wrong app item
 // or left unlocked in Plex; a director's poster not composed to 2:3 around the judge's box; a collection opened by an
-// arrival, or made in an app after the first listing, never getting its poster; and a rerun paying or uploading again.
+// arrival, or made in an app after the first listing, never getting its poster; a wait for the app counted as a failed
+// attempt (its backoff grows); Plex uploads and locks missing from the library changes health's optimize reads; and a
+// rerun paying or uploading again.
 func TestCollectionPosters(t *testing.T) {
 	w := collectionWorld(t, "dry_run = true\n", false)
 	film := `[{"url":"` + w.api.URL + `/t/p/original/green.jpg","thumb":"` + w.api.URL + `/t/p/w500/green.jpg","source":"tmdb"}]`
@@ -160,6 +167,9 @@ func TestCollectionPosters(t *testing.T) {
 	if n := len(w.h.Plex.Calls("POST", "/library/metadata/500/posters")) + len(w.h.Jellyfin.Calls("POST", "/Items/jb0/Images/Primary")); n != 0 || alien != 0 {
 		t.Fatalf("the owner's collection Alien: %d uploads, %d rows; his posters are never touched", n, alien)
 	}
+	if n, _ := w.h.Env.Store.LibraryChanges(context.Background()); n != 4 {
+		t.Fatalf("library changes counted %d, want 4 (two Plex uploads and two locks), so health's optimize sees them", n)
+	}
 
 	// An arrival opens the director collection Paul Greengrass; Jellyfin already lists it, Plex only from tomorrow.
 	db := w.h.Env.Store.DB()
@@ -173,6 +183,11 @@ func TestCollectionPosters(t *testing.T) {
 	if want := []string{"commons 1920px-redwide.jpg", "tmdb-profile blue.jpg", "commons 960px-green.jpg"}; !slices.Equal(photos, want) {
 		t.Fatalf("Greengrass pool %v, want %v: on-set Commons first, turns with TMDB; no tiny file, no namesake's category, no text hit "+
 			"that never names him, no co-director", photos, want)
+	}
+	var attempts int
+	db.QueryRow(`SELECT attempts FROM posters_sinks WHERE item='collection:paul greengrass' AND sink='plex'`).Scan(&attempts)
+	if attempts != 0 {
+		t.Fatalf("Greengrass, not in Plex yet, counted %d failed attempts; waiting for the app is no failure", attempts)
 	}
 	jf := w.h.Jellyfin.Calls("POST", "/Items/jb2/Images/Primary")
 	if len(jf) != 1 {
@@ -196,24 +211,40 @@ func TestCollectionPosters(t *testing.T) {
 	}
 }
 
-// Catches: collection judging stopped by what the titles spent, titles stopped by what collections spent, and
-// collection calls past their own budget.
+// Catches: collection judging stopped by what the titles spent, titles stopped by what collections spent, collection
+// calls past their own budget, and one spent budget's alert silencing the other's.
 func TestCollectionBudgetApart(t *testing.T) {
 	for _, c := range []struct {
-		name, item    string
-		cost          float64
-		titles, colls bool // judged this run
-		alertMentions string
-	}{{"collections spent", "collection:x", 4.999, true, false, "collections"}, {"titles spent", "movie:tmdb-9", 11.999, false, true, "titles"}} {
+		name          string
+		spent         map[string]float64
+		titles, colls bool     // judged this run
+		alerts        []string // each alert names one budget
+	}{
+		{"collections spent", map[string]float64{"collection:x": 4.999}, true, false, []string{"collections"}},
+		{"titles spent", map[string]float64{"movie:tmdb-9": 11.999}, false, true, []string{"titles"}},
+		{"both spent", map[string]float64{"collection:x": 4.999, "movie:tmdb-9": 11.999}, false, false, []string{"collections", "titles"}},
+	} {
 		w := collectionWorld(t, "dry_run = true\n", true)
 		db := w.h.Env.Store.DB()
 		db.Exec(schema)
-		db.Exec(`INSERT INTO posters_calls(at, item, of, model, mode, batch_id, state, input_tokens, output_tokens, reserved_usd,
-			cost_usd, llm_ms, error) VALUES (?, ?, 'x', 'claude-sonnet-5-5', 'sync', '', 'done', 0, 0, 0, ?, 0, '')`, stamp(w.h.Now), c.item, c.cost)
+		for item, cost := range c.spent {
+			db.Exec(`INSERT INTO posters_calls(at, item, of, model, mode, batch_id, state, input_tokens, output_tokens, reserved_usd,
+				cost_usd, llm_ms, error) VALUES (?, ?, 'x', 'claude-sonnet-5-5', 'sync', '', 'done', 0, 0, 0, ?, 0, '')`, stamp(w.h.Now), item, cost)
+		}
 		rep := w.run(t)
 		titles, colls := w.verdict(t, "movie:tmdb-1").Rule == "judged", w.verdict(t, "collection:scary movie").Rule == "judged"
-		if titles != c.titles || colls != c.colls || len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], c.alertMentions) {
-			t.Errorf("%s: titles judged %v (want %v), collections judged %v (want %v), alerts %v", c.name, titles, c.titles, colls, c.colls, rep.Alerts)
+		var named []string
+		for _, a := range rep.Alerts {
+			for _, b := range []string{"collections", "titles"} {
+				if strings.Contains(a, "("+b+")") {
+					named = append(named, b)
+				}
+			}
+		}
+		slices.Sort(named)
+		if titles != c.titles || colls != c.colls || !slices.Equal(named, c.alerts) {
+			t.Errorf("%s: titles judged %v (want %v), collections judged %v (want %v), alerts %v (want one per budget %v)",
+				c.name, titles, c.titles, colls, c.colls, rep.Alerts, c.alerts)
 		}
 	}
 }
@@ -243,4 +274,158 @@ func TestComposeFramesTheDirector(t *testing.T) {
 	if out.Bounds() != image.Rect(0, 0, 1000, 1500) || red < 300*200/10 {
 		t.Fatalf("poster %v with %d red samples of %d; want 1000x1500 holding the director (about a quarter of it)", out.Bounds(), red, 300*200)
 	}
+}
+
+// Catches: a spent title budget ending a Message Batch submission at the first refused title, so the collections queued
+// behind every title are never batched (within a batch, and in the batches after one the titles filled).
+func TestBatchReachesCollectionsPastSpentTitles(t *testing.T) {
+	for _, size := range []int{2, 3} {
+		w := collectionWorld(t, fmt.Sprintf("dry_run = true\nbatch_min = 1\nbatch_size = %d\n", size), true)
+		db := w.h.Env.Store.DB()
+		db.Exec(schema)
+		db.Exec(`INSERT INTO posters_calls(at, item, of, model, mode, batch_id, state, input_tokens, output_tokens, reserved_usd,
+			cost_usd, llm_ms, error) VALUES (?, 'movie:tmdb-9', 'x', 'claude-sonnet-5-5', 'sync', '', 'done', 0, 0, 0, 11.999, 0, '')`, stamp(w.h.Now))
+		w.run(t)
+		var batched int
+		db.QueryRow(`SELECT count(*) FROM posters_calls WHERE item LIKE 'collection:%' AND state='pending' AND batch_id != ''`).Scan(&batched)
+		if len(w.batches) != 1 || batched != 1 {
+			t.Errorf("batch_size %d: %d batches, %d collection requests batched; want Scary Movie batched past the refused titles", size, len(w.batches), batched)
+		}
+	}
+}
+
+// Catches: a poster sent to one of the owner's Plex collections because he renamed it to an approved name, or to his
+// Jellyfin BoxSet (the one the collections stage gave his poster) under such a name; and a first upload replacing a
+// Plex collection poster someone else locked.
+func TestOwnersAppCollectionsRefused(t *testing.T) {
+	w := collectionWorld(t, "dry_run = true\ncollection_dry_run = false\n", false)
+	w.h.Plex.Handle("GET", "/library/sections/4/collections", 200, `{"MediaContainer":{"Metadata":[{"ratingKey":"500","title":"Scary Movie"},
+ {"ratingKey":"603","title":"Evil Dead"}]}}`)
+	w.h.Plex.Handle("GET", "/library/metadata/603", 200, `{"MediaContainer":{"Metadata":[{"ratingKey":"603","Field":[{"locked":true,"name":"thumb"}]}]}}`)
+	w.jellyfinLists(jellyfinItems + `, {"Id":"jb0","Type":"BoxSet","Name":"Scary Movie"}, {"Id":"jb3","Type":"BoxSet","Name":"Evil Dead"}`)
+	w.h.Env.Store.PutJSON(context.Background(), "collections", "poster/jellyfin/jb0", "/config/collection-posters/500.jpg")
+	rep := w.run(t)
+	var locks []string
+	for _, c := range w.h.Plex.Calls("PUT", "/library/sections/4/all") {
+		locks = append(locks, c.RawQuery)
+	}
+	if n := len(w.h.Plex.Calls("POST", "/library/metadata/500/posters")) + len(w.h.Plex.Calls("POST", "/library/metadata/603/posters")) +
+		len(w.h.Jellyfin.Calls("POST", "/Items/jb0/Images/Primary")); n != 0 || len(locks) != 0 {
+		t.Fatalf("%d uploads to the owner's Plex 500 or Jellyfin jb0 or the locked Plex 603, locks %v; want none", n, locks)
+	}
+	if len(w.h.Jellyfin.Calls("POST", "/Items/jb3/Images/Primary")) != 1 || !slices.ContainsFunc(rep.Alerts, func(a string) bool { return strings.Contains(a, "603") }) {
+		t.Fatalf("Evil Dead must still reach Jellyfin, and the locked Plex 603 raise an alert; alerts %v", rep.Alerts)
+	}
+}
+
+// Catches: a collection that left the set (the owner adopted it: it is in his file now) getting a poster again when
+// an app re-creates it, from an outbox row this run did not ask for.
+func TestCollectionLeavingTheSetNeverUploads(t *testing.T) {
+	w := collectionWorld(t, "dry_run = true\ncollection_dry_run = false\n", false)
+	w.run(t)
+	os.WriteFile(w.ownerFile, []byte(`[{"ratingKey":"500","title":"Alien","titleSort":null,"members":[{"ids":["tmdb://348"]}]},
+ {"ratingKey":"700","title":"Scary Movie","titleSort":null,"members":[{"ids":["tmdb://4247"]}]}]`), 0o644)
+	w.h.Plex.Handle("GET", "/library/sections/4/collections", 200, `{"MediaContainer":{"Metadata":[{"ratingKey":"6011","title":"Scary Movie"},
+ {"ratingKey":"603","title":"Evil Dead"}]}}`)
+	w.h.Now = w.h.Now.Add(25 * time.Hour)
+	w.run(t)
+	if n := len(w.h.Plex.Calls("POST", "/library/metadata/6011/posters")); n != 0 {
+		t.Fatalf("Scary Movie, the owner's now, re-created in Plex as 6011, got %d uploads; want none", n)
+	}
+}
+
+// Catches: a director's poster from a photo the judge scored below director_min_score, or chosen unjudged because it
+// was the only candidate though no source vouches for who it shows (a Commons text hit); and a director left
+// without a poster for that with no alert.
+func TestDirectorBelowTheBar(t *testing.T) {
+	w := collectionWorld(t, "dry_run = true\ncollection_dry_run = false\n", false)
+	w.run(t)
+	for path, body := range map[string]string{
+		"/movie/111/credits": `{"crew":[{"id":99,"name":"Kathryn Bigelow","job":"Director"}]}`,
+		"/movie/121/credits": `{"crew":[{"id":98,"name":"Ang Lee","job":"Director"}]}`,
+		"/person/98/images":  `{"profiles":[{"file_path":"/blue.jpg","width":1000,"height":1500}]}`,
+	} {
+		w.h.TMDB.Handle("GET", path, 200, body)
+	}
+	commons := w.commons
+	w.set(func() {
+		w.commons = func(rw http.ResponseWriter, r *http.Request) {
+			for q, colour := range map[string]string{`"Kathryn Bigelow" filming`: "redwide", `"Ang Lee" filming`: "bluewide"} {
+				if strings.HasPrefix(r.URL.Query().Get("gsrsearch"), q) {
+					name := strings.Trim(strings.TrimSuffix(q, " filming"), `"`)
+					reply(rw, fmt.Sprintf(`{"query":{"pages":[{"title":"File:%s filming.jpg","imageinfo":[{"url":"x","thumburl":"%s/t/p/c/500px-%s.jpg",
+ "mime":"image/jpeg","width":3000,"height":1500,"extmetadata":{"ImageDescription":{"value":"%s directing"}}}]}]}}`, name, w.api.URL, colour, name))
+					return
+				}
+			}
+			commons(rw, r)
+		}
+	})
+	db := w.h.Env.Store.DB()
+	db.Exec(`INSERT INTO collections_new(name, sort_title, at) VALUES ('Kathryn Bigelow', 'zzKathryn Bigelow', ''), ('Ang Lee', 'zzAng Lee', '')`)
+	db.Exec(`INSERT INTO collections_joins(collection, tmdb, reason, at) VALUES ('Kathryn Bigelow', 111, 'x', ''), ('Ang Lee', 121, 'x', '')`)
+	before := w.messages
+	rep := w.run(t)
+	bigelow, lee := w.verdict(t, "collection:kathryn bigelow"), w.verdict(t, "collection:ang lee")
+	var queued int
+	db.QueryRow(`SELECT count(*) FROM posters_sinks WHERE item='collection:ang lee'`).Scan(&queued)
+	if bigelow.Rule != "judged" || w.messages-before != 2 {
+		t.Fatalf("Bigelow's lone Commons text hit: rule %q after %d judge calls; it must be judged, not taken unseen", bigelow.Rule, w.messages-before)
+	}
+	if lee.Choice != "" || queued != 0 || !slices.ContainsFunc(rep.Alerts, func(a string) bool { return strings.Contains(a, "Ang Lee") }) {
+		t.Fatalf("Ang Lee's best photo scored 3: choice %q, %d outbox rows, alerts %v; want no poster and an alert naming him", lee.Choice, queued, rep.Alerts)
+	}
+}
+
+// Catches: a collections file that cannot be read failing the whole run, so no title is judged either.
+func TestBadCollectionFilesSkipOnlyCollections(t *testing.T) {
+	w := newWorld(t, "dry_run = true\ncollections_owner_file = \"/nonexistent/owner.json\"\ncollections_approved_file = \"/nonexistent/approved.json\"\n")
+	rep := w.run(t)
+	if w.verdict(t, "movie:tmdb-1").Rule != "judged" || len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "owner.json") {
+		t.Fatalf("Alpha rule %q, alerts %v; want titles judged and one alert naming the unreadable file", w.verdict(t, "movie:tmdb-1").Rule, rep.Alerts)
+	}
+}
+
+// Catches: a 429's Retry-After pausing only the request that got it, while the run's other Wikimedia requests go on
+// at the usual pace and are refused in turn.
+func TestRetryAfterPausesEveryWikimediaRequest(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	pace := WikimediaPace
+	t.Cleanup(func() { WikimediaPace = pace })
+	WikimediaPace = func(bool) time.Duration { return 6500 * time.Millisecond }
+	var at []time.Duration // when each request reached the server, on the fake clock
+	start := h.Now
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		at = append(at, h.Now.Sub(start))
+		if strings.HasSuffix(r.URL.Path, "/a.jpg") {
+			rw.Header().Set("Retry-After", "30")
+			rw.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		rw.Write(poster("red"))
+	}))
+	t.Cleanup(srv.Close)
+	to, _ := url.Parse(srv.URL)
+	r := &run{env: h.Env, http: &http.Client{Transport: rewrite{to}}}
+	sleep := wikiSleep
+	t.Cleanup(func() { wikiSleep = sleep })
+	wikiSleep = func(_ context.Context, d time.Duration) error { h.Now = h.Now.Add(d); return nil }
+	if _, err := r.fetch(context.Background(), "https://upload.wikimedia.org/a.jpg"); err == nil {
+		t.Fatal("a.jpg answered 429 every time; want an error")
+	}
+	if _, err := r.fetch(context.Background(), "https://upload.wikimedia.org/b.jpg"); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(at); n != 4 || at[3]-at[2] < 30*time.Second {
+		t.Fatalf("requests at %v; b.jpg must wait out a.jpg's last Retry-After (30 s), not just the 6.5 s pace", at)
+	}
+}
+
+// rewrite sends every request to one test server, whatever host it names.
+type rewrite struct{ to *url.URL }
+
+func (rw rewrite) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.URL.Scheme, r.URL.Host = rw.to.Scheme, rw.to.Host
+	return http.DefaultTransport.RoundTrip(r)
 }

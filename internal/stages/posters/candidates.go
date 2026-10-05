@@ -393,11 +393,27 @@ func (r *run) fetch(ctx context.Context, u string) ([]byte, error) {
 		if permanent || attempt == 2 || ctx.Err() != nil {
 			return nil, err
 		}
+		if paced {
+			if err := wikiSleep(ctx, wait); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-time.After(wait):
 		}
+	}
+}
+
+// wikiSleep waits d, or until ctx ends; a test replaces it to move a fake clock instead.
+var wikiSleep = func(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
 	}
 }
 
@@ -414,15 +430,13 @@ var WikimediaPace = func(contact bool) time.Duration {
 // the request's end and passes the turn on. Requests to Wikimedia go one at a time across the run.
 func (r *run) wikimediaTurn(ctx context.Context) (done func(), err error) {
 	r.wikiMu.Lock()
-	if wait := time.Until(r.wikiLast.Add(WikimediaPace(r.opt.CommonsContact != ""))); wait > 0 {
-		select {
-		case <-ctx.Done():
+	if wait := r.wikiLast.Add(WikimediaPace(r.opt.CommonsContact != "")).Sub(r.env.Now()); wait > 0 {
+		if err := wikiSleep(ctx, wait); err != nil {
 			r.wikiMu.Unlock()
-			return nil, ctx.Err()
-		case <-time.After(wait):
+			return nil, err
 		}
 	}
-	return func() { r.wikiLast = time.Now(); r.wikiMu.Unlock() }, nil
+	return func() { r.wikiLast = r.env.Now(); r.wikiMu.Unlock() }, nil
 }
 
 func writeAtomic(path string, b []byte) error {

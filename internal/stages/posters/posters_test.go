@@ -131,6 +131,7 @@ type world struct {
 	batches    map[string][]llm.BatchRequest
 	ended      bool
 	commons    http.HandlerFunc // the Wikimedia Commons API, when set
+	ownerFile  string           // collectionWorld's collections.owner.json
 }
 
 // set changes the fake servers' behaviour between runs.
@@ -694,15 +695,24 @@ func TestOwnersUploadUnmarked(t *testing.T) {
 	}
 }
 
-// Catches: a title nothing knows (no TMDB entry, no fanart.tv art, no owner poster) asked about again on every run:
-// TMDB's 404 is not cached, so each run would cost requests for such a title forever.
-func TestEmptyPoolNotRefetched(t *testing.T) {
+// Catches: a title nothing knows (no TMDB entry, no fanart.tv art, no owner poster) asked about again on every run
+// (TMDB's 404 is not cached), or never again, so art a source gains later is never seen; and a title left without a
+// single candidate for days with no alert.
+func TestEmptyPoolRegatheredDaily(t *testing.T) {
 	w := newWorld(t, "dry_run = true\n")
 	os.MkdirAll(filepath.Join(w.lib, "Movies/Delta (2004) {tmdb-4}"), 0o755)
 	w.run(t)
 	w.run(t)
 	if n := len(w.h.TMDB.Calls("GET", "/movie/4")); n != 1 {
-		t.Fatalf("TMDB asked about the unknown Delta %d times in two runs, want once", n)
+		t.Fatalf("TMDB asked about the unknown Delta %d times in two runs on one day, want once", n)
+	}
+	w.h.Now = w.h.Now.Add(25 * time.Hour)
+	if rep := w.run(t); len(w.h.TMDB.Calls("GET", "/movie/4")) != 2 || len(rep.Alerts) != 0 {
+		t.Fatalf("a day later: TMDB asked %d times (want 2), alerts %v (want none yet)", len(w.h.TMDB.Calls("GET", "/movie/4")), rep.Alerts)
+	}
+	w.h.Now = w.h.Now.Add(48 * time.Hour)
+	if rep := w.run(t); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "movie:tmdb-4") {
+		t.Fatalf("three days without a candidate: alerts %v, want one naming movie:tmdb-4", rep.Alerts)
 	}
 }
 
