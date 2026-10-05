@@ -220,7 +220,8 @@ func row(t *testing.T, env *stage.Env, path string) (status, errText string) {
 
 // Catches, end to end: notes for files outside the scheme or in hidden folders, the probe bound not deferring
 // (or not putting the newest file first), an unchanged note rewritten or an unchanged file re-probed, an
-// unreadable or video-less file not listed, alerted twice or re-probed before its retry time, the original name
+// unreadable or video-less file not listed, alerted twice or re-probed before its retry time, the note of a video
+// that turned unreadable left describing its previous version (or naming ffprobe's per-run pointers), the original name
 // lost across two moves, another version's sidecar listed, a stale temp file blocking a write, a note left stale
 // when its text changes (a new sidecar) or when someone edits it, correct notes rewritten after the note state is
 // lost, an SDR file probed for frames or a file under
@@ -232,6 +233,7 @@ func TestRunReconciles(t *testing.T) {
 	audioOnly := l.add("Movies/Audio Only (2000) {tmdb-2}/Audio Only (2000) {tmdb-2}.mkv", 0)
 	pilot := l.add("TV/Show (2008) {tmdb-1396}/Season 01/Show (2008) - S01E01 - Pilot.mkv", 1)
 	broken := l.add("Movies/Broken (2001) {tmdb-1}/Broken (2001) {tmdb-1}.mkv", 2)
+	l.add("Movies/Broken (2001) {tmdb-1}/.details/Broken (2001) {tmdb-1}.mkv.txt", 2) // the note on its previous version
 	heat := l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv", 3)
 	extra := l.add("Movies/Heat (1995) {tmdb-949}/Featurettes/Making Of.mkv", 4)
 	l.add("Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.en.srt", 5)
@@ -245,7 +247,7 @@ func TestRunReconciles(t *testing.T) {
 	fixture, _ := filepath.Abs("testdata/cronos_dtshdma.json")
 	calls := filepath.Join(h.Env.FFmpeg.Dir, "calls")
 	h.Script(t, "ffprobe", `echo "$*" >> "`+calls+`"
-case "$*" in *Broken*) echo "Invalid data found when processing input" >&2; exit 1;;
+case "$*" in *Broken*) echo "[matroska,webm @ 0x7f8e2c00] 0x00 at pos 0 (0x0) invalid as first byte of an EBML number" >&2; exit 1;;
   *"Audio Only"*) echo '{"streams":[{"index":0,"codec_type":"audio","codec_name":"flac"}],"format":{}}'; exit;; esac
 cat "`+fixture+`"
 `)
@@ -258,7 +260,7 @@ cat "`+fixture+`"
 	probes := func() int { raw, _ := os.ReadFile(calls); return strings.Count(string(raw), "-show_streams") }
 
 	rep := runOnce(t, h.Env)
-	if rep.Counts["probed"] != 4 || rep.Counts["probe_deferred"] != 1 || rep.Counts["written"] != 2 || rep.Counts["unreadable"] != 2 || note(extra) != "" {
+	if rep.Counts["probed"] != 4 || rep.Counts["probe_deferred"] != 1 || rep.Counts["written"] != 4 || rep.Counts["unreadable"] != 2 || note(extra) != "" {
 		t.Fatalf("run 1 counts %v (the oldest file, Making Of, must be the deferred one)", rep.Counts)
 	}
 	n := note(heat)
@@ -274,7 +276,12 @@ cat "`+fixture+`"
 	if !strings.Contains(note(pilot), "Identity:        tmdb-1396\n") {
 		t.Errorf("episode note = %q", note(pilot))
 	}
-	if status, e := row(t, h.Env, broken); status != "unreadable" || !strings.Contains(e, "Invalid data found") ||
+	if want := "Title:           Broken (2001) {tmdb-1}\nOriginal name:   Broken (2001) {tmdb-1}.mkv\nOriginal folder: Broken (2001) {tmdb-1}\n" +
+		"Unreadable:      ffprobe file: exit status 1: [matroska,webm] 0x00 at pos 0 (0x0) invalid as first byte of an EBML number\n" +
+		"Size:            0.00 GB\nSource · group:  unknown · unknown\nIdentity:        tmdb-1\n"; note(broken) != want {
+		t.Errorf("unreadable note:\n%s\nwant:\n%s", note(broken), want)
+	}
+	if status, e := row(t, h.Env, broken); status != "unreadable" || !strings.Contains(e, "EBML number") ||
 		len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "2 video(s) newly unreadable") || !strings.Contains(rep.Alerts[0], broken) {
 		t.Fatalf("broken: status %q err %q alerts %v", status, e, rep.Alerts)
 	}

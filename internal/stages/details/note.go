@@ -74,6 +74,24 @@ func render(v video, info probe.Info, orig string, sidecars []string, row *fileR
 	return b.String()
 }
 
+// ffAddress is the pointer ffprobe prints in its messages ("[matroska,webm @ 0x55d1c0a3c2c0]"); it differs per run.
+var ffAddress = regexp.MustCompile(` @ 0x[0-9a-f]+`)
+
+// renderUnreadable is the note for a video ffprobe cannot read: what is known without it, and why not more.
+func renderUnreadable(v video, orig, reason string) string {
+	var b strings.Builder
+	line := func(label, value string) { fmt.Fprintf(&b, "%-17s%s\n", label+":", value) }
+	src, group := sourceGroup(filepath.Base(orig))
+	line("Title", strings.TrimSuffix(filepath.Base(v.path), filepath.Ext(v.path)))
+	line("Original name", filepath.Base(orig))
+	line("Original folder", filepath.Base(filepath.Dir(orig)))
+	line("Unreadable", clip(ffAddress.ReplaceAllString(strings.ReplaceAll(reason, v.path, "file"), "")))
+	line("Size", fmt.Sprintf("%.2f GB", float64(v.size)/1e9))
+	line("Source · group", src+" · "+group)
+	line("Identity", v.identity)
+	return b.String()
+}
+
 // ---- the first ten lines, as write_details_files.py writes them ----
 
 func resLabel(w, h int) string {

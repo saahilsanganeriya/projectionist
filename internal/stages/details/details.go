@@ -176,7 +176,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 			return err
 		}
 		if *p.row != before {
-			if err := r.note(p.v, p.info, p.row); err != nil {
+			if err := r.note(p.v, render(p.v, p.info, r.original(p.v.path), r.sidecarsOf(p.v.path), p.row), p.row); err != nil {
 				return err
 			}
 			if err := r.save(ctx, p.v.path, p.row); err != nil {
@@ -272,12 +272,15 @@ func (r *run) one(ctx context.Context, v video, row *fileRow) error {
 		}
 		row.Status, row.Error, row.CheckedAt = "unreadable", err.Error(), r.env.Now()
 		r.rep.Count("unreadable", 1)
+		if err := r.note(v, renderUnreadable(v, r.original(v.path), row.Error), row); err != nil { // replaces a note on the file's previous version
+			return err
+		}
 		return r.save(ctx, v.path, row)
 	}
 	if row.Status != "ok" {
 		row.Status, row.Error, row.CheckedAt = "ok", "", r.env.Now()
 	}
-	if err := r.note(v, info, row); err != nil {
+	if err := r.note(v, render(v, info, r.original(v.path), r.sidecarsOf(v.path), row), row); err != nil {
 		return err
 	}
 	if (r.needsPeak(info, row) || !row.Clean.Valid) && len(r.queue) < r.opt.MaxPeakScans+r.opt.MaxDecodeChecks {
@@ -289,10 +292,9 @@ func (r *run) one(ctx context.Context, v video, row *fileRow) error {
 	return nil
 }
 
-// note brings the note in line with the file. When the text is what the row says was last written and the note
-// still has that size and mtime, a stat suffices; otherwise the note is read, compared and rewritten if needed.
-func (r *run) note(v video, info probe.Info, row *fileRow) error {
-	text := render(v, info, r.original(v.path), r.sidecarsOf(v.path), row)
+// note makes the video's note say text. When text is what the row says was last written and the note still has
+// that size and mtime, a stat suffices; otherwise the note is read, compared and rewritten if needed.
+func (r *run) note(v video, text string, row *fileRow) error {
 	sum := sha256.Sum256([]byte(text))
 	sha := hex.EncodeToString(sum[:])
 	path := notePath(r.opt, v.path)
