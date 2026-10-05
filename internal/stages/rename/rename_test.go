@@ -114,6 +114,9 @@ aligned_log = ""`, root, l.undoLog, l.review, keyFile, srv.URL))
 	write(t, filepath.Join(movies, "Heat.1995.1080p.BluRay.x264-GRP", "Heat.1995.1080p.BluRay.x264-GRP.srt"), englishSRT(120))
 	write(t, filepath.Join(movies, "Heat.1995.1080p.BluRay.x264-GRP", "SITEA.txt"), "ad")
 	write(t, filepath.Join(movies, "Mystery.2001.mkv"), "unmatched")
+	write(t, filepath.Join(movies, "Gone.2010", "@eaDir", "thumb.jpg"), "a shell left by an earlier move")
+	write(t, filepath.Join(movies, "Gone.2010", ".DS_Store"), "")
+	write(t, filepath.Join(movies, "Kept.2011", "#recycle", "x.mkv"), "the recycle bin is not clutter")
 	write(t, filepath.Join(movies, "Unknown.Thing.2001", "Unknown.Thing.2001.mkv"), "unmatched")
 	write(t, filepath.Join(movies, "Unknown.Thing.2001", "Unknown.Thing.2001.nfo"), "stays with its video")
 	// already named; TMDB spells its title differently, which must not rename it
@@ -135,16 +138,23 @@ func (l *library4test) run(t *testing.T) stage.Report {
 // Catches, end to end: a new film or show not reaching its scheme name (TMDB identity, episode titles, subtitle
 // language from its text, junk archived, the emptied folder pruned), an ambiguous TMDB match being renamed instead of
 // listed for review, junk archived out of a folder whose video waits for review, an episode already named being
-// renamed to TMDB's spelling, Jellyfin not told, a second run changing anything, and undo not restoring the tree.
+// renamed to TMDB's spelling, an empty shell (only @eaDir/.DS_Store) left behind or a recycle bin swept, Jellyfin not
+// told, a second run changing anything, and undo not restoring the tree.
 func TestRunNewArrivalsThenUndo(t *testing.T) {
 	l := newLibrary(t)
-	before := tree(t, l.root)
+	var before []string // what undo must restore: everything but the empty shell, which is swept for good
+	for _, p := range tree(t, l.root) {
+		if !strings.HasPrefix(p, "Movies/Gone.2010/") {
+			before = append(before, p)
+		}
+	}
 	l.run(t)
 
 	want := []string{
 		".projectionist/rename/undo.tsv",
 		"Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.en.srt",
 		"Movies/Heat (1995) {tmdb-949}/Heat (1995) {tmdb-949}.mkv",
+		"Movies/Kept.2011/#recycle/x.mkv",
 		"Movies/Mystery.2001.mkv",
 		"Movies/Unknown.Thing.2001/Unknown.Thing.2001.mkv",
 		"Movies/Unknown.Thing.2001/Unknown.Thing.2001.nfo",

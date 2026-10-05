@@ -4,7 +4,7 @@
 //
 //	walk ─► identity (names, library, TMDB) ─► episode rows (names, TMDB) ─► facts (ffprobe, subtitle bytes)
 //	     ─► Build (pure planner) ─► units with work, settled, no problems ─► executor (viewer gate per unit)
-//	     ─► _needs-review.txt, Jellyfin told which folders changed
+//	     ─► empty shells swept ─► _needs-review.txt, Jellyfin told which folders changed
 //
 // Sources: the files themselves and TMDB, directly. Plex is never asked anything (it watches the disk); Jellyfin
 // only receives one /Library/Media/Updated push per run, queued and retried, never failing the stage.
@@ -101,10 +101,13 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	}
 	review = append(review, leftItems(plan, lib)...)
 	if opt.Mode == "plan" {
-		return writePlan(opt.PlanDir, plan, units, review)
+		return writePlan(opt.PlanDir, plan, units, review, lib.shells)
 	}
 	writeReview(env, opt.ReviewFile, review)
 	touched, err := apply(ctx, env, rep, opt, units)
+	if err == nil {
+		sweep(env, rep, opt, lib)
+	}
 	pushJellyfin(ctx, env, opt, touched)
 	rep.Summary = fmt.Sprintf("%d unit(s) applied, %d left for review", rep.Counts["units_done"], len(review))
 	return err
@@ -116,6 +119,7 @@ type library struct {
 	root, movies, tv string
 	files            map[string]int64
 	busy             map[string]bool // top-level entries still arriving (written within Quiet, or a partial download)
+	shells           []string        // folders holding nothing but clutter (.DS_Store, @eaDir), deepest first
 }
 
 // top is the library entry a path belongs to: Movies/<X>, TV/<X>, or Movies/Remote Versions/<X>.
@@ -134,6 +138,12 @@ func (l *library) top(p string) string {
 
 func scan(root string, settled time.Time) (*library, error) {
 	l := &library{root: root, movies: root + "/Movies", tv: root + "/TV", files: map[string]int64{}, busy: map[string]bool{}}
+	dirs, content := map[string]bool{}, map[string]bool{}
+	holds := func(p string) { // p's folders hold something that is not clutter
+		for d := path.Dir(p); d != l.movies && d != l.tv && !content[d] && len(d) > len(root); d = path.Dir(d) {
+			content[d] = true
+		}
+	}
 	for _, lib := range []string{l.movies, l.tv} {
 		err := filepath.WalkDir(lib, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -146,6 +156,9 @@ func scan(root string, settled time.Time) (*library, error) {
 				return nil
 			}
 			if d.IsDir() && (d.Name() == "@eaDir" || d.Name() == "#recycle") {
+				if d.Name() == "#recycle" { // a recycle bin is never clutter
+					holds(p + "/x")
+				}
 				return filepath.SkipDir
 			}
 			info, err := d.Info()
@@ -155,8 +168,13 @@ func scan(root string, settled time.Time) (*library, error) {
 			if top := l.top(p); changedSince(info, settled) || partialExt[lowerExt(p)] {
 				l.busy[top] = true
 			}
-			if !d.IsDir() {
+			if d.IsDir() {
+				dirs[p] = true
+			} else {
 				l.files[p] = info.Size()
+				if !clutter[d.Name()] {
+					holds(p)
+				}
 			}
 			return nil
 		})
@@ -164,6 +182,12 @@ func scan(root string, settled time.Time) (*library, error) {
 			return nil, err
 		}
 	}
+	for d := range dirs {
+		if !content[d] {
+			l.shells = append(l.shells, d)
+		}
+	}
+	sort.Slice(l.shells, func(i, j int) bool { return len(l.shells[i]) > len(l.shells[j]) })
 	return l, nil
 }
 
@@ -556,6 +580,17 @@ func apply(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, 
 	return touched, nil
 }
 
+// sweep removes settled folders left holding only clutter (apply_ops.py --sweep), re-checking each on disk.
+func sweep(env *stage.Env, rep *stage.Report, opt Options, lib *library) {
+	x := &executor{roots: libraryRoots(opt.Root), now: env.Now, stats: map[string]int{}}
+	for _, d := range lib.shells {
+		if !lib.busy[lib.top(d)] && lexists(d) {
+			x.prune(d)
+		}
+	}
+	rep.Count("swept", x.stats["pruned"])
+}
+
 func libraryRoots(root string) []string {
 	return []string{root + "/Movies", root + "/TV", root + "/_archive", root + "/_assets"}
 }
@@ -590,7 +625,7 @@ func undo(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options) e
 
 // ---- outputs
 
-func writePlan(dir string, plan Plan, units map[string][]Op, review []reviewItem) error {
+func writePlan(dir string, plan Plan, units map[string][]Op, review []reviewItem, shells []string) error {
 	if dir == "" {
 		return errors.New("rename: plan mode needs plan_dir")
 	}
@@ -613,7 +648,7 @@ func writePlan(dir string, plan Plan, units map[string][]Op, review []reviewItem
 		}
 	}
 	files := map[string]string{"ops.tsv": ops.String(), "review.tsv": rv.String(), "problems.tsv": pr.String(),
-		"units.txt": strings.Join(sortedKeys(units), "\n") + "\n"}
+		"units.txt": strings.Join(sortedKeys(units), "\n") + "\n", "shells.txt": strings.Join(shells, "\n") + "\n"}
 	for n, body := range files {
 		if err := os.WriteFile(filepath.Join(dir, n), []byte(body), 0o644); err != nil {
 			return err
