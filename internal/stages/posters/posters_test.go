@@ -30,14 +30,19 @@ func init() { FetchDelay, llm.RetryDelay, tmdb.RetryDelay = zeroDelay, zeroDelay
 
 func zeroDelay(int) time.Duration { return 0 }
 
-// poster draws a JPEG whose colour the fake judge scores and whose pattern gives each colour its own dHash.
+// poster draws a JPEG whose colour the fake judge scores and whose pattern gives each colour its own dHash;
+// "big" draws the same art at twice the size.
 func poster(colour string) []byte {
-	img := image.NewRGBA(image.Rect(0, 0, 400, 600))
-	for y := 0; y < 600; y++ {
-		for x := 0; x < 400; x++ {
-			v := uint8(128 + x*127/400)
+	w := 400
+	if c, ok := strings.CutSuffix(colour, "big"); ok {
+		colour, w = c, 800
+	}
+	img := image.NewRGBA(image.Rect(0, 0, w, w*3/2))
+	for y := 0; y < w*3/2; y++ {
+		for x := 0; x < w; x++ {
+			v := uint8(128 + x*127/w)
 			c := map[string]color.RGBA{"red": {v, 0, 0, 255}, "blue": {0, 0, 255 - v/2, 255},
-				"green": {0, uint8(96 + 120*(x*9/400%2)), 0, 255}}[colour]
+				"green": {0, uint8(96 + 120*(x*9/w%2)), 0, 255}, "yellow": {200, uint8(80 + 120*(x*9/w/2%2)), 0, 255}}[colour]
 			img.Set(x, y, c)
 		}
 	}
@@ -81,6 +86,8 @@ type world struct {
 	h        *fake.Harness
 	api      *httptest.Server
 	mu       sync.Mutex
+	garbage  bool // the judge answers prose
+	models   int
 	messages int
 	batches  map[string][]llm.BatchRequest
 	ended    bool
@@ -111,7 +118,11 @@ func newWorld(t *testing.T, opts string) *world {
 		}
 		return `{"original_language":"en","images":{"posters":[` + strings.Join(ps, ",") + `]}}`
 	}
-	tmdbAnswers := map[string]string{"/3/movie/1": posters("red", "blue"), "/3/movie/2": posters("red"),
+	// Alpha's list also holds a bigger copy of red, a banner and a German poster: none may enter the pool.
+	alpha := strings.Replace(posters("red", "blue", "redbig"), `]}}`, `,
+ {"file_path":"/yellow.jpg","iso_639_1":"en","width":1000,"height":400,"vote_average":9,"vote_count":50},
+ {"file_path":"/yellow.jpg","iso_639_1":"de","width":1000,"height":1500,"vote_average":9,"vote_count":50}]}}`, 1)
+	tmdbAnswers := map[string]string{"/3/movie/1": alpha, "/3/movie/2": posters("red"),
 		"/3/tv/3": posters("blue", "red"), "/3/tv/3/season/1": posters("green")}
 	w.api = httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		w.mu.Lock()
@@ -123,12 +134,17 @@ func newWorld(t *testing.T, opts string) *world {
 		case strings.HasPrefix(p, "/t/p/"):
 			rw.Write(poster(strings.TrimSuffix(filepath.Base(p), ".jpg")))
 		case p == "/v1/models":
+			w.models++
 			reply(rw, `{"data":[{"id":"claude-haiku-4-5-20251001","created_at":"2025-10-01T00:00:00Z"},{"id":"claude-sonnet-5-5","created_at":"2026-08-01T00:00:00Z"}]}`)
 		case p == "/v1/messages":
 			var req llm.Request
 			json.NewDecoder(r.Body).Decode(&req)
 			w.messages++
-			json.NewEncoder(rw).Encode(answer(req))
+			resp := answer(req)
+			if w.garbage {
+				resp.Content = []llm.Block{llm.Text("These are all lovely posters.")}
+			}
+			json.NewEncoder(rw).Encode(resp)
 		case p == "/v1/messages/batches":
 			var body struct{ Requests []llm.BatchRequest }
 			json.NewDecoder(r.Body).Decode(&body)
@@ -235,6 +251,13 @@ func TestRunEndToEnd(t *testing.T) {
 	if w.messages != 2 || rep.Counts["apply_deferred"] == 0 || len(w.h.Jellyfin.Calls("POST", "/Items/j1/Images/Primary")) != 0 {
 		t.Fatalf("run 1: %d judge calls (want 2: Alpha, Gamma), counts %v; nothing may upload while a guest watches", w.messages, rep.Counts)
 	}
+	var alpha []Candidate
+	alphaRaw := ""
+	w.h.Env.Store.DB().QueryRow(`SELECT cands FROM posters_items WHERE key='movie:tmdb-1'`).Scan(&alphaRaw)
+	json.Unmarshal([]byte(alphaRaw), &alpha)
+	if len(alpha) != 3 {
+		t.Fatalf("Alpha's pool has %d candidates, want 3 (owner, red, blue): a resized copy, a banner and a German poster must stay out", len(alpha))
+	}
 	want := map[string][2]string{"movie:tmdb-1": {"/red.jpg", "judged"}, "movie:tmdb-2": {"owner:movie/12.jpg", "upload"},
 		"show:tmdb-3": {"/red.jpg", "judged"}, "season:tmdb-3:1": {"/green.jpg", "single"}}
 	for k, wv := range want {
@@ -277,19 +300,37 @@ func TestRunEndToEnd(t *testing.T) {
 		len(w.h.Plex.Calls("POST", "/library/metadata/101/posters")) != 1 {
 		t.Fatalf("after the retry: %d Gamma uploads (want 2), %d judge calls (want 2); reruns must change nothing", n, w.messages)
 	}
+	if n := len(w.h.Plex.Calls("GET", "/library/sections/4/all")); n != 1 {
+		t.Fatalf("Plex listed its movies %d times within a day, want once", n)
+	}
+}
+
+// Catches: a title whose judge keeps answering prose being paid for on every run, and the model list asked for on
+// every run instead of once a day.
+func TestUnusableAnswersStop(t *testing.T) {
+	w := newWorld(t, "dry_run = true\n")
+	w.garbage = true
+	for range 3 {
+		w.run(t)
+	}
+	if v := w.verdict(t, "movie:tmdb-1"); w.messages != 4 || v.Rule != "unjudged" || w.models != 1 {
+		t.Fatalf("%d judge calls (want 2 titles × 2 tries), Alpha rule %q (want unjudged), %d model lists (want 1)", w.messages, v.Rule, w.models)
+	}
 }
 
 // Catches: a backlog judged one call at a time at full price, a batch result applied to the wrong title, and a
 // pending batch's cost not held against the budget.
 func TestBatchBacklog(t *testing.T) {
 	w := newWorld(t, "batch_min = 1\ndry_run = true\n")
+	// A reservation left by a run that died before submitting must be released, or this budget could not hold the batch.
+	w.h.Env.Store.DB().Exec(schema)
+	w.h.Env.Store.DB().Exec(`INSERT INTO posters_calls(at, item, of, model, mode, batch_id, state, input_tokens, output_tokens,
+		reserved_usd, cost_usd, llm_ms, error) VALUES ('', 'x', 'y', 'm', 'batch', '', 'pending', 0, 0, 4.999, 0, 0, '')`)
 	w.run(t)
 	if w.messages != 0 || len(w.batches["b1"]) != 2 || w.verdict(t, "movie:tmdb-1").Choice != "" {
 		t.Fatalf("run 1: %d messages, batch %d requests; want one batch of 2 and no verdict yet", w.messages, len(w.batches["b1"]))
 	}
-	var held float64
-	w.h.Env.Store.DB().QueryRow(`SELECT sum(reserved_usd) FROM posters_calls WHERE state='pending'`).Scan(&held)
-	if held <= 0 {
+	if held, _ := spentUSD(context.Background(), w.h.Env.Store.DB()); held <= 0 {
 		t.Fatal("a submitted batch holds nothing against the budget")
 	}
 	w.mu.Lock()
