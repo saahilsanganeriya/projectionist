@@ -5,6 +5,7 @@ import (
 	"cmp"
 	"compress/gzip"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -14,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,8 +36,8 @@ import (
 //	Dune    already has Dune.en.srt                    -> untouched, never probed
 //	Show    English audio, nothing anywhere            -> no_candidates
 //
-// The fake alass hears speech.srt in any audio and writes realign.srt (both srt(ts, 1)) as any alignment, or the
-// candidate unchanged once realign.srt is removed.
+// The fake ffmpeg decodes any audio as a tone wherever srt(ts, 1) has a line (the speech the stage hears), and the fake
+// alass writes realign.srt (srt(ts, 1)) as any alignment, or the candidate unchanged once realign.srt is removed.
 type fixture struct {
 	h        *fake.Harness
 	st       Stage
@@ -54,6 +56,20 @@ type fixture struct {
 }
 
 func (f *fixture) path(rel string) string { return filepath.Join(f.lib, rel) }
+
+// speechPCM writes path: 16 kHz s16le PCM of a 1 kHz tone for d seconds from each t+shift, silence elsewhere (a sparse
+// file: the silence costs no disk).
+func speechPCM(path string, ts []float64, shift, d float64) {
+	tone := make([]byte, 2*int(d*16000))
+	for k := range len(tone) / 2 {
+		binary.LittleEndian.PutUint16(tone[2*k:], uint16(int16(8000*math.Sin(2*math.Pi*1000*float64(k)/16000))))
+	}
+	f, _ := os.Create(path)
+	defer f.Close()
+	for _, t := range ts {
+		f.WriteAt(tone, int64(2*int((t+shift)*16000)))
+	}
+}
 
 const (
 	ran    = "Movies/Ran (1985) {tmdb-11645}/Ran (1985) {tmdb-11645}.mkv"
@@ -93,16 +109,15 @@ func newFixture(t *testing.T) *fixture {
 	put("Show.json", probeJSON(`{"index":1,"codec_type":"audio","codec_name":"aac",`+eng+`}`))
 	put("ran.framecrc", framecrc(f.ts))
 	put("realign.srt", srt(f.ts, 1))
-	put("speech.srt", srt(f.ts, 1))
+	speechPCM(filepath.Join(ff, "speech.pcm"), f.ts, 1, 1.5)
 	f.h.Script(t, "ffprobe", `echo "$*" >> "`+ff+`/ffprobe.calls"
 for n in Ran Heat Clerks Show; do case "$*" in *"/$n "*) cat "`+ff+`/$n.json"; exit 0;; esac; done; exit 1
 `)
 	f.h.Script(t, "ffmpeg", `echo "$*" >> "`+ff+`/helper.calls"
-case "$*" in *framecrc*) cat "`+ff+`/ran.framecrc";; *) exit 1;; esac
+case "$*" in *framecrc*) cat "`+ff+`/ran.framecrc";; *s16le*) cat "`+ff+`/speech.pcm";; *) exit 1;; esac
 `)
-	// alass's real CLI: <reference> <incorrect> <output> [--index <audio stream>]; it exits 1 on any other flag.
+	// alass's real CLI: <reference> <incorrect> <output>.
 	f.h.Script(t, "alass", `echo "$*" >> "`+ff+`/helper.calls"
-if [ "$2" = "_" ]; then [ "$4 $5" = "--index 1" ] || exit 1; cp "`+ff+`/speech.srt" "$3"; exit 0; fi
 cp "`+ff+`/realign.srt" "$3" 2>/dev/null || cp "$2" "$3"; echo "info: 'reference file FPS/input file FPS' ratio is 1"
 `)
 	f.h.TMDB.Handle("GET", "/movie/11645", 200, `{"id":11645,"external_ids":{"imdb_id":"tt0089881"}}`)
@@ -456,8 +471,9 @@ func TestRunEpisodeFromGestdown(t *testing.T) {
 }
 
 // Catches a missing or broken alass parking titles for a week, or failing quietly: missing, every title that needs it
-// waits in the queue, spending neither a download nor one of the day's alignments; failing, the title it failed on is
-// recorded (it may be that title's audio) and the titles behind it wait; one alert either way.
+// waits in the queue, spending neither a download nor one of the day's alignments; failing, no candidate is refused for
+// it (a refusal is for good) and the title waits with those behind it; a title whose audio cannot be heard is recorded
+// (it may be that title's audio) and the titles behind it wait; one alert each.
 func TestRunWhenAlassBreaks(t *testing.T) {
 	missing := newFixture(t)
 	os.Remove(filepath.Join(missing.h.Env.FFmpeg.Dir, "alass"))
@@ -467,17 +483,26 @@ func TestRunWhenAlassBreaks(t *testing.T) {
 			rep.Alerts, missing.outcomes(), missing.queued(), rep.Counts["cap_used"], strings.Contains(strings.Join(missing.requests, " "), "/dl/clerks"))
 	}
 	broken := newFixture(t)
-	alass := broken.h.Script(t, "alass", "exit 1\n")
-	if rep := broken.run(t); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "alass failed") || broken.outcomes()[broken.path(clerks)] != "no_reference" {
-		t.Errorf("alass failing: alerts %q, recorded %v; want one alert and Clerks recorded", rep.Alerts, broken.outcomes())
+	broken.h.Script(t, "alass", "exit 1\n")
+	rep := broken.run(t)
+	if refused := broken.verdict(clerks, "rejected_misaligned"); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "alass failed") ||
+		broken.outcomes()[broken.path(clerks)] != "queued" || len(refused) != 0 {
+		t.Errorf("alass failing: alerts %q, recorded %v, refusal %v; want one alert, Clerks still queued, its candidate not refused", rep.Alerts,
+			broken.outcomes(), refused)
 	}
-	r := &run{env: broken.h.Env, opt: Options{Alass: alass}, rep: &stage.Report{}, alerted: map[string]bool{}}
-	next := &title{path: broken.path(clerks), info: probe.Info{Audio: []probe.Audio{{Index: 1}}}}
+	deaf := newFixture(t)
+	ff := deaf.h.Env.FFmpeg.Dir
+	deaf.h.Script(t, "ffmpeg", `case "$*" in *framecrc*) cat "`+ff+`/ran.framecrc";; *) exit 1;; esac`+"\n") // no audio decodes
+	if rep := deaf.run(t); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "hearing the audio failed") || deaf.outcomes()[deaf.path(clerks)] != "no_reference" {
+		t.Errorf("audio not heard: alerts %q, recorded %v; want one alert and Clerks recorded", rep.Alerts, deaf.outcomes())
+	}
+	r := &run{env: deaf.h.Env, opt: Options{Alass: filepath.Join(ff, "alass")}, rep: &stage.Report{}, alerted: map[string]bool{}}
+	next := &title{path: deaf.path(clerks), info: probe.Info{Audio: []probe.Audio{{Index: 1}}}}
 	before, _ := r.alignments(context.Background())
 	first, _ := r.reference(context.Background(), next)
 	second, _ := r.reference(context.Background(), next)
 	if after, _ := r.alignments(context.Background()); first.deferred || !second.deferred || len(after)-len(before) != 1 {
-		t.Errorf("deferred %v, then %v, %d alignments counted; want the title after alass failed deferred, costing none", first.deferred,
+		t.Errorf("deferred %v, then %v, %d alignments counted; want the title after the audio failed deferred, costing none", first.deferred,
 			second.deferred, len(after)-len(before))
 	}
 }
@@ -665,6 +690,45 @@ func TestAlassFit(t *testing.T) {
 		if ok != c.want || ok && (result != "retimed" || out != uniform.String() || attempt["offset_ms"] != 1500.0) {
 			t.Errorf("%s against its speech %v: ok %v result %q attempt %v", c.mode, c.want, ok, result, attempt)
 		}
+	}
+}
+
+// Catches the speech for alass heard as alass hears it (Brooklyn Nine-Nine: its score under the dialogue took 85-91 %
+// of the runtime for speech, and the right subtitles were aligned tens of seconds off), from the mixed or a
+// non-default track, or with lines lost where the PCM is judged in pieces: across a hearSpan boundary or after the
+// last whole one. A steady tone 28 dB under the lines plays throughout, as a score would.
+func TestHearVoiceBand(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	ff := h.Env.FFmpeg.Dir
+	lines := []span{{10, 12}, {40, 41.5}, {89, 91.5}, {130, 133}, {185, 186.5}} // the third crosses 90 s, the last is past 180 s
+	pcm := make([]byte, 2*200*16000)
+	for k := range len(pcm) / 2 {
+		level, at := 300.0, float64(k)/16000
+		for _, l := range lines {
+			if at >= l.start && at < l.end {
+				level = 8000
+			}
+		}
+		binary.LittleEndian.PutUint16(pcm[2*k:], uint16(int16(level*math.Sin(2*math.Pi*1000*at))))
+	}
+	os.WriteFile(filepath.Join(ff, "speech.pcm"), pcm, 0o644)
+	h.Script(t, "ffmpeg", `echo "$*" >> "`+ff+`/helper.calls"; cat "`+ff+`/speech.pcm"`+"\n")
+	r := &run{env: h.Env, opt: Options{Alass: h.Script(t, "alass", "exit 1\n")}}
+	ti := &title{path: "/v.mkv", info: probe.Info{Audio: []probe.Audio{{Index: 1, Layout: "stereo"}, {Index: 2, Layout: "5.1", Default: true}}}}
+	ref := reference{label: "alass"}
+	defer ref.cleanup()
+	if err := r.hear(context.Background(), ti, &ref); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(ref.speech)
+	heard := cues(string(raw))
+	calls, _ := os.ReadFile(filepath.Join(ff, "helper.calls"))
+	ok := len(heard) == len(lines) && strings.Contains(string(calls), "-map 0:2 -af pan=mono|c0=FC")
+	for i := range heard {
+		ok = ok && i < len(lines) && math.Abs(heard[i].start-lines[i].start) <= 0.03 && math.Abs(heard[i].end-lines[i].end) <= 0.03
+	}
+	if !ok || !slices.Equal(ref.talk, spanBits(heard, 1)) {
+		t.Errorf("heard %v from %q; want %v from the default track's centre channel", heard, calls, lines)
 	}
 }
 

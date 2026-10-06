@@ -731,7 +731,8 @@ func (o *subdl) Search(ctx context.Context, q Query) ([]Candidate, error) {
 		if q.Show && (season != strconv.Itoa(q.Season) || episode != strconv.Itoa(q.Episode)) {
 			continue
 		}
-		out = append(out, Candidate{Source: "subdl", ID: r.URL, Release: r.Release, FileName: r.Name, HearingImpaired: r.HI,
+		id, _, _ := strings.Cut(r.URL, "?") // the API appends the key to url: an id is kept in the history
+		out = append(out, Candidate{Source: "subdl", ID: id, Release: r.Release, FileName: r.Name, HearingImpaired: r.HI,
 			Season: season, Episode: episode, link: o.dl + r.URL, provider: o})
 	}
 	return out, nil

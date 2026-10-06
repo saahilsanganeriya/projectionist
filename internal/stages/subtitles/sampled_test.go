@@ -398,7 +398,10 @@ func TestRunSampled(t *testing.T) {
 		probes, _ := os.ReadFile(filepath.Join(ff, "ffprobe.calls"))
 		helpers, _ := os.ReadFile(filepath.Join(ff, "helper.calls"))
 		intervals, audio := strings.Count(string(probes), "-read_intervals"), strings.Count(string(helpers), "-ss ")
-		whole := strings.Contains(string(helpers), "framecrc") || strings.Contains(string(helpers), " _ ")
+		whole := strings.Contains(string(helpers), "framecrc")
+		for _, l := range strings.Split(string(helpers), "\n") {
+			whole = whole || strings.Contains(l, "s16le") && !strings.Contains(l, "-ss ") // the audio heard whole
+		}
 		if o := f.outcomes()[f.path(show)]; o != c.want || whole || c.captions && (intervals != 1 || audio != 0) || !c.captions && (intervals != 0 || audio != 4) {
 			t.Errorf("%s: %q (want %q); %d image-track reads, %d audio windows, whole-file read %v", c.why, o, c.want, intervals, audio, whole)
 			continue
