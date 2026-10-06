@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -78,8 +79,9 @@ func speechSamples(starts []float64, wins []sampleWindow) []sample {
 }
 
 // Catches each guard of the sampled fit: a shift, a PAL speed-up or a 23.976/24 change not recovered (from captions or
-// from speech), another film's subtitle or another cut's written, a window with too few matched lines accepted, and a
-// ratio the windows cannot tell from another (all four within six minutes) taken anyway.
+// from speech), another film's subtitle or another cut's written (the difference in the middle, or near either end of
+// a film or an episode, between the 3 % edge and the windows next to it), a window with too few matched lines
+// accepted, and a ratio the windows cannot tell from another (all four within six minutes) taken anyway.
 func TestFitSamples(t *testing.T) {
 	const film = 3000.0
 	truth := dense(1000, 7)
@@ -90,7 +92,7 @@ func TestFitSamples(t *testing.T) {
 		if cut[i] > film/2 {
 			cut[i] += 4
 		}
-		drift[i] *= 1.0002
+		drift[i] *= 1.00015
 	}
 	thin := captionSamples(truth, wins)
 	other := thin[2].captions[:7:7] // window 3 keeps 7 of its lines and gains another film's 30: under half match
@@ -113,13 +115,14 @@ func TestFitSamples(t *testing.T) {
 		fewCues = append(fewCues, c)
 	}
 	close := []sampleWindow{{1000, 90}, {1090, 90}, {1180, 90}, {1270, 90}}
-	for _, c := range []struct {
+	type fitCase struct {
 		name          string
 		cues          []span
 		samples       []sample
 		ratio, offset float64
 		refused       string
-	}{
+	}
+	cases := []fitCase{
 		{"captions, 7.3 s late", cueSpans(truth, 1, 7.3), captionSamples(truth, wins), 1, 7.3, ""},
 		{"captions, PAL", cueSpans(truth, 25/23.976, -0.4), captionSamples(truth, wins), 25 / 23.976, -0.4, ""},
 		{"captions, 23.976 against 24", cueSpans(truth, 23.976/24, 1.2), captionSamples(truth, wins), 23.976 / 24, 1.2, ""},
@@ -135,7 +138,22 @@ func TestFitSamples(t *testing.T) {
 		{"speech, a window of five lines", fewCues, speechSamples(truth, wins), 0, 0, "window 2 lacks evidence"},
 		{"speech, another cut", cueSpans(truth, 1, 0), speechSamples(cut, wins), 0, 0, "lacks evidence"},
 		{"speech, a drift", cueSpans(truth, 1, 0), speechSamples(drift, wins), 0, 0, "disagree"},
-	} {
+	}
+	for _, dur := range []float64{7200, 1320} { // a film and an episode: another cut 4 s longer from 8 % or from 92 %
+		w, truth := sampleWindowsFor(dur, 4, 90), dense(int(dur/3), 7)
+		for at, refused := range map[float64]string{0.08: "window 1 lacks evidence", 0.92: "window 4 lacks evidence"} {
+			jumped := slices.Clone(truth)
+			for i := range jumped {
+				if jumped[i] > at*dur {
+					jumped[i] += 4
+				}
+			}
+			name := fmt.Sprintf("%.0f s, another cut from %.0f %%", dur, 100*at)
+			cases = append(cases, fitCase{"captions, " + name, cueSpans(truth, 1, 0), captionSamples(jumped, w), 0, 0, refused},
+				fitCase{"speech, " + name, cueSpans(truth, 1, 0), speechSamples(jumped, w), 0, 0, refused})
+		}
+	}
+	for _, c := range cases {
 		f := fitSamples(c.cues, c.samples)
 		switch {
 		case c.refused != "" && !strings.Contains(f.Refused, c.refused):
@@ -146,14 +164,15 @@ func TestFitSamples(t *testing.T) {
 	}
 }
 
-// Catches windows placed in the first or last 3 % (logos, recaps, credits), bunched, or overrunning a short video.
+// Catches windows placed in the first or last 3 % (logos, recaps, credits), short of them (the runtime between the edge
+// and the outer window then goes unchecked), bunched, or overrunning a short video.
 func TestSampleWindowsFor(t *testing.T) {
 	for _, c := range []struct {
 		duration float64
 		length   float64
 		want     []sampleWindow
 	}{
-		{6000, 90, []sampleWindow{{840, 90}, {2250, 90}, {3660, 90}, {5070, 90}}},
+		{6000, 90, []sampleWindow{{180, 90}, {2030, 90}, {3880, 90}, {5730, 90}}},
 		{600, 150, []sampleWindow{{18, 141}, {159, 141}, {300, 141}, {441, 141}}}, // 94 % of 600 s in 4: 141 s each
 	} {
 		got := sampleWindowsFor(c.duration, 4, c.length)
@@ -181,8 +200,10 @@ func packetsJSON(starts []float64, offset float64) string {
 }
 
 // Catches the image track read over the whole file instead of the windows (one ffprobe over all of them, seeking by
-// the index), a window without dialogue judged instead of replaced by the stretch after it, more than two replacement
-// windows read, the "clear screen" packets taken for captions, or the file's start time left in the caption times.
+// the index), a window without dialogue judged instead of replaced by the stretch next to it toward the middle (the
+// last window by the one before it, and then the one before that, not the quiet window again), more than two
+// replacement windows read, the "clear screen" packets taken for captions, or the file's start time left in the
+// caption times.
 func TestSamplerReadsWindowsAndReplacesQuietOnes(t *testing.T) {
 	const film = 6000.0
 	captions := dense(2000, 7)
@@ -202,10 +223,11 @@ func TestSamplerReadsWindowsAndReplacesQuietOnes(t *testing.T) {
 		refused string
 		starts  []float64
 	}{
-		{"every window talks", captions, 1, "", []float64{840, 2250, 3660, 5070}},
-		{"the second is quiet", quiet(2250, 2340), 2, "", []float64{840, 2340, 3660, 5070}},
-		{"quiet twice over", quiet(2250, 2430), 3, "", []float64{840, 2430, 3660, 5070}},
-		{"quiet three times", quiet(2250, 2520), 3, "window 2 holds no dialogue", nil},
+		{"every window talks", captions, 1, "", []float64{180, 2030, 3880, 5730}},
+		{"the second is quiet", quiet(2030, 2120), 2, "", []float64{180, 2120, 3880, 5730}},
+		{"quiet twice over", quiet(2030, 2210), 3, "", []float64{180, 2210, 3880, 5730}},
+		{"quiet three times", quiet(2030, 2300), 3, "window 2 holds no dialogue", nil},
+		{"the last is quiet twice over (credits)", quiet(5640, 6000), 3, "", []float64{180, 2030, 3880, 5550}},
 	} {
 		h := fake.NewEnv(t, nil)
 		dir := t.TempDir()
@@ -224,7 +246,7 @@ echo "$*" >> "`+dir+`/calls"; cat "`+dir+`/packets.json"`+"\n")
 		why, err := s.readAll(context.Background())
 		calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
 		lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
-		if err != nil || why != c.refused || len(lines) != c.reads || !strings.Contains(lines[0], "-select_streams 3 -read_intervals 841.400%+90.000,2251.400%+90.000,") {
+		if err != nil || why != c.refused || len(lines) != c.reads || !strings.Contains(lines[0], "-select_streams 3 -read_intervals 181.400%+90.000,2031.400%+90.000,") {
 			t.Fatalf("%s: why %q err %v, %d reads %q; want %q, %d reads of the windows", c.name, why, err, len(lines), lines, c.refused, c.reads)
 		}
 		for i, want := range c.starts {
@@ -264,8 +286,9 @@ func srtOf(spans []span) string {
 
 // sampledFixture is the fixture's Show (3000 s, English audio, with or without an English PGS track) served by
 // Gestdown with the given subtitles in that order, and helpers that answer from the video's true timing (dense cue
-// starts): ffprobe's packets for the image track, ffmpeg's PCM (a 1 kHz tone wherever a line is spoken) for the
-// audio windows. Every ffprobe and ffmpeg call is logged.
+// starts): ffprobe's packets for the image track, ffmpeg's PCM (a 1 kHz tone wherever a line is spoken, 16 dB over a
+// noise floor: against digital silence the clipped onset score saturates into a plateau a second wide) for the audio
+// windows. Every ffprobe and ffmpeg call is logged.
 func sampledFixture(t *testing.T, captions bool, subs ...string) *fixture {
 	f := newFixture(t)
 	f.mode = "sampled"
@@ -303,11 +326,20 @@ case "$*" in *format=start_time*) echo 0.000; exit 0;; *-read_intervals*) cat "`
 case "$*" in *"/Show "*) cat "`+ff+`/Show.json"; exit 0;; esac; exit 1
 `)
 	for _, w := range sampleWindowsFor(3000, 4, 90) {
-		pcm := make([]byte, int(w.dur*16000)*2)
+		samples := make([]float64, int(w.dur*16000))
+		x := uint32(w.start)
+		for k := range samples {
+			x = x*1664525 + 1013904223
+			samples[k] = float64(int32(x>>16)-32768) / 12
+		}
 		for _, s := range truth {
-			for k := max(0, int((s-w.start)*16000)); k < min(len(pcm)/2, int((s+2-w.start)*16000)); k++ {
-				binary.LittleEndian.PutUint16(pcm[2*k:], uint16(int16(8000*math.Sin(2*math.Pi*1000*float64(k)/16000))))
+			for k := max(0, int((s-w.start)*16000)); k < min(len(samples), int((s+2-w.start)*16000)); k++ {
+				samples[k] += 8000 * math.Sin(2*math.Pi*1000*float64(k)/16000)
 			}
+		}
+		pcm := make([]byte, 2*len(samples))
+		for k, v := range samples {
+			binary.LittleEndian.PutUint16(pcm[2*k:], uint16(int16(v)))
 		}
 		os.WriteFile(filepath.Join(ff, fmt.Sprintf("pcm-%.3f", w.start)), pcm, 0o644)
 	}
@@ -383,7 +415,7 @@ func TestRunSampled(t *testing.T) {
 
 // Catches a title sampled that cannot be sampled cheaply, exactly or meaningfully: under 10 minutes, in a container
 // whose seeks do not land where playback does (AVI, MPEG-TS), or with no reference at all; and the reference picked
-// wrong: the English image track whenever there is one (not a forced one), else the first audio track.
+// wrong: the English image track whenever there is one (not a forced one, not a commentary), else the first audio track.
 func TestNewSampler(t *testing.T) {
 	pgs := probe.Subtitle{Index: 4, Codec: "hdmv_pgs_subtitle", Language: "eng"}
 	audio := []probe.Audio{{Index: 1, Layout: "5.1(side)"}}
@@ -396,6 +428,8 @@ func TestNewSampler(t *testing.T) {
 		{"a film with English captions", "v.mkv", probe.Info{Duration: 6000, Audio: audio, Subtitles: []probe.Subtitle{pgs}}, "captions"},
 		{"only forced captions", "v.mkv", probe.Info{Duration: 6000, Audio: audio, Subtitles: []probe.Subtitle{{Index: 4, Codec: "hdmv_pgs_subtitle",
 			Language: "eng", Forced: true}}}, "speech"},
+		{"only a commentary in images", "v.mkv", probe.Info{Duration: 6000, Audio: audio, Subtitles: []probe.Subtitle{{Index: 4, Codec: "hdmv_pgs_subtitle",
+			Language: "eng", Title: "Director's Commentary"}}}, "speech"},
 		{"no captions", "v.mp4", probe.Info{Duration: 6000, Audio: audio}, "speech"},
 		{"no audio either", "v.mkv", probe.Info{Duration: 6000}, ""},
 		{"a featurette", "v.mkv", probe.Info{Duration: 540, Audio: audio}, ""},
@@ -425,23 +459,23 @@ func TestDialogue(t *testing.T) {
 	}
 }
 
-// Catches the sampled fit reading on when a seek does not land (no usable index: the helper reads from the start):
-// a read far past its share of the file stops the title's sampling, for the audio (one window: a 1 GiB, 100-minute
-// film's share is 16 MB, the allowance 4 times that plus 64 MiB) and for the image track (four windows at once). Linux
-// only: the count is rchar from /proc.
-func TestSamplerStopsWhenAReadOverruns(t *testing.T) {
+// Catches a helper left to read on when a seek does not land (no usable index: it reads the file from the start):
+// it is killed once it has read past its allowance, four times its share of the file plus 64 MiB (a 1 GiB, 100-minute
+// film: 131.5 MB for one 90 s audio window, 324.8 MB for the image track's four), long before the 200 GiB it would
+// read. Linux only: the count is rchar from /proc.
+func TestSamplerKillsAReadPastItsAllowance(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("rchar is read from /proc/<pid>/io")
 	}
+	const endless = "exec dd if=/dev/zero of=/dev/null bs=4M count=51200 2>/dev/null\n"
 	for _, c := range []struct {
 		name, helper, script string
 		subs                 []probe.Subtitle
-		read                 float64
+		allowance            int64
 	}{
-		{"audio", "ffmpeg", "head -c 150000000 /dev/zero > /dev/null\n", nil, 150e6},
-		{"image track", "ffprobe", `case "$*" in *format=start_time*) echo 0; exit 0;; esac
-head -c 400000000 /dev/zero > /dev/null; echo '{"packets":[]}'
-`, []probe.Subtitle{{Index: 2, Codec: "hdmv_pgs_subtitle", Language: "eng"}}, 400e6},
+		{"audio", "ffmpeg", endless, nil, 131533373},
+		{"image track", "ffprobe", "case \"$*\" in *format=start_time*) echo 0; exit 0;; esac\n" + endless,
+			[]probe.Subtitle{{Index: 2, Codec: "hdmv_pgs_subtitle", Language: "eng"}}, 324806901},
 	} {
 		h := fake.NewEnv(t, nil)
 		h.Script(t, c.helper, c.script)
@@ -450,8 +484,8 @@ head -c 400000000 /dev/zero > /dev/null; echo '{"packets":[]}'
 		r := &run{env: h.Env, opt: Options{SampleWindows: 4, SampleLength: 90e9}, rep: &stage.Report{}}
 		s, _ := r.newSampler(&title{path: video, info: probe.Info{Duration: 6000, Size: 1 << 30, Audio: []probe.Audio{{Index: 1}}, Subtitles: c.subs}})
 		why, err := s.readAll(context.Background())
-		if err != nil || !strings.Contains(why, "no usable index") || float64(s.read) < c.read || float64(s.read) > c.read+1e6 {
-			t.Errorf("%s: why %q err %v after %d bytes; want stopped after the first read's %.0f", c.name, why, err, s.read, c.read)
+		if err != nil || !strings.Contains(why, fmt.Sprintf("stopped past %d bytes: no usable index", c.allowance)) || s.read < c.allowance || s.read > 20<<30 {
+			t.Errorf("%s: why %q err %v after %d bytes; want killed soon after %d", c.name, why, err, s.read, c.allowance)
 		}
 	}
 }

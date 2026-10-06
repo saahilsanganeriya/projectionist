@@ -204,7 +204,8 @@ quiet        = "10m" # a folder written to more recently is still arriving
 
 # An English text subtitle beside every movie and episode; replaces scripts/sub_stats.py and scripts/subfetch2.py.
 # A video carrying an embedded English text track already has English subtitles (the players show it, and the audit
-# counts it): it is skipped, never opened. Nothing is written whose timing was not checked. Per title, the first route
+# counts it): it is skipped, never opened. A subtitle made for the file's own release is trusted once its length fits
+# the video's; any other is written only once fitted to the video's captions or speech. Per title, the first route
 # that succeeds: a subtitle made for the file's own release (its original name's group, from the .details note or the
 # rename logs; or an OpenSubtitles file-hash match) is written without reading the video once its last cue fits the
 # note's duration and frame rate; in sampled mode (the default) a plausible subtitle fitted to an English .en.idx
@@ -233,8 +234,9 @@ mode          = "sampled"              # sampled: the routes above. careful, the
                                        # the queue, which aligns at any hour
 align_window  = "01:00-07:00"          # sampled mode: the queue starts alignments only inside this window (config timezone);
                                        # a run outside it, or inside it with the day's cap spent, asks for a run when it may
-sample_windows = 4                     # windows the sampled fit reads, spread over 3-97 % of the runtime
-sample_length  = "90s"                 # each; a window without dialogue is replaced by the next stretch, twice at most
+sample_windows = 4                     # windows the sampled fit reads, the first at 3 % of the runtime, the last ending at 97 %
+sample_length  = "90s"                 # each; a window without dialogue is replaced by the stretch next to it toward the
+                                       # middle, twice at most
 legacy_quota  = "/volume1/PlexMediaServer/subtitle-downloads" # subfetch2.py's quota files, read once while the store has none
 # undo_logs = [...]                    # rename logs for original names a note lacks; default: the details stage's list
 # output_dir = "/volume1/PlexMediaServer/projectionist-test/subtitles/out" # test runs: write sidecars here instead

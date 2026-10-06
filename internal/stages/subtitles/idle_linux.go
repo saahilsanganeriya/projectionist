@@ -24,6 +24,11 @@ func exitedRead(pid int) (rchar, readBytes int64) {
 	if unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT, nil) != nil {
 		return 0, 0
 	}
+	return procRead(pid)
+}
+
+// procRead is rchar and read_bytes from /proc/<pid>/io, 0 when it cannot be read.
+func procRead(pid int) (rchar, readBytes int64) {
 	raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/io")
 	if err != nil {
 		return 0, 0

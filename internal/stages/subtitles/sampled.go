@@ -7,7 +7,7 @@ package subtitles
 // the usual frame-rate changes:
 //
 //	the video  [3 %...........................................................97 %] of its runtime
-//	               |w1|           |w2|           |w3|           |w4|          K windows, evenly spread
+//	           |w1|                  |w2|                  |w3|                  |w4|   K windows, the outer two at the edges
 //	per ratio  every window scores every offset; the windows' sum picks the ratio and the offset
 //	written    only when every window has evidence at that offset, the windows' own best offsets agree, and the chosen
 //	           ratio beats every other ratio by a margin
@@ -15,12 +15,18 @@ package subtitles
 // A subtitle of another cut puts its windows on different offsets, one timed for another frame rate drifts between
 // them, and another film's matches no window: none is written, and the title goes on to the whole-file alignment
 // queue. A window whose reference holds no dialogue (fewer than quietLines captions, or under quietSpeech of its
-// frames voiced) cannot judge: it is replaced by the stretch next to it, at most maxExtra times per title.
+// frames voiced) cannot judge: it is replaced by the stretch next to it on the side of the runtime's middle, at most
+// maxExtra times per title.
+//
+// What no check sees: the first and last 3 %, and a difference inside the outer half of an edge window (that window's
+// majority sets its offset). For a two-hour film that is about 4 minutes at each end, for a 22-minute episode about
+// 1.5; a quiet edge window moved inward widens it by the quiet stretch.
 
 import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -45,9 +51,10 @@ const (
 	// A caption start matches a cue start within captionTol: subtitle authors start a line a few frames from where the
 	// captions do. The window and joint offsets are then the median of the matched pairs, which is exact to a frame.
 	captionTol = 0.25
-	// Every window's own best offset must lie within agreeSpread of every other's. The windows span about 70 % of the
-	// runtime, so a drift the ratio set does not cover that stays inside 0.3 s across them is at most about 0.2 s at
-	// the video's first and last 3 %, inside the gate's 0.25 s; anything larger (another cut, another rate) fails.
+	// Every window's own best offset must lie within agreeSpread of every other's. The windows' centres span about 93 %
+	// of a film's runtime, so a drift the ratio set does not cover that stays inside 0.3 s across them is off by about
+	// 0.16 s at the video's ends (the joint offset sits among the windows' own), inside the gate's 0.25 s; anything
+	// larger (another cut, another rate) fails.
 	agreeSpread = 0.3
 	// Caption evidence: at the joint offset a window must match at least minLines caption starts and half of all it
 	// holds. By chance a caption has a cue start within 0.25 s about 15 % of the time (one cue every 3-4 s), so six
@@ -75,14 +82,14 @@ const (
 // sampleWindow is a stretch of the video: start and length in seconds of its presentation time.
 type sampleWindow struct{ start, dur float64 }
 
-// sampleWindowsFor spreads k windows of w seconds evenly between the runtime's first and last 3 %.
+// sampleWindowsFor spreads k (at least 2) windows of w seconds evenly over the runtime's 3-97 %, the first starting at
+// 3 % and the last ending at 97 %, so that a subtitle of another cut whose difference lies near either end is seen.
 func sampleWindowsFor(duration float64, k int, w float64) []sampleWindow {
 	lo, hi := sampleEdge*duration, (1-sampleEdge)*duration
 	w = math.Min(w, (hi-lo)/float64(k))
 	out := make([]sampleWindow, k)
 	for i := range out {
-		c := lo + (float64(i)+0.5)*(hi-lo)/float64(k)
-		out[i] = sampleWindow{c - w/2, w}
+		out[i] = sampleWindow{lo + float64(i)*(hi-lo-w)/float64(k-1), w}
 	}
 	return out
 }
@@ -362,7 +369,8 @@ func (r *run) newSampler(t *title) (*sampler, string) {
 }
 
 // readAll reads every window, then for each that holds no dialogue the stretch next to it instead, at most maxExtra
-// in all. It stops, with why, when a read costs far more than its share of the file (no usable index).
+// in all. It stops, with why, when a helper is killed for reading far more than its share of the file (no usable
+// index).
 func (s *sampler) readAll(ctx context.Context) (string, error) {
 	got, why, err := s.readWindows(ctx, s.windows)
 	for extra := 0; why == "" && err == nil; {
@@ -382,10 +390,13 @@ func (s *sampler) readAll(ctx context.Context) (string, error) {
 		extra += len(quiet)
 		var next []sampleWindow
 		for _, i := range quiet {
-			w := got[i].win
-			if w.start = w.start + w.dur; w.start+w.dur > (1-sampleEdge)*s.t.info.Duration {
-				w.start -= 2 * w.dur // the last window's neighbour lies before it
+			// toward the runtime's middle, as the window first placed there lies: an outer window moves inward, and a
+			// second replacement moves on from the first instead of back onto the quiet window
+			w, step := got[i].win, got[i].win.dur
+			if s.windows[i].start+step/2 > s.t.info.Duration/2 {
+				step = -step
 			}
+			w.start += step
 			next = append(next, w)
 		}
 		var more []sample
@@ -398,15 +409,17 @@ func (s *sampler) readAll(ctx context.Context) (string, error) {
 	return why, err
 }
 
-// readWindows reads windows from the image track (one ffprobe over all of them) or the audio (one ffmpeg each).
+// readWindows reads windows from the image track (one ffprobe over all of them) or the audio (one ffmpeg each). Each
+// read may take four times its share of the file plus 64 MiB (slack for the seek to a keyframe); a helper reading past
+// that is killed (Linux), and the title is not sampled: its seeks do not use an index.
 func (s *sampler) readWindows(ctx context.Context, wins []sampleWindow) ([]sample, string, error) {
-	budget := func(n int) int64 { // a read's fair share of the file, with slack for the seek to a keyframe
+	allowance := func(n int) int64 {
 		share := float64(s.t.info.Size) * float64(n) * wins[0].dur / s.t.info.Duration
 		return int64(4*share) + 64<<20
 	}
 	if s.track != nil {
 		if s.start == nil {
-			out, _, err := s.helper(ctx, s.r.env.FFmpeg.FFprobePath(), "-v", "error", "-show_entries", "format=start_time",
+			out, err := s.helper(ctx, 0, s.r.env.FFmpeg.FFprobePath(), "-v", "error", "-show_entries", "format=start_time",
 				"-of", "default=nw=1:nk=1", s.t.path)
 			if err != nil {
 				return nil, "", err
@@ -418,13 +431,12 @@ func (s *sampler) readWindows(ctx context.Context, wins []sampleWindow) ([]sampl
 		for _, w := range wins {
 			ivals = append(ivals, fmt.Sprintf("%.3f%%+%.3f", *s.start+w.start, w.dur))
 		}
-		out, io, err := s.helper(ctx, s.r.env.FFmpeg.FFprobePath(), "-v", "error", "-select_streams", strconv.Itoa(s.track.Index),
-			"-read_intervals", strings.Join(ivals, ","), "-show_entries", "packet=pts_time,size", "-of", "json", s.t.path)
-		if err != nil {
+		out, err := s.helper(ctx, allowance(len(wins)), s.r.env.FFmpeg.FFprobePath(), "-v", "error", "-select_streams",
+			strconv.Itoa(s.track.Index), "-read_intervals", strings.Join(ivals, ","), "-show_entries", "packet=pts_time,size", "-of", "json", s.t.path)
+		if errors.Is(err, errOverrun) {
+			return nil, fmt.Sprintf("reading the windows was stopped past %d bytes: no usable index", allowance(len(wins))), nil
+		} else if err != nil {
 			return nil, "", err
-		}
-		if io > budget(len(wins)) {
-			return nil, fmt.Sprintf("reading the windows took %d bytes, past %d: no usable index", io, budget(len(wins))), nil
 		}
 		starts, err := captionPackets(out, s.track.Codec, *s.start)
 		if err != nil {
@@ -443,14 +455,13 @@ func (s *sampler) readWindows(ctx context.Context, wins []sampleWindow) ([]sampl
 	}
 	var got []sample
 	for _, w := range wins {
-		pcm, io, err := s.helper(ctx, s.r.env.FFmpeg.FFmpegPath(), "-nostdin", "-hide_banner", "-loglevel", "error",
+		pcm, err := s.helper(ctx, allowance(1), s.r.env.FFmpeg.FFmpegPath(), "-nostdin", "-hide_banner", "-loglevel", "error",
 			"-ss", fmt.Sprintf("%.3f", w.start), "-t", fmt.Sprintf("%.3f", w.dur), "-i", s.t.path,
 			"-map", fmt.Sprintf("0:%d", s.audio.Index), dialogue(s.audio)[0], dialogue(s.audio)[1], "-ar", "16000", "-f", "s16le", "-")
-		if err != nil {
+		if errors.Is(err, errOverrun) {
+			return nil, fmt.Sprintf("reading a window was stopped past %d bytes: no usable index", allowance(1)), nil
+		} else if err != nil {
 			return nil, "", err
-		}
-		if io > budget(1) {
-			return nil, fmt.Sprintf("reading a window took %d bytes, past %d: no usable index", io, budget(1)), nil
 		}
 		level := voiceLevel(pcm)
 		got = append(got, sample{win: w, level: level, voiced: voiced(level)})
@@ -475,13 +486,14 @@ func (s *sampler) starts() []float64 {
 	return out
 }
 
-// helper runs one reading helper on the video and returns its stdout and the bytes it read.
-func (s *sampler) helper(ctx context.Context, bin string, args ...string) ([]byte, int64, error) {
+// helper runs one reading helper on the video, killed once it has read more than limit bytes (0: no limit), and
+// returns its stdout.
+func (s *sampler) helper(ctx context.Context, limit int64, bin string, args ...string) ([]byte, error) {
 	before := s.t.read
-	out, err := s.r.cmd(ctx, s.t, bin, args...)
+	out, err := s.r.cmdUpTo(ctx, s.t, limit, bin, args...)
 	s.read += s.t.read - before
 	s.disk = s.t.disk
-	return out, s.t.read - before, err
+	return out, err
 }
 
 // dialogue is the output option that keeps where films put their dialogue: the centre channel when the layout has

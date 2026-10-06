@@ -16,8 +16,9 @@ package subtitles
 // framecrc file, "idx" or "-", duration) with the same two -> spot.tsv: a written sidecar's median distance to the
 // video's English captions where a framecrc is given (or to its <video>.en.idx captions for "idx"), and the shift
 // alass's alignment to the speech would give it; GATE_SYNC (id, video, sidecar, duration, "captions <stream>" or
-// "alass <audio stream>") with the same two -> sync.tsv: a written sidecar's offset from an independent whole-file
-// reference (the complete caption track, or alass's whole-file alignment to the audio) at the start, middle and end;
+// "alass <audio stream>", and optionally the starts of the windows the fit read) with the same two -> sync.tsv: a
+// written sidecar's offset from an independent whole-file reference (the complete caption track less the windows the
+// fit read, or alass's whole-file alignment to the audio) at the start, middle and end;
 // GATE_FIT (id, video, candidate file) with GATE_FFMPEG_DIR -> fit.tsv and fit/<id>.srt: the sampled fit of that very
 // candidate (the stage's own reads of the windows), and the retimed text when the fit holds; GATE_LOCAL (id, video,
 // sidecar) -> local.tsv: a written sidecar's own best offset (speech onsets, ratio 1) in ten 90 s windows at 5, 15 ...
@@ -32,6 +33,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -255,7 +257,8 @@ func TestGateSpot(t *testing.T) {
 var syncRegions = [][2]float64{{0.03, 0.13}, {0.45, 0.55}, {0.87, 0.97}}
 
 // TestGateSync measures each written sidecar against a reference the sampled fit never saw whole. "captions": the
-// complete English image track, demuxed from the whole file; in each region the offset is the median distance from
+// complete English image track, demuxed from the whole file, less the captions inside the windows the fit read (90 s
+// from each start given, 1 s either side for the rounding); in each region the offset is the median distance from
 // caption starts to their matched cue starts at the region's own best offset. "alass": alass aligns the sidecar to the
 // speech of the whole file; in each region the offset is the median shift alass gives its cues (sign: what alass would
 // add). A region with fewer than 5 matches is "n/a".
@@ -272,6 +275,13 @@ func TestGateSync(t *testing.T) {
 		written := cues(string(raw))
 		duration, _ := strconv.ParseFloat(f[3], 64)
 		kind, stream, _ := strings.Cut(f[4], " ")
+		var read []float64 // the fit's window starts
+		if len(f) > 5 {
+			for _, w := range strings.Split(f[5], ",") {
+				start, _ := strconv.ParseFloat(w, 64)
+				read = append(read, start)
+			}
+		}
 		ti := &title{path: f[1]}
 		began := time.Now()
 		var offsets []string
@@ -314,7 +324,8 @@ func TestGateSync(t *testing.T) {
 				w := sampleWindow{reg[0] * duration, (reg[1] - reg[0]) * duration}
 				smp := sample{win: w}
 				for _, c := range caps {
-					if c >= w.start && c < w.start+w.dur {
+					seen := slices.ContainsFunc(read, func(start float64) bool { return c >= start-1 && c < start+91 })
+					if c >= w.start && c < w.start+w.dur && !seen {
 						smp.captions = append(smp.captions, c)
 					}
 				}

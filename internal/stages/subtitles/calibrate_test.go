@@ -15,10 +15,11 @@ import (
 )
 
 // Calibration harness, not a test (build tag "calibrate"): the evidence behind the sampled fit's thresholds. CALIBRATE=
-// <dir> holds what the NAS gave for 15 titles of the quick gate: sampled/proto/<id>/ (path, windows, probe.json, subs.csv:
-// the English image track's packets in the 4 windows), sampled/proto2/<id>/ (a<i>.pcm: each window's dialogue channel
-// as 16 kHz s16le, channels), quick/out and quick2/out (the subtitles quick mode wrote), quick/spot/*.framecrc (whole
-// caption tracks) and quick/lib/**.en.idx. A title's truth is its subtitle's whole-file caption fit. Run with
+// <dir> holds what the NAS gave for 15 titles of the quick gate, read at the stage's window layout: sampled/proto/<id>/
+// (path, windows, probe.json, subs.csv: the English image track's packets in the 4 windows), sampled/proto2/<id>/
+// (a<i>.pcm: each window's dialogue channel as 16 kHz s16le, channels), quick/out and quick2/out (the subtitles quick
+// mode wrote), quick/spot/*.framecrc (whole caption tracks) and quick/lib/**.en.idx. A title's truth is its subtitle's
+// whole-file caption fit. Run with
 //
 //	CALIBRATE=<dir> go test -tags calibrate -run TestCalibrate -v ./internal/stages/subtitles
 
@@ -143,8 +144,9 @@ func truthFit(spans []span, truth []float64) (float64, float64, bool) {
 }
 
 // TestCalibrate runs the production fit on every title's windows: its own candidate, synthetic variants of its
-// truth-aligned text (shifted, PAL, 24 fps), another cut (the second half 4 s later), and every other title's
-// candidate (must be refused).
+// truth-aligned text (shifted, PAL, 24 fps), another cut (everything after 50 %, 8 % or 92 % of the runtime 4 s
+// later: the middle, and between each 3 % edge and the window next to it), and every other title's candidate (must be
+// refused).
 func TestCalibrate(t *testing.T) {
 	titles := loadCalibration(t)
 	samplesOf := func(pt calibrationTitle, kind string) []sample {
@@ -183,30 +185,32 @@ func TestCalibrate(t *testing.T) {
 			for _, v := range []struct {
 				name string
 				r, o float64
-				cut  bool
-			}{{"orig", tr, to, false}, {"+3.7", 1, 3.7, false}, {"pal", 25 / 23.976, 0.8, false}, {"24", 24 / 23.976, -2, false}, {"cut", 1, 0, true}} {
+				cut  float64 // where another cut's 4 s difference begins, as a share of the runtime; 0: none
+			}{{"orig", tr, to, 0}, {"+3.7", 1, 3.7, 0}, {"pal", 25 / 23.976, 0.8, 0}, {"24", 24 / 23.976, -2, 0},
+				{"cut", 1, 0, 0.5}, {"cut8", 1, 0, 0.08}, {"cut92", 1, 0, 0.92}} {
 				c := spans
 				if v.name != "orig" {
 					c = make([]span, len(inSync))
 					for i, s := range inSync {
 						c[i] = span{(s.start - v.o) / v.r, (s.end - v.o) / v.r}
-						if v.cut && s.start > pt.dur/2 {
+						if v.cut > 0 && s.start > v.cut*pt.dur {
 							c[i] = span{s.start + 4, s.end + 4}
 						}
 					}
 				}
 				f := fitSamples(c, smp)
 				if kind == "speech" {
-					all = append(all, res{f, !v.cut})
+					all = append(all, res{f, v.cut == 0})
 				}
 				var errs []float64
 				for _, q := range []float64{0.05, 0.5, 0.95} {
 					tau := q * pt.dur / v.r
 					errs = append(errs, (f.Ratio-v.r)*tau+f.Offset-v.o)
 				}
-				if v.cut {
+				if v.cut > 0 {
 					if f.Refused == "" {
 						negAccepted++
+						t.Logf("%-22.22s %-8s NEG ACCEPTED %s", pt.name, kind, v.name)
 					}
 					negTotal++
 				} else if f.Refused == "" {

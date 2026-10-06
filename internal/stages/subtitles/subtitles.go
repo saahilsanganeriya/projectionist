@@ -1,7 +1,8 @@
 // Package subtitles keeps an English text subtitle beside every movie and episode (port of scripts/sub_stats.py and
 // scripts/subfetch2.py, made cheap-first). It is a reconciler: each run walks the library and, for each video still
-// lacking an English sidecar, does only the missing step, and reads as little of the video as the step allows. Nothing
-// is written whose timing was not checked.
+// lacking an English sidecar, does only the missing step, and reads as little of the video as the step allows. A
+// subtitle made for the file's own release is trusted once its length fits the video's; any other is written only once
+// fitted to the video's captions or speech.
 //
 //	embedded English text track       -> skipped: the players show it, so nothing is fetched and nothing read
 //	else candidates from the providers (Gestdown, SITEC, Subdl with a key; OpenSubtitles legacy and .com last), best
@@ -673,10 +674,12 @@ func hasEnglishAudio(info probe.Info) bool {
 	return false
 }
 
+// imageTracks are the video's English caption tracks in images (PGS, VobSub): not forced, not commentary.
 func imageTracks(info probe.Info) []probe.Subtitle {
 	var out []probe.Subtitle
 	for _, s := range info.Subtitles {
-		if (s.Codec == "hdmv_pgs_subtitle" || s.Codec == "dvd_subtitle") && english(s.Language) && !s.Forced {
+		if (s.Codec == "hdmv_pgs_subtitle" || s.Codec == "dvd_subtitle") && english(s.Language) && !s.Forced &&
+			!strings.Contains(strings.ToLower(s.Title), "comment") {
 			out = append(out, s)
 		}
 	}
@@ -1601,9 +1604,23 @@ func writeSidecar(base string, data []byte) (string, error) {
 
 // cmd runs a helper at idle CPU and the lowest best-effort I/O priority in its own process group (so alass's ffmpeg
 // runs so too and dies with it) and returns its stdout; the bytes it and its children read (rchar and, of those, from
-// the disk, read_bytes; Linux) are added to t's when t is the video it reads. The group is stopped while anyone but the owner is watching (an unknown count
-// counts as watching), checked every viewer-gate poll, and continued once they stop.
+// the disk, read_bytes; Linux) are added to t's when t is the video it reads. The group is stopped while anyone but
+// the owner is watching (an unknown count counts as watching), checked every viewer-gate poll, and continued once they
+// stop.
 func (r *run) cmd(ctx context.Context, t *title, bin string, args ...string) ([]byte, error) {
+	return r.cmdUpTo(ctx, t, 0, bin, args...)
+}
+
+// errOverrun is a helper killed for reading past its allowance.
+var errOverrun = errors.New("killed: read past its allowance")
+
+// readPoll is how often a helper with an allowance has its reads counted: at the NAS disks' ~200 MB/s it reads at
+// most about 20 MB past the allowance before it is killed.
+const readPoll = 100 * time.Millisecond
+
+// cmdUpTo is cmd, with the helper's group killed and errOverrun returned once the helper itself has read more than
+// limit bytes (rchar, polled every readPoll; Linux only; 0: no limit).
+func (r *run) cmdUpTo(ctx context.Context, t *title, limit int64, bin string, args ...string) ([]byte, error) {
 	c := exec.CommandContext(ctx, bin, args...)
 	c.Env = append(os.Environ(), "ALASS_FFMPEG_PATH="+r.env.FFmpeg.FFmpegPath(), "ALASS_FFPROBE_PATH="+r.env.FFmpeg.FFprobePath())
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -1625,11 +1642,23 @@ func (r *run) cmd(ctx context.Context, t *title, bin string, args ...string) ([]
 	}()
 	tick := time.NewTicker(r.env.Viewers.Poll)
 	defer tick.Stop()
+	var reads <-chan time.Time
+	if limit > 0 {
+		poll := time.NewTicker(readPoll)
+		defer poll.Stop()
+		reads = poll.C
+	}
 	var err error
+	over := false
 	for paused, running := false, true; running; {
 		select {
 		case err = <-done:
 			running = false
+		case <-reads:
+			if read, _ := procRead(c.Process.Pid); read > limit && !over {
+				syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+				over = true
+			}
 		case <-tick.C:
 			others, cerr := r.env.Viewers.Count(ctx)
 			if busy := cerr != nil || others > 0; busy != paused {
@@ -1642,6 +1671,9 @@ func (r *run) cmd(ctx context.Context, t *title, bin string, args ...string) ([]
 				r.env.Log.Info("helper paused for viewers", "event", "subtitle_pause", "bin", filepath.Base(bin), "paused", paused, "others", others, "err", cerr)
 			}
 		}
+	}
+	if over {
+		return nil, fmt.Errorf("%s: %w of %d bytes", filepath.Base(bin), errOverrun, limit)
 	}
 	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
