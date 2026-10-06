@@ -12,7 +12,7 @@
 // time. With history false (the default) only the entries he logs after this stage first runs become events; history
 // true imports the export and the feed's backlog, which Plex then shows his friends (his watch history is visible to
 // friends of friends, his ratings to friends). An entry he deletes is dropped, and he is told when its play is
-// already in the record (marking the film unplayed undoes it).
+// already in the record (marking the film unplayed in Jellyfin undoes it; Plex sends no webhook for an unscrobble).
 //
 // Inputs, all public and fetched politely (one request per 2 s for the whole process, shared with every stage through
 // lbpace; every answer that can be cached is): the RSS feed (every run), the watchlist and watched-films grid pages
@@ -523,7 +523,8 @@ func (r *run) readFeed(ctx context.Context) error {
 // retract drops the stored diary entries he has deleted on Letterboxd. The feed holds his latest 50 entries in the
 // order he logged them (then his lists), so a stored entry logged after the oldest of them and missing from it was
 // deleted; an older one has only fallen off the end. The record is append-only, so the play of one already recorded
-// stays there: he is told, and marking the film unplayed in Plex or Jellyfin undoes it.
+// stays there: he is told, and marking the film unplayed in Jellyfin undoes it. In Plex it would not: Plex sends no
+// webhook for an unscrobble, so the mark never reaches the record.
 func (r *run) retract(ctx context.Context, entries []rssEntry) error {
 	if len(entries) == 0 {
 		return nil
@@ -565,7 +566,7 @@ func (r *run) retract(ctx context.Context, entries []rssEntry) error {
 		}
 	}
 	if len(names) > 0 {
-		r.rep.Alert("Letterboxd diary entries deleted: %s. Their plays stay in the watch record, so Plex and Jellyfin keep them: mark the film unplayed in either app to undo one",
+		r.rep.Alert("Letterboxd diary entries deleted: %s. Their plays stay in the watch record, so Plex and Jellyfin keep them: mark the film unplayed in Jellyfin to undo one (marking it unplayed in Plex never reaches the record)",
 			strings.Join(names, ", "))
 	}
 	return nil

@@ -74,7 +74,7 @@ type State struct {
 	Plays         int
 	PositionMs    int64
 	Rating        *float64
-	KnowsPlay     bool      // Played and Plays come from an event (Finished or Snapshot)
+	KnowsPlay     bool      // Played and Plays come from an event (Finished, Snapshot or Logged)
 	KnowsPosition bool      // PositionMs comes from an event (any kind but Rated)
 	At            time.Time // when the newest event that changed the state happened
 	Source        string    // that event's source, i.e. who wrote last

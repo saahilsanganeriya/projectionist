@@ -108,14 +108,11 @@ const sampleSeconds = 5
 
 // decodeCheck looks for holes (see holeAt), then decodes 5 s of the video at its start, middle and end:
 // truncated or zero-filled files fail here even when their headers probe fine. A sample the GPU rejects is decoded
-// again on the CPU before it counts. The samples follow the video stream's own length when the file states it:
-// the container's can run seconds longer (an audio tail). Bytes that cannot be read (EIO from a failed btrfs
-// checksum) are a verdict too, not an error: an error would fail every run at this file and hold back the files
-// queued behind it.
+// again on the CPU before it counts. The samples follow the video stream's own length: the container's is its longest
+// stream, which can run on past the last picture (an audio tail, a late subtitle). When the file does not state the
+// video's length, its last packet is read (videoEnd). Bytes that cannot be read (EIO from a failed btrfs checksum) are
+// a verdict too, not an error: an error would fail every run at this file and hold back the files queued behind it.
 func decodeCheck(ctx context.Context, ff config.FFmpeg, path string, v *probe.Video, duration float64) (clean bool, detail string, err error) {
-	if v.Duration > 0 {
-		duration = v.Duration
-	}
 	off, size, found, err := holeAt(ctx, path)
 	switch {
 	case err != nil && (errors.Is(err, fs.ErrNotExist) || ctx.Err() != nil):
@@ -124,6 +121,13 @@ func decodeCheck(ctx context.Context, ff config.FFmpeg, path string, v *probe.Vi
 		return false, "the file cannot be read: " + err.Error(), nil
 	case found:
 		return false, fmt.Sprintf("4 KiB of zeros at %.1f%% (byte %d): part of the file never arrived", 100*float64(off)/float64(size), off), nil
+	}
+	if v.Duration > 0 {
+		duration = v.Duration
+	} else if end, err := videoEnd(ctx, ff.FFprobePath(), path, v.Index, duration); err != nil {
+		return false, "", err
+	} else if end > 0 {
+		duration = end
 	}
 	samples := []struct {
 		name string
@@ -144,6 +148,44 @@ func decodeCheck(ctx context.Context, ff config.FFmpeg, path string, v *probe.Vi
 		}
 	}
 	return true, "", nil
+}
+
+// videoEnd is where the video stream's last packet ends, read from the packets of its last minute (the demuxer seeks
+// to the keyframe before that, so a video ending sooner is still found), or 0 to keep the container's length. It is 0
+// when the demuxer complains while reading them: a file cut short ("File ended prematurely") has a last packet at the
+// cut, and only the stated length makes its later samples fail. err is set only when ffprobe could not be run or ctx
+// ended. MKV states no stream length unless the muxer tagged one: The Human Condition II's video ends at 10,672.3 s
+// and its file at 10,684.5 s; a Parts Unknown episode's at 2,552.5 s and 2,801.0 s (a subtitle runs on).
+func videoEnd(ctx context.Context, ffprobe, path string, stream int, duration float64) (float64, error) {
+	cmd := exec.CommandContext(ctx, ffprobe, "-v", "error", "-select_streams", strconv.Itoa(stream),
+		"-read_intervals", strconv.FormatFloat(math.Max(0, duration-60), 'f', 3, 64)+"%",
+		"-show_entries", "packet=pts_time,duration_time", "-of", "csv=p=0", path)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	runErr := cmd.Wait()
+	if ctx.Err() != nil {
+		return 0, ctx.Err()
+	}
+	if runErr != nil || strings.TrimSpace(stderr.String()) != "" {
+		return 0, nil
+	}
+	end := 0.0
+	for _, l := range strings.Split(stdout.String(), "\n") {
+		pts, dur, _ := strings.Cut(strings.TrimSpace(l), ",")
+		p, err := strconv.ParseFloat(pts, 64)
+		if err != nil {
+			continue // "N/A"
+		}
+		d, _ := strconv.ParseFloat(dur, 64)
+		end = math.Max(end, p+d)
+	}
+	if end >= duration {
+		return 0, nil
+	}
+	return end, nil
 }
 
 const holeProbes, holeBlock = 256, 4096

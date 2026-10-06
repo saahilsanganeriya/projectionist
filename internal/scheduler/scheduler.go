@@ -94,6 +94,14 @@ func (r *Runner) RunOnce(ctx context.Context, st stage.Stage) (rep stage.Report,
 
 	finished := r.Now()
 	outcome = rep.Outcome(err)
+	// Whatever it failed with (context canceled, a killed ffmpeg), a shutdown did it.
+	interrupted := err != nil && ctx.Err() != nil
+	if interrupted {
+		outcome = stage.Interrupted
+		if len(rep.Alerts) > 0 { // some alerts are raised once (a stored "told" marker): they reach /health now or never
+			outcome = stage.Alert
+		}
+	}
 	for _, a := range rep.Alerts {
 		log.Warn(a, "event", "alert")
 	}
@@ -111,9 +119,12 @@ func (r *Runner) RunOnce(ctx context.Context, st stage.Stage) (rep stage.Report,
 		attrs = append(attrs, "count_"+k, v)
 		r.Metrics.Add("projectionist_stage_items_total", float64(v), "stage", name, "kind", k)
 	}
-	if err != nil {
+	switch {
+	case interrupted:
+		log.Info("run interrupted", append(attrs, "err", err)...)
+	case err != nil:
 		log.Error("run failed", append(attrs, "err", err)...)
-	} else {
+	default:
 		log.Info("run finished", attrs...)
 	}
 	r.Metrics.Add("projectionist_stage_runs_total", 1, "stage", name, "outcome", string(outcome))
@@ -122,7 +133,10 @@ func (r *Runner) RunOnce(ctx context.Context, st stage.Stage) (rep stage.Report,
 	r.Metrics.Set("projectionist_stage_last_run_timestamp_seconds", float64(finished.Unix()), "stage", name)
 	r.Metrics.Set("projectionist_stage_last_duration_seconds", finished.Sub(started).Seconds(), "stage", name)
 	r.set(name, func(s *Status) {
-		s.Running, s.LastFinish, s.Outcome, s.Alerts, s.Error, s.Summary = false, finished, string(outcome), rep.Alerts, "", rep.Summary
+		if s.Running = false; outcome == stage.Interrupted {
+			return // the last finished run's outcome stands
+		}
+		s.LastFinish, s.Outcome, s.Alerts, s.Error, s.Summary = finished, string(outcome), rep.Alerts, "", rep.Summary
 		if err != nil {
 			s.Error = err.Error()
 		}
@@ -199,10 +213,14 @@ func (s *Scheduler) loop(ctx context.Context, job Job, wake <-chan struct{}) {
 		s.Runner.Log.Error("store last run failed", "event", "store_error", "stage", name, "err", err)
 	} else if ok {
 		last = run.StartedAt
-		if run.FinishedAt.IsZero() {
-			run.Outcome = "interrupted" // the process stopped mid-run; the stage resumes on its next run
+		// A run the process stopped in (never finished, or recorded interrupted) has no outcome: the one before stands.
+		done, _, err := s.Runner.Store.LastFinishedRun(ctx, name)
+		if err != nil {
+			s.Runner.Log.Error("store last run failed", "event", "store_error", "stage", name, "err", err)
 		}
-		s.Runner.set(name, func(st *Status) { st.LastStart, st.LastFinish, st.Outcome = run.StartedAt, run.FinishedAt, run.Outcome })
+		s.Runner.set(name, func(st *Status) {
+			st.LastStart, st.LastFinish, st.Outcome = run.StartedAt, done.FinishedAt, done.Outcome
+		})
 	}
 	triggered := false
 	for {
