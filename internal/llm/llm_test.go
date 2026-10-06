@@ -5,9 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"maps"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -57,8 +61,9 @@ var ask = llm.Request{Messages: []llm.Message{llm.User(llm.Text("hi"))}, MaxToke
 
 // Catches: a 429 or 5xx failing the call instead of being retried; a server's Retry-After ignored (hammering a gateway
 // that asked for a pause) or one of minutes waited out inside a run; retries past the fourth attempt; a 400 or a
-// billing refusal retried (each a paid-for or pointless repeat), or a team's model restriction taken for billing; a timeout or a dropped answer not retried, or retried
-// without the lost attempt counted as possibly billed. Waits are measured on the fake clock.
+// billing refusal retried (each a paid-for or pointless repeat), or a team's model restriction taken for billing; an
+// account out of quota (OpenAI's 429 insufficient_quota) retried as a rate limit; a timeout or a dropped answer not
+// retried, or retried without the lost attempt counted as possibly billed. Waits are measured on the fake clock.
 func TestFailurePolicy(t *testing.T) {
 	ok := llmtest.Answer{Text: "fine", In: 10, Out: 5}
 	cases := []struct {
@@ -80,6 +85,8 @@ func TestFailurePolicy(t *testing.T) {
 		{"403 free tier: no retry", []llmtest.Answer{{Status: 403, Type: "no_providers_available", // the live answer, 2026-10-06T00:03Z
 			Message: "Free tier users do not have access to this model. Upgrade to paid credits at https://vercel.com/d?to=x for unrestricted access."}, ok},
 			1, 0, 1, 0, llm.ErrBilling},
+		{"429 out of quota (OpenAI): no retry", []llmtest.Answer{{Status: 429, Type: "insufficient_quota",
+			Message: "You exceeded your current quota, please check your plan and billing details."}, ok}, 1, 0, 1, 0, llm.ErrBilling},
 		{"403 model not allowed: no retry, not billing", []llmtest.Answer{{Status: 403, Type: "forbidden", Message: "model blocked by team restrictions"}, ok},
 			1, 0, 1, 0, &llm.APIError{}},
 		{"timeout, then an answer", []llmtest.Answer{{Hang: true}, ok}, 2, 122 * time.Second, 124 * time.Second, 1, nil},
@@ -330,7 +337,8 @@ func TestBillingHold(t *testing.T) {
 		start := time.Now()
 		c := onClock(g, st, nil)
 		_, err := c.Session("tonight").Chat(ctx, ask)
-		if told, again := c.TellBilling(ctx), c.TellBilling(ctx); !errors.Is(err, llm.ErrBilling) || !told || again || len(g.Calls()) != 1 {
+		tell := func() bool { return c.Session("tonight").TellBilling(ctx) }
+		if told, again := tell(), tell(); !errors.Is(err, llm.ErrBilling) || !told || again || len(g.Calls()) != 1 {
 			t.Fatalf("the first refusal: %v, %d calls, told %v then %v; want one call and one alert", err, len(g.Calls()), told, again)
 		}
 		time.Sleep(30 * time.Minute) // the next tonight run, after a restart
@@ -338,7 +346,7 @@ func TestBillingHold(t *testing.T) {
 		s := c.Session("posters")
 		parked := s.Parked()
 		_, err = s.Chat(ctx, ask)
-		if !errors.Is(parked, llm.ErrBilling) || !errors.Is(err, llm.ErrBilling) || len(g.Calls()) != 1 || c.TellBilling(ctx) ||
+		if !errors.Is(parked, llm.ErrBilling) || !errors.Is(err, llm.ErrBilling) || len(g.Calls()) != 1 || tell() ||
 			!strings.Contains(parked.Error(), "since "+start.Format(time.RFC3339)) ||
 			!strings.Contains(parked.Error(), "tried again from "+start.Add(time.Hour).Format(time.RFC3339)) {
 			t.Fatalf("30 min later: parked %v, %v, %d calls; want parked before any call, none sent, no second alert", parked, err, len(g.Calls()))
@@ -350,7 +358,7 @@ func TestBillingHold(t *testing.T) {
 			}
 		}
 		parked = c.Session("tonight").Parked()
-		if len(g.Calls()) != 2 || c.TellBilling(ctx) || strings.Count(fmt.Sprint(parked), "its last answer") != 1 ||
+		if len(g.Calls()) != 2 || tell() || strings.Count(fmt.Sprint(parked), "its last answer") != 1 ||
 			!strings.Contains(fmt.Sprint(parked), "tried again from "+time.Now().Add(time.Hour).Format(time.RFC3339)) {
 			t.Fatalf("the hourly try: %d calls in all, then %v; want 2 (one try for 8 callers), no second alert, the next try an "+
 				"hour after it and the gateway's own answer", len(g.Calls()), parked)
@@ -367,7 +375,7 @@ func TestBillingHold(t *testing.T) {
 		}
 		set(true, nil)
 		c.Session("tonight").Chat(ctx, ask)
-		if len(g.Calls()) != 11 || !c.TellBilling(ctx) {
+		if len(g.Calls()) != 11 || !tell() {
 			t.Fatalf("a new refusal after an answered call: %d calls; want it sent and told", len(g.Calls()))
 		}
 	})
@@ -463,5 +471,132 @@ func TestPartialTaskKeepsItsDefaults(t *testing.T) {
 		n.Model != "m/x" || n.Reasoning != "off" || !slices.Equal(n.Fallbacks, []string{llm.FallbackModel}) ||
 		c.Task("collections").Model != llm.VisionModel {
 		t.Fatalf("posters %+v, tonight %+v, collections %+v", p, n, c.Task("collections"))
+	}
+}
+
+// openAI is a fake of OpenAI's own Chat Completions API answering every call with status and body.
+type openAI struct {
+	mu    sync.Mutex
+	calls []struct{ path, key, body string }
+}
+
+func newOpenAI(t *testing.T, status int, body string) (*openAI, string) {
+	o := &openAI{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		o.mu.Lock()
+		o.calls = append(o.calls, struct{ path, key, body string }{r.URL.Path, r.Header.Get("Authorization"), string(raw)})
+		o.mu.Unlock()
+		w.WriteHeader(status)
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return o, srv.URL + "/v1"
+}
+
+func (o *openAI) sent() []struct{ path, key, body string } {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return slices.Clone(o.calls)
+}
+
+// direct is a task calling api on a key file of its own, at GPT-6 Astra's price.
+func direct(t *testing.T, api string) llm.Task {
+	key := filepath.Join(t.TempDir(), "openai_api_key")
+	if err := os.WriteFile(key, []byte("test-SECRET-openai-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return llm.Task{API: api, KeyFile: key, Model: "gpt-6-astra", Fallbacks: []string{}, Reasoning: "low", PriceIn: 10, PriceOut: 50}
+}
+
+// Catches a task on an API of its own (OpenAI's, for the one-time poster pass) sent to the gateway or on the gateway's
+// key; sent with a field OpenAI refuses with a 400 (the gateway's models, reasoning or cache marks, max_tokens, which
+// its reasoning models refuse, or "off" as an effort) or without its effort; and priced from the gateway's catalogue,
+// which does not list it, rather than at the task's own prices.
+func TestDirectTask(t *testing.T) {
+	o, api := newOpenAI(t, 200, `{"model":"gpt-6-astra-2026-09-30","choices":[{"message":{"role":"assistant","content":"ok"},
+		"finish_reason":"stop"}],"usage":{"prompt_tokens":800,"completion_tokens":60}}`)
+	g := llmtest.New(nil)
+	s := llmtest.Client(t, g, &memStore{}, time.Now, llm.Config{Tasks: map[string]llm.Task{"posters": direct(t, api)}}).Session("posters")
+	ctx := context.Background()
+	req := llm.Request{InputTokens: 1000, MaxTokens: 100, ResponseFormat: llm.JSONAnswer("verdict", json.RawMessage(`{"type":"object"}`)),
+		Messages: []llm.Message{llm.System("judge"), {Role: "user", Content: []llm.Part{llm.Text("refs")}, CacheControl: llm.Ephemeral}}}
+	worst, err := s.WorstCase(ctx, req)
+	if err != nil || math.Abs(worst-(1000*10+100*50)/1e6) > 1e-12 {
+		t.Fatalf("worst case $%v, %v; want $0.015 at the task's prices", worst, err)
+	}
+	res, err := s.Chat(ctx, req)
+	if err != nil || res.Text != "ok" || math.Abs(res.CostUSD-(800*10+60*50)/1e6) > 1e-12 {
+		t.Fatalf("%q, $%v, %v; want the answer at $0.011", res.Text, res.CostUSD, err)
+	}
+	req.Effort = "off"
+	if _, err := s.Chat(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	sent := o.sent()
+	if len(sent) != 2 || sent[0].path != "/v1/chat/completions" || sent[0].key != "Bearer test-SECRET-openai-key" || len(g.Calls()) != 0 || g.Listed() != 0 {
+		t.Fatalf("OpenAI got %d calls (%+v), the gateway %d and its catalogue %d asks; want 2 on the task's key, none to the gateway",
+			len(sent), sent, len(g.Calls()), g.Listed())
+	}
+	for i, want := range []string{`"low"`, ""} {
+		var body map[string]json.RawMessage
+		json.Unmarshal([]byte(sent[i].body), &body)
+		keys := slices.Sorted(maps.Keys(body))
+		wantKeys := []string{"max_completion_tokens", "messages", "model", "reasoning_effort", "response_format"}
+		if want == "" {
+			wantKeys = slices.DeleteFunc(wantKeys, func(k string) bool { return k == "reasoning_effort" })
+		}
+		if !slices.Equal(keys, wantKeys) || string(body["reasoning_effort"]) != want || string(body["max_completion_tokens"]) != "100" ||
+			string(body["model"]) != `"gpt-6-astra"` || strings.Contains(sent[i].body, "cache_control") {
+			t.Errorf("call %d sent %s; want only %v, effort %s", i, sent[i].body, wantKeys, want)
+		}
+	}
+}
+
+// Catches a task on an API of its own priced at $0 against every budget because a price is missing (no catalogue
+// prices it), or keeping fallbacks that would never be tried, accepted at startup or at its first call.
+func TestDirectTaskConfig(t *testing.T) {
+	priced := direct(t, "https://api.openai.com/v1")
+	noIn, noOut, fallbacks := priced, priced, priced
+	noIn.PriceIn, noOut.PriceOut, fallbacks.Fallbacks = 0, 0, []string{"anthropic/claude-opus-5.5"}
+	for name, c := range map[string]struct {
+		task llm.Task
+		want string // "" = accepted
+	}{"priced": {priced, ""}, "no price_in": {noIn, "price_in and price_out"}, "no price_out": {noOut, "price_in and price_out"},
+		"fallbacks": {fallbacks, "fallbacks"}} {
+		cfg := llm.Config{Tasks: map[string]llm.Task{"posters": c.task}}
+		_, priceErr := llm.New(cfg, &memStore{}, time.Now).Session("posters").Price(context.Background())
+		for _, err := range []error{cfg.Validate(), priceErr} {
+			if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), "llm task posters") ||
+				!strings.Contains(err.Error(), c.want)) {
+				t.Errorf("%s: %v; want an error naming the task and %q", name, err, c.want)
+			}
+		}
+	}
+}
+
+// Catches one account's billing refusal holding back another's: the one-time OpenAI key out of quota (its 429
+// insufficient_quota) parking tonight's picks on the owner's gateway key, or taking the one alert for both; and the
+// refusal not holding the OpenAI task itself across a restart.
+func TestBillingHoldIsPerAccount(t *testing.T) {
+	o, api := newOpenAI(t, 429, `{"error":{"message":"You exceeded your current quota, please check your plan and billing details.",
+		"type":"insufficient_quota","param":null,"code":"insufficient_quota"}}`)
+	g := llmtest.New(func(int, llm.Request) llmtest.Answer { return llmtest.Answer{Text: "ok"} })
+	st, ctx := &memStore{}, context.Background()
+	cfg := llm.Config{Tasks: map[string]llm.Task{"posters": direct(t, api)}}
+	c := llmtest.Client(t, g, st, time.Now, cfg)
+	posters, tonight := c.Session("posters"), c.Session("tonight")
+	_, err := posters.Chat(ctx, ask)
+	_, tonightErr := tonight.Chat(ctx, ask)
+	if !errors.Is(err, llm.ErrBilling) || !errors.Is(posters.Parked(), llm.ErrBilling) || len(o.sent()) != 1 || tonightErr != nil || tonight.Parked() != nil {
+		t.Fatalf("posters %v (parked %v, %d calls), tonight %v (parked %v); want posters parked on its refusal, tonight answered",
+			err, posters.Parked(), len(o.sent()), tonightErr, tonight.Parked())
+	}
+	if told, other := posters.TellBilling(ctx), tonight.TellBilling(ctx); !told || other {
+		t.Fatalf("told posters %v, tonight %v; want the one alert for posters' account only", told, other)
+	}
+	c = llmtest.Client(t, g, st, time.Now, cfg) // a restart
+	if !errors.Is(c.Session("posters").Parked(), llm.ErrBilling) || c.Session("tonight").Parked() != nil {
+		t.Fatalf("after a restart: posters %v, tonight %v; want posters still held, tonight not", c.Session("posters").Parked(), c.Session("tonight").Parked())
 	}
 }

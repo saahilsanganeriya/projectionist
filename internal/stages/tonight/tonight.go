@@ -167,7 +167,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 			return ctx.Err()
 		case !errors.Is(err, llm.ErrBilling):
 			rep.Alert("tonight: no new picks for %s: %v", day, err)
-		case env.LLM.TellBilling(ctx):
+		case env.LLM.Session("tonight").TellBilling(ctx):
 			rep.Alert("tonight: no new picks for %s, nor later, until the AI gateway accepts calls (it is tried again hourly; "+
 				"this alert comes once, for every stage that asks a model): %v", day, err)
 		default:

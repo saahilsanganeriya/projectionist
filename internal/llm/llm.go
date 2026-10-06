@@ -1,7 +1,10 @@
-// Package llm calls models through the Vercel AI Gateway's OpenAI-compatible Chat Completions API, the one path for
-// every stage that asks a model: one key, one process-wide bound on calls in flight, one failure policy, and the dollar
-// cost of every call so a stage can hold a hard budget. Each task (posters, collections, tonight) names its model and
-// an ordered list of fallbacks in [llm.tasks.<task>]; a Claude model is just another id ("anthropic/claude-sonnet-5.5").
+// Package llm calls models through OpenAI-compatible Chat Completions APIs, the one path for every stage that asks a
+// model: one process-wide bound on calls in flight across every API, one failure policy, and the dollar cost of every
+// call so a stage can hold a hard budget. Each task (posters, collections, tonight) names its model and an ordered list
+// of fallbacks in [llm.tasks.<task>], sent through the Vercel AI Gateway ([llm] api and key_file) and priced from its
+// catalogue; a Claude model is just another id ("anthropic/claude-sonnet-5.5"). A task may instead call an API of its
+// own on its own key (OpenAI's, say): then it is priced at its own price_in and price_out, takes no fallbacks, and sends
+// OpenAI's plain request.
 //
 // Failure policy (docs/STAGES.md repeats it):
 //
@@ -10,17 +13,19 @@
 //     (one over 5 minutes is not waited for), up to attempts (4) in all; any other answer fails the call at once;
 //   - an attempt whose request was sent in full but whose answer was lost (a timeout, a dropped connection) may have
 //     been billed: the call counts it at its worst case (Result.CostUSD) even when a retry then answers;
-//   - a Session parks after park_after (5) failed calls in a row, and at once when the gateway refuses for billing
-//     (402, or a 403 for no card on file or a model outside the free tier): a parked session makes no more calls, and
-//     the billing refusal is no model failure and bills nothing. The refusal is kept in the store until a call is
-//     answered again; meanwhile no call is sent but one an hour (billingRecheck), across the process and its restarts,
-//     and the stages raise one alert for it in all (TellBilling).
+//   - a Session parks after park_after (5) failed calls in a row, and at once when its API refuses for billing (402, a
+//     403 for no card on file or a model outside the free tier, or OpenAI's 429 insufficient_quota): a parked session
+//     makes no more calls, and the billing refusal is no model failure and bills nothing. The refusal is kept in the
+//     store until a call is answered again; meanwhile no call is sent but one an hour (billingRecheck), across the
+//     process and its restarts, and the stages raise one alert for it in all (TellBilling). A refusal holds back only
+//     the tasks on its account (API and key): the one-time key out of quota leaves the gateway's tasks calling.
 //
 // Errors never carry the key or a request body.
 package llm
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -32,6 +37,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,10 +61,19 @@ type Config struct {
 // Task is one [llm.tasks.<name>] table: the model, the fallbacks the gateway tries in order when it fails, and how
 // much it may reason: "off" asks for the least the model allows (no reasoning, or its lowest effort), any other value
 // is sent as the effort ("low", "medium", ...). Reasoning applies to the fallbacks too.
+//
+// A task whose api is not [llm]'s calls that API directly, on its key_file (else [llm]'s). No catalogue prices it, so
+// it needs price_in and price_out, and it takes no fallbacks: the gateway is what tries them. Its effort is sent as
+// written, as reasoning_effort; "off" sends none, leaving the model's default, as there is no catalogue to find the
+// model's least in.
 type Task struct {
 	Model     string   `toml:"model"`
 	Fallbacks []string `toml:"fallbacks"`
 	Reasoning string   `toml:"reasoning"`
+	API       string   `toml:"api"`
+	KeyFile   string   `toml:"key_file"`
+	PriceIn   float64  `toml:"price_in"`  // USD per million input tokens
+	PriceOut  float64  `toml:"price_out"` // USD per million output tokens
 }
 
 // The bake-offs' picks: the posters and collections judge and its fallback (the owner's-taste test, 2026-10-06: the
@@ -125,7 +140,33 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
-// Store keeps the daily model catalogue and a billing refusal across runs (store.Store).
+// Validate refuses a task that calls an API of its own without both prices, or with fallbacks.
+func (c Config) Validate() error {
+	c = c.withDefaults()
+	for name, t := range c.Tasks {
+		if err := c.checkDirect(name, t); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkDirect is Validate's rule for one task: a missing price would count its calls at $0 against every budget, and
+// fallbacks would never be tried.
+func (c Config) checkDirect(name string, t Task) error {
+	switch {
+	case t.API == "" || t.API == c.API:
+		return nil
+	case len(t.Fallbacks) > 0:
+		return fmt.Errorf("llm task %s calls %s directly, so its fallbacks %q would never be tried (the gateway tries them); "+
+			"set fallbacks = []", name, t.API, t.Fallbacks)
+	case t.PriceIn <= 0 || t.PriceOut <= 0:
+		return fmt.Errorf("llm task %s calls %s directly: price_in and price_out (USD per million tokens) are required", name, t.API)
+	}
+	return nil
+}
+
+// Store keeps the daily model catalogue and the billing refusals across runs (store.Store).
 type Store interface {
 	GetJSON(ctx context.Context, stage, key string, v any) (bool, error)
 	PutJSON(ctx context.Context, stage, key string, v any) error
@@ -146,20 +187,21 @@ type Client struct {
 	cat   catalogue
 
 	blockMu sync.Mutex
-	blocked *blocked      // nil until read from the store
-	probe   chan struct{} // held by the one call that tries a refusing gateway again
+	holds   map[string]*hold // per account (Session.account), each read from the store on first use
 }
 
 func New(cfg Config, st Store, now func() time.Time) *Client {
 	cfg = cfg.withDefaults()
 	return &Client{
 		cfg: cfg, store: st, now: now, HTTP: &http.Client{}, sem: make(chan struct{}, cfg.InFlight), Backoff: jittered,
-		probe: make(chan struct{}, 1),
-		Key: func() (string, error) {
-			b, err := os.ReadFile(cfg.KeyFile)
-			return strings.TrimSpace(string(b)), err
-		},
+		holds: map[string]*hold{},
+		Key:   func() (string, error) { return readKey(cfg.KeyFile) },
 	}
+}
+
+func readKey(file string) (string, error) {
+	b, err := os.ReadFile(file)
+	return strings.TrimSpace(string(b)), err
 }
 
 // InFlight is how many calls the client lets into the air at once: a stage fans out this wide.
@@ -368,8 +410,8 @@ var (
 	ErrUnknownModel = errors.New("model not in the gateway's catalogue")
 )
 
-// APIError is a non-2xx answer; Type is the gateway's error type ("invalid_request_error", "rate_limit_exceeded",
-// "customer_verification_required", ...).
+// APIError is a non-2xx answer; Type is the API's error type ("invalid_request_error", "rate_limit_exceeded",
+// "customer_verification_required", ...), else its code.
 type APIError struct {
 	Status        int
 	Type, Message string
@@ -379,16 +421,18 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("gateway: HTTP %d %s: %s", e.Status, e.Type, e.Message)
 }
 
-// Is makes errors.Is(err, ErrBilling) true for a 402, and for a 403 that names a missing card, the free tier or
-// credits (2026-10-06, a model outside the free tier: "no_providers_available", "Free tier users do not have access
-// to this model. Upgrade to paid credits ...").
+// Is makes errors.Is(err, ErrBilling) true for a 402, for OpenAI's insufficient_quota (a 429 that waiting does not
+// end: the account has no credit left), and for a 403 that names a missing card, the free tier or credits (2026-10-06, a
+// model outside the free tier: "no_providers_available", "Free tier users do not have access to this model. Upgrade to
+// paid credits ...").
 func (e *APIError) Is(target error) bool {
 	if target != ErrBilling {
 		return false
 	}
 	msg := strings.ToLower(e.Message)
-	return e.Status == http.StatusPaymentRequired || e.Status == http.StatusForbidden && (e.Type == "customer_verification_required" ||
-		strings.Contains(msg, "credit card") || strings.Contains(msg, "free tier") || strings.Contains(msg, "credits"))
+	return e.Status == http.StatusPaymentRequired || e.Type == "insufficient_quota" ||
+		e.Status == http.StatusForbidden && (e.Type == "customer_verification_required" ||
+			strings.Contains(msg, "credit card") || strings.Contains(msg, "free tier") || strings.Contains(msg, "credits"))
 }
 
 // ---- sessions ----
@@ -396,9 +440,11 @@ func (e *APIError) Is(target error) bool {
 // Session is one stage run's use of one task. It parks after ParkAfter failed calls in a row, or at once on a billing
 // refusal; Parked says why, for the run's one alert.
 type Session struct {
-	c    *Client
-	name string
-	task Task
+	c       *Client
+	name    string
+	task    Task
+	api     string // [llm]'s, the gateway, or the task's own
+	account string // the store key of its API and key's billing refusal
 
 	mu     sync.Mutex
 	fails  int
@@ -406,7 +452,23 @@ type Session struct {
 }
 
 func (c *Client) Session(task string) *Session {
-	return &Session{c: c, name: task, task: c.cfg.Tasks[task]}
+	t := c.cfg.Tasks[task]
+	s := &Session{c: c, name: task, task: t, api: cmp.Or(t.API, c.cfg.API), account: "blocked"}
+	if keyFile := cmp.Or(t.KeyFile, c.cfg.KeyFile); s.api != c.cfg.API || keyFile != c.cfg.KeyFile {
+		s.account += " " + s.api + " " + keyFile
+	}
+	return s
+}
+
+// direct says the task calls an API of its own rather than the gateway.
+func (s *Session) direct() bool { return s.api != s.c.cfg.API }
+
+// key is the bearer token, read on every request: the task's key_file's, else [llm]'s (Client.Key).
+func (s *Session) key() (string, error) {
+	if s.task.KeyFile == "" {
+		return s.c.Key()
+	}
+	return readKey(s.task.KeyFile)
 }
 
 // Model is the task's first model.
@@ -415,14 +477,14 @@ func (s *Session) Model() string { return s.task.Model }
 // Name is the task's.
 func (s *Session) Name() string { return s.name }
 
-// Parked says why the session makes no more calls; nil while it may. A billing refusal another session met parks it
-// too, until the gateway is due to be tried again.
+// Parked says why the session makes no more calls; nil while it may. A billing refusal another session on its account
+// met parks it too, until the account is due to be tried again.
 func (s *Session) Parked() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.parked == nil {
-		if b := s.c.billing(context.Background()); b.held(s.c.now()) {
-			s.parked = parkedForBilling(b.Since, b.refusal())
+		if b, _ := s.c.billing(context.Background(), s.account); b.held(s.c.now()) {
+			s.parked = parkedForBilling(s.api, b.Since, b.refusal())
 		}
 	}
 	return s.parked
@@ -437,7 +499,7 @@ func (s *Session) WorstCase(ctx context.Context, req Request) (float64, error) {
 	return p.Cost(req.InputTokens, req.MaxTokens), err
 }
 
-// Price is the dearest input and the dearest output price among the task's models.
+// Price is the dearest input and the dearest output price among the task's models; for a task off the gateway, its own.
 func (s *Session) Price(ctx context.Context) (Price, error) {
 	p, _, err := s.price(ctx)
 	return p, err
@@ -445,6 +507,12 @@ func (s *Session) Price(ctx context.Context) (Price, error) {
 
 // price is the dearest price among the task's models, and the first model's catalogue entry.
 func (s *Session) price(ctx context.Context) (Price, ModelInfo, error) {
+	if s.direct() {
+		if err := s.c.cfg.checkDirect(s.name, s.task); err != nil {
+			return Price{}, ModelInfo{}, err
+		}
+		return Price{In: s.task.PriceIn / 1e6, Out: s.task.PriceOut / 1e6}, ModelInfo{}, nil
+	}
 	var dearest Price
 	var first ModelInfo
 	for i, id := range s.models() {
@@ -471,7 +539,7 @@ func (s *Session) Chat(ctx context.Context, req Request) (Result, error) {
 		s.settle(ctx, err)
 		return Result{}, err
 	}
-	release, err := s.c.admit(ctx)
+	release, err := s.c.admit(ctx, s.account)
 	if err != nil {
 		s.settle(ctx, err)
 		return Result{}, err
@@ -479,12 +547,13 @@ func (s *Session) Chat(ctx context.Context, req Request) (Result, error) {
 	defer release()
 	models := s.models()
 	req.Model, req.Models = models[0], models[1:]
-	effort := req.Effort
-	if effort == "" {
-		effort = s.task.Reasoning
-	}
+	effort := cmp.Or(req.Effort, s.task.Reasoning)
 	req.Reasoning = first.reasoning(effort)
-	res, comp, err := s.c.do(ctx, req)
+	var body any = req
+	if s.direct() {
+		body = openAI(req, effort)
+	}
+	res, comp, err := s.c.do(ctx, s, body)
 	res.CostUSD = float64(res.MaybeBilled) * p.Cost(req.InputTokens, req.MaxTokens)
 	if err == nil {
 		res.CostUSD += s.answerCost(ctx, comp, res, p)
@@ -494,16 +563,36 @@ func (s *Session) Chat(ctx context.Context, req Request) (Result, error) {
 }
 
 // answerCost is the gateway's figure, else the usage at the answering model's catalogue price (the dearest of the
-// task's when the catalogue does not list the id it answered under).
-func (s *Session) answerCost(ctx context.Context, comp completion, res Result, dearest Price) float64 {
-	if usd, ok := comp.cost(); ok {
-		return usd
+// task's when the catalogue does not list the id it answered under); off the gateway, the usage at the task's price.
+func (s *Session) answerCost(ctx context.Context, comp completion, res Result, p Price) float64 {
+	if !s.direct() {
+		if usd, ok := comp.cost(); ok {
+			return usd
+		}
+		if m, err := s.c.Model(ctx, res.Model); err == nil {
+			p = m.Price
+		}
 	}
-	p := dearest
-	if m, err := s.c.Model(ctx, res.Model); err == nil {
-		p = m.Price
+	return p.Cost(res.Usage.PromptTokens, res.Usage.CompletionTokens)
+}
+
+// openAI is req as OpenAI's own API takes it: it refuses with a 400 the gateway's fields (fallbacks, reasoning, a
+// message's cache mark; it caches prefixes by itself) and, from its reasoning models, max_tokens.
+func openAI(req Request, effort string) any {
+	messages := slices.Clone(req.Messages)
+	for i := range messages {
+		messages[i].CacheControl = nil
 	}
-	return float64(res.Usage.PromptTokens)*p.In + float64(res.Usage.CompletionTokens)*p.Out
+	if effort == "off" {
+		effort = ""
+	}
+	return struct {
+		Model               string          `json:"model"`
+		Messages            []Message       `json:"messages"`
+		MaxCompletionTokens int             `json:"max_completion_tokens"` // reasoning counts towards it
+		ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
+		ResponseFormat      *ResponseFormat `json:"response_format,omitempty"`
+	}{req.Model, messages, req.MaxTokens, effort, req.ResponseFormat}
 }
 
 // settle counts the call towards parking: a success resets the count, a billing refusal parks at once (and is kept in
@@ -512,9 +601,9 @@ func (s *Session) settle(ctx context.Context, err error) {
 	var since time.Time
 	switch {
 	case err == nil:
-		s.c.unblock(ctx)
+		s.c.unblock(ctx, s.account)
 	case errors.Is(err, ErrBilling):
-		since = s.c.block(ctx, err)
+		since = s.c.block(ctx, s.account, err)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -523,7 +612,7 @@ func (s *Session) settle(ctx context.Context, err error) {
 		s.fails = 0
 	case s.parked != nil || ctx.Err() != nil:
 	case errors.Is(err, ErrBilling):
-		s.parked = parkedForBilling(since, err)
+		s.parked = parkedForBilling(s.api, since, err)
 	default:
 		if s.fails++; s.fails >= s.c.cfg.ParkAfter {
 			s.parked = fmt.Errorf("%w after %d failed calls in a row; the last: %w", ErrParked, s.fails, err)
@@ -531,11 +620,11 @@ func (s *Session) settle(ctx context.Context, err error) {
 	}
 }
 
-func parkedForBilling(since time.Time, err error) error {
-	return fmt.Errorf("%w: the gateway has refused calls since %s: %w", ErrParked, since.Format(time.RFC3339), err)
+func parkedForBilling(api string, since time.Time, err error) error {
+	return fmt.Errorf("%w: %s has refused calls since %s: %w", ErrParked, api, since.Format(time.RFC3339), err)
 }
 
-// billingRecheck is how often a gateway that refuses for billing is tried again: by one call, which the others wait
+// billingRecheck is how often an account that refuses for billing is tried again: by one call, which the others wait
 // for. A refused call costs nothing; the hold keeps every run of every stage from asking (tonight runs every 30 min).
 const billingRecheck = time.Hour
 
@@ -548,106 +637,118 @@ type blocked struct {
 	Message string    `json:"message,omitempty"`
 }
 
-// held says the gateway refuses for billing and is not yet due to be tried again.
+// held says the account refuses for billing and is not yet due to be tried again.
 func (b blocked) held(now time.Time) bool {
 	return !b.Since.IsZero() && now.Before(b.Tried.Add(billingRecheck))
 }
 
 // refusal is the error of a call the hold kept from being sent.
 func (b blocked) refusal() error {
-	return fmt.Errorf("%w: not sent, the gateway is tried again from %s; its last answer: %s", ErrBilling,
+	return fmt.Errorf("%w: not sent, the account is tried again from %s; its last answer: %s", ErrBilling,
 		b.Tried.Add(billingRecheck).Format(time.RFC3339), b.Message)
 }
 
 const storeStage = "llm"
 
-// loadBlocked needs blockMu held.
-func (c *Client) loadBlocked(ctx context.Context) *blocked {
-	if c.blocked == nil {
-		c.blocked = &blocked{}
-		if _, err := c.store.GetJSON(ctx, storeStage, "blocked", c.blocked); err != nil {
-			c.blocked = &blocked{}
-		}
-	}
-	return c.blocked
+// hold is one account's billing refusal, and the slot of the one call that tries the account again.
+type hold struct {
+	blocked
+	probe chan struct{}
 }
 
-func (c *Client) billing(ctx context.Context) blocked {
+// loadHold needs blockMu held.
+func (c *Client) loadHold(ctx context.Context, account string) *hold {
+	h := c.holds[account]
+	if h == nil {
+		h = &hold{probe: make(chan struct{}, 1)}
+		if _, err := c.store.GetJSON(ctx, storeStage, account, &h.blocked); err != nil {
+			h.blocked = blocked{}
+		}
+		c.holds[account] = h
+	}
+	return h
+}
+
+func (c *Client) billing(ctx context.Context, account string) (blocked, chan struct{}) {
 	c.blockMu.Lock()
 	defer c.blockMu.Unlock()
-	return *c.loadBlocked(ctx)
+	h := c.loadHold(ctx, account)
+	return h.blocked, h.probe
 }
 
-// admit lets a call go. While the gateway refuses for billing, none goes until the next try is due, and then one at
-// a time: the first is the try, and the rest wait for its answer, going on if it was answered and held if it was
-// refused again. release ends the call's turn, after its outcome is recorded.
-func (c *Client) admit(ctx context.Context) (release func(), err error) {
-	switch b := c.billing(ctx); {
+// admit lets a call on account go. While the account refuses for billing, none goes until the next try is due, and
+// then one at a time: the first is the try, and the rest wait for its answer, going on if it was answered and held if
+// it was refused again. release ends the call's turn, after its outcome is recorded.
+func (c *Client) admit(ctx context.Context, account string) (release func(), err error) {
+	b, probe := c.billing(ctx, account)
+	switch {
 	case b.Since.IsZero():
 		return func() {}, nil
 	case b.held(c.now()):
 		return nil, b.refusal()
 	}
 	select {
-	case c.probe <- struct{}{}:
+	case probe <- struct{}{}:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-	switch b := c.billing(ctx); {
+	switch b, _ := c.billing(ctx, account); {
 	case b.Since.IsZero(): // the try it waited for was answered
-		<-c.probe
+		<-probe
 		return func() {}, nil
 	case b.held(c.now()): // and refused again
-		<-c.probe
+		<-probe
 		return nil, b.refusal()
 	}
-	return func() { <-c.probe }, nil
+	return func() { <-probe }, nil
 }
 
-// block records a billing refusal and returns since when the gateway has refused calls. Only a refusal the gateway
-// sent moves the next try; a call the hold kept back changes nothing.
-func (c *Client) block(ctx context.Context, err error) time.Time {
+// block records a billing refusal and returns since when the account has refused calls. Only a refusal the API sent
+// moves the next try; a call the hold kept back changes nothing.
+func (c *Client) block(ctx context.Context, account string, err error) time.Time {
 	c.blockMu.Lock()
 	defer c.blockMu.Unlock()
-	b := c.loadBlocked(ctx)
+	h := c.loadHold(ctx, account)
 	if api := (*APIError)(nil); errors.As(err, &api) {
-		if b.Since.IsZero() {
-			b.Since = c.now()
+		if h.Since.IsZero() {
+			h.Since = c.now()
 		}
-		b.Tried, b.Message = c.now(), err.Error()
-		c.store.PutJSON(context.WithoutCancel(ctx), storeStage, "blocked", b)
+		h.Tried, h.Message = c.now(), err.Error()
+		c.store.PutJSON(context.WithoutCancel(ctx), storeStage, account, h.blocked)
 	}
-	return b.Since
+	return h.Since
 }
 
-func (c *Client) unblock(ctx context.Context) {
+func (c *Client) unblock(ctx context.Context, account string) {
 	c.blockMu.Lock()
 	defer c.blockMu.Unlock()
-	if b := c.loadBlocked(ctx); !b.Since.IsZero() {
-		*b = blocked{}
-		c.store.PutJSON(context.WithoutCancel(ctx), storeStage, "blocked", b)
+	if h := c.loadHold(ctx, account); !h.Since.IsZero() {
+		h.blocked = blocked{}
+		c.store.PutJSON(context.WithoutCancel(ctx), storeStage, account, h.blocked)
 	}
 }
 
-// TellBilling is true once per billing refusal, for the stage that raises the one alert about it, and false after,
-// until a call is answered and the gateway refuses anew. The mark is kept in the store with the refusal.
-func (c *Client) TellBilling(ctx context.Context) bool {
+// TellBilling is true once per billing refusal of the session's account, for the stage that raises the one alert about
+// it, and false after, until a call is answered and the account refuses anew. The mark is kept in the store with the
+// refusal.
+func (s *Session) TellBilling(ctx context.Context) bool {
+	c := s.c
 	c.blockMu.Lock()
 	defer c.blockMu.Unlock()
-	b := c.loadBlocked(ctx)
-	if b.Since.IsZero() || b.Told {
+	h := c.loadHold(ctx, s.account)
+	if h.Since.IsZero() || h.Told {
 		return false
 	}
-	b.Told = true
-	c.store.PutJSON(context.WithoutCancel(ctx), storeStage, "blocked", b)
+	h.Told = true
+	c.store.PutJSON(context.WithoutCancel(ctx), storeStage, s.account, h.blocked)
 	return true
 }
 
 // ---- transport ----
 
-// do sends req, retrying what the failure policy retries, and returns the answer.
-func (c *Client) do(ctx context.Context, req Request) (Result, completion, error) {
-	payload, err := json.Marshal(req)
+// do sends the session's request body, retrying what the failure policy retries, and returns the answer.
+func (c *Client) do(ctx context.Context, s *Session, body any) (Result, completion, error) {
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return Result{}, completion{}, err
 	}
@@ -655,14 +756,14 @@ func (c *Client) do(ctx context.Context, req Request) (Result, completion, error
 	var res Result
 	for {
 		res.Attempts++
-		comp, a := c.attempt(ctx, payload)
+		comp, a := c.attempt(ctx, s, payload)
 		if a.maybeBilled {
 			res.MaybeBilled++
 		}
 		if a.err == nil {
 			res.Model, res.Usage, res.Took = comp.Model, comp.Usage.Usage, time.Since(start)
 			if res.Model == "" {
-				res.Model = req.Model
+				res.Model = s.task.Model
 			}
 			if len(comp.Choices) > 0 {
 				ch := comp.Choices[0]
@@ -699,21 +800,22 @@ type attemptOutcome struct {
 	retryAfter  time.Duration
 }
 
-// attempt is one POST /chat/completions inside the bound on calls in flight and the per-attempt timeout.
-func (c *Client) attempt(ctx context.Context, payload []byte) (completion, attemptOutcome) {
+// attempt is one POST /chat/completions to the session's API inside the bound on calls in flight and the per-attempt
+// timeout.
+func (c *Client) attempt(ctx context.Context, s *Session, payload []byte) (completion, attemptOutcome) {
 	select {
 	case c.sem <- struct{}{}:
 	case <-ctx.Done():
 		return completion{}, attemptOutcome{err: ctx.Err()}
 	}
 	defer func() { <-c.sem }()
-	key, err := c.Key()
+	key, err := s.key()
 	if err != nil {
-		return completion{}, attemptOutcome{err: fmt.Errorf("gateway key: %w", err)}
+		return completion{}, attemptOutcome{err: fmt.Errorf("llm task %s key: %w", s.name, err)}
 	}
 	actx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(actx, http.MethodPost, c.cfg.API+"/chat/completions", nil)
+	req, err := http.NewRequestWithContext(actx, http.MethodPost, s.api+"/chat/completions", nil)
 	if err != nil {
 		return completion{}, attemptOutcome{err: err}
 	}
@@ -738,7 +840,8 @@ func (c *Client) attempt(ctx context.Context, payload []byte) (completion, attem
 		}
 		return comp, attemptOutcome{}
 	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
-		return completion{}, attemptOutcome{err: apiError(resp.StatusCode, raw), retry: true, retryAfter: retryAfter(resp.Header.Get("Retry-After"), c.now())}
+		apiErr := apiError(resp.StatusCode, raw)
+		return completion{}, attemptOutcome{err: apiErr, retry: !errors.Is(apiErr, ErrBilling), retryAfter: retryAfter(resp.Header.Get("Retry-After"), c.now())}
 	default:
 		return completion{}, attemptOutcome{err: apiError(resp.StatusCode, raw)}
 	}
