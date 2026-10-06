@@ -81,5 +81,5 @@ secrets:
     file: /volume1/docker/projectionist/secrets/tmdb_api_key
   fanart_api_key:
     file: /volume1/docker/projectionist/secrets/fanart_api_key
-  ai_gateway_api_key: # the owner's Vercel AI Gateway key: every model call ([llm] key_file)
+  ai_gateway_api_key: # the owner's Vercel AI Gateway key: every model call whose task names no API of its own ([llm] key_file)
     file: /volume1/docker/projectionist/secrets/ai_gateway_api_key

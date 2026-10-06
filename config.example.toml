@@ -324,7 +324,7 @@ quiet         = ["missing_english_subs"]       # grows with every download until
 
 # The poster the owner would choose for every movie, show and season, on Jellyfin and Plex; replaces posters/posters.py.
 # Candidates: the owner's poster (from a Plex DB backup and the export taken with it), a Criterion release's cover,
-# TMDB and fanart.tv (the shared clients). Judge: one vision call per title through the AI gateway, on [llm.tasks.posters]'s model (collections on
+# TMDB and fanart.tv (the shared clients). Judge: one vision call per title on [llm.tasks.posters]'s model (collections on
 # [llm.tasks.collections]'s), as many at once as [llm] in_flight allows, to his taste: illustrated, artistic fan art
 # over mainstream key art, creative over plain, the title the only text. Off until enabled: even with dry_run, judging
 # spends. Verdicts judged under the prompts before the owner's taste are judged again once (the backfill: run it on
@@ -420,11 +420,11 @@ home_after       = "movie.recentlyadded"
 # limit   = 0      # keep only the first N (a Top 250 is the Top 500 with limit = 250)
 # poster  = ""     # an image file instead of the generated poster
 
-# Every model call goes through the Vercel AI Gateway (OpenAI-compatible Chat Completions), on one key, one bound on
-# calls in flight for the whole process, and one failure policy (docs/STAGES.md, "LLM calls"). Each task names its
-# model, the fallbacks the gateway tries in order when it fails, and how much it may reason ("off" = the least the
-# model allows); prices come from the gateway's model list, fetched daily. A Claude model is just another id
-# ("anthropic/claude-sonnet-5.5"). These are the defaults; a task table may set only some keys.
+# Every model call goes through the Vercel AI Gateway (OpenAI-compatible Chat Completions) on one key, unless its task
+# names an API of its own; one bound on calls in flight for the whole process, and one failure policy (docs/STAGES.md,
+# "LLM calls"). Each task names its model, the fallbacks the gateway tries in order when it fails, and how much it may
+# reason ("off" = the least the model allows); prices come from the gateway's model list, fetched daily. A Claude model
+# is just another id ("anthropic/claude-sonnet-5.5"). These are the defaults; a task table may set only some keys.
 [llm]
 api        = "https://ai-gateway.vercel.sh/v1"
 key_file   = "/run/secrets/ai_gateway_api_key"
@@ -452,6 +452,20 @@ reasoning = "none"
 model     = "deepseek/deepseek-v4.1-flash"
 fallbacks = ["alibaba/qwen3.7-flash"]
 reasoning = "off"
+
+# A task may call an API of its own on its own key: in place of the posters table above, OpenAI's (GPT-6 Astra, the
+# one-time poster pass; the same for collections). It then needs its prices (USD per million tokens; no catalogue
+# prices it) and takes no fallbacks (only the gateway tries them); its effort goes as written, and Astra's least is
+# "low". A missing price or a fallback fails the config load. Delete api, key_file, price_in and price_out to move it
+# back to the gateway.
+# [llm.tasks.posters]
+# api       = "https://api.openai.com/v1"
+# key_file  = "/run/secrets/openai_api_key_task"
+# model     = "gpt-6-astra"
+# fallbacks = []
+# reasoning = "low"
+# price_in  = 10   # OpenAI's list price for up to 272K input tokens; above that 20
+# price_out = 50   # above 272K input tokens 75
 
 # Nightly versions of the NVMe app data on volume1: SQLite's online backup of each database, then the roots file by
 # file, hardlinking what did not change since the newest version. Needs /volume2 read-only, each database's folder
