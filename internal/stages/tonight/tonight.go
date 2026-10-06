@@ -1,67 +1,96 @@
-// Package tonight fills a "Tonight" row on the owner's Plex Home, first of its Movies rows: five films
-// from his library he has not seen, picked once a day by one Claude call that reads his Letterboxd ratings and
-// reviews, each with a one-line reason tied to a film or director he rated highly.
+// Package tonight fills a household "Tonight" row, first of the Movies rows on the Plex Home of everyone the library
+// is shared with: five films from the library that no one in the household (people) has seen, picked once a day by
+// one model call that reads each person's Letterboxd ratings and reviews, each with a one-line reason tied to a film
+// one of them rated highly. Nothing personal reaches the row: the model sees the people only as "viewer A, B, ..."; a
+// reason that names no film a viewer rated 4★ or more, or quotes a review, is retried and then dropped.
 //
-// Every 30 min the stage reconciles: a pick he has since watched (Letterboxd, Plex or Jellyfin) leaves the row at
-// once. Once per day, after pick_after, it re-picks. The same picks fill a "Tonight" BoxSet in Jellyfin.
+// Every 30 min the stage reconciles: a pick anyone in the household has since watched (a Letterboxd feed, the watch
+// record, or the owner's Plex and Jellyfin) leaves the row at once. Once per day, after pick_after, it re-picks. The
+// same picks fill a "Tonight" BoxSet in Jellyfin.
 //
-//	Letterboxd export + RSS ─┐
-//	library folders {tmdb-N} ├─► unseen candidates ─► 1 AI call/day (+1 retry, both ≤ daily_cap_usd) ─► picks (state)
-//	TMDB facts (cached)     ─┘                                                                       │
-//	                                                   Plex collection + Home row ◄──────────────────┤ queued, retried,
-//	                                                   Jellyfin BoxSet           ◄──────────────────┘ never fail the run
+//	per person: export | feed + films page (cached) ─┐
+//	watch record (jfsync: Plex, Jellyfin plays)     ├─► unseen by all ─► 1 AI call/day (+1 retry, ≤ daily_cap_usd) ─► picks
+//	library folders {tmdb-N} + TMDB facts (cached)  ─┘                                                               │
+//	                                           Plex collection + Home row ◄─────────────────────────────────────────┤ queued, retried,
+//	                                           Jellyfin BoxSet           ◄─────────────────────────────────────────┘ never fail the run
 //
-// The model is the dated policy's choice ([[llm.policy]], env.LLM): the newest Sonnet until 2026-11-05, then the
-// newest Haiku.
+// A person whose feed has not answered for feedStale does not stop the picks: they are made from the others (and
+// whatever of that person is cached), and the day's picks raise one alert naming them. The model is the tonight
+// task's ([llm.tasks.tonight], env.LLM), through the AI gateway.
 //
-// The stage never writes watched state, never touches Continue Watching / On Deck, and never deletes anything
-// of his: it edits only the collection it owns.
+// The stage never writes watched state, never touches Continue Watching / On Deck, and never deletes anything of
+// anyone's: it edits only the collection it owns.
 package tonight
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
 	"projectionist/internal/llm"
 	"projectionist/internal/stage"
+	"projectionist/internal/stages/letterboxd"
 )
 
 const name = "tonight"
 
 type Options struct {
-	Effort         string        `toml:"effort"` // low, medium, high; sent only to a model that accepts it
-	MaxTokens      int           `toml:"max_tokens"`
-	DailyCapUSD    float64       `toml:"daily_cap_usd"`
-	APIKeyFile     string        `toml:"api_key_file"`
-	APIBase        string        `toml:"api_base"` // "" = https://api.anthropic.com
-	Picks          int           `toml:"picks"`
-	PickAfter      string        `toml:"pick_after"`     // HH:MM in the config timezone: a new day's picks after this
-	MaxCandidates  int           `toml:"max_candidates"` // unseen films shown to the model, best-ranked first
-	Section        int           `toml:"section"`
-	Collection     string        `toml:"collection"`
-	MoviesDir      string        `toml:"movies_dir"`
-	LetterboxdDir  string        `toml:"letterboxd_dir"`
-	LetterboxdRSS  string        `toml:"letterboxd_rss"`
-	ImageBase      string        `toml:"image_base"`
-	JellyfinUser   string        `toml:"jellyfin_user"`
-	SinkTimeout    time.Duration `toml:"sink_timeout"`     // per sink per run; what is left over waits for the next run
-	PlexMapTimeout time.Duration `toml:"plex_map_timeout"` // the once-a-day Movies listing; minutes during a scan
-	MapEvery       time.Duration `toml:"map_every"`        // how often the TMDB → Plex/Jellyfin item maps are re-read
+	MaxTokens     int     `toml:"max_tokens"` // reasoning included
+	DailyCapUSD   float64 `toml:"daily_cap_usd"`
+	Picks         int     `toml:"picks"`
+	PickAfter     string  `toml:"pick_after"`     // HH:MM in the config timezone: a new day's picks after this
+	MaxCandidates int     `toml:"max_candidates"` // unseen films shown to the model, best-ranked first
+	Section       int     `toml:"section"`
+	Collection    string  `toml:"collection"`
+	MoviesDir     string  `toml:"movies_dir"`
+	ImageBase     string  `toml:"image_base"`
+	JellyfinUser  string  `toml:"jellyfin_user"` // the owner's account, whose played flags count
+	// People is the household, in the letterboxd stage's shape: person is their name in jfsync's users (the watch
+	// record), user their Letterboxd username, export_dir a folder holding their own letterboxd-<user>-* export (""
+	// = none: their feed and films page instead). Its other keys mean nothing here. Unset: the owner alone.
+	People         []letterboxd.Person `toml:"people"`
+	LetterboxdURL  string              `toml:"letterboxd_url"`
+	SinkTimeout    time.Duration       `toml:"sink_timeout"`     // per sink per run; what is left over waits for the next run
+	PlexMapTimeout time.Duration       `toml:"plex_map_timeout"` // the once-a-day Movies listing; minutes during a scan
+	MapEvery       time.Duration       `toml:"map_every"`        // how often the TMDB → Plex/Jellyfin item maps are re-read
 }
 
 func defaults() Options {
 	return Options{
-		Effort: "medium", MaxTokens: 1000, DailyCapUSD: 0.15,
-		APIKeyFile: "/run/secrets/anthropic_api_key", Picks: 5, PickAfter: "05:00", MaxCandidates: 400,
-		Section: 4, Collection: "Tonight", MoviesDir: "/volume1/media/Movies",
-		LetterboxdDir: "/volume1/docker/projectionist/data/letterboxd",
-		LetterboxdRSS: "https://letterboxd.com/saahilsan/rss/", ImageBase: "https://image.tmdb.org/t/p", JellyfinUser: "saahil",
+		MaxTokens: 4000, DailyCapUSD: 0.15, Picks: 5, PickAfter: "05:00", MaxCandidates: 400,
+		Section: 4, Collection: "Tonight", MoviesDir: "/volume1/media/Movies", LetterboxdURL: "https://letterboxd.com",
+		ImageBase: "https://image.tmdb.org/t/p", JellyfinUser: "saahil",
 		SinkTimeout: 3 * time.Minute, PlexMapTimeout: 10 * time.Minute, MapEvery: 24 * time.Hour,
 	}
+}
+
+// owner is the household when people is unset. Not a default in Options: TOML decodes a shorter people list into the
+// default's backing array, so a configured entry would keep the owner's export_dir.
+var owner = letterboxd.Person{Person: "saahil", User: "saahilsan", ExportDir: "/volume1/docker/projectionist/data/letterboxd"}
+
+// options decodes the stage's keys and checks them; after is pick_after as an offset from local midnight.
+func options(env *stage.Env) (opt Options, after time.Duration, err error) {
+	opt = defaults()
+	if err := env.Options(&opt); err != nil {
+		return opt, 0, err
+	}
+	if len(opt.People) == 0 {
+		opt.People = []letterboxd.Person{owner}
+	}
+	persons := map[string]bool{}
+	for _, p := range opt.People {
+		if p.Person == "" || p.User == "" || persons[p.Person] {
+			return opt, 0, fmt.Errorf("tonight people: each entry needs a user and a person of its own (person %q, user %q)", p.Person, p.User)
+		}
+		persons[p.Person] = true
+	}
+	after, err = clock(opt.PickAfter)
+	return opt, after, err
 }
 
 type pick struct {
@@ -79,7 +108,6 @@ type state struct {
 	Picks    []pick             `json:"picks"`         // still unwatched, in the model's order
 	Recent   map[int]string     `json:"recent"`        // tmdb → day picked; kept 14 days so the picks rotate
 	Spend    map[string]float64 `json:"spend"`         // local day → USD, including reservations for calls in flight
-	Resolved resolved           `json:"resolved"`
 	Plex     sinkState          `json:"plex"`
 	Jellyfin sinkState          `json:"jellyfin"`
 }
@@ -94,11 +122,7 @@ type Stage struct{}
 func (Stage) Name() string { return name }
 
 func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
-	opt := defaults()
-	if err := env.Options(&opt); err != nil {
-		return err
-	}
-	after, err := clock(opt.PickAfter)
+	opt, after, err := options(env)
 	if err != nil {
 		return err
 	}
@@ -119,9 +143,9 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	}
 	save := func() error { return env.Store.PutJSON(ctx, name, "state", st) }
 
-	rss, err := refreshRSS(ctx, env, opt.LetterboxdRSS)
+	members, err := loadMembers(ctx, env, opt, true)
 	if err != nil {
-		env.Log.Warn("letterboxd rss unavailable; using the cached entries", "event", "letterboxd_rss_error", "err", err)
+		return err
 	}
 	// The item maps carry his Plex and Jellyfin plays, which a pick must know. Jellyfin answers in seconds. Plex can
 	// take minutes during a scan, so before a pick it gets one short try, and only while there is no map at all;
@@ -133,15 +157,22 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 			return plexMap(c, env.Plex, opt.Section)
 		})
 	}
-	reconcile(ctx, env, rep, opt, &st, rss, pm, jm)
+	reconcile(ctx, env, rep, opt, &st, members, pm, jm)
 
 	day := pickDay(env.Now(), loc, after)
 	if st.Day != day {
-		if err := pickFilms(ctx, env, rep, opt, &st, day, rss, pm, jm, save); err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
+		switch err := pickFilms(ctx, env, rep, opt, &st, day, members, pm, jm, save); {
+		case err == nil:
+		case ctx.Err() != nil:
+			return ctx.Err()
+		case !errors.Is(err, llm.ErrBilling):
 			rep.Alert("tonight: no new picks for %s: %v", day, err)
+		case env.LLM.TellBilling(ctx):
+			rep.Alert("tonight: no new picks for %s, nor later, until the AI gateway accepts calls (it is tried again hourly; "+
+				"this alert comes once, for every stage that asks a model): %v", day, err)
+		default:
+			env.Log.Warn("no new picks: the AI gateway still refuses calls for billing (alerted once)", "event", "tonight_billing_held",
+				"day", day, "err", err)
 		}
 	}
 	if err := save(); err != nil {
@@ -180,7 +211,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		return err
 	}
 	rep.Count("picks", len(st.Picks))
-	rep.Summary = fmt.Sprintf("%d pick(s) for %s; spent $%.4f today", len(st.Picks), st.Day, st.Spend[day])
+	rep.Summary = fmt.Sprintf("%d pick(s) for %s, for %d people; spent $%.4f today", len(st.Picks), st.Day, len(members), st.Spend[day])
 	return nil
 }
 
@@ -261,15 +292,28 @@ func runSink(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options
 	}
 }
 
-// reconcile drops the picks he has watched since they were picked. Each source is one small, bounded read; a
-// source that does not answer is skipped until the next run.
-func reconcile(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, st *state, rss rssCache, pm, jm idMap) {
+// reconcile drops the picks anyone in the household has watched since they were picked. Each source is one small,
+// bounded read; a source that does not answer is skipped until the next run.
+func reconcile(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, st *state, members []member, pm, jm idMap) {
 	if len(st.Picks) == 0 {
 		return
 	}
 	watched := map[int]string{}
-	for _, e := range rss.Entries {
-		watched[e.TMDB] = "letterboxd"
+	for _, m := range members {
+		for _, e := range m.cache.Entries {
+			if e.TMDB > 0 {
+				watched[e.TMDB] = "letterboxd:" + m.who.Person
+			}
+		}
+	}
+	if record, err := recordWatched(ctx, env.Store.DB(), members); err != nil {
+		env.Log.Warn("watch record check failed", "event", "watch_record_error", "err", err)
+	} else {
+		for id, who := range record {
+			if watched[id] == "" {
+				watched[id] = "watch record:" + who
+			}
+		}
 	}
 	read := func(source string, f func(context.Context) (map[int]bool, error)) {
 		rctx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -305,85 +349,108 @@ func reconcile(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 	st.Picks = kept
 }
 
-// pickFilms makes the day's one AI call, plus at most one retry, inside the daily cap. Both are sized before the
-// first is sent, at their worst (bound), so the pair can never pass the cap; each call's worst case is reserved
-// before it is sent and settled to the billed usage after. A call whose answer was lost after it may have run keeps
-// its reservation, because it may have been billed.
-func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, st *state, day string, rss rssCache,
-	pm, jm idMap, save func() error) error {
-	export, err := readExport(opt.LetterboxdDir)
-	if err != nil {
-		return fmt.Errorf("letterboxd export: %w", err)
-	}
+// pickCall is the day's call as sized, and what its answer is checked against.
+type pickCall struct {
+	req     llm.Request
+	unseen  map[int]candidate
+	loved   map[string]bool
+	quotes  quoteGuard
+	n       int            // candidates shown
+	exports map[string]int // export rows read per person
+}
+
+// preparePick reads everyone's history and the library, ranks the films no one in the household has seen, and sizes
+// the day's call: the candidate list is cut until the call AND its one retry, each at its worst (bound), fit what is
+// left of the day's cap.
+func preparePick(ctx context.Context, env *stage.Env, opt Options, st *state, day string, members []member, pm, jm idMap,
+	s *llm.Session) (pickCall, error) {
 	lib, err := scanLibrary(opt.MoviesDir)
 	if err != nil {
-		return err
+		return pickCall{}, err
 	}
 	fetched, failed, err := fillFacts(ctx, env, lib)
 	if err != nil {
-		return err
+		return pickCall{}, err
+	}
+	record, err := recordWatched(ctx, env.Store.DB(), members)
+	if err != nil {
+		return pickCall{}, fmt.Errorf("watch record: %w", err)
 	}
 	env.Log.Info("library facts", "event", "tonight_library", "films", len(lib), "tmdb_fetched", fetched, "tmdb_failed", failed,
-		"letterboxd_export_rows", len(export), "letterboxd_rss_entries", len(rss.Entries))
+		"watch_record_films", len(record))
 
-	w := newWatched(export, rss.Entries)
+	w := newWatched()
+	var all []rated
+	var tastes, reviews []string
+	loved, exports := map[string]bool{}, map[string]int{}
+	for _, m := range members {
+		export, err := m.export()
+		if err != nil {
+			return pickCall{}, fmt.Errorf("%s's letterboxd export: %w", m.who.Person, err)
+		}
+		exports[m.who.Person] = len(export)
+		w.add(m.who.Person, export, m.cache.Entries)
+		hist := history(export, m.cache.Entries)
+		if len(hist) > 0 { // viewers are lettered in order; one with nothing known is left out of the prompt
+			tastes = append(tastes, tasteText(string(rune('A'+len(tastes))), hist, 400, tasteBytes/len(members)))
+		}
+		all = append(all, hist...)
+		maps.Copy(loved, lovedFilms(hist))
+		for _, e := range append(export, slices.Collect(maps.Values(m.cache.Entries))...) {
+			if e.Review != "" {
+				reviews = append(reviews, e.Review)
+			}
+		}
+		env.Log.Info("household member", "event", "tonight_member", "person", m.who.Person, "letterboxd_export_rows", len(export),
+			"letterboxd_cached", len(m.cache.Entries), "films_rated", len(hist), "feed_read_at", m.cache.Feed.ReadAt.Format(time.RFC3339))
+	}
+	for id, who := range record {
+		w.IDs[id] = "watch record: " + who
+	}
 	for _, m := range []idMap{pm, jm} {
 		for id := range m.Watched {
 			w.IDs[id] = "server"
 		}
 	}
-	hist := history(export, rss.Entries)
+	if len(loved) == 0 {
+		return pickCall{}, errors.New("no one in the household has a film rated 4 stars or more for a reason to draw on")
+	}
 	for id, at := range st.Recent {
 		if at < daysBefore(day, 14) {
 			delete(st.Recent, id)
 		}
 	}
-	cands := rankCandidates(lib, w, hist, st.Recent, day)
+	cands := rankCandidates(lib, w, all, st.Recent, day)
 	if len(cands) < opt.Picks {
-		return fmt.Errorf("only %d unseen films", len(cands))
+		return pickCall{}, fmt.Errorf("only %d unseen films", len(cands))
+	}
+	p, err := s.Price(ctx)
+	if err != nil {
+		return pickCall{}, err
 	}
 
-	a := newAI(opt.APIBase, opt.APIKeyFile, 3*time.Minute)
-	m, err := resolveModel(ctx, env, a, &st.Resolved)
-	if err != nil {
-		return err
+	// The retry re-sends the call plus the answer (at most max_tokens) and the violations; each is priced with all of
+	// max_tokens as output. The cost grows linearly with the candidate lines, so one rescale nearly always lands.
+	taste := strings.Join(tastes, "\n\n")
+	request := func(n int) llm.Request {
+		return pickRequest(opt, taste, []llm.Message{userMessage(prompt(day, cands[:n], opt.Picks))})
 	}
-	p := llm.PriceOf(m.ID)
-	if p.Assumed {
-		env.Log.Warn("no list price for the model; budgeting at twice its family's", "event", "tonight_price_assumed", "model", m.ID)
-	}
-
-	// Size the candidate list so the call AND its retry fit what is left of today's budget. The retry re-sends the
-	// call plus the answer (at most max_tokens) and the violations. fixed counts the request without candidate
-	// lines: the cached prefix plus a short tail, all of it priced as a cache write.
-	taste := tasteText(hist, 400, tasteBytes)
-	request := func(n int) llm.CachedRequest {
-		return pickRequest(m, opt, taste, []llm.Message{userMessage(prompt(day, cands[:n], opt.Picks))})
-	}
-	fixed, err := a.CountTokens(ctx, request(0))
-	if err != nil {
-		return err
-	}
+	fixed := request(0).InputTokens
 	pair := func(total int) float64 {
-		return bound(p, total, fixed, opt.MaxTokens) + bound(p, total+opt.MaxTokens+retryExtra, fixed, opt.MaxTokens)
+		return p.Cost(total, opt.MaxTokens) + p.Cost(total+opt.MaxTokens+retryExtra, opt.MaxTokens)
 	}
 	left := opt.DailyCapUSD - st.Spend[day]
 	n := min(opt.MaxCandidates, len(cands))
-	var req llm.CachedRequest
-	var total int
+	var req llm.Request
 	for i := 0; ; i++ {
 		req = request(n)
-		if total, err = a.CountTokens(ctx, req); err != nil {
-			return err
-		}
-		if pair(total) <= left {
+		if pair(req.InputTokens) <= left {
 			break
 		}
-		// the cost grows linearly with the candidate lines, so one rescale nearly always lands
-		next := int(float64(n) * (left - pair(fixed)) / (pair(total) - pair(fixed)) * 0.95)
+		next := int(float64(n) * (left - pair(fixed)) / (pair(req.InputTokens) - pair(fixed)) * 0.95)
 		if i == 3 || next < 4*opt.Picks {
-			return fmt.Errorf("%w: the call and its retry may cost $%.4f, $%.4f left of $%.2f (%d input tokens, %d candidates)",
-				errOverBudget, pair(total), left, opt.DailyCapUSD, total, n)
+			return pickCall{}, fmt.Errorf("%w: the call and its retry may cost $%.4f, $%.4f left of $%.2f (%d input tokens, %d candidates)",
+				errOverBudget, pair(req.InputTokens), left, opt.DailyCapUSD, req.InputTokens, n)
 		}
 		n = next
 	}
@@ -391,81 +458,131 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 	for _, c := range cands[:n] {
 		unseen[c.TMDB] = c
 	}
-	env.Log.Info("ai call sized", "event", "tonight_ai_sized", "model", m.ID, "candidates", n, "unseen", len(cands),
-		"counted_input_tokens", total, "pair_bound_usd", fmt.Sprintf("%.5f", pair(total)), "left_usd", fmt.Sprintf("%.5f", left))
+	env.Log.Info("ai call sized", "event", "tonight_ai_sized", "model", s.Model(), "viewers", len(tastes), "candidates", n,
+		"unseen", len(cands), "estimated_input_tokens", req.InputTokens, "pair_bound_usd", fmt.Sprintf("%.5f", pair(req.InputTokens)),
+		"left_usd", fmt.Sprintf("%.5f", left))
+	return pickCall{req: req, unseen: unseen, loved: loved, quotes: newQuoteGuard(reviews), n: n, exports: exports}, nil
+}
 
-	call := func(attempt int, reserve float64) (llm.Response, error) {
-		st.Spend[day] += reserve
-		if err := save(); err != nil {
-			return llm.Response{}, err
-		}
-		r, err := a.MessagesCached(ctx, req)
-		switch {
-		case err == nil:
-			st.Spend[day] += p.Cost(r.Usage, false) - reserve
-		case errors.Is(err, llm.ErrUnknownOutcome):
-			env.Log.Warn("ai answer lost; counting the call as billed", "event", "tonight_ai_unknown_outcome", "attempt", attempt,
-				"reserved_usd", fmt.Sprintf("%.5f", reserve))
-		default: // refused by the API, or never sent
-			st.Spend[day] -= reserve
-		}
-		if serr := save(); serr != nil {
-			return llm.Response{}, serr
-		}
-		if err != nil {
-			return llm.Response{}, err
-		}
-		u := r.Usage
-		env.Log.Info("ai call", "event", "tonight_ai_call", "attempt", attempt, "model", m.ID, "candidates", n,
-			"input_tokens", u.InputTokens, "cache_write_tokens", u.CacheCreationInputTokens, "cache_read_tokens", u.CacheReadInputTokens,
-			"output_tokens", u.OutputTokens, "stop", r.StopReason, "cost_usd", fmt.Sprintf("%.5f", p.Cost(u, false)),
-			"bound_usd", fmt.Sprintf("%.5f", reserve), "spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]))
-		if st.Spend[day] > opt.DailyCapUSD { // only a count_tokens estimate beyond bound's slack gets here
-			env.Log.Warn("over the daily AI cap", "event", "tonight_over_cap", "spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]))
-		}
-		env.Log.Debug("ai answer", "event", "tonight_ai_answer", "attempt", attempt, "text", r.Text())
-		rep.Count("ai_calls", 1)
-		return r, nil
+// Today is the pick call the stage would make now, for the bake-off tool (cmd/bakeoff): its request, before a model
+// and its reasoning are set, and a check that reads an answer as the stage does, into "Title (year) [mood; liked]:
+// reason" lines and the violations a retry would name.
+func Today(ctx context.Context, env *stage.Env) (llm.Request, func(text string) (picks, violations []string), error) {
+	opt, after, err := options(env)
+	if err != nil {
+		return llm.Request{}, nil, err
 	}
-	r, err := call(1, bound(p, total, fixed, opt.MaxTokens))
+	st := state{Recent: map[int]string{}, Spend: map[string]float64{}}
+	var pm, jm idMap
+	for key, v := range map[string]any{"state": &st, "plexmap": &pm, "jfmap": &jm} {
+		if _, err := env.Store.GetJSON(ctx, name, key, v); err != nil {
+			return llm.Request{}, nil, err
+		}
+	}
+	members, err := loadMembers(ctx, env, opt, false) // what the stage last read: the bake-off sends Letterboxd nothing
+	if err != nil {
+		return llm.Request{}, nil, err
+	}
+	loc := env.Loc
+	if loc == nil {
+		loc = time.UTC
+	}
+	day := pickDay(env.Now(), loc, after)
+	st.Spend[day] = 0 // the bake-off sizes the call as a fresh day's
+	pc, err := preparePick(ctx, env, opt, &st, day, members, pm, jm, env.LLM.Session("tonight"))
+	if err != nil {
+		return llm.Request{}, nil, err
+	}
+	return pc.req, func(text string) (lines, violations []string) {
+		picks, violations, _ := validate(text, pc.unseen, pc.loved, pc.quotes, opt.Picks)
+		for _, p := range picks {
+			lines = append(lines, fmt.Sprintf("%s (%d) [%s; liked %s]: %s", p.Title, p.Year, p.Mood, p.Liked, p.Reason))
+		}
+		return lines, violations
+	}, nil
+}
+
+// pickFilms makes the day's one AI call, plus at most one retry, inside the daily cap. Both are sized before the
+// first is sent, at their worst, so the pair can never pass the cap; each call's worst case is reserved before it is
+// sent and settled to what it cost after (an attempt whose answer was lost stays counted at its worst case).
+func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, st *state, day string, members []member,
+	pm, jm idMap, save func() error) error {
+	s := env.LLM.Session("tonight")
+	if err := s.Parked(); err != nil { // a billing refusal that holds: no call would be sent
+		return err
+	}
+	pc, err := preparePick(ctx, env, opt, st, day, members, pm, jm, s)
 	if err != nil {
 		return err
 	}
-	loved := lovedFilms(hist)
-	picks, violations, glued := validate(r.Text(), unseen, loved, opt.Picks)
-	if r.StopReason == "max_tokens" {
-		// Thinking shares max_tokens with the answer, so the retry thinks less; a changed effort may miss the cache,
-		// which bound already prices.
-		violations = append([]string{"the answer was cut off at the length limit before the JSON was complete"}, violations...)
-		if m.LowEffort {
-			oc := *req.OutputConfig
-			oc.Effort = "low"
-			req.OutputConfig = &oc
+	p, err := s.Price(ctx)
+	if err != nil {
+		return err
+	}
+	req := pc.req
+	call := func(attempt int, reserve float64) (llm.Result, error) {
+		st.Spend[day] += reserve
+		if err := save(); err != nil {
+			return llm.Result{}, err
 		}
+		r, err := s.Chat(ctx, req)
+		st.Spend[day] += r.CostUSD - reserve
+		if serr := save(); serr != nil {
+			return llm.Result{}, serr
+		}
+		if r.MaybeBilled > 0 {
+			env.Log.Warn("ai answer lost; counting the attempt as billed", "event", "tonight_ai_unknown_outcome", "attempt", attempt,
+				"lost_attempts", r.MaybeBilled, "counted_usd", fmt.Sprintf("%.5f", r.CostUSD))
+		}
+		if err != nil {
+			return llm.Result{}, err
+		}
+		env.Log.Info("ai call", "event", "tonight_ai_call", "attempt", attempt, "model", r.Model, "candidates", pc.n,
+			"input_tokens", r.Usage.PromptTokens, "output_tokens", r.Usage.CompletionTokens, "finish", r.Finish,
+			"cost_usd", fmt.Sprintf("%.5f", r.CostUSD), "bound_usd", fmt.Sprintf("%.5f", reserve),
+			"spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]), "duration_ms", r.Took.Milliseconds())
+		if st.Spend[day] > opt.DailyCapUSD { // only an input past its estimate, or lost attempts, get here
+			env.Log.Warn("over the daily AI cap", "event", "tonight_over_cap", "spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]))
+		}
+		env.Log.Debug("ai answer", "event", "tonight_ai_answer", "attempt", attempt, "text", r.Text)
+		rep.Count("ai_calls", 1)
+		return r, nil
+	}
+	r, err := call(1, p.Cost(req.InputTokens, req.MaxTokens))
+	if parked := s.Parked(); parked != nil {
+		return parked // a billing refusal says since when
+	}
+	if err != nil {
+		return err
+	}
+	picks, violations, glued := validate(r.Text, pc.unseen, pc.loved, pc.quotes, opt.Picks)
+	if r.Finish == "length" {
+		// Reasoning shares max_tokens with the answer, so the retry asks for as little reasoning as the model allows.
+		violations = append([]string{"the answer was cut off at the length limit before the JSON was complete"}, violations...)
+		req.Effort = "off"
 	}
 	if len(violations) > 0 {
 		env.Log.Warn("picks need a retry", "event", "tonight_picks_invalid", "violations", strings.Join(violations, "; "))
 		problems := "\n- " + strings.Join(violations, "\n- ")
-		if text := r.Text(); strings.TrimSpace(text) != "" {
-			// The answer goes back as text alone: thinking blocks are bound to their conversation and may be left out.
-			req.Messages = append(req.Messages, llm.Message{Role: "assistant", Content: []llm.Block{llm.Text(text)}},
+		if text := r.Text; strings.TrimSpace(text) != "" {
+			req.Messages = append(req.Messages, llm.Assistant(text),
 				userMessage("Fix these problems and answer again with all "+fmt.Sprint(opt.Picks)+" picks:"+problems))
 		} else {
-			// Nothing to send back (cut off inside thinking, or a refusal): the API refuses an empty text block and two
-			// user turns in a row, so the one user turn goes again with the problems as a second block.
-			ask := req.Messages[0]
-			ask.Content = append(ask.Content, llm.Text("An earlier answer to this had these problems; avoid them and answer with all "+
+			// Nothing to send back (cut off inside reasoning, or a refusal): an empty assistant turn is refused by some
+			// providers, so the user turn goes again with the problems as a second part.
+			last := len(req.Messages) - 1
+			ask := req.Messages[last]
+			ask.Content = append(slices.Clone(ask.Content), llm.Text("An earlier answer to this had these problems; avoid them and answer with all "+
 				fmt.Sprint(opt.Picks)+" picks:"+problems))
-			req.Messages = []llm.Message{ask}
+			req.Messages = append(slices.Clone(req.Messages[:last]), ask)
 		}
-		if total, err = a.CountTokens(ctx, req); err != nil {
-			env.Log.Warn("retry not sized; keeping the valid picks", "event", "tonight_retry_skipped", "err", err)
-		} else if b := bound(p, total, fixed, opt.MaxTokens); st.Spend[day]+b > opt.DailyCapUSD {
+		req = estimated(req)
+		if b := p.Cost(req.InputTokens, req.MaxTokens); st.Spend[day]+b > opt.DailyCapUSD {
 			env.Log.Warn("no budget left for the retry; keeping the valid picks", "event", "tonight_retry_skipped",
 				"retry_bound_usd", fmt.Sprintf("%.5f", b), "spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]))
 		} else if r2, err := call(2, b); err != nil {
 			env.Log.Warn("retry failed; keeping the valid picks", "event", "tonight_retry_error", "err", err)
-		} else if picks2, v2, g2 := validate(r2.Text(), unseen, loved, opt.Picks); len(picks2) > len(picks) {
+		} else if picks2, v2, g2 := validate(r2.Text, pc.unseen, pc.loved, pc.quotes, opt.Picks); len(picks2) > len(picks) {
 			picks, glued = picks2, append(glued, g2...)
 			if len(v2) > 0 {
 				env.Log.Warn("dropped invalid picks after the retry", "event", "tonight_picks_dropped", "violations", strings.Join(v2, "; "))
@@ -490,13 +607,17 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 	if len(picks) == 0 {
 		return errors.New("the model returned no valid picks")
 	}
+	// Once a day, with the picks: a later run that day makes none, and a day without picks has its own alert.
+	if out := outdated(members, pc.exports, env.Now()); len(out) > 0 {
+		rep.Alert("tonight: the picks for %s were made without fresh Letterboxd data for %s", day, strings.Join(out, "; "))
+	}
 	return nil
 }
 
 func prompt(day string, cands []candidate, want int) string {
 	t, _ := time.Parse(time.DateOnly, day)
 	var b strings.Builder
-	fmt.Fprintf(&b, "Tonight is %s.\n\nUNSEEN films in his library, one per line "+
+	fmt.Fprintf(&b, "Tonight is %s.\n\nUNSEEN films in the library, seen by no viewer, one per line "+
 		"(id | title | year | director | genres | countries | minutes | language | overview):\n", t.Format("Monday 2 January 2006"))
 	for _, c := range cands {
 		b.WriteString(c.line())

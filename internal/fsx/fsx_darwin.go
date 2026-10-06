@@ -20,3 +20,6 @@ func cloneFile(src, dst string) error {
 	}
 	return nil
 }
+
+// Background runs fn; priorities matter only on the NAS.
+func Background(fn func()) { fn() }

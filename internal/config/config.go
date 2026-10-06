@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -12,21 +13,22 @@ import (
 )
 
 type Config struct {
-	Listen   string   `toml:"listen"`   // host network: keep it on 127.0.0.1 or the LAN address
-	StateDB  string   `toml:"state_db"` // SQLite file; must sit on a local disk (btrfs volume), never SMB/NFS
-	Timezone string   `toml:"timezone"` // only for stage windows; logs and the DB are always UTC
-	Owners   []string `toml:"owners"`   // Plex/Jellyfin account names whose viewing never pauses a job
-	Log      Log      `toml:"log"`
-	Plex     Plex     `toml:"plex"`
-	Jellyfin Jellyfin `toml:"jellyfin"`
-	FFmpeg   FFmpeg   `toml:"ffmpeg"`
-	TMDB     TMDB     `toml:"tmdb"`
-	Fanart   Fanart   `toml:"fanart"`
-	LLM      LLM      `toml:"llm"`
+	Listen   string     `toml:"listen"`   // host network: keep it on 127.0.0.1 or the LAN address
+	StateDB  string     `toml:"state_db"` // SQLite file; must sit on a local disk (btrfs volume), never SMB/NFS
+	Timezone string     `toml:"timezone"` // only for stage windows; logs and the DB are always UTC
+	Owners   []string   `toml:"owners"`   // Plex/Jellyfin account names whose viewing never pauses a job
+	Log      Log        `toml:"log"`
+	Plex     Plex       `toml:"plex"`
+	Jellyfin Jellyfin   `toml:"jellyfin"`
+	FFmpeg   FFmpeg     `toml:"ffmpeg"`
+	TMDB     TMDB       `toml:"tmdb"`
+	Fanart   Fanart     `toml:"fanart"`
+	LLM      llm.Config `toml:"llm"` // the AI gateway and each task's model; unset keys take llm.Defaults
 
 	Stages map[string]toml.Primitive `toml:"stages"`
 
 	md       toml.MetaData
+	mdMu     sync.Mutex // toml.MetaData is not safe for concurrent decodes; stages decode their options as they start
 	location *time.Location
 }
 
@@ -57,11 +59,6 @@ type TMDB struct {
 type Fanart struct {
 	APIKeyFile string        `toml:"api_key_file"`
 	CacheTTL   time.Duration `toml:"cache_ttl"`
-}
-
-// LLM is which Claude model the stages that call one use, by date ([[llm.policy]]); none = llm.DefaultPolicy.
-type LLM struct {
-	Policy llm.Policy `toml:"policy"`
 }
 
 type FFmpeg struct {
@@ -111,7 +108,10 @@ func (c *Config) Schedule(name string) (Schedule, error) {
 	if !ok {
 		return Schedule{}, nil
 	}
-	if err := c.md.PrimitiveDecode(prim, &s); err != nil {
+	c.mdMu.Lock()
+	err := c.md.PrimitiveDecode(prim, &s)
+	c.mdMu.Unlock()
+	if err != nil {
 		return s, fmt.Errorf("stages.%s: %w", name, err)
 	}
 	if s.Enabled && s.Every <= 0 {
@@ -129,7 +129,10 @@ func (c *Config) StageOptions(name string, v any) error {
 	if !ok {
 		return nil
 	}
-	if err := c.md.PrimitiveDecode(prim, v); err != nil {
+	c.mdMu.Lock()
+	err := c.md.PrimitiveDecode(prim, v)
+	c.mdMu.Unlock()
+	if err != nil {
 		return fmt.Errorf("stages.%s: %w", name, err)
 	}
 	return nil

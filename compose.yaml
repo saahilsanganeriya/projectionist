@@ -50,10 +50,22 @@ services:
       - /volume1/PlexMediaServer/subtitle-downloads:/volume1/PlexMediaServer/subtitle-downloads:ro
       # posters: the owner's poster exports and the Plex DB backups they are matched with, read when they change.
       - /volume1/PlexMediaServer/backups:/volume1/PlexMediaServer/backups:ro
-      # The owner's unzipped Letterboxd export: lists' export_dir (a missing or empty folder is an alert on every run),
-      # the letterboxd stage's export_dir and tonight's letterboxd_dir (for those two, a missing folder is no export).
+      # The unzipped Letterboxd exports: lists' export_dir (a missing or empty folder is an alert on every run), the
+      # letterboxd stage's and tonight's people export_dir (for those two, a missing folder is no export; each person
+      # reads only the letterboxd-<user>-* folders named for them).
       - /volume1/docker/projectionist/data/letterboxd:/volume1/docker/projectionist/data/letterboxd:ro
-    secrets: [jellyfin_key, tmdb_read_token, tmdb_api_key, fanart_api_key, anthropic_api_key] # /run/secrets/<name>, read-only
+      # health: the NVMe app-data volume's mount, fullness and top-level entries; appbackup reads its roots here.
+      # The superblock's own rw/ro still shows through this read-only bind, so health sees a read-only remount.
+      - { type: bind, source: /volume2, target: /volume2, read_only: true, bind: { create_host_path: false } }
+      # appbackup: SQLite's online backup opens each database's -shm read-write, so these folders are writable.
+      - type: bind
+        source: /volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases
+        target: /volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases
+        bind: { create_host_path: false }
+      - { type: bind, source: /volume2/jellyfin/config/data, target: /volume2/jellyfin/config/data, bind: { create_host_path: false } }
+      - { type: bind, source: /volume2/projectionist/state, target: /volume2/projectionist/state, bind: { create_host_path: false } } # = /state
+      - /volume1/PlexMediaServer/nvme-backup:/volume1/PlexMediaServer/nvme-backup # appbackup's nightly versions
+    secrets: [jellyfin_key, tmdb_read_token, tmdb_api_key, fanart_api_key, ai_gateway_api_key] # /run/secrets/<name>, read-only
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
@@ -67,5 +79,5 @@ secrets:
     file: /volume1/docker/projectionist/secrets/tmdb_api_key
   fanart_api_key:
     file: /volume1/docker/projectionist/secrets/fanart_api_key
-  anthropic_api_key: # the owner's personal Anthropic key
-    file: /volume1/docker/projectionist/secrets/anthropic_api_key
+  ai_gateway_api_key: # the owner's Vercel AI Gateway key: every model call ([llm] key_file)
+    file: /volume1/docker/projectionist/secrets/ai_gateway_api_key

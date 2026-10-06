@@ -44,7 +44,7 @@ type Env struct {
 	Probe    *probe.Prober
 	TMDB     *tmdb.Client   // the only source of identity, episodes, collections and external ids; one per process
 	Fanart   *fanart.Client // community artwork, keyed by TMDB/IMDb id (films) or TVDB id (shows)
-	LLM      llm.Policy     // which Claude model, by date ([[llm.policy]]); nil = llm.DefaultPolicy
+	LLM      *llm.Client    // every model call, through the AI gateway; one per process, so its bound on calls in flight holds
 	FFmpeg   config.FFmpeg
 	Metrics  *obs.Metrics     // the /metrics registry, for a stage's own gauges and counters
 	Now      func() time.Time // UTC

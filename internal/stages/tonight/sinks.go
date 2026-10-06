@@ -421,15 +421,15 @@ type plexHub struct {
 	PromotedToRecommended bool   `json:"promotedToRecommended"`
 }
 
-// promotePlexHub shows the collection on his own Home only (not his friends' Home, not the library's Recommended
-// tab, where shared users would read reasons quoting his ratings) and moves it to the top of the Movies section's
-// hub order. Plex caches each Home hub answer and keeps it when a collection's members change (2026-10-05: one
+// promotePlexHub shows the collection on the owner's Home and on the Home of everyone the library is shared with (the
+// household row: its reasons name films, never a viewer, a rating or a review), not on the library's Recommended tab,
+// and moves it to the top of the Movies section's hub order. Plex caches each Home hub answer and keeps it when a collection's members change (2026-10-05: one
 // /hubs/promoted query listed the old picks 27 minutes after the edit); a manage PUT on the hub drops it, so a stale
 // hub gets the flags again, and stale is cleared only once that PUT succeeds.
 func promotePlexHub(ctx context.Context, log *slog.Logger, px *plex.Client, section int, id string, stale *bool) error {
 	base := fmt.Sprintf("/hubs/sections/%d/manage", section)
 	ident := fmt.Sprintf("custom.collection.%d.%s", section, id)
-	const vis = "promotedToRecommended=0&promotedToOwnHome=1&promotedToSharedHome=0"
+	const vis = "promotedToRecommended=0&promotedToOwnHome=1&promotedToSharedHome=1"
 	var mc struct {
 		Hub []plexHub `json:"Hub"`
 	}
@@ -443,7 +443,7 @@ func promotePlexHub(ctx context.Context, log *slog.Logger, px *plex.Client, sect
 			return err
 		}
 		log.Info("home row promoted", "event", "plex_write", "action", "promote", "hub", ident)
-	case mc.Hub[at] != plexHub{Identifier: ident, PromotedToOwnHome: true} || *stale:
+	case mc.Hub[at] != plexHub{Identifier: ident, PromotedToOwnHome: true, PromotedToSharedHome: true} || *stale:
 		if err := px.Do(ctx, "PUT", base+"/"+ident+"?"+vis); err != nil {
 			return err
 		}

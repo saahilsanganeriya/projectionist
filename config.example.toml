@@ -100,35 +100,51 @@ plex_movies_section   = 4
 plex_slow             = "5s"           # a cold Movies tab took 26.8 s on a fragmented database, 17 ms after an optimize
 plex_batch            = 500            # details notes + rename moves + Plex collection edits since the last optimize
 plex_optimize_window  = "03:00-06:00"  # when an optimize may start (timezone above); the 2026-10-05 one took 4 min 21 s
+# The app-data NVMe volume, mounted read-only: alerts on every run while it is not mounted on the host, read-only, too
+# full, or holds anything but app data. "" = no volume checks.
+volume2               = "/volume2"
+volume2_max_used      = 75             # percent, as df counts it
+volume2_allow         = ["PlexAppData", "jellyfin", "projectionist", "transcode", "transcode.img", "swapfile",
+                         "lost+found", "aquota.user", "aquota.group", "@eaDir", "@tmp", ".move"] # .move: drop after the move
+backup_max_age        = "36h"          # alert while appbackup's newest version is older; "0s" = no check
 [stages.health.public] # URL = the status it must answer through the Cloudflare tunnel; redirects are not followed
 "https://jellyfin.example.com"    = 302
 "https://plex.example.com"    = 401
 "https://nas.example.com" = 200
 
-# The owner's Letterboxd diary → projectionist's watch record (jfsync, the one writer, carries it to Plex and
-# Jellyfin), and his watchlist as a "Watchlist" collection in both apps, promoted to his Plex Home.
+# Each member's Letterboxd diary → projectionist's watch record (jfsync, the one writer, carries it to Plex and
+# Jellyfin), and each member's Letterboxd watchlist → their own Plex watchlist (plex.tv, per user; never a server
+# collection, which everyone the server is shared with would see).
 [stages.letterboxd]
-every          = "30m"                    # the RSS feed is read every run; grid pages once per pages_every. Letterboxd is paced
-                                          # at one request per 2 s for the whole process, shared with lists and tonight
-user           = "saahilsan"
-max_fetches    = 400                      # Letterboxd requests per run; the first lookups resume over a few runs
-pages_every    = "24h"                    # watchlist + watched-films grid crawl
-export_dir     = "/volume1/docker/projectionist/data/letterboxd" # unzipped account exports; the newest folder wins
-movies_dir     = "/volume1/media/Movies"
-missing_file   = "/volume1/media/_watchlist-missing.txt" # watchlist films not on the NAS; "" = none
-sink_refresh   = "24h"                    # re-read what Plex (one paged listing) and plex.tv hold this often; Plex also before a collection write, once a day per film
-jellyfin_refresh = "24h"                  # re-read what Jellyfin holds this often (15-30 s a read); also before a collection write, once a day per film
-plex_section   = 4
-jellyfin_user  = "saahil"
-person         = "saahil"                 # the owner in the watch record: his name in jfsync's users (jfsync alerts on any other)
-# false: only diary entries he logs after this stage first runs become watch events. true: also the export and the
-# feed's backlog (on 2026-10-05 about 465 Plex watched marks and 649 ratings, which Plex shows his friends: watch
-# history to friends of friends, ratings to friends). His decision.
-history        = false
-collection     = "Watchlist"              # "" = no Watchlist collection
-plex_watchlist = false                    # also mirror onto his plex.tv watchlist (his Plex friends can see it)
-run_budget     = "25m"                    # no Plex/Jellyfin/plex.tv call starts later than this into a run; keep it under every
-dry_run        = false                    # count events and collection writes only
+every           = "30m"                   # the RSS feeds are read every run. Letterboxd is paced at one request per 2 s for
+                                          # the whole process, shared with lists and tonight; it offers no webhooks, so it is polled
+user            = "saahilsan"
+max_fetches     = 400                     # Letterboxd requests per run; the first lookups resume over a few runs
+watchlist_every = "6h"                    # each member's watchlist grid crawl
+pages_every     = "24h"                   # his watched-films grid crawl
+export_dir      = "/volume1/docker/projectionist/data/letterboxd" # unzipped account exports; the newest folder wins
+movies_dir      = "/volume1/media/Movies"
+missing_file    = "/volume1/media/_watchlist-missing.txt" # his watchlist films not on the NAS; "" = none
+sink_refresh    = "24h"                   # re-read each Plex watchlist this often; also before any write to it
+person          = "saahil"                # the owner in the watch record: his name in jfsync's users (jfsync alerts on any other)
+# false: only diary entries logged after a member's first run become watch events. true: also the export and the
+# feed's backlog (for him on 2026-10-05 about 465 Plex watched marks and 649 ratings, which Plex shows his friends:
+# watch history to friends of friends, ratings to friends). His decision.
+history         = false
+# Each member's Letterboxd watchlist films they have not watched (on Letterboxd, or in Plex or Jellyfin as the watch
+# record has it) go on their own Plex watchlist, films not on the NAS included; only films this stage added are taken
+# off again, so what they add by hand stays. His is written with the server's own sign-in, a person's through a Plex
+# Home switch to their plex_user (a managed user has a watchlist too). Visible as each Plex account's privacy allows.
+plex_watchlist  = false
+run_budget      = "25m"                   # no plex.tv call starts later than this into a run; keep it under every
+dry_run         = false                   # count events and watchlist writes only
+# More members, each synced after him on the same max_fetches: their diary becomes watch events for person (a name in
+# jfsync's users). user is their Letterboxd username; plex_user, their Plex Home user (its username, or a managed user's
+# name), is where their watchlist goes ("" = their watchlist is not read). Optional: history (false, as his) and
+# export_dir ("" = none; it may be his: each member reads only the letterboxd-<user>-* folders named for them). A Home
+# user with a PIN cannot be switched to: the run alerts and skips that member's watchlist.
+# people = [{ person = "roger", user = "auralb", plex_user = "roger" },
+#           { person = "aaron", user = "aaron1009", plex_user = "aarontest941" }]
 
 # Small 4K copies of the films listed as "Remote 4K" (Plex playlist, Jellyfin playlist or Jellyfin collection);
 # replaces scripts/remote4k.py (DSM task 9).
@@ -241,30 +257,43 @@ legacy_quota  = "/volume1/PlexMediaServer/subtitle-downloads" # subfetch2.py's q
 # undo_logs = [...]                    # rename logs for original names a note lacks; default: the details stage's list
 # output_dir = "/volume1/PlexMediaServer/projectionist-test/subtitles/out" # test runs: write sidecars here instead
 
-# Five unseen films for tonight, picked once a day by one Claude call over his Letterboxd ratings and reviews; a
-# Plex Movies collection "Tonight" promoted to his own Home as the first Movies row (below Continue Watching, On Deck
-# and the rows of libraries ordered before Movies), and the same BoxSet in Jellyfin.
-# Reconciles every 30 min: a pick he has since watched leaves the row at once.
+# Five films for the household that none of them has seen, picked once a day by one model call over each person's
+# Letterboxd ratings and reviews; a Plex Movies collection "Tonight" promoted to his Home and to the Home of everyone
+# the library is shared with, as the first Movies row (below Continue Watching, On Deck and the rows of libraries
+# ordered before Movies), and the same BoxSet in Jellyfin. Nothing personal reaches it: the model knows the people only
+# as viewers A, B, C, and a reason that quotes a review (6 words of one, or a short one whole) is retried, then dropped.
+# Unseen: in no one's Letterboxd (export, feed, films page) and in no one's watch record (each person's plays and
+# ratings, from jfsync and letterboxd), nor played on his own Plex or Jellyfin account.
+# Reconciles every 30 min: a pick anyone has since watched leaves the row at once.
 # daily_cap_usd is a hard cap: the call and its one retry are sized together before the first is sent, each at its
-# worst (the cached prompt prefix billed as a cache write, as a retry that misses the 5-minute cache pays it again;
-# 2% slack on token counts; all of max_tokens as output), and the candidate list is cut until the pair fits.
+# worst (the input estimated at 3 bytes a token and all of max_tokens as output, at the dearest price the gateway
+# lists for the tonight task's models), and the candidate list is cut until the pair fits. At DeepSeek V4.1 Flash's
+# price a day costs about a cent (the bake-off: $0.005-0.011), so the cap only binds on a dear model.
 [stages.tonight]
-every           = "30m"                          # the model is [[llm.policy]]'s
-effort          = "medium"                       # sent only to a model that takes it (Haiku 4.5 does not)
-max_tokens      = 1000                           # thinking + the JSON; a cut-off answer is retried at effort "low"
+every           = "30m"                          # the model is [llm.tasks.tonight]'s
+max_tokens      = 4000                           # reasoning + the JSON; a cut-off answer is retried with the least reasoning
 daily_cap_usd   = 0.15                           # hard: see the comment above the table
 pick_after      = "05:00"                        # in timezone: a new day's picks after this
 picks           = 5
 max_candidates  = 400                            # unseen films shown, best-ranked first; fewer when the cap needs it
-api_key_file    = "/run/secrets/anthropic_api_key"
-letterboxd_dir  = "/volume1/docker/projectionist/data/letterboxd" # the export CSVs, or the newest export folder in it
-letterboxd_rss  = "https://letterboxd.com/saahilsan/rss/"
 movies_dir      = "/volume1/media/Movies"
 section         = 4
 collection      = "Tonight"
-jellyfin_user   = "saahil"
+jellyfin_user   = "saahil"                       # his own account, whose played flags count
 sink_timeout    = "3m"                           # per sink per run; a failed write is retried with backoff
 plex_map_timeout = "10m"                         # the daily TMDB id → ratingKey listing; a page took 112 s in a scan
+# The household. person: their name in jfsync's users (their plays and ratings in the watch record count as seen);
+# user: their Letterboxd username; export_dir: a folder holding their own letterboxd-<user>-* export ("" = none). Every
+# run reads each feed (the latest 50 diary entries, reviews included), and once a day page 1 of the films of anyone
+# without an export (their newest 72, rated): Cloudflare refuses deeper and sorted pages, so for them only what those
+# show, kept since the first run, and the watch record count as seen. All paced with every stage (lbpace). A person
+# whose feed has not answered for 48 h does not stop the picks: they are made from the others and whatever of theirs is
+# cached, and the day's picks raise one alert naming them. Unset: him alone.
+people = [
+  { person = "saahil", user = "saahilsan",  export_dir = "/volume1/docker/projectionist/data/letterboxd" },
+  { person = "roger",  user = "auralb" }, # Aurelia
+  { person = "aaron", user = "aaron1009" },
+]
 
 # Real-time trigger: inotify on the library and finished downloads. A top-level folder (a movie, a show, a download)
 # that changed and then stayed quiet for `quiet` triggers each stage in `trigger`; each is a reconciler that finds its
@@ -295,21 +324,18 @@ quiet         = ["missing_english_subs"]       # grows with every download until
 
 # The most artistic poster for every movie, show and season, on Jellyfin and Plex; replaces posters/posters.py.
 # Candidates: the owner's poster (from a Plex DB backup and the export taken with it), TMDB and fanart.tv (the shared
-# clients). Judge: Claude on the owner's own Anthropic key (secrets_dir/anthropic_api_key), the model chosen by
-# [[llm.policy]], one vision call per title; a backlog goes through Message Batches (half price). Off until enabled:
-# even with dry_run, judging spends: the 3,023-title backlog costs about $4.70 in batches with Sonnet 5.5 at low
-# effort ($0.00155 a title on the 12-title pilot, 2026-10-05), about half that with Haiku 4.5. A batch request holds
-# its worst case (about $0.0064) against budget_usd until it settles, so the first run submits about 1,880 titles and
-# a later run the rest; that wait is no alert.
+# clients). Judge: one vision call per title through the AI gateway, on [llm.tasks.posters]'s model (collections on
+# [llm.tasks.collections]'s), as many at once as [llm] in_flight allows. Off until enabled: even with dry_run, judging
+# spends. The bake-off (docs/STAGES.md, 2026-10-06) measured $0.00047 a title on qwen3-vl-instruct ($0.00004 on its
+# fallback qwen3.7-flash): the 3,023-title backlog is about $1.40. Each call holds its worst case (about $0.002 on
+# qwen3-vl-instruct: all of max_tokens at the dearest provider's price) against budget_usd until it settles.
 [stages.posters]
 enabled            = false
 every              = "6h"
 dry_run            = true            # judge only; review posters_items, then set false to upload
-budget_usd         = 12              # all judge calls ever; a hard stop
-max_tokens         = 1024            # thinking included
-batch_min          = 25              # fewer titles to judge than this: the normal API
-batch_size         = 200
-secrets_dir        = "/run/secrets"
+budget_usd         = 12              # all judge calls ever (the Anthropic calls before the gateway included); a hard stop
+                                     # for new calls (lost answers may pass it by in_flight x 3 worst cases, ~$0.05)
+max_tokens         = 1024            # reasoning included
 cache_dir          = "/state/posters" # thumbnails
 # One export: items.json and posters/ from export_customizations.py, and the Plex DB backup taken with them. Pointing
 # these at a newer export (before dry_run = false) merges it in: its uploads and picks win, its defaults never do.
@@ -326,7 +352,8 @@ mark               = "poster-curator 2026-10" # EXIF ImageDescription on the ima
 # Collections: every Movies collection the owner gave no poster (the approved ones, and those arrivals open) gets one:
 # a franchise its TMDB collection's or fanart.tv's poster or its most acclaimed film's; a director a textless 1000x1500
 # poster composed from a photo (Wikimedia Commons, on-set first, then TMDB). One judge call per collection, about 150
-# for the approved list (under $1 with Sonnet 5.5). The owner's collections are never touched. Both files on = collections on.
+# for the approved list (cents at the vision model's price). The owner's collections are never touched. Both files on =
+# collections on.
 collections_owner_file    = "/config/collections.owner.json"
 collections_approved_file = "/config/collections.approved.json"
 collection_dry_run        = true # judge only; review posters_items (keys "collection:<name>"), then set false to upload
@@ -375,12 +402,50 @@ home_after       = "movie.recentlyadded"
 # limit   = 0      # keep only the first N (a Top 250 is the Top 500 with limit = 250)
 # poster  = ""     # an image file instead of the generated poster
 
-# Which Claude model the stages that call one use, by date: the first rule whose `until` is still in the future wins
-# (`until` is exclusive; no `until` = for good). "<family>:latest" is the newest model whose id contains <family>,
-# looked up daily in the Models API, so a new model is used the day it ships. This is the default when no rule is set.
-[[llm.policy]]
-model = "sonnet:latest"
-until = 2026-11-05T08:00:00Z # 00:00 PST
+# Every model call goes through the Vercel AI Gateway (OpenAI-compatible Chat Completions), on one key, one bound on
+# calls in flight for the whole process, and one failure policy (docs/STAGES.md, "LLM calls"). Each task names its
+# model, the fallbacks the gateway tries in order when it fails, and how much it may reason ("off" = the least the
+# model allows); prices come from the gateway's model list, fetched daily. A Claude model is just another id
+# ("anthropic/claude-sonnet-5.5"). These are the defaults; a task table may set only some keys.
+[llm]
+api        = "https://ai-gateway.vercel.sh/v1"
+key_file   = "/run/secrets/ai_gateway_api_key"
+in_flight  = 8      # calls in the air across the process
+timeout    = "120s" # per attempt
+attempts   = 4      # 429, 5xx, timeouts and dropped answers are retried with jittered backoff or Retry-After
+park_after = 5      # failed calls in a row before a stage stops calling for the rest of its run (a billing refusal: at
+                    # once, one alert in all, and one call an hour across the process until the gateway answers)
 
-[[llm.policy]]
-model = "haiku:latest"
+# The models are the bake-off's picks (docs/STAGES.md, 2026-10-06). The vision tasks send effort "none" rather than
+# "off": "off" reads the first model's controls, qwen3-vl-instruct has none, and qwen3.7-flash would then reason.
+[llm.tasks.posters]     # the movie, show and season poster judge: vision
+model     = "alibaba/qwen3-vl-instruct"
+fallbacks = ["alibaba/qwen3.7-flash"]
+reasoning = "none"
+
+[llm.tasks.collections] # the franchise and director collection judges: vision
+model     = "alibaba/qwen3-vl-instruct"
+fallbacks = ["alibaba/qwen3.7-flash"]
+reasoning = "none"
+
+[llm.tasks.tonight]     # the daily picks: text
+model     = "deepseek/deepseek-v4.1-flash"
+fallbacks = ["alibaba/qwen3.7-flash"]
+reasoning = "off"
+
+# Nightly versions of the NVMe app data on volume1: SQLite's online backup of each database, then the roots file by
+# file, hardlinking what did not change since the newest version. Needs /volume2 read-only, each database's folder
+# read-write (SQLite opens the -shm read-write) and target read-write (see compose.yaml).
+[stages.appbackup]
+every     = "24h"
+window    = "04:30-06:30"
+databases = [
+  "/volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db",
+  "/volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.blobs.db",
+  "/volume2/jellyfin/config/data/jellyfin.db",
+  "/volume2/projectionist/state/projectionist.db",
+]
+roots     = ["/volume2/PlexAppData", "/volume2/jellyfin", "/volume2/projectionist"]
+exclude   = ["/volume2/transcode", "/volume2/transcode.img"] # transcoder scratch, never copied
+target    = "/volume1/PlexMediaServer/nvme-backup"           # <target>/<YYYY-MM-DD>/<the source path>
+keep      = 7

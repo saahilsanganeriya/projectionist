@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -93,4 +94,47 @@ func TestWindowClose(t *testing.T) {
 			t.Errorf("%+v.Close(%s) = %v, want %v", c.w, c.at, got.UTC(), c.want)
 		}
 	}
+}
+
+// TestConcurrentStageDecodes catches stages that start together (health and jfsync both run every 5m) decoding their
+// options from the shared toml.MetaData at once: its maps are not safe for that, and on 2026-10-06 03:05Z the
+// "concurrent map writes" fatal error took the whole service down. Run under -race.
+func TestConcurrentStageDecodes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.toml")
+	if err := os.WriteFile(path, []byte(`
+[stages.health]
+every = "5m"
+timeout = "10s"
+
+[stages.jfsync]
+every = "5m"
+apply = true
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			name := []string{"health", "jfsync"}[i%2]
+			for j := 0; j < 50; j++ {
+				var v struct {
+					Timeout string `toml:"timeout"`
+					Apply   bool   `toml:"apply"`
+				}
+				if err := cfg.StageOptions(name, &v); err != nil {
+					t.Error(err)
+				}
+				if _, err := cfg.Schedule(name); err != nil {
+					t.Error(err)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
 }

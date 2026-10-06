@@ -1,121 +1,68 @@
 package tonight
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
+	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 
 	"projectionist/internal/llm"
-	"projectionist/internal/stage"
 )
 
-// ---- the pick call: the dated model policy, the daily cap, one answer (+ one retry) ----
+// ---- the pick call: the tonight task's model, the daily cap, one answer (+ one retry) ----
 
 // errOverBudget refuses a call when it and its one retry, at their worst, would take the day's spend past the cap.
 var errOverBudget = errors.New("tonight: the call would exceed the daily AI budget")
 
 // retryExtra is what sizing allows for the violations a retry appends, in tokens. A longer list (many invalid picks
-// with long titles) is caught by the cap check made on the counted retry before it is sent.
+// with long titles) is caught by the cap check made on the retry before it is sent.
 const retryExtra = 300
 
-// bound is the most a request can cost once sent. Its one cache breakpoint ends the system prompt, so up to prefix
-// tokens may be billed as a cache write: a retry meant to read them pays the write again when the cache misses (it
-// lives 5 minutes, and a model that renders effort ahead of the system prompt misses it at another effort; Sonnet 5.5
-// read it at effort "low" on 2026-10-05). Later tokens are plain input; all of max_tokens is output. Counts get 2% slack, because count_tokens is an estimate that "might differ by a small amount".
-func bound(p llm.Price, total, prefix, maxTokens int) float64 {
-	slack := func(n int) int { return n + n/50 }
-	return p.Cost(llm.Usage{CacheCreationInputTokens: slack(prefix), InputTokens: slack(total - prefix), OutputTokens: maxTokens}, false)
+// pickRequest is one pick conversation, constrained to the picks schema, with an upper estimate of its input.
+func pickRequest(opt Options, taste string, msgs []llm.Message) llm.Request {
+	return estimated(llm.Request{MaxTokens: opt.MaxTokens, ResponseFormat: llm.JSONAnswer("picks", picksSchema),
+		Messages: append([]llm.Message{llm.System(instructions + "\n\n" + taste)}, msgs...)})
 }
 
-// newAI reads the key file on every request; the key never reaches a log or an error.
-func newAI(base, keyFile string, timeout time.Duration) *llm.Client {
-	if base == "" {
-		base = "https://api.anthropic.com"
-	}
-	return &llm.Client{API: base, HTTP: &http.Client{Timeout: timeout}, Key: func() (string, error) {
-		raw, err := os.ReadFile(keyFile)
-		return string(raw), err
-	}}
-}
-
-// resolved is the model a policy alias named on the last lookup.
-type resolved struct {
-	Alias string `json:"alias,omitempty"`
-	llm.Model
-	At time.Time `json:"at,omitzero"`
-}
-
-// resolveModel is the dated policy's choice now (env.LLM). A "family:latest" alias resolves once a day, and at once
-// when the policy moves to another alias; the last answer stands while the Models API is down.
-func resolveModel(ctx context.Context, env *stage.Env, a *llm.Client, r *resolved) (llm.Model, error) {
-	alias, err := env.LLM.Model(env.Now())
-	if err != nil {
-		return llm.Model{}, err
-	}
-	family, ok := strings.CutSuffix(alias, ":latest")
-	if !ok {
-		return llm.Model{ID: alias}, nil
-	}
-	if r.Alias == alias && env.Now().Sub(r.At) < 24*time.Hour {
-		return r.Model, nil
-	}
-	m, err := a.Latest(ctx, family)
-	if err != nil {
-		if r.Alias != alias {
-			return llm.Model{}, err
+// estimated sets req's input estimate from its messages, as they stand.
+func estimated(req llm.Request) llm.Request {
+	req.InputTokens = 0
+	for _, m := range req.Messages {
+		req.InputTokens += 4 // the role and the framing
+		for _, p := range m.Content {
+			req.InputTokens += llm.EstimateTokens(p.Text)
 		}
-		env.Log.Warn("model list failed; keeping the last answer", "event", "tonight_model_error", "model", r.ID, "err", err)
-		return r.Model, nil
 	}
-	*r = resolved{Alias: alias, Model: m, At: env.Now()}
-	env.Log.Info("model resolved", "event", "tonight_model", "alias", alias, "model", m.ID, "low_effort", m.LowEffort)
-	return m, nil
+	return req
 }
 
-// pickRequest is one pick conversation. The taste block is the stable prefix and carries the cache breakpoint.
-// Effort goes only to a model that accepts it (Haiku 4.5 answers 400 to any effort).
-func pickRequest(m llm.Model, opt Options, taste string, msgs []llm.Message) llm.CachedRequest {
-	oc := &llm.OutputConfig{Format: &llm.Format{Type: "json_schema", Schema: picksSchema}}
-	if m.LowEffort {
-		oc.Effort = opt.Effort
-	}
-	return llm.CachedRequest{
-		Model: m.ID, MaxTokens: opt.MaxTokens, Messages: msgs, OutputConfig: oc,
-		System: []llm.SystemBlock{
-			{Type: "text", Text: instructions},
-			{Type: "text", Text: taste, CacheControl: &llm.CacheControl{Type: "ephemeral"}},
-		},
-	}
-}
-
-func userMessage(text string) llm.Message {
-	return llm.Message{Role: "user", Content: []llm.Block{llm.Text(text)}}
-}
+func userMessage(text string) llm.Message { return llm.User(llm.Text(text)) }
 
 // ---- prompt ----
 
 // The mood and liked fields hold the bookkeeping the model otherwise wrote into the reason (2026-10-05: "...of
-// Moonlight.Quiet and slow.Hmm."); the reason is then only the sentence he reads.
-const instructions = `You choose what one person watches tonight, from films he owns and has not seen.
+// Moonlight.Quiet and slow.Hmm."); the reason is then only the sentence everyone reads. The row is shared, so the
+// reason speaks of films, never of a viewer, a rating or a review.
+const instructions = `You choose what a household watches together tonight, from films they own that none of them has seen.
 
-He is a cinephile who logs and rates every film on Letterboxd right after watching it. His ratings and reviews
-follow; they are the only evidence of his taste.
+Each viewer logs and rates films on Letterboxd. Their ratings and reviews follow, one block per viewer; they are the
+only evidence of each viewer's taste.
 
 Rules:
 - Pick only films from the UNSEEN list in the user message, and give each pick's id exactly as listed.
+- Pick films the viewers would enjoy together: weigh every viewer's taste, not one viewer's alone.
 - Make the picks differ in mood (for example light, tense, moving, strange, slow) and in length: include a
   short one and a long one when the list has them. Avoid several picks from one genre, decade or country.
-- For each pick, "mood" is its mood in two or three words, and "liked" is the title of the film he rated 4 stars
-  or more that the pick draws on, written as in his ratings. Use these two fields for that bookkeeping.
-- "reason" is one finished sentence of at most 160 characters, for him to read: it names the "liked" film or its
-  director and says what tonight's film shares with it. No spoilers, no notes, no checks.
+- For each pick, "mood" is its mood in two or three words, and "liked" is the title of a film a viewer rated 4 stars
+  or more that the pick draws on, written as in their ratings. Use these two fields for that bookkeeping.
+- "reason" is one finished sentence of at most 160 characters that anyone in the house may read: it names the
+  "liked" film or its director and says, in your own words, what tonight's film shares with it. Never mention a
+  viewer, a rating or a review, and never quote a review. No spoilers, no notes, no checks.
 - Answer with JSON only, in the given schema.`
 
 var picksSchema = json.RawMessage(`{"type":"object","additionalProperties":false,"required":["picks"],
@@ -149,7 +96,7 @@ func cleanReason(s string) (reason string, cut bool) {
 	return reason, reason != strings.TrimSpace(s)
 }
 
-// lovedFilms holds the films he rated 4★ or more, keyed by title alone and by title and year (filmKey).
+// lovedFilms holds the films a viewer rated 4★ or more, keyed by title alone and by title and year (filmKey).
 func lovedFilms(hist []rated) map[string]bool {
 	loved := map[string]bool{}
 	for _, h := range hist {
@@ -171,10 +118,10 @@ func lovedKey(liked string) string {
 	return filmKey(liked, 0)
 }
 
-// validate keeps the answer's picks that name an unseen film once and draw on a film he rated 4★ or more, and lists
-// every violation for the retry. glued holds the reasons something was cut from (cleanReason), as the model wrote
-// them, so the log shows whether the cause is gone.
-func validate(text string, unseen map[int]candidate, loved map[string]bool, want int) (picks []pick, violations, glued []string) {
+// validate keeps the answer's picks that name an unseen film once, draw on a film a viewer rated 4★ or more and quote
+// no review, and lists every violation for the retry. glued holds the reasons something was cut from (cleanReason),
+// as the model wrote them, so the log shows whether the cause is gone.
+func validate(text string, unseen map[int]candidate, loved map[string]bool, quotes quoteGuard, want int) (picks []pick, violations, glued []string) {
 	var ans answer
 	if err := json.Unmarshal([]byte(text), &ans); err != nil {
 		return nil, []string{"the answer is not JSON in the schema: " + err.Error()}, nil
@@ -190,8 +137,10 @@ func validate(text string, unseen map[int]candidate, loved map[string]bool, want
 			violations = append(violations, fmt.Sprintf("pick %d: id %d is picked twice", i+1, p.ID))
 		case reason == "":
 			violations = append(violations, fmt.Sprintf("pick %d: id %d has no reason", i+1, p.ID))
+		case quotes.quoted(reason):
+			violations = append(violations, fmt.Sprintf("pick %d: the reason quotes a viewer's review; say it in your own words", i+1))
 		case !loved[lovedKey(p.Liked)]:
-			violations = append(violations, fmt.Sprintf("pick %d: liked %q is not a film he rated 4 stars or more", i+1, p.Liked))
+			violations = append(violations, fmt.Sprintf("pick %d: liked %q is not a film a viewer rated 4 stars or more", i+1, p.Liked))
 		default:
 			seen[p.ID] = true
 			if cut {
@@ -208,6 +157,55 @@ func validate(text string, unseen map[int]candidate, loved map[string]bool, want
 		violations = append(violations, fmt.Sprintf("%d valid picks; %d are needed", len(picks), want))
 	}
 	return picks, violations, glued
+}
+
+// quoteWords is the shortest run of a review's words a reason may not repeat: 6, since a shorter run is often a
+// name plus a common phrase ("Paul Thomas Anderson at his"). A review shorter than that may not be repeated whole once
+// it has 3 words (a reason may say "sad", not "sad and slow").
+const quoteWords = 6
+
+// quoteGuard holds every quoteWords-word run of the household's reviews, and each shorter review of 3 words or more
+// whole, as normalized words: the collection's summary is shared, so a reason must not quote one.
+type quoteGuard map[string]bool
+
+func newQuoteGuard(reviews []string) quoteGuard {
+	q := quoteGuard{}
+	for _, r := range reviews {
+		w := words(r)
+		if len(w) < quoteWords && len(w) >= 3 {
+			q[strings.Join(w, " ")] = true
+		}
+		for i := 0; i+quoteWords <= len(w); i++ {
+			q[strings.Join(w[i:i+quoteWords], " ")] = true
+		}
+	}
+	return q
+}
+
+func (q quoteGuard) quoted(reason string) bool {
+	w := words(reason)
+	for n := 3; n <= quoteWords; n++ {
+		for i := 0; i+n <= len(w); i++ {
+			if q[strings.Join(w[i:i+n], " ")] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// words splits s into lowercase words without accents or punctuation, as filmKey compares titles.
+func words(s string) []string {
+	var b strings.Builder
+	for _, r := range norm.NFD.String(strings.ToLower(s)) {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(r)
+		case !unicode.Is(unicode.Mn, r): // a mark NFD split off a letter is dropped; anything else ends a word
+			b.WriteByte(' ')
+		}
+	}
+	return strings.Fields(b.String())
 }
 
 func oneLine(s string, max int) string {

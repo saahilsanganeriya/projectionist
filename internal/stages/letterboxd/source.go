@@ -121,6 +121,7 @@ type rssEntry struct {
 	Rating   int    // half stars, 1..10; 0 = unrated
 	LoggedAt time.Time
 	RatedAt  time.Time // stored entries only: LoggedAt, or the first feed read that found the rating changed
+	Review   string    // the review text, if any (read by tonight; this stage syncs no reviews)
 }
 
 func parseRSS(body []byte) ([]rssEntry, error) {
@@ -134,6 +135,7 @@ func parseRSS(body []byte) ([]rssEntry, error) {
 			Year    int    `xml:"https://letterboxd.com filmYear"`
 			Rating  string `xml:"https://letterboxd.com memberRating"`
 			MovieID int    `xml:"https://themoviedb.org movieId"`
+			Desc    string `xml:"description"`
 		} `xml:"channel>item"`
 	}
 	if err := xml.Unmarshal(body, &doc); err != nil {
@@ -153,9 +155,51 @@ func parseRSS(body []byte) ([]rssEntry, error) {
 			return nil, fmt.Errorf("letterboxd rss %s: pubDate %q: %w", it.GUID, it.PubDate, err)
 		}
 		out = append(out, rssEntry{ID: id, Slug: slugOf(it.Link), TMDB: it.MovieID, Title: it.Title, Year: it.Year,
-			Watched: it.Watched, Rating: halfStars(it.Rating), LoggedAt: logged.UTC()})
+			Watched: it.Watched, Rating: halfStars(it.Rating), LoggedAt: logged.UTC(), Review: reviewText(it.Desc)})
 	}
 	return out, nil
+}
+
+var (
+	paragraph = regexp.MustCompile(`(?s)<p>(.*?)</p>`)
+	tag       = regexp.MustCompile(`<[^>]+>`)
+)
+
+// reviewText is an item description's review: its paragraphs as text, without the poster, the "Watched on" line an
+// entry with no review carries, or the spoiler notice.
+func reviewText(desc string) string {
+	var review []string
+	for _, m := range paragraph.FindAllStringSubmatch(desc, -1) {
+		text := strings.TrimSpace(html.UnescapeString(tag.ReplaceAllString(m[1], "")))
+		if text != "" && !strings.HasPrefix(text, "Watched on ") && !strings.HasPrefix(text, "This review may contain spoilers") {
+			review = append(review, text)
+		}
+	}
+	return strings.Join(review, " ")
+}
+
+// feed reads user's feed with a conditional GET on c's validators. changed is false when it answered 304; the
+// returned cache is what to store once the entries are recorded.
+func (f *fetcher) feed(ctx context.Context, base, user string, c feedCache, now time.Time) (entries []rssEntry, next feedCache, changed bool, err error) {
+	hdr := map[string]string{"Accept": "application/rss+xml"}
+	if c.ETag != "" {
+		hdr["If-None-Match"] = c.ETag
+	}
+	if c.LastModified != "" {
+		hdr["If-Modified-Since"] = c.LastModified
+	}
+	p, err := f.get(ctx, fmt.Sprintf("%s/%s/rss/", base, user), hdr)
+	if err != nil {
+		return nil, c, false, err
+	}
+	if p.status == http.StatusNotModified {
+		c.ReadAt = now
+		return nil, c, false, nil
+	}
+	if entries, err = parseRSS(p.body); err != nil {
+		return nil, c, false, err
+	}
+	return entries, feedCache{ETag: p.header.Get("ETag"), LastModified: p.header.Get("Last-Modified"), ReadAt: now}, true, nil
 }
 
 // halfStars turns "3.5" (stars) into 7; anything unparsable or out of range is "no rating".
@@ -259,6 +303,7 @@ type exportRow struct {
 	Date    string // the row's "Date": when it was logged / rated / added
 	Watched string // diary only: "Watched Date"
 	Rating  int    // half stars; 0 = none
+	Review  string // reviews only (read by tonight)
 }
 
 type export struct {
@@ -268,12 +313,13 @@ type export struct {
 	Diary     []exportRow
 	Ratings   []exportRow
 	Watchlist []exportRow
+	Reviews   []exportRow // optional: read by tonight, not by this stage
 }
 
-var exportName = regexp.MustCompile(`^letterboxd-.+-(\d{4}-\d{2}-\d{2}-\d{2}-\d{2})-utc$`)
+var exportName = regexp.MustCompile(`^letterboxd-(.+)-(\d{4}-\d{2}-\d{2}-\d{2}-\d{2})-utc$`)
 
 // readExport loads the newest export folder under dir (its name carries the date); ok is false when there is none.
-func readExport(dir string) (ex export, ok bool, err error) {
+func readExport(dir, user string) (ex export, ok bool, err error) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return export{}, false, nil
@@ -283,7 +329,8 @@ func readExport(dir string) (ex export, ok bool, err error) {
 	}
 	var names []string
 	for _, e := range entries {
-		if e.IsDir() && exportName.MatchString(e.Name()) {
+		// Only this member's: a person's export beside the owner's must never be read as his.
+		if m := exportName.FindStringSubmatch(e.Name()); e.IsDir() && m != nil && strings.EqualFold(m[1], user) {
 			names = append(names, e.Name())
 		}
 	}
@@ -293,13 +340,16 @@ func readExport(dir string) (ex export, ok bool, err error) {
 	sort.Strings(names) // ISO dates in the name: the last is the newest
 	name := names[len(names)-1]
 	ex.Dir = filepath.Join(dir, name)
-	if ex.At, err = time.Parse("2006-01-02-15-04", exportName.FindStringSubmatch(name)[1]); err != nil {
+	if ex.At, err = time.Parse("2006-01-02-15-04", exportName.FindStringSubmatch(name)[2]); err != nil {
 		return export{}, false, err
 	}
 	for file, dst := range map[string]*[]exportRow{"watched.csv": &ex.Watched, "diary.csv": &ex.Diary, "ratings.csv": &ex.Ratings, "watchlist.csv": &ex.Watchlist} {
 		if *dst, err = readCSV(filepath.Join(ex.Dir, file)); err != nil {
 			return export{}, false, err
 		}
+	}
+	if ex.Reviews, err = readCSV(filepath.Join(ex.Dir, "reviews.csv")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return export{}, false, err
 	}
 	return ex, true, nil
 }
@@ -354,7 +404,7 @@ func readCSV(path string) ([]exportRow, error) {
 		year, _ := strconv.Atoi(field(r, "Year"))
 		uri := field(r, "Letterboxd URI")
 		out = append(out, exportRow{LID: uri[strings.LastIndex(uri, "/")+1:], Title: field(r, "Name"), Year: year,
-			Date: field(r, "Date"), Watched: field(r, "Watched Date"), Rating: halfStars(field(r, "Rating"))})
+			Date: field(r, "Date"), Watched: field(r, "Watched Date"), Rating: halfStars(field(r, "Rating")), Review: field(r, "Review")})
 	}
 	return out, nil
 }

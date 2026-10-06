@@ -11,12 +11,12 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
-	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,12 +28,13 @@ import (
 	"projectionist/internal/config"
 	"projectionist/internal/fake"
 	"projectionist/internal/llm"
+	"projectionist/internal/llm/llmtest"
 	"projectionist/internal/stage"
 	"projectionist/internal/tmdb"
 )
 
 // Pages of one item make every test list Jellyfin in more than one page.
-func init() { FetchDelay, llm.RetryDelay, jellyfinPage = zeroDelay, zeroDelay, 1 }
+func init() { FetchDelay, jellyfinPage = zeroDelay, 1 }
 
 func zeroDelay(int) time.Duration { return 0 }
 
@@ -84,34 +85,27 @@ func scoreOf(jpg []byte) int {
 }
 
 // answer is the fake judge: it scores each labelled image by its colour, so a letter mixed up with another
-// candidate's image shows up as a wrong choice, and puts a director in the left quarter of every photo. Like the real
-// API, Sonnet 5.5 asked without low effort thinks the whole max_tokens away, and Haiku 4.5 refuses an effort (answer
-// returns nil: the server sends a 400).
-func answer(req llm.Request) *llm.Response {
-	switch {
-	case req.Model == "claude-haiku-4-5-20251001" && req.OutputConfig != nil:
-		return nil
-	case req.Model == "claude-sonnet-5-5" && (req.OutputConfig == nil || req.OutputConfig.Effort != "low"):
-		return &llm.Response{Model: req.Model, StopReason: "max_tokens", Usage: llm.Usage{InputTokens: 1000, OutputTokens: req.MaxTokens}}
-	}
+// candidate's image shows up as a wrong choice, and puts a director in the left quarter of every photo. Like a model
+// that ignores the schema it was given, it adds a second JSON object after the answer.
+func answer(req llm.Request) llmtest.Answer {
 	var scores, boxes []string
 	label := ""
-	for _, b := range req.Messages[0].Content {
-		if b.Type == "text" && len(b.Text) >= 2 && b.Text[1] == ':' {
-			label = b.Text[:1]
+	for _, p := range req.Messages[1].Content {
+		if p.Type == "text" && len(p.Text) >= 2 && p.Text[1] == ':' {
+			label = p.Text[:1]
 		}
-		if b.Type == "image" {
-			raw, _ := base64.StdEncoding.DecodeString(b.Source.Data)
+		if p.Type == "image_url" {
+			raw, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(p.ImageURL.URL, "data:image/jpeg;base64,"))
 			scores = append(scores, fmt.Sprintf(`%q: %d`, label, scoreOf(raw)))
 			boxes = append(boxes, fmt.Sprintf(`%q: [0, 0.1, 0.25, 0.9]`, label))
 		}
 	}
 	extra := ""
-	if req.System == directorPrompt {
+	if req.Messages[0].Content[0].Text == directorPrompt {
 		extra = `, "box": {` + strings.Join(boxes, ", ") + `}`
 	}
-	return &llm.Response{Model: req.Model, Content: []llm.Block{llm.Text(`{"scores": {` + strings.Join(scores, ", ") + `}` + extra +
-		`, "reason": "red wins"} {"extra": 1}`)}, Usage: llm.Usage{InputTokens: 1000, OutputTokens: 100}}
+	return llmtest.Answer{Text: `{"scores": {` + strings.Join(scores, ", ") + `}` + extra + `, "reason": "red wins"} {"extra": 1}`,
+		In: 1000, Out: 100}
 }
 
 type world struct {
@@ -121,18 +115,16 @@ type world struct {
 	cache      string // the stage's cache_dir
 	opts       string // the stage's options
 	api        *httptest.Server
+	gateway    *llmtest.Gateway
 	mu         sync.Mutex
 	tmdb       map[string]string // TMDB's answers by path
 	garbage    bool              // the judge answers prose
-	overloaded bool              // the judge answers 529
-	dropped    bool              // judge calls and batch creations lose their answer after the server has them
-	onBatch    func()            // called as a batch is created
-	models     int
-	messages   int // answered judge calls
-	batches    map[string][]llm.BatchRequest
-	ended      bool
-	commons    http.HandlerFunc // the Wikimedia Commons API, when set
-	ownerFile  string           // collectionWorld's collections.owner.json
+	overloaded bool              // the gateway answers 503
+	dropped    bool              // judge calls lose their answer after the gateway has them
+	billing    bool              // the gateway refuses every call: no card on file
+	messages   int               // answered judge calls
+	commons    http.HandlerFunc  // the Wikimedia Commons API, when set
+	ownerFile  string            // collectionWorld's collections.owner.json
 }
 
 // set changes the fake servers' behaviour between runs.
@@ -144,9 +136,9 @@ func (w *world) set(f func()) {
 
 // newWorld is a library of a movie showing Plex's default poster, one the owner uploaded a poster for, and a show with
 // one season he never touched. TMDB is the harness's fake; fanart.tv (the harness's too) knows none of the titles; image
-// downloads and Anthropic are one more fake server.
+// downloads are one more fake server, and the AI gateway another, on the default tasks.
 func newWorld(t *testing.T, opts string) *world {
-	w := &world{h: fake.NewEnv(t, nil), batches: map[string][]llm.BatchRequest{}}
+	w := &world{h: fake.NewEnv(t, nil)}
 	lib, backup := t.TempDir(), t.TempDir()
 	w.lib, w.backup, w.cache = lib, backup, t.TempDir()
 	for _, d := range []string{"Movies/Alpha (2001) {tmdb-1}", "Movies/Beta (2002) {tmdb-2}", "TV/Gamma (2003) {tmdb-3}/Season 01"} {
@@ -198,52 +190,29 @@ func newWorld(t *testing.T, opts string) *world {
 			rw.WriteHeader(http.StatusTooManyRequests)
 		case p == "/w/api.php" && w.commons != nil:
 			w.commons(rw, r)
-		case p == "/v1/models":
-			w.models++
-			reply(rw, `{"data":[{"id":"claude-sonnet-5-5","created_at":"2026-09-28T00:00:00Z","capabilities":{"effort":{"low":{"supported":true}}}},
- {"id":"claude-haiku-4-5-20251001","created_at":"2025-10-15T00:00:00Z","capabilities":{"effort":{"low":{"supported":false}}}}]}`)
-		case p == "/v1/messages" && w.overloaded:
-			rw.WriteHeader(529)
-		case (p == "/v1/messages" || p == "/v1/messages/batches") && w.dropped:
-			io.Copy(io.Discard, r.Body) // the API has the request; its answer is lost
-			conn, _, _ := rw.(http.Hijacker).Hijack()
-			conn.Close()
-		case p == "/v1/messages":
-			var req llm.Request
-			json.NewDecoder(r.Body).Decode(&req)
-			resp := answer(req)
-			if resp == nil {
-				rw.WriteHeader(400)
-				reply(rw, `{"type":"error","error":{"type":"invalid_request_error","message":"effort is not supported"}}`)
-				return
-			}
-			w.messages++
-			if w.garbage {
-				resp.Content = []llm.Block{llm.Text("These are all lovely posters.")}
-			}
-			json.NewEncoder(rw).Encode(resp)
-		case p == "/v1/messages/batches":
-			var body struct{ Requests []llm.BatchRequest }
-			json.NewDecoder(r.Body).Decode(&body)
-			id := fmt.Sprintf("b%d", len(w.batches)+1)
-			w.batches[id] = body.Requests
-			if w.onBatch != nil {
-				w.onBatch()
-			}
-			reply(rw, `{"id":"`+id+`","processing_status":"in_progress"}`)
-		case strings.HasSuffix(p, "/results"):
-			for _, br := range w.batches[strings.Split(p, "/")[4]] {
-				line, _ := json.Marshal(map[string]any{"custom_id": br.CustomID, "result": map[string]any{"type": "succeeded", "message": answer(br.Params)}})
-				fmt.Fprintf(rw, "%s\n", line)
-			}
-		case strings.HasPrefix(p, "/v1/messages/batches/"):
-			status := map[bool]string{false: "in_progress", true: "ended"}[w.ended]
-			reply(rw, `{"id":"`+filepath.Base(p)+`","processing_status":"`+status+`"}`)
 		default:
 			http.NotFound(rw, r)
 		}
 	}))
 	t.Cleanup(w.api.Close)
+	w.gateway = llmtest.New(func(_ int, req llm.Request) llmtest.Answer {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		switch {
+		case w.billing:
+			return llmtest.Answer{Status: 403, Type: "customer_verification_required", Message: "requires a valid credit card on file"}
+		case w.overloaded:
+			return llmtest.Answer{Status: 503}
+		case w.dropped:
+			return llmtest.Answer{Drop: true}
+		}
+		w.messages++
+		if w.garbage {
+			return llmtest.Answer{Text: "These are all lovely posters.", In: 1000, Out: 100}
+		}
+		return answer(req)
+	})
+	w.h.Env.LLM = llmtest.Client(t, w.gateway, w.h.Env.Store, func() time.Time { return w.h.Env.Now() }, llm.Config{})
 
 	w.opts = fmt.Sprintf(`movies_root = %q
 tv_root = %q
@@ -251,10 +220,9 @@ cache_dir = %q
 owner_items = %q
 owner_posters = %q
 owner_backup_db = %q
-anthropic_api = %q
 tmdb_images = %q
 `, filepath.Join(lib, "Movies"), filepath.Join(lib, "TV"), w.cache, filepath.Join(backup, "items.json"),
-		filepath.Join(backup, "posters"), filepath.Join(backup, "plex.db"), w.api.URL, w.api.URL+"/t/p") + opts
+		filepath.Join(backup, "posters"), filepath.Join(backup, "plex.db"), w.api.URL+"/t/p") + opts
 	w.h.SetOptions(w.opts)
 
 	// Real Plex sends each item's own "guid" (a string) beside includeGuids' "Guid" list.
@@ -328,13 +296,7 @@ func plexDB(t *testing.T, path, insert string) {
 func (w *world) run(t *testing.T) *stage.Report {
 	t.Helper()
 	var rep stage.Report
-	s := Stage{Secret: func(n string) (string, error) {
-		if n == "anthropic_api_key" {
-			return "test-" + n, nil
-		}
-		return "", os.ErrNotExist
-	}}
-	if err := s.Run(context.Background(), w.h.Env, &rep); err != nil {
+	if err := (Stage{}).Run(context.Background(), w.h.Env, &rep); err != nil {
 		t.Fatalf("run: %v (alerts %v)", err, rep.Alerts)
 	}
 	return &rep
@@ -433,95 +395,115 @@ func TestRunEndToEnd(t *testing.T) {
 	}
 }
 
-// Catches: a title whose judge keeps answering prose being paid for on every run; an outage (calls never answered)
-// counted as unusable answers, which would freeze the backlog unjudged; and the model list asked for on every run
-// instead of once a day.
+// Catches: a title whose judge keeps answering prose being paid for on every run, or given up on after one answer
+// (an unreadable answer is asked once more); an outage (calls never answered) counted as unusable answers, which
+// would freeze the backlog unjudged; and the gateway's model list asked for on every run instead of once a day.
 func TestUnusableAnswersStop(t *testing.T) {
 	w := newWorld(t, "dry_run = true\n")
 	w.set(func() { w.overloaded = true })
 	w.run(t)
 	w.run(t)
 	w.set(func() { w.overloaded, w.garbage = false, true })
-	for range 3 {
+	rep := w.run(t)
+	if v := w.verdict(t, "movie:tmdb-1"); w.messages != 4 || v.Rule != "unjudged" || rep.Counts["judge_unusable"] != 4 {
+		t.Fatalf("%d answered judge calls (want 2 titles × 2 tries after the outage), Alpha rule %q (want unjudged), counts %v",
+			w.messages, v.Rule, rep.Counts)
+	}
+	for range 2 {
 		w.run(t)
 	}
-	if v := w.verdict(t, "movie:tmdb-1"); w.messages != 4 || v.Rule != "unjudged" || w.models != 1 {
-		t.Fatalf("%d answered judge calls (want 2 titles × 2 tries after the outage), Alpha rule %q (want unjudged), %d model lists (want 1)",
-			w.messages, v.Rule, w.models)
+	if w.messages != 4 || w.gateway.Listed() != 1 {
+		t.Fatalf("%d answered judge calls after two more runs (want still 4), %d model lists (want 1)", w.messages, w.gateway.Listed())
 	}
 }
 
-// Catches: a call whose process died mid-call blocking its title and holding its reservation forever, or being
-// released at $0 though it may have been billed; and a call another run still has in flight being taken for dead.
+// Catches: a call whose process died mid-call, or a Message Batch from before the gateway that nobody collects now,
+// blocking its title and holding its reservation forever, or being released at $0 though it may have been billed; and
+// a call another run still has in flight being taken for dead.
 func TestInterruptedCalls(t *testing.T) {
 	w := newWorld(t, "dry_run = true\n")
 	w.set(func() { w.overloaded = true })
 	w.run(t) // gathers the pools; no judge call is answered
 	w.set(func() { w.overloaded = false })
 	db := w.h.Env.Store.DB()
-	for key, at := range map[string]time.Time{"movie:tmdb-1": w.h.Now.Add(-2 * time.Hour), "show:tmdb-3": w.h.Now} {
+	for _, c := range []struct {
+		key, batch string
+		at         time.Time
+	}{{"movie:tmdb-1", "", w.h.Now.Add(-2 * time.Hour)}, {"show:tmdb-3", "", w.h.Now}, {"movie:tmdb-1", "msgbatch_01", w.h.Now.Add(-26 * time.Hour)}} {
 		var raw string
 		var cands []Candidate
-		db.QueryRow(`SELECT cands FROM posters_items WHERE key=?`, key).Scan(&raw)
+		db.QueryRow(`SELECT cands FROM posters_items WHERE key=?`, c.key).Scan(&raw)
 		json.Unmarshal([]byte(raw), &cands)
 		db.Exec(`INSERT INTO posters_calls(at, item, of, model, mode, batch_id, state, input_tokens, output_tokens, reserved_usd,
-			cost_usd, llm_ms, error) VALUES (?, ?, ?, 'killed', 'sync', '', 'pending', 0, 0, 0.002, 0, 0, '')`, stamp(at), key, setID(cands))
+			cost_usd, llm_ms, error) VALUES (?, ?, ?, 'killed', 'sync', ?, 'pending', 0, 0, 0.002, 0, 0, '')`, stamp(c.at), c.key, setID(cands), c.batch)
 	}
 	w.run(t)
 	var cost float64
-	db.QueryRow(`SELECT cost_usd FROM posters_calls WHERE item='movie:tmdb-1' AND model='killed'`).Scan(&cost)
-	if alpha, gamma := w.verdict(t, "movie:tmdb-1"), w.verdict(t, "show:tmdb-3"); alpha.Rule != "judged" || cost != 0.002 || gamma.Rule != "" {
-		t.Fatalf("Alpha %q with its 2-hour-old call settled at $%v (want judged, $0.002); Gamma %q (want unjudged: its call is in flight)",
+	db.QueryRow(`SELECT sum(cost_usd) FROM posters_calls WHERE item='movie:tmdb-1' AND model='killed'`).Scan(&cost)
+	if alpha, gamma := w.verdict(t, "movie:tmdb-1"), w.verdict(t, "show:tmdb-3"); alpha.Rule != "judged" || cost != 0.004 || gamma.Rule != "" {
+		t.Fatalf("Alpha %q with its 2-hour-old call and its old batch settled at $%v (want judged, $0.004); Gamma %q (want unjudged: its call is in flight)",
 			alpha.Rule, cost, gamma.Rule)
 	}
 }
 
-// Catches: a backlog judged one call at a time at full price, a batch result applied to the wrong title or to a pool
-// that changed while the batch ran (its letters name other posters now), and a pending batch's cost not held against
-// the budget.
-func TestBatchBacklog(t *testing.T) {
-	w := newWorld(t, "batch_min = 1\ndry_run = true\n")
+// Catches: a judge call that may have been billed (its answer was lost, on every one of its 4 attempts) recorded at $0
+// or released from the budget, which lets real spend pass the hard budget unseen.
+func TestUnknownOutcomeCounted(t *testing.T) {
+	w := newWorld(t, "dry_run = true\n")
+	w.set(func() { w.dropped = true })
 	w.run(t)
-	if w.messages != 0 || len(w.batches["b1"]) != 2 || w.verdict(t, "movie:tmdb-1").Choice != "" {
-		t.Fatalf("run 1: %d messages, batch %d requests; want one batch of 2 and no verdict yet", w.messages, len(w.batches["b1"]))
+	rows, _ := w.h.Env.Store.DB().Query(`SELECT cost_usd, error FROM posters_calls WHERE state='failed' AND reserved_usd=0`)
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var cost float64
+		var msg string
+		rows.Scan(&cost, &msg)
+		n++
+		// all of max_tokens at the vision model's $1.20 per million output, on each of the 4 attempts
+		if cost < 4*1024*1.2e-6 || !strings.Contains(msg, "after 4 attempt(s)") {
+			t.Errorf("a call lost on every attempt counted at $%v (%s); want over $%v", cost, msg, 4*1024*1.2e-6)
+		}
 	}
-	if held, _ := spentUSD(context.Background(), w.h.Env.Store.DB(), false); held <= 0 {
-		t.Fatal("a submitted batch holds nothing against the budget")
-	}
-	// Alpha's pool changes while the batch runs (TMDB lists a new poster, a day later, and the pool is gathered again).
-	w.set(func() {
-		w.tmdb["/movie/1/images"] = `{"posters":[{"file_path":"/red.jpg","iso_639_1":"en","width":1000,"height":1500},
- {"file_path":"/blue.jpg","iso_639_1":"en","width":1000,"height":1500},{"file_path":"/yellow.jpg","iso_639_1":"en","width":1000,"height":1500}]}`
-		w.ended = true
-	})
-	w.h.Env.Store.DB().Exec(`DELETE FROM http_cache`)
-	w.h.Env.Store.DB().Exec(`UPDATE posters_items SET cands=NULL WHERE key='movie:tmdb-1'`)
-	w.run(t)
-	if v := w.verdict(t, "show:tmdb-3"); !strings.HasSuffix(v.Choice, "/red.jpg") || len(w.batches["b2"]) != 1 {
-		t.Fatalf("run 2: Gamma chose %q (want red); batch 2 has %d requests (want Alpha's new pool alone)", v.Choice, len(w.batches["b2"]))
-	}
-	w.run(t)
-	var cost float64
-	w.h.Env.Store.DB().QueryRow(`SELECT sum(cost_usd) FROM posters_calls WHERE state='done'`).Scan(&cost)
-	if v := w.verdict(t, "movie:tmdb-1"); !strings.HasSuffix(v.Choice, "/red.jpg") || math.Abs(cost-0.0045) > 1e-12 {
-		t.Fatalf("after batch 2: Alpha chose %s; cost $%v, want $0.0045 (3 × (1000 in + 100 out) at Sonnet's half price)", v.Choice, cost)
+	if n != 2 {
+		t.Fatalf("%d failed calls, want 2", n)
 	}
 }
 
-// Catches: a judge call or a batch creation that may have been billed (its answer was lost) recorded at $0 or
-// released from the budget, which lets real spend pass the hard budget unseen.
-func TestUnknownOutcomeCounted(t *testing.T) {
-	for _, opts := range []string{"", "batch_min = 1\n"} {
-		w := newWorld(t, "dry_run = true\n"+opts)
-		w.set(func() { w.dropped = true })
-		w.run(t)
-		var n int
-		var spent float64
-		w.h.Env.Store.DB().QueryRow(`SELECT count(*), coalesce(sum(cost_usd), 0) FROM posters_calls WHERE state='failed' AND reserved_usd=0`).
-			Scan(&n, &spent)
-		if n != 2 || spent < 2*0.0005 {
-			t.Errorf("%q: %d calls failed with $%v counted; want 2, each at its worst case (over $0.0005)", opts, n, spent)
-		}
+// Catches: a gateway that refuses calls until the owner adds a card raising an alert per title (3,000 of them), or
+// again on later runs, or calling it again on each run instead of once an hour; the refusal counted against the title
+// as an unusable answer (two of them would leave it unjudged for good), or billed against the budget, or a call the
+// hold kept back recorded in the ledger; and the titles not judged once the gateway accepts calls again.
+func TestGatewayRefusesForBilling(t *testing.T) {
+	w := collectionWorld(t, "dry_run = true\n", true)
+	w.set(func() { w.billing = true })
+	rep := w.run(t)
+	var calls, unusable int
+	var spent float64
+	w.h.Env.Store.DB().QueryRow(`SELECT count(*), coalesce(sum(state='unusable'), 0), coalesce(sum(cost_usd + reserved_usd), 0)
+		FROM posters_calls`).Scan(&calls, &unusable, &spent)
+	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "until the AI gateway accepts calls") || unusable != 0 || spent != 0 ||
+		len(w.gateway.Calls()) > 2*w.h.Env.LLM.InFlight() {
+		t.Fatalf("alerts %q; %d calls sent, %d recorded, %d unusable, $%v counted; want one alert, nothing unusable or billed",
+			rep.Alerts, len(w.gateway.Calls()), calls, unusable, spent)
+	}
+	recorded := calls
+	sent := len(w.gateway.Calls())
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	rep = w.run(t)
+	w.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM posters_calls`).Scan(&calls)
+	if len(w.gateway.Calls()) != sent || len(rep.Alerts) != 0 || calls != recorded {
+		t.Fatalf("30 min later, still refused: %d more calls, %d more ledger rows, alerts %q; want none", len(w.gateway.Calls())-sent,
+			calls-recorded, rep.Alerts)
+	}
+	w.h.Now = w.h.Now.Add(time.Hour)
+	if rep := w.run(t); len(w.gateway.Calls()) != sent+1 || len(rep.Alerts) != 0 {
+		t.Fatalf("the hourly try, still refused: %d more calls, alerts %q; want one call and no alert", len(w.gateway.Calls())-sent, rep.Alerts)
+	}
+	w.set(func() { w.billing = false })
+	w.h.Now = w.h.Now.Add(6 * time.Hour)
+	if rep := w.run(t); rep.Counts["judged"] == 0 || w.verdict(t, "movie:tmdb-1").Rule != "judged" {
+		t.Fatalf("once the gateway accepts calls: counts %v, Alpha %+v; want the titles judged", rep.Counts, w.verdict(t, "movie:tmdb-1"))
 	}
 }
 
@@ -539,7 +521,8 @@ func guestLater(w *world) func() {
 }
 
 // Catches: a guest who starts watching after a long drain began not pausing the rest of it: the poster uploads (the
-// ~3,000-title backlog once dry_run is switched off) and the batch uploads (~30 MB each).
+// ~3,000-title backlog once dry_run is switched off), and the judge calls (each uploads a title's thumbnails; the
+// backlog is hours of them).
 func TestGuestArrivesMidDrain(t *testing.T) {
 	t.Run("uploads", func(t *testing.T) {
 		w := newWorld(t, "apply_workers = 1\n")
@@ -549,17 +532,22 @@ func TestGuestArrivesMidDrain(t *testing.T) {
 			t.Fatalf("counts %v; the guest arrived at Alpha's Plex upload, so the other 3 titles must wait", rep.Counts)
 		}
 	})
-	t.Run("batches", func(t *testing.T) {
-		w := newWorld(t, "dry_run = true\nbatch_min = 1\nbatch_size = 1\n")
-		arrive := guestLater(w)
-		w.set(func() { w.onBatch = arrive })
-		if rep := w.run(t); len(w.batches) != 1 || rep.Counts["judge_deferred"] != 1 {
-			t.Fatalf("%d batches, counts %v; the guest arrived at the first batch, so the second must wait", len(w.batches), rep.Counts)
+	t.Run("judging", func(t *testing.T) {
+		w := newWorld(t, "dry_run = true\n")
+		arrive, once := guestLater(w), sync.Once{}
+		w.h.Env.LLM = llmtest.Client(t, w.gateway, w.h.Env.Store, w.h.Env.Now, llm.Config{InFlight: 1})
+		reply := w.gateway.Reply
+		w.gateway.Reply = func(n int, req llm.Request) llmtest.Answer {
+			once.Do(arrive)
+			return reply(n, req)
+		}
+		if rep := w.run(t); len(w.gateway.Calls()) != 1 || rep.Counts["judge_deferred"] != 1 {
+			t.Fatalf("%d judge calls, counts %v; the guest arrived at the first, so the second title must wait", len(w.gateway.Calls()), rep.Counts)
 		}
 	})
 }
 
-// Catches: judge calls or batch uploads made while a guest watches.
+// Catches: judge calls made while a guest watches.
 func TestGuestDefersJudging(t *testing.T) {
 	w := newWorld(t, "dry_run = true\n")
 	w.set(func() { w.overloaded = true })
@@ -820,43 +808,70 @@ func TestNewerOwnerExport(t *testing.T) {
 	}
 }
 
-// Catches: the owner's dated switch from Sonnet to Haiku not taking effect (the cached Sonnet answer kept for the
-// rest of its day), and a request shape fixed to one model: Sonnet 5.5 needs low effort (without it, it thinks the
-// whole max_tokens away) and Haiku 4.5 refuses any effort with a 400.
-func TestModelPolicySwitch(t *testing.T) {
+// Catches: a call in flight holding less than its worst case against the budget (calls in flight could then pass
+// it), titles judged on another task's model, the fallbacks not sent (an outage of one model stopping all
+// judging), the ledger naming the model asked rather than the one that answered (a fallback, billed at its own
+// price), a judge that reasons (the vision default takes "none"), and the answer's schema missing a letter the pool
+// uses.
+func TestJudgeTasks(t *testing.T) {
 	w := newWorld(t, "dry_run = true\n")
-	switchAt := llm.DefaultPolicy[0].Until
-	w.h.Now = switchAt.Add(-time.Hour)
+	w.h.Env.LLM = llmtest.Client(t, w.gateway, w.h.Env.Store, w.h.Env.Now, llm.Config{Tasks: map[string]llm.Task{
+		"posters": {Model: "google/gemma-4-31b-it", Fallbacks: []string{"zai/glm-5.3-flash"}, Reasoning: "off"}}})
+	reply := w.gateway.Reply
+	var held []float64
+	w.gateway.Reply = func(n int, req llm.Request) llmtest.Answer {
+		var usd float64
+		w.h.Env.Store.DB().QueryRow(`SELECT coalesce(min(reserved_usd), 0) FROM posters_calls WHERE state='pending'`).Scan(&usd)
+		w.mu.Lock()
+		held = append(held, usd)
+		w.mu.Unlock()
+		a := reply(n, req)
+		a.Model = "zai/glm-5.3-flash"
+		return a
+	}
 	w.run(t)
-	sonnet := w.verdict(t, "movie:tmdb-1")
-	w.h.Now = switchAt.Add(time.Hour)
-	w.h.Env.Store.DB().Exec(`UPDATE posters_items SET verdict=NULL`)
-	w.run(t)
-	if haiku := w.verdict(t, "movie:tmdb-1"); sonnet.Model != "claude-sonnet-5-5" || haiku.Model != "claude-haiku-4-5-20251001" || haiku.Rule != "judged" {
-		t.Fatalf("judged by %q before the switch (want claude-sonnet-5-5) and %q %s after it (want claude-haiku-4-5-20251001 judged)",
-			sonnet.Model, haiku.Model, haiku.Rule)
+	if slices.Min(held) < 1024*0.5e-6 { // all of max_tokens at the dearer model's $0.50 per million output
+		t.Fatalf("calls in flight held $%v against the budget; want each its worst case", held)
+	}
+	var req llm.Request
+	for _, c := range w.gateway.Calls() {
+		if strings.HasPrefix(c.Messages[1].Content[0].Text, "MOVIE: Alpha") {
+			req = c
+		}
+	}
+	schema := string(req.ResponseFormat.JSONSchema.Schema)
+	if req.Model != "google/gemma-4-31b-it" || !slices.Equal(req.Models, []string{"zai/glm-5.3-flash"}) || req.Reasoning != nil ||
+		!strings.Contains(schema, `"required":["A","B","C"]`) {
+		t.Fatalf("sent model %s, fallbacks %v, reasoning %+v, schema %s", req.Model, req.Models, req.Reasoning, schema)
+	}
+	var model string
+	var cost float64
+	w.h.Env.Store.DB().QueryRow(`SELECT model, cost_usd FROM posters_calls WHERE item='movie:tmdb-1'`).Scan(&model, &cost)
+	if v := w.verdict(t, "movie:tmdb-1"); model != "zai/glm-5.3-flash" || v.Model != model || math.Abs(cost-(1000*0.15+100*0.5)/1e6) > 1e-12 {
+		t.Fatalf("ledger %s at $%v, verdict by %s; want the fallback that answered, at its price", model, cost, v.Model)
 	}
 }
 
 // Catches: the example config switching paid judging on at deploy (a table without enabled = false is enabled), and
-// its [[llm.policy]] not decoding to the dated switch (a time without its zone would read as local time).
+// its [llm] table not decoding to the gateway, the key file compose mounts, and each task's defaults.
 func TestExampleConfig(t *testing.T) {
 	cfg, err := config.Load("../../../config.example.toml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	sched, err := cfg.Schedule(name)
-	before, _ := cfg.LLM.Policy.Model(time.Date(2026, 11, 5, 7, 59, 59, 0, time.UTC))
-	after, _ := cfg.LLM.Policy.Model(time.Date(2026, 11, 5, 8, 0, 0, 0, time.UTC))
-	if err != nil || sched.Enabled || len(cfg.LLM.Policy) == 0 || before != "sonnet:latest" || after != "haiku:latest" {
-		t.Fatalf("posters enabled=%v (%v); policy %v gives %q then %q; want disabled, sonnet:latest until 2026-11-05T08:00Z, then haiku:latest",
-			sched.Enabled, err, cfg.LLM.Policy, before, after)
+	c := llm.New(cfg.LLM, nil, time.Now)
+	if err != nil || sched.Enabled || cfg.LLM.KeyFile != "/run/secrets/ai_gateway_api_key" || !reflect.DeepEqual(cfg.LLM.Tasks, llm.Defaults().Tasks) ||
+		c.InFlight() != 8 {
+		t.Fatalf("posters enabled=%v (%v); llm %+v", sched.Enabled, err, cfg.LLM)
 	}
 }
 
 // Catches: what fails every title alike logged as one warning per title (3,000 of them) while the run reports
 // success, instead of failing the run, which /health shows: a missing TMDB key; a thumbnail cache that cannot be
-// written, which was also alerted as each owner poster being unreadable, once, and then never again.
+// written, which was also alerted as each owner poster being unreadable, once, and then never again; a judge model
+// the gateway does not list (a typo, a withdrawn model), whose price lookup failed each call before it was sent,
+// where no session counted it towards parking.
 func TestWhatFailsEveryTitleStopsRun(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -869,6 +884,10 @@ func TestWhatFailsEveryTitleStopsRun(t *testing.T) {
 		{"thumbnail cache unwritable", func(w *world) {
 			os.WriteFile(filepath.Join(w.cache, "thumbs"), nil, 0o644) // a file where its directory goes, even for root
 		}, errThumbCache},
+		{"judge model not in the gateway's catalogue", func(w *world) {
+			w.h.Env.LLM = llmtest.Client(t, w.gateway, w.h.Env.Store, w.h.Env.Now, llm.Config{Tasks: map[string]llm.Task{
+				"posters": {Model: "deepseek/deepseek-v4.1-flsh"}}})
+		}, llm.ErrUnknownModel},
 	} {
 		w := newWorld(t, "dry_run = true\n")
 		c.fail(w)
@@ -880,19 +899,19 @@ func TestWhatFailsEveryTitleStopsRun(t *testing.T) {
 }
 
 // Catches: a judge call made once the budget cannot hold its worst case; and an alert (/health 503, a DSM e-mail)
-// when only what a batch in flight holds fills the budget, as on the first enabled run (holds settle at about a
-// third, and the rest is judged later).
+// when only what calls in flight hold fills the budget (they settle below what they hold, and the rest is judged
+// later).
 func TestBudget(t *testing.T) {
 	for _, c := range []struct {
 		name, state, batch string
 		cost, held         float64
 		wantAlert          bool
-	}{{"spent", "done", "", 0.0499, 0, true}, {"held by a batch in flight", "pending", "bX", 0, 0.0499, false}} {
+	}{{"spent", "done", "", 0.0499, 0, true}, {"held by a call in flight", "pending", "", 0, 0.0499, false}} {
 		w := newWorld(t, "budget_usd = 0.05\ndry_run = true\n")
 		db := w.h.Env.Store.DB()
 		db.Exec(schema)
 		db.Exec(`INSERT INTO posters_calls(at, item, of, model, mode, batch_id, state, input_tokens, output_tokens, reserved_usd,
-			cost_usd, llm_ms, error) VALUES (?, 'show:tmdb-9', 'x', 'claude-sonnet-5-5', 'batch', ?, ?, 0, 0, ?, ?, 0, '')`,
+			cost_usd, llm_ms, error) VALUES (?, 'show:tmdb-9', 'x', 'deepseek/deepseek-v4.1-flash', 'gateway', ?, ?, 0, 0, ?, ?, 0, '')`,
 			stamp(w.h.Now), c.batch, c.state, c.held, c.cost)
 		rep := w.run(t)
 		alerted := len(rep.Alerts) == 1 && strings.Contains(rep.Alerts[0], errBudget.Error())
