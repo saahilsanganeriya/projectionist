@@ -416,6 +416,60 @@ func TestRunProviderTrouble(t *testing.T) {
 	}
 }
 
+// subdlOnly is the fixture with Subdl its one provider, answering status (and Retry-After when set) while failing, else
+// no subtitles; searches counts its searches.
+func subdlOnly(t *testing.T, status int, retryAfter string) (f *fixture, failing *atomic.Bool, searches func() int) {
+	f, failing = newFixture(t), &atomic.Bool{}
+	failing.Store(true)
+	srv, calls := counter(t, func(w http.ResponseWriter, _ *http.Request, _ int) {
+		if !failing.Load() {
+			w.Write([]byte(`{"subtitles":[]}`))
+			return
+		}
+		if retryAfter != "" {
+			w.Header().Set("Retry-After", retryAfter)
+		}
+		w.WriteHeader(status)
+	})
+	f.st.subdlAPI, f.st.subdlDL = srv.URL+"/api", srv.URL
+	os.WriteFile(filepath.Join(f.dir, "subdl_api_key"), []byte("key\n"), 0o600)
+	f.options(`providers = ["subdl"]`)
+	return f, failing, func() int { return calls("/api") }
+}
+
+// Catches Subdl's daily limit (HTTP 429; the free plan allows 2,000 searches and 300 downloads a day) taken for an
+// outage: an alert on every run (it held /health at 503 all day), Subdl searched again for each title, a title
+// recorded without Subdl's answer, or the wait forgotten by the next run instead of kept until Retry-After, else the
+// next 00:00 UTC.
+func TestRunSubdlQuotaWaitsForTheReset(t *testing.T) {
+	for retryAfter, reset := range map[string]time.Time{
+		"":     time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC), // the fixture's clock starts at 2026-10-05 06:00 UTC
+		"7200": time.Date(2026, 10, 5, 8, 0, 0, 0, time.UTC),
+	} {
+		f, failing, searches := subdlOnly(t, 429, retryAfter)
+		if rep := f.run(t); len(rep.Alerts) != 0 || searches() != 1 || len(f.outcomes()) != 0 {
+			t.Errorf("Retry-After %q: alerts %q, %d searches, recorded %v; want none, 1, nothing", retryAfter, rep.Alerts, searches(), f.outcomes())
+		}
+		failing.Store(false)
+		f.h.Now = reset.Add(-time.Second)
+		if rep := f.run(t); len(rep.Alerts) != 0 || searches() != 1 {
+			t.Errorf("Retry-After %q, a second before the reset: alerts %q, %d searches; want none, still 1", retryAfter, rep.Alerts, searches())
+		}
+		f.h.Now = reset
+		if f.run(t); searches() == 1 {
+			t.Errorf("Retry-After %q: Subdl not searched at the reset", retryAfter)
+		}
+	}
+}
+
+// Catches a Subdl outage (a 5xx past every retry) logged as a spent quota: it still raises an alert.
+func TestRunSubdlOutageAlerts(t *testing.T) {
+	f, _, _ := subdlOnly(t, 503, "")
+	if rep := f.run(t); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "subdl unavailable") {
+		t.Errorf("Subdl answering 503: alerts %q; want one naming subdl", rep.Alerts)
+	}
+}
+
 // Catches a candidate the captions reject not given to alass (a cut the fit cannot follow), or alass's output kept
 // without fitting the captions (its last three eighths 20 s off, though most cues sit on them) or although the fit's
 // in-sync test (0.5 s a chunk) leaves it more than 300 ms from them (cues alternately 0.3 s late and 0.35 s early).

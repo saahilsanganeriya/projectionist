@@ -41,8 +41,9 @@
 // (and of those, from the disk); a title that got no subtitle is tried again after retry_after, then after 2, 4 and 8
 // times it, and a queued title is searched again on the same schedule. A title is recorded only once TMDB and every
 // provider it needs answered (and alass ran, where it is needed); else it is deferred, not recorded, and an alert names
-// the cause (a spent download quota is routine and only logged). Each run also refreshes sub_stats.py's TSV over the
-// whole library. Jellyfin hears of each new sidecar through a queue kept in the store; Plex watches the disk.
+// the cause (a spent quota, OpenSubtitles' downloads or Subdl's daily limit, is routine and only logged, and waits for
+// its reset across runs). Each run also refreshes sub_stats.py's TSV over the whole library. Jellyfin hears of each
+// new sidecar through a queue kept in the store; Plex watches the disk.
 package subtitles
 
 import (
@@ -293,11 +294,18 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 		return orig
 	})
 	key := func(name string) string { return filepath.Join(opt.SecretsDir, name) }
+	keeper := func(storeKey string) func(quotaState) { // saves a provider's quota state, so the next run resumes it
+		return func(st quotaState) {
+			if err := env.Store.PutJSON(context.WithoutCancel(ctx), name, storeKey, st); err != nil {
+				env.Log.Error("quota state not saved", "event", "store_error", "err", err)
+			}
+		}
+	}
 	for _, p := range opt.Providers {
 		switch p {
 		case "opensubtitles":
 			l := &legacy{base: or(s.openSubtitles, "https://rest.opensubtitles.org/search/"), userAgent: userAgent, hc: noRedirect,
-				pace: newPacer(time.Second), dl: newPacer(dlGap)}
+				pace: newPacer(time.Second), dl: newPacer(dlGap), keep: keeper("opensubtitles_quota")}
 			l.dl.quota429 = true
 			var st quotaState
 			found, err := env.Store.GetJSON(ctx, name, "opensubtitles_quota", &st)
@@ -308,11 +316,6 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 				return nil, err
 			}
 			l.restore(st)
-			l.keep = func(st quotaState) {
-				if err := env.Store.PutJSON(context.WithoutCancel(ctx), name, "opensubtitles_quota", st); err != nil {
-					env.Log.Error("quota state not saved", "event", "store_error", "err", err)
-				}
-			}
 			if !found { // the import happens once: from now on the store holds the quota
 				l.keep(st)
 			}
@@ -324,8 +327,15 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 			}
 		case "subdl":
 			if k := key("subdl_api_key"); fileExists(k) {
-				r.providers = append(r.providers, &subdl{api: or(s.subdlAPI, "https://api.subdl.com/api/v1/subtitles"),
-					dl: or(s.subdlDL, "https://dl.subdl.com"), keyFile: k, hc: hc, pace: newPacer(time.Second)})
+				o := &subdl{api: or(s.subdlAPI, "https://api.subdl.com/api/v1/subtitles"), dl: or(s.subdlDL, "https://dl.subdl.com"),
+					keyFile: k, hc: hc, pace: newPacer(time.Second), keep: keeper("subdl_quota")}
+				o.pace.quota429 = true
+				var st quotaState
+				if _, err := env.Store.GetJSON(ctx, name, "subdl_quota", &st); err != nil {
+					return nil, err
+				}
+				o.pace.resumeAt(st.ResumeAfter)
+				r.providers = append(r.providers, o)
 			}
 		case "gestdown": // free community services: half the rate
 			r.providers = append(r.providers, &gestdown{base: or(s.gestdownAPI, "https://api.gestdown.info"), hc: hc,
@@ -1799,8 +1809,8 @@ func (r *run) alertOnce(key, format string, args ...any) {
 	}
 }
 
-// alertParked raises an alert, once a run, when a provider kept failing or refused; a spent download quota is
-// routine and only logged, once.
+// alertParked raises an alert, once a run, when a provider kept failing or refused; a spent quota is routine and only
+// logged, once.
 func (r *run) alertParked(p Provider, item string, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

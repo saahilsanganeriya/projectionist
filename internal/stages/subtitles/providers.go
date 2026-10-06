@@ -6,7 +6,8 @@ package subtitles
 // quota are ports of subfetch2.py v8. Every request goes through its provider's pacer: requests a gap apart (1 s;
 // 2 s for Gestdown and SITEC; 8 min for legacy downloads), exponential backoff on 429/5xx/network errors, and parking
 // for the rest of the run once the provider keeps failing, refuses a search or spends its download quota, so the
-// titles that need it wait for the next run.
+// titles that need it wait for the next run. The legacy API's quota and Subdl's daily limit (its 429, answered at once)
+// park it until they reset, a time the store keeps, so later runs wait too.
 
 import (
 	"archive/zip"
@@ -224,6 +225,13 @@ func (p *pacer) pause(until time.Time, err error) {
 	p.parked, p.until = err, until
 }
 
+// resumeAt parks the provider until a quota wait a previous run stored ends; a wait already over parks nothing.
+func (p *pacer) resumeAt(t time.Time) {
+	if p.now().Before(t) {
+		p.pause(t, quotaErr("quota wait in force", t))
+	}
+}
+
 // out is why the provider is parked, nil when it is not; p.mu must be held.
 func (p *pacer) out() error {
 	if p.parked != nil && !p.until.IsZero() && !p.now().Before(p.until) {
@@ -295,11 +303,11 @@ func (p *pacer) doH(ctx context.Context, hc *http.Client, req func() (*http.Requ
 				return body, resp.Header, nil
 			case resp.StatusCode == 429 && !p.quota429 || resp.StatusCode/100 == 5:
 				last = fmt.Errorf("HTTP %d", resp.StatusCode)
-				if s, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && s > 0 {
-					backoff = time.Duration(s) * time.Second
+				if d := retryAfter(resp.Header); d > 0 {
+					backoff = d
 				}
 			default:
-				return nil, nil, &statusError{resp.StatusCode, body}
+				return nil, nil, &statusError{resp.StatusCode, body, resp.Header}
 			}
 		}
 		if attempt < attempts-1 {
@@ -313,11 +321,20 @@ func (p *pacer) doH(ctx context.Context, hc *http.Client, req func() (*http.Requ
 }
 
 type statusError struct {
-	code int
-	body []byte
+	code   int
+	body   []byte
+	header http.Header
 }
 
 func (e *statusError) Error() string { return fmt.Sprintf("HTTP %d", e.code) }
+
+// retryAfter is a response's Retry-After in seconds, 0 when it has none (or gives a date).
+func retryAfter(h http.Header) time.Duration {
+	if s, err := strconv.Atoi(h.Get("Retry-After")); err == nil && s > 0 {
+		return time.Duration(s) * time.Second
+	}
+	return 0
+}
 
 // ---- OpenSubtitles legacy REST ----
 
@@ -366,7 +383,7 @@ const (
 	quotaWait  = 24 * time.Hour
 )
 
-// quotaState is the legacy API's download history as kept in the store.
+// quotaState is a provider's quota as kept in the store: the legacy API's download history and wait, Subdl's wait.
 type quotaState struct {
 	Downloads   []time.Time `json:"downloads"`    // the last 24 h's downloads, oldest first
 	ResumeAfter time.Time   `json:"resume_after"` // no download or search before this
@@ -392,9 +409,7 @@ func (o *legacy) restore(st quotaState) {
 	if n := len(st.Downloads); n > 0 {
 		o.dl.next = st.Downloads[n-1].Add(dlGap)
 	}
-	if o.dl.now().Before(st.ResumeAfter) {
-		o.dl.pause(st.ResumeAfter, quotaErr("quota wait in force", st.ResumeAfter))
-	}
+	o.dl.resumeAt(st.ResumeAfter)
 }
 
 func quotaErr(reason string, until time.Time) error {
@@ -680,11 +695,31 @@ type subdl struct {
 	api, dl string // https://api.subdl.com/api/v1/subtitles, https://dl.subdl.com
 	keyFile string
 	hc      *http.Client
-	pace    *pacer
+	pace    *pacer           // searches and downloads; quota429
+	keep    func(quotaState) // saves the wait for the daily limit, so the next run waits too
 }
 
 func (o *subdl) Name() string  { return "subdl" }
 func (o *subdl) pacer() *pacer { return o.pace }
+
+// get fetches link. A 429 is the plan's daily limit (2,000 searches, 300 downloads), not an outage: Subdl waits, this
+// run and later ones, until Retry-After, else the next 00:00 UTC (assumed: the docs state a daily limit, not its reset).
+func (o *subdl) get(ctx context.Context, link string) ([]byte, error) {
+	body, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) { return http.NewRequest(http.MethodGet, link, nil) })
+	var se *statusError
+	if !errors.As(err, &se) || se.code != http.StatusTooManyRequests {
+		return body, err
+	}
+	now := o.pace.now().UTC()
+	until := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
+	if d := retryAfter(se.header); d > 0 {
+		until = now.Add(d)
+	}
+	err = quotaErr("answered HTTP 429", until)
+	o.pace.pause(until, err)
+	o.keep(quotaState{ResumeAfter: until})
+	return nil, fmt.Errorf("%w: %w", errParked, err)
+}
 
 // Search asks by TMDB id (else IMDb id, else the show's name); an episode's results must name that episode.
 func (o *subdl) Search(ctx context.Context, q Query) ([]Candidate, error) {
@@ -708,7 +743,7 @@ func (o *subdl) Search(ctx context.Context, q Query) ([]Candidate, error) {
 		v.Set("season_number", strconv.Itoa(q.Season))
 		v.Set("episode_number", strconv.Itoa(q.Episode))
 	}
-	raw, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) { return http.NewRequest(http.MethodGet, o.api+"?"+v.Encode(), nil) })
+	raw, err := o.get(ctx, o.api+"?"+v.Encode())
 	if err != nil {
 		return nil, err
 	}
@@ -740,7 +775,7 @@ func (o *subdl) Search(ctx context.Context, q Query) ([]Candidate, error) {
 
 // Download fetches the zip and returns its one SRT; anything but a zip is the quota (or a block page): park.
 func (o *subdl) Download(ctx context.Context, c Candidate) (string, error) {
-	body, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) { return http.NewRequest(http.MethodGet, c.link, nil) })
+	body, err := o.get(ctx, c.link)
 	if err != nil {
 		return "", err
 	}
