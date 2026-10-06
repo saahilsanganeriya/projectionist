@@ -167,7 +167,7 @@ func run(cfgPath, dbPath, tonightDB, cache, out string, models, tmodels []string
 		ai.Key = func() (string, error) { return cmp.Or(v, "fake"), nil }
 	}
 	var report strings.Builder
-	fmt.Fprintf(&report, "# Bake-off %s\n\nGateway %s%s; key from %s.\n\n", now().Format(time.RFC3339), lc.API,
+	fmt.Fprintf(&report, "# Bake-off %s\n\nGateway %s%s; key from %s.\n\n", now().Format(time.RFC3339), cmp.Or(lc.API, llm.Defaults().API),
 		map[bool]string{true: " (FAKE: in-process llmtest, nothing spent)"}[fake], map[bool]string{true: "AI_GATEWAY_API_KEY", false: "the key file"}[os.Getenv("AI_GATEWAY_API_KEY") != ""])
 	if only != "tonight" {
 		st, err := store.Open(dbPath)

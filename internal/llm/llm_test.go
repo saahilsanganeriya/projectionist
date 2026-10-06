@@ -209,8 +209,9 @@ func TestCost(t *testing.T) {
 
 // Catches: a broken model or key paid for and logged thousands of times in one run instead of parking after five
 // failed calls in a row; a success not resetting the count (three bad hours parking a healthy day); a billing refusal
-// counted as a model failure, retried call after call, or forgotten by the next run's alert; and the refusal kept after
-// the gateway answers again.
+// counted as a model failure, retried call after call, parked as if the hold had kept it unsent (the alert would say
+// "not sent" of a call the gateway refused), or forgotten by the next run's alert; and the refusal kept after the
+// gateway answers again.
 func TestSessionParks(t *testing.T) {
 	var mu sync.Mutex
 	fail, billing := true, false
@@ -255,8 +256,10 @@ func TestSessionParks(t *testing.T) {
 	_, err = s.Chat(ctx, ask)
 	_, again := s.Chat(ctx, ask)
 	if !errors.Is(err, llm.ErrBilling) || !errors.Is(again, llm.ErrParked) || len(g.Calls()) != 11 ||
-		!strings.Contains(s.Parked().Error(), "since 2026-10-05T23:00:00Z") || !errors.Is(s.Parked(), llm.ErrBilling) {
-		t.Fatalf("billing: %v then %v after %d calls, parked %v; want one call, parked since the refusal", err, again, len(g.Calls()), s.Parked())
+		!strings.Contains(s.Parked().Error(), "since 2026-10-05T23:00:00Z") || !errors.Is(s.Parked(), llm.ErrBilling) ||
+		strings.Contains(s.Parked().Error(), "not sent") {
+		t.Fatalf("billing: %v then %v after %d calls, parked %v; want one call, parked on the gateway's refusal since then", err, again,
+			len(g.Calls()), s.Parked())
 	}
 	clock = clock.Add(6 * time.Hour) // the next run: a new client, as after a restart, still refused
 	c = llmtest.Client(t, g, st, func() time.Time { return clock }, llm.Config{})
