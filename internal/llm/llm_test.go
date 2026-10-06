@@ -55,7 +55,7 @@ var ask = llm.Request{Messages: []llm.Message{llm.User(llm.Text("hi"))}, MaxToke
 
 // Catches: a 429 or 5xx failing the call instead of being retried; a server's Retry-After ignored (hammering a gateway
 // that asked for a pause) or one of minutes waited out inside a run; retries past the fourth attempt; a 400 or a
-// billing refusal retried (each a paid-for or pointless repeat); a timeout or a dropped answer not retried, or retried
+// billing refusal retried (each a paid-for or pointless repeat), or a team's model restriction taken for billing; a timeout or a dropped answer not retried, or retried
 // without the lost attempt counted as possibly billed. Waits are measured on the fake clock.
 func TestFailurePolicy(t *testing.T) {
 	ok := llmtest.Answer{Text: "fine", In: 10, Out: 5}
@@ -75,6 +75,11 @@ func TestFailurePolicy(t *testing.T) {
 		{"400: no retry", []llmtest.Answer{{Status: 400, Type: "invalid_request_error", Message: "bad image"}, ok}, 1, 0, 1, 0, &llm.APIError{}},
 		{"403 no card: no retry", []llmtest.Answer{{Status: 403, Type: "customer_verification_required", Message: "requires a valid credit card on file"}, ok}, 1, 0, 1, 0, llm.ErrBilling},
 		{"402 no credits: no retry", []llmtest.Answer{{Status: 402, Type: "insufficient_funds"}, ok}, 1, 0, 1, 0, llm.ErrBilling},
+		{"403 free tier: no retry", []llmtest.Answer{{Status: 403, Type: "no_providers_available", // the live answer, 2026-10-06T00:03Z
+			Message: "Free tier users do not have access to this model. Upgrade to paid credits at https://vercel.com/d?to=x for unrestricted access."}, ok},
+			1, 0, 1, 0, llm.ErrBilling},
+		{"403 model not allowed: no retry, not billing", []llmtest.Answer{{Status: 403, Type: "forbidden", Message: "model blocked by team restrictions"}, ok},
+			1, 0, 1, 0, &llm.APIError{}},
 		{"timeout, then an answer", []llmtest.Answer{{Hang: true}, ok}, 2, 122 * time.Second, 124 * time.Second, 1, nil},
 		{"answer dropped, then an answer", []llmtest.Answer{{Drop: true}, ok}, 2, 2 * time.Second, 4 * time.Second, 1, nil},
 	}
@@ -92,8 +97,8 @@ func TestFailurePolicy(t *testing.T) {
 					t.Fatalf("got %q, %v; want the answer", res.Text, err)
 				case c.err == llm.ErrBilling && !errors.Is(err, llm.ErrBilling):
 					t.Fatalf("err %v; want a billing refusal", err)
-				case c.err != nil && c.err != llm.ErrBilling && !errors.As(err, &apiErr):
-					t.Fatalf("err %v; want the gateway's error", err)
+				case c.err != nil && c.err != llm.ErrBilling && (!errors.As(err, &apiErr) || errors.Is(err, llm.ErrBilling)):
+					t.Fatalf("err %v; want the gateway's error, not a billing refusal", err)
 				}
 				if n := len(g.Calls()); n != c.calls || res.Attempts != c.calls || waited < c.minWait || waited >= c.maxWait || res.MaybeBilled != c.maybeBilled {
 					t.Fatalf("%d calls (%d attempts) over %v, %d maybe billed; want %d over [%v, %v), %d", n, res.Attempts, waited,

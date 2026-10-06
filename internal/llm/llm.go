@@ -11,8 +11,9 @@
 //   - an attempt whose request was sent in full but whose answer was lost (a timeout, a dropped connection) may have
 //     been billed: the call counts it at its worst case (Result.CostUSD) even when a retry then answers;
 //   - a Session parks after park_after (5) failed calls in a row, and at once when the gateway refuses for billing
-//     (402, or 403 customer_verification_required): a parked session makes no more calls, and the billing refusal is
-//     no model failure and bills nothing. The refusal is kept in the store until a call is answered again.
+//     (402, or a 403 for no card on file or a model outside the free tier): a parked session makes no more calls, and
+//     the billing refusal is no model failure and bills nothing. The refusal is kept in the store until a call is
+//     answered again.
 //
 // Errors never carry the key or a request body.
 package llm
@@ -341,14 +342,16 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("gateway: HTTP %d %s: %s", e.Status, e.Type, e.Message)
 }
 
-// Is makes errors.Is(err, ErrBilling) true for a 402, and for a 403 that names a missing card or credits.
+// Is makes errors.Is(err, ErrBilling) true for a 402, and for a 403 that names a missing card, the free tier or
+// credits (2026-10-06, a model outside the free tier: "no_providers_available", "Free tier users do not have access
+// to this model. Upgrade to paid credits ...").
 func (e *APIError) Is(target error) bool {
 	if target != ErrBilling {
 		return false
 	}
 	msg := strings.ToLower(e.Message)
-	return e.Status == http.StatusPaymentRequired || e.Status == http.StatusForbidden &&
-		(e.Type == "customer_verification_required" || strings.Contains(msg, "credit card") || strings.Contains(msg, "credits"))
+	return e.Status == http.StatusPaymentRequired || e.Status == http.StatusForbidden && (e.Type == "customer_verification_required" ||
+		strings.Contains(msg, "credit card") || strings.Contains(msg, "free tier") || strings.Contains(msg, "credits"))
 }
 
 // ---- sessions ----
