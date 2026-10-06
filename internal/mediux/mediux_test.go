@@ -66,6 +66,7 @@ func TestForeign(t *testing.T) {
 		{"Home Alone Collection - Kevin allein zu Haus Collection", []string{"Home Alone Collection"}, true},
 		{"The Mummy Collection - Die Mumie Collection", []string{"The Mummy Collection"}, true},
 		{"Meet the Parents Collection - Meine Braut Collection", []string{"Meet the Parents Collection"}, true},
+		{"Ladybug Collection - La Coccinelle", []string{"Ladybug Collection"}, true},
 		{"Die Hard Collection", []string{"Die Hard Collection"}, false},
 		{"Back to the Future Collection - Minimalist", []string{"Back to the Future Collection"}, false},
 	} {

@@ -386,7 +386,7 @@ archive_dir = "/volume1/PlexMediaServer/poster-archive"
 # lead); a set fewer than half of whose films take it is dropped. The approved collection also gets the set's
 # collection poster as a candidate; the owner's never. MediUX is read anonymously, one page every 2 s, each kept a week.
 mediux        = "https://mediux.pro"            # "" turns poster sets off
-mediux_assets = "https://api.mediux.pro/assets" # images; full size only for the posters uploaded
+mediux_assets = "https://api.mediux.pro/assets" # images; full size only for a worn set's posters
 
 # Letterboxd lists as Plex collections and Jellyfin BoxSets: the canon plus the owner's own public lists, owned films
 # in list order, "On the NAS: N of M · seen S · <url>" summaries, generated posters, Plex Home rows for `home`.
