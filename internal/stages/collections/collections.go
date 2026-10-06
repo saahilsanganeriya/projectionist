@@ -243,6 +243,33 @@ func PosterlessCollections(ctx context.Context, db *sql.DB, ownerFile, approvedF
 	return out, nil
 }
 
+// Franchise is a desired franchise collection; Owned when its poster is the owner's.
+type Franchise struct {
+	Name    string
+	Owned   bool
+	Sets    []string // the TMDB collections that feed it; none for most of the owner's
+	Members []int    // TMDB ids
+}
+
+// Franchises is every desired franchise collection, the owner's included: the shelves whose films the posters stage
+// dresses in one poster set.
+func Franchises(ctx context.Context, db *sql.DB, ownerFile, approvedFile string) ([]Franchise, error) {
+	if _, err := db.ExecContext(ctx, schema); err != nil {
+		return nil, err
+	}
+	d, err := load(ctx, db, Options{OwnerFile: ownerFile, ApprovedFile: approvedFile})
+	if err != nil {
+		return nil, err
+	}
+	var out []Franchise
+	for _, c := range d.list {
+		if !c.Director {
+			out = append(out, Franchise{Name: c.Name, Owned: c.Poster != "", Sets: c.Sets, Members: c.Members})
+		}
+	}
+	return out, nil
+}
+
 // ---- arrivals ----
 
 const schema = `

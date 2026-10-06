@@ -136,7 +136,7 @@ func (r *run) gatherFranchise(ctx context.Context, it *row) error {
 	}
 	langs := []string{"", "xx", "00", "en", lang}
 	other := func(c Candidate) bool { return !slices.Contains(langs, c.Lang) }
-	it.Cands = r.fill(ctx, nil, slices.DeleteFunc(own, other), slices.DeleteFunc(fan, other), film)
+	it.Cands = r.fill(ctx, nil, r.setPosters[t.Key], slices.DeleteFunc(own, other), slices.DeleteFunc(fan, other), film)
 	return nil
 }
 

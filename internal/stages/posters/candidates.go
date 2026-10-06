@@ -115,7 +115,7 @@ func (r *run) gather(ctx context.Context, it *row) error {
 	}
 	langs := []string{"", "xx", "00", "en", info.lang}
 	keep := func(c Candidate) bool { return slices.Contains(langs, c.Lang) }
-	it.Cands = r.fill(ctx, pool, slices.DeleteFunc(info.posters, func(c Candidate) bool { return !keep(c) }),
+	it.Cands = r.fill(ctx, pool, r.setPosters[t.Key], slices.DeleteFunc(info.posters, func(c Candidate) bool { return !keep(c) }),
 		slices.DeleteFunc(fan, func(c Candidate) bool { return !keep(c) }))
 	return nil
 }

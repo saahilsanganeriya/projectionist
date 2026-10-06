@@ -1,6 +1,6 @@
 // Package posters picks the most artistic poster for every movie, show and season and puts it on Jellyfin and Plex
 // (port of posters/posters.py, which ran on the Mac), and gives every Movies collection without a poster of the
-// owner's one (collections.go).
+// owner's one (collections.go), and dresses each franchise shelf's films in one MediUX poster set (sets.go).
 //
 // Each run reconciles the library against the posters_items table, so an early trigger or a crash only resumes:
 //
@@ -32,6 +32,7 @@ import (
 
 	"projectionist/internal/fanart"
 	"projectionist/internal/llm"
+	"projectionist/internal/mediux"
 	"projectionist/internal/stage"
 	"projectionist/internal/store"
 	"projectionist/internal/tmdb"
@@ -69,6 +70,9 @@ type Options struct {
 	// The owner's own posters for other films (title keys of his uploads and picks), shown to the judge of every title
 	// and franchise as his taste; none = the prompt alone.
 	TasteReferences []string `toml:"taste_references"`
+	// Poster sets (sets.go), with collections on: MediUX's site and image host; mediux = "" turns them off.
+	MediUX       string `toml:"mediux"`
+	MediUXAssets string `toml:"mediux_assets"`
 }
 
 func defaults() Options {
@@ -95,6 +99,8 @@ func defaults() Options {
 		CollectionBudgetUSD: 5,
 		DirectorMinScore:    4,
 		CommonsAPI:          "https://commons.wikimedia.org/w/api.php",
+		MediUX:              "https://mediux.pro",
+		MediUXAssets:        "https://api.mediux.pro/assets",
 	}
 }
 
@@ -187,6 +193,12 @@ type run struct {
 	refs        refs            // the owner's taste references, set before judging fans out
 	ownerKeys   map[string]bool // the owner's collections' Plex ratingKeys: never a target
 
+	mx         *mediux.Client
+	setPosters map[string][]Candidate // title key → the worn sets' posters its pool holds (sets.go)
+	bonus      map[string]string      // film title key → its worn set's poster, which gets the shelf bonus
+	credits    map[string]string      // a set poster's URL → its artist's credit, for the EXIF mark
+	worn       []wornSet
+
 	wikiMu    sync.Mutex // requests to Wikimedia go one at a time, WikimediaPace apart (wikimediaTurn)
 	wikiLast  time.Time
 	wikiPause time.Time // no Wikimedia request before this: the last Retry-After
@@ -260,6 +272,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if err != nil {
 		return err
 	}
+	dressShelves := false
 	if opt.CollectionsApproved != "" {
 		// A collections file that cannot be read stops the collections only; the titles go on.
 		if cs, keys, err := collectionTitles(ctx, db, opt); err != nil {
@@ -267,6 +280,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		} else {
 			titles, r.ownerKeys = append(titles, cs...), keys
 			rep.Count("collections", len(cs))
+			dressShelves = opt.MediUX != ""
 		}
 	}
 	if len(opt.Only) > 0 {
@@ -283,6 +297,13 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		return err
 	}
 	rep.Count("titles", len(rows))
+	r.setPosters, r.bonus, r.credits = map[string][]Candidate{}, map[string]string{}, map[string]string{}
+	if dressShelves {
+		r.mx = mediux.New(opt.MediUX, opt.MediUXAssets, env.Store, env.Now, mediuxSleep)
+		if err := r.sets(ctx, titles); err != nil {
+			return err
+		}
+	}
 
 	var stale []*row
 	for _, it := range rows {
@@ -322,6 +343,9 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		return err
 	}
 	if err := r.judge(ctx, rows); err != nil {
+		return err
+	}
+	if err := r.dropUnworn(ctx, rows); err != nil {
 		return err
 	}
 	r.noPoster(rows)
@@ -398,11 +422,12 @@ func loadRows(ctx context.Context, db *sql.DB, titles []Title, now time.Time) ([
 	return out, tx.Commit()
 }
 
-// poolSig names what a title's pool is gathered from: a new owner poster (a newer export) gathers it again.
+// poolSig names what a title's pool is gathered from: a new owner poster (a newer export) or another worn set gathers
+// it again.
 func (r *run) poolSig(t Title) string {
 	switch t.Kind {
 	case franchise:
-		return "tmdb-collection+fanart+film"
+		return "tmdb-collection+fanart+film" + r.setSig(t.Key)
 	case director:
 		return "commons+tmdb-person"
 	}
@@ -410,7 +435,7 @@ func (r *run) poolSig(t Title) string {
 	if p, ok := r.owners[t.Key]; ok {
 		sig += " owner=" + p.State + ":" + p.File
 	}
-	return sig
+	return sig + r.setSig(t.Key)
 }
 
 // Stores run detached from ctx: finished work is recorded even while the run is being cancelled.
