@@ -544,7 +544,8 @@ func (r *run) jellyfinIndex(ctx context.Context) (map[string]sinkItem, error) {
 	for _, typ := range types {
 		for start := 0; ; start += jellyfinPage {
 			var page struct{ Items []item }
-			if err := r.env.Jellyfin.GetJSON(ctx, fmt.Sprintf("/Items?Recursive=true&IncludeItemTypes=%s&Fields=ProviderIds"+
+			// collapseBoxSetItems=false: by default Jellyfin answers a film or show in a collection with the collection
+			if err := r.env.Jellyfin.GetJSON(ctx, fmt.Sprintf("/Items?Recursive=true&IncludeItemTypes=%s&collapseBoxSetItems=false&Fields=ProviderIds"+
 				"&EnableImages=false&EnableUserData=false&EnableTotalRecordCount=false&StartIndex=%d&Limit=%d",
 				typ, start, jellyfinPage), &page); err != nil {
 				return nil, err

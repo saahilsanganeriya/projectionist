@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -419,6 +420,10 @@ func newFakeJellyfin(t *testing.T, movies map[string]int, now func() time.Time) 
 		var items []map[string]any
 		switch {
 		case q.Get("IncludeItemTypes") == "Movie":
+			// like Jellyfin: a film in a BoxSet is answered with the BoxSet, unless the listing asks
+			// collapseBoxSetItems=false or filters on IsPlayed
+			collapse := q.Get("collapseBoxSetItems") != "false" && q.Get("IsPlayed") == ""
+			listed := map[string]bool{}
 			for id, tmdb := range j.movies {
 				// like Jellyfin mid-rescan: a user-scoped listing shows only part of the library, except for played films
 				if q.Get("userId") != "" && (q.Get("IsPlayed") == "true") != j.played[id] {
@@ -427,7 +432,19 @@ func newFakeJellyfin(t *testing.T, movies map[string]int, now func() time.Time) 
 				if j.scanning != "" && tmdb%2 == 1 {
 					continue
 				}
-				items = append(items, map[string]any{"Id": id, "ProviderIds": map[string]string{"Tmdb": fmt.Sprint(tmdb)}})
+				boxed := false
+				for _, s := range j.sets {
+					if collapse && slices.Contains(s.items, id) {
+						boxed = true
+						if !listed[s.id] {
+							listed[s.id] = true
+							items = append(items, map[string]any{"Id": s.id, "Type": "BoxSet"})
+						}
+					}
+				}
+				if !boxed {
+					items = append(items, map[string]any{"Id": id, "ProviderIds": map[string]string{"Tmdb": fmt.Sprint(tmdb)}})
+				}
 			}
 		case q.Get("IncludeItemTypes") == "BoxSet":
 			for _, s := range j.sets {

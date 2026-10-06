@@ -808,6 +808,27 @@ func (j *jfFake) members() []string {
 	return slices.Sorted(slices.Values(j.box))
 }
 
+// Catches: the movie listing left to collapse collections. Jellyfin then answers each film in a collection with the
+// collection, so a pick in one was left out of Jellyfin's Tonight, and a collection's TMDB id was read as a film's.
+func TestJellyfinMapListsFilmsInCollections(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	h.Jellyfin.Handle("GET", "/Users", 200, `[{"Name":"saahil","Id":"u1"}]`)
+	h.Jellyfin.HandleFunc("GET", "/Items", func(rw http.ResponseWriter, r *http.Request) {
+		item := `{"Id":"j438631","ProviderIds":{"Tmdb":"438631"}}`
+		if r.URL.Query().Get("collapseBoxSetItems") != "false" { // Jellyfin's default for a movie query
+			item = `{"Id":"box2","Type":"BoxSet","ProviderIds":{"Tmdb":"726871"}}`
+		}
+		io.WriteString(rw, `{"Items":[`+item+`]}`)
+	})
+	m, err := jellyfinMap(context.Background(), h.Env.Jellyfin, "saahil")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[int]string{438631: "j438631"}; !maps.Equal(m.Items, want) {
+		t.Fatalf("item map = %v, want %v (Dune is in a Jellyfin collection)", m.Items, want)
+	}
+}
+
 // Catches, across four runs: a watched film offered (export, feed, Plex, Jellyfin); a pick outside the unseen set
 // kept instead of retried; the taste block missing from the system message, the call sent to another task's model,
 // without the tonight task's reasoning or without the picks schema; a second AI call on the same day; a watched pick left in the

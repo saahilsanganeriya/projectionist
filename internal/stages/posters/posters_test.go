@@ -773,6 +773,31 @@ func TestWaitsForSink(t *testing.T) {
 	}
 }
 
+// Catches: the Jellyfin listing left to collapse collections. Jellyfin then answers each film or show in a collection
+// with the collection, so a title in one waited for Jellyfin to list it, and never got its poster there.
+func TestJellyfinIndexListsTitlesInCollections(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	h.Jellyfin.HandleFunc("GET", "/Items", func(rw http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		item := map[string]string{"Movie": `{"Id":"j1","Type":"Movie","ProviderIds":{"Tmdb":"1"}}`,
+			"Series": `{"Id":"j3","Type":"Series","ProviderIds":{"Tmdb":"3"}}`}[q.Get("IncludeItemTypes")]
+		if item != "" && q.Get("collapseBoxSetItems") != "false" { // Jellyfin's default for a movie or show query
+			item = `{"Id":"s1","Type":"BoxSet","Name":"Saga"}`
+		}
+		if q.Get("StartIndex") != "0" { // one item per type: the first page holds it
+			item = ""
+		}
+		reply(rw, `{"Items":[`+item+`]}`)
+	})
+	idx, err := (&run{env: h.Env}).jellyfinIndex(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx["movie:tmdb-1"].ID != "j1" || idx["show:tmdb-3"].ID != "j3" {
+		t.Fatalf("index = %v, want Alpha as j1 and Gamma as j3 (both in a Jellyfin collection)", idx)
+	}
+}
+
 // Catches: a title an app re-created under a new item after its poster went up (a rename gives Jellyfin a new id,
 // Plex re-creates items on some moves) never getting the poster again; the apps' item lists not fetched while no
 // upload is due; and a title whose item did not change uploaded again.

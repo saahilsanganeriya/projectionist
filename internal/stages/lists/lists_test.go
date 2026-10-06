@@ -478,6 +478,17 @@ func TestJellyfinScanDefersBoxSets(t *testing.T) {
 	}
 }
 
+// Catches: the movie listing left to collapse collections. Jellyfin then answers each film in a collection with the
+// collection, so a list's film already in one (2026-10-06: 1,310 of Jellyfin's 2,240 movies were) was never shelved.
+func TestJellyfinShelvesFilmsInCollections(t *testing.T) {
+	w := newWorld(t)
+	w.jf.sets = append(w.jf.sets, &boxSet0{id: "own1", name: "Vengeance Trilogy", order: "PremiereDate", items: []string{"j670"}})
+	w.run(t)
+	if want := []string{"j14537", "j389", "j25237", "j670"}; !reflect.DeepEqual(w.boxSet(t, "Top").items, want) {
+		t.Errorf("jellyfin Top = %v, want %v (Oldboy is also in the owner's Vengeance Trilogy)", w.boxSet(t, "Top").items, want)
+	}
+}
+
 // Catches: one of the stage's own collections counted as an owner's title because a failed write left it without
 // the stage's summary — the shelf would be renamed "… · Letterboxd" on a later run, and back once the summary is in.
 func TestOwnShelfNeverTakesItsOwnTitle(t *testing.T) {
