@@ -462,8 +462,10 @@ func media(t *testing.T, size int, zeros ...[2]int) string {
 // read failing the run instead of the file (EIO from a btrfs checksum; ENOTDIR stands in, as root reads past a
 // chmod 000 and test-linux runs as root), a missing piece
 // between the samples passing (Amélie's "Home Movie" had 8 MiB of zeros
-// at 8 %), header or tail padding taken for a hole, and the end sample timed by the container when the video ends
-// sooner (a Clone Wars episode: video 1355.4 s, audio 1359.4 s, 48 of 59 frames).
+// at 8 %), header or tail padding taken for a hole, the end sample timed by the container when the video ends sooner,
+// whether the file states the video's length (a Clone Wars episode: video 1355.4 s, audio 1359.4 s, 48 of 59 frames)
+// or not (The Human Condition II: its last packet at 10,672.3 s, the file 10,684.5 s), and a file cut short passing
+// because its last packet sits at the cut (Mr. Robot S03E09: 738 s of 2,917.5 s, "File ended prematurely").
 func TestDecodeCheck(t *testing.T) {
 	cases := []struct{ script, wantDetail string }{
 		{`case "$*" in *-hwaccel*) echo "hwaccel init failed" >&2; exit 1;; esac; echo frame=120`, ""},
@@ -476,6 +478,7 @@ func TestDecodeCheck(t *testing.T) {
 	noise := media(t, mib)
 	for _, c := range cases {
 		h := newEnv(t)
+		h.Script(t, "ffprobe", "") // no packet read: the container's length stands
 		h.Script(t, "ffmpeg", c.script+"\n")
 		clean, detail, err := decodeCheck(context.Background(), h.Env.FFmpeg, noise, &probe.Video{Codec: "hevc", FPS: 24}, 6000)
 		if err != nil || clean != (c.wantDetail == "") || detail != c.wantDetail {
@@ -483,6 +486,7 @@ func TestDecodeCheck(t *testing.T) {
 		}
 	}
 	h := newEnv(t)
+	h.Script(t, "ffprobe", "")
 	h.Script(t, "ffmpeg", "echo frame=48\n") // all of a 2 s clip at 24 fps, and of 5 s at 24 fps when asked
 	if clean, detail, err := decodeCheck(context.Background(), h.Env.FFmpeg, noise, &probe.Video{Codec: "av1", FPS: 24}, 2); !clean {
 		t.Errorf("2 s clip: clean=false detail=%q err=%v", detail, err)
@@ -499,6 +503,21 @@ func TestDecodeCheck(t *testing.T) {
 	h.Script(t, "ffmpeg", `case "$*" in *"-ss 1353.367 "*) echo frame=48;; *) echo frame=120;; esac`+"\n")
 	if clean, detail, _ := decodeCheck(context.Background(), h.Env.FFmpeg, noise, &probe.Video{Codec: "av1", FPS: 23.976, Duration: 1355.396}, 1359.367); !clean {
 		t.Errorf("video shorter than its container: clean=false detail=%q", detail)
+	}
+	// Only the video's last minute is read; frames come out only before its last packet (10,672.3 s), or the cut (738 s).
+	h.Script(t, "ffprobe", `case "$*" in *"-select_streams 0 -read_intervals 10624.478%"*) echo "10672.245000,0.041000";;
+*"-read_intervals 2857.524%"*) echo "[matroska,webm @ 0x55f8] File ended prematurely" >&2; echo "738.029000,0.041000";; esac`+"\n")
+	framesBefore := func(end string) string {
+		return `ss=$(echo "$*" | sed 's/.*-ss \([0-9.]*\) .*/\1/'); awk -v s="$ss" 'BEGIN { if (s+0 < ` + end + `) print "frame=120"; else print "frame=0" }'` + "\n"
+	}
+	h.Script(t, "ffmpeg", framesBefore("10672"))
+	if clean, detail, _ := decodeCheck(context.Background(), h.Env.FFmpeg, noise, &probe.Video{Codec: "hevc", FPS: 24}, 10684.478); !clean {
+		t.Errorf("video ends 12 s before the file, unstated: clean=false detail=%q", detail)
+	}
+	h.Script(t, "ffmpeg", framesBefore("738"))
+	if clean, detail, _ := decodeCheck(context.Background(), h.Env.FFmpeg, noise, &probe.Video{Codec: "hevc", FPS: 24}, 2917.524); clean ||
+		detail != "middle (0h 24m 16s): 0 frames decoded, want at least 60" {
+		t.Errorf("a file cut at 738 s of 2,917.5 s: clean=%v detail=%q; want its middle sample to fail", clean, detail)
 	}
 	h.Script(t, "ffmpeg", "echo frame=120\n")
 	padded := media(t, mib, [2]int{0, 20 << 10}, [2]int{mib - 20<<10, mib})

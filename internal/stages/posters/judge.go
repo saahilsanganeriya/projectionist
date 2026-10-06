@@ -77,7 +77,7 @@ figure, head included, as [left, top, right, bottom] fractions of the image's wi
 // Verdict is the decision for one candidate set; a different set (another source, a new poster) is judged again.
 type Verdict struct {
 	Choice string               `json:"choice"` // Candidate.URL
-	Rule   string               `json:"rule"`   // upload | single | judged | kept | unjudged
+	Rule   string               `json:"rule"`   // upload | owner_pick | single | judged | kept | below_bar | unjudged
 	Reason string               `json:"reason,omitempty"`
 	Scores map[string]float64   `json:"scores,omitempty"` // by Candidate.URL
 	Boxes  map[string][]float64 `json:"boxes,omitempty"`  // a director's photos: where the director is, by Candidate.URL
@@ -127,7 +127,25 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 			continue
 		}
 		of := setID(it.Cands)
-		if it.Verdict != nil && it.Verdict.Of == of || inFlight[it.Title.Key+" "+of] {
+		if inFlight[it.Title.Key+" "+of] {
+			continue
+		}
+		// A title's pool decided before is decided again by today's rules from its stored scores, with no call; a
+		// collection keeps its verdict (its rules are its own). An unjudged pool whose unusable answers no longer
+		// count (callState) is asked again.
+		if old := it.Verdict; old != nil && old.Of == of && (old.Rule != "unjudged" || unusable[it.Title.Key+" "+of] >= 2) {
+			if it.Title.Kind.collection() {
+				continue
+			}
+			if v := redecide(it.Cands, *old); v.Choice != old.Choice || v.Rule != old.Rule {
+				v.At = r.env.Now()
+				if err := r.saveVerdict(ctx, it, v); err != nil {
+					return err
+				}
+				r.count("redecided", 1)
+				r.env.Log.Info("decided again from stored scores", "event", "title_redecided", "item", it.Title.Key,
+					"from", old.Rule, "to", v.Rule)
+			}
 			continue
 		}
 		v, decided := shortcut(it.Cands)
@@ -170,23 +188,30 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 	return nil
 }
 
-// shortcut is the verdict that needs no judge: the owner's upload stays, and a lone candidate wins, unless it is a
-// Commons text hit, which no source vouches shows the director: that one is judged.
+// shortcut is the verdict that needs no judge: the owner's upload and his pick stay (his picks are often deliberate
+// alternative art, where the judge prefers mainstream key art), and a lone candidate wins, unless it is a Commons
+// text hit, which no source vouches shows the director: that one is judged.
 func shortcut(cands []Candidate) (Verdict, bool) {
 	switch {
 	case cands[0].Owner == ownerUpload:
 		return Verdict{Choice: cands[0].URL, Rule: "upload"}, true
+	case cands[0].Owner == ownerPick:
+		return Verdict{Choice: cands[0].URL, Rule: "owner_pick"}, true
 	case len(cands) == 1 && cands[0].Source != srcCommonsText:
 		return Verdict{Choice: cands[0].URL, Rule: "single"}, true
 	}
 	return Verdict{}, false
 }
 
-// decide applies the owner's policy to the judge's scores (by candidate index): Plex's own default poster yields to
-// any higher score, the owner's pick only to one at least two points higher; on a tie the earlier candidate (the
-// owner's, then the better-voted) stays. With a bar (a director's director_min_score), a pool whose best score is
-// below it has no choice (-1): the pool already holds every source, so no other source is left to fall back to.
+// decide applies the owner's policy to the judge's scores (by candidate index): his upload and pick stay (shortcut),
+// and Plex's own default poster yields only to a candidate scored at least 2 points higher (1 is within the judge's
+// noise); on a tie the earlier candidate (the owner's, then the better-voted) stays. With a bar (a director's
+// director_min_score), a pool whose best score is below it has no choice (-1): the pool already holds every source,
+// so no other source is left to fall back to.
 func decide(cands []Candidate, scores map[int]float64, bar float64) (int, string) {
+	if v, ok := shortcut(cands); ok {
+		return 0, v.Rule
+	}
 	best := -1
 	for i := range cands {
 		if s, ok := scores[i]; ok && (best < 0 || s > scores[best]) {
@@ -200,15 +225,25 @@ func decide(cands []Candidate, scores map[int]float64, bar float64) (int, string
 		return 0, "unjudged"
 	}
 	if cands[0].Source == srcOwner {
-		margin := 1.0
-		if cands[0].Owner == ownerPick {
-			margin = 2
-		}
-		if own, ok := scores[0]; !ok || scores[best] < own+margin {
+		if own, ok := scores[0]; !ok || scores[best] < own+2 {
 			return 0, "kept"
 		}
 	}
 	return best, "judged"
+}
+
+// redecide is v, a verdict on this same title's pool (not a collection's: no bar), under today's policy: decide again
+// from its stored scores.
+func redecide(cands []Candidate, v Verdict) Verdict {
+	byIndex := map[int]float64{}
+	for i, c := range cands {
+		if s, ok := v.Scores[c.URL]; ok {
+			byIndex[i] = s
+		}
+	}
+	i, rule := decide(cands, byIndex, 0)
+	v.Choice, v.Rule = cands[i].URL, rule
+	return v
 }
 
 // order is the stable per-title shuffle of candidate indices behind letters A..F, which fights position bias.
@@ -355,7 +390,7 @@ func (r *run) noPoster(rows []*row) {
 
 // judgeAnswer is what the judge said, by letter; OnSet and Box come with a director's photos only.
 type judgeAnswer struct {
-	Scores map[string]float64   `json:"scores"`
+	Scores letterScores         `json:"scores"`
 	Reason string               `json:"reason"`
 	OnSet  []string             `json:"on_set"`
 	Box    map[string][]float64 `json:"box"`
@@ -395,6 +430,25 @@ func parseAnswer(text string) (judgeAnswer, error) {
 		return judgeAnswer{}, fmt.Errorf("no scores in %q", clip(text))
 	}
 	return out, nil
+}
+
+// letterScores is the answer's "scores" object without the keys whose value is not a number: 25 of the first 2,818
+// answers put their "reason" in there too.
+type letterScores map[string]float64
+
+func (s *letterScores) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*s = letterScores{}
+	for k, v := range raw {
+		var f float64
+		if json.Unmarshal(v, &f) == nil {
+			(*s)[k] = f
+		}
+	}
+	return nil
 }
 
 func clip(s string) string {
@@ -608,9 +662,11 @@ func (r *run) setBatch(ctx context.Context, ids []int64, batch string) error {
 }
 
 // callState is, per "item of", whether a call is in flight and how many billed answers were unusable. Failures that
-// were never answered (outages, expired batches) do not count: the title is simply asked again on a later run.
+// were never answered (outages, expired batches) do not count: the title is simply asked again on a later run. Nor do
+// the answers the parser misread before it ignored a "reason" inside "scores": they had scores.
 func (r *run) callState(ctx context.Context) (map[string]bool, map[string]int, error) {
-	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT item, of, state FROM posters_calls WHERE state IN ('pending', 'unusable')`)
+	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT item, of, state FROM posters_calls WHERE state = 'pending'
+		OR state = 'unusable' AND error NOT LIKE 'json: cannot unmarshal string into Go struct field .scores of type float64%'`)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -1,7 +1,8 @@
 // Package server exposes /health and /metrics.
 //
-// /health answers 503 while any stage's latest run raised an alert or failed, so a one-line DSM task
-// (curl -fsS http://127.0.0.1:8097/health) keeps DSM's "email me when a task fails" as the alert channel.
+// /health answers 503 while any stage's latest finished run raised an alert or failed, so a one-line DSM task
+// (curl -fsS http://127.0.0.1:8097/health) keeps DSM's "email me when a task fails" as the alert channel. A run a
+// shutdown or restart cut off is not finished: the one before it stands (stage.Interrupted).
 package server
 
 import (

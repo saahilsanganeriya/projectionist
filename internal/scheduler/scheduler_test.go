@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -66,7 +67,9 @@ func (f fakeStage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) e
 }
 
 // Catches: outcomes mis-recorded — alerts raised before an error lost, a panic killing the service instead of
-// failing the run, or the store not reflecting what /health shows.
+// failing the run, a run a shutdown cut off (context canceled, or a child process killed with it) recorded as an
+// error, alerts a cut-off run raised dropped with it (some are raised once, behind a stored marker, so a restart
+// lost them for good), or the store not reflecting what /health shows.
 func TestRunOnceOutcomes(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "s.db"))
 	if err != nil {
@@ -79,20 +82,39 @@ func TestRunOnceOutcomes(t *testing.T) {
 		NewEnv: func(stage.Stage, *slog.Logger) *stage.Env { return &stage.Env{} },
 	}
 	cases := []struct {
-		name string
-		run  func(context.Context, *stage.Env, *stage.Report) error
-		want stage.Outcome
+		name     string
+		run      func(context.Context, *stage.Env, *stage.Report) error
+		want     stage.Outcome
+		shutdown bool // the run's context is cancelled while it runs
 	}{
-		{"ok", func(context.Context, *stage.Env, *stage.Report) error { return nil }, stage.OK},
-		{"alert", func(_ context.Context, _ *stage.Env, rep *stage.Report) error { rep.Alert("cpu transcode"); return nil }, stage.Alert},
+		{"ok", func(context.Context, *stage.Env, *stage.Report) error { return nil }, stage.OK, false},
+		{"alert", func(_ context.Context, _ *stage.Env, rep *stage.Report) error { rep.Alert("cpu transcode"); return nil }, stage.Alert, false},
 		{"alert then error", func(_ context.Context, _ *stage.Env, rep *stage.Report) error {
 			rep.Alert("drift")
 			return errors.New("jellyfin down")
-		}, stage.Error},
-		{"panic", func(context.Context, *stage.Env, *stage.Report) error { panic("boom") }, stage.Error},
+		}, stage.Error, false},
+		{"panic", func(context.Context, *stage.Env, *stage.Report) error { panic("boom") }, stage.Error, false},
+		{"shutdown", func(ctx context.Context, _ *stage.Env, _ *stage.Report) error { return ctx.Err() }, stage.Interrupted, true},
+		{"child killed by the shutdown", func(context.Context, *stage.Env, *stage.Report) error {
+			return errors.New("ffmpeg: signal: killed")
+		}, stage.Interrupted, true},
+		{"ok though shut down", func(context.Context, *stage.Env, *stage.Report) error { return nil }, stage.OK, true},
+		{"alert then shutdown", func(ctx context.Context, _ *stage.Env, rep *stage.Report) error {
+			rep.Alert("Happiest Season's poster is unreadable")
+			return ctx.Err()
+		}, stage.Alert, true},
 	}
 	for _, c := range cases {
-		rep, got := r.RunOnce(context.Background(), fakeStage{run: c.run})
+		ctx, cancel := context.WithCancel(context.Background())
+		fn := c.run
+		if c.shutdown {
+			fn = func(ctx context.Context, env *stage.Env, rep *stage.Report) error {
+				cancel()
+				return c.run(ctx, env, rep)
+			}
+		}
+		rep, got := r.RunOnce(ctx, fakeStage{run: fn})
+		cancel()
 		if got != c.want {
 			t.Errorf("%s: outcome %s, want %s", c.name, got, c.want)
 		}
@@ -100,9 +122,52 @@ func TestRunOnceOutcomes(t *testing.T) {
 		if run.Outcome != string(c.want) || run.FinishedAt.IsZero() {
 			t.Errorf("%s: stored run %+v", c.name, run)
 		}
-		if c.name == "alert then error" && len(rep.Alerts) != 1 {
-			t.Errorf("alert raised before the error was lost: %v", rep.Alerts)
+		if strings.HasPrefix(c.name, "alert then") && len(rep.Alerts) != 1 {
+			t.Errorf("%s: alert raised before it was lost: %v", c.name, rep.Alerts)
 		}
+		if s := r.Snapshot()["fake"]; c.want != stage.Interrupted && (s.Outcome != string(c.want) || len(s.Alerts) != len(rep.Alerts)) {
+			t.Errorf("%s: /health shows outcome %q alerts %v, want %s and the run's %d", c.name, s.Outcome, s.Alerts, c.want, len(rep.Alerts))
+		}
+	}
+}
+
+// Catches: a restart reading the run it stopped in (never finished, or recorded interrupted) as the stage's outcome,
+// which either hid an error the run before it ended in or, recorded as an error, held /health at 503 for a shutdown.
+func TestRestartKeepsLastFinishedOutcome(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		runs []string // outcomes oldest first; "" = never finished
+		want string
+	}{
+		{"ok, then stopped mid-run", []string{"ok", ""}, "ok"},
+		{"error, then interrupted", []string{"error", "interrupted"}, "error"},
+		{"only interrupted", []string{"interrupted"}, ""},
+	} {
+		synctest.Test(t, func(t *testing.T) {
+			st, err := store.Open(filepath.Join(t.TempDir(), "s.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			for _, o := range c.runs {
+				id, _ := st.StartRun(context.Background(), "fake", time.Now().Add(-time.Hour))
+				if o != "" {
+					st.FinishRun(context.Background(), id, time.Now().Add(-time.Hour), o, "")
+				}
+			}
+			s := &Scheduler{Loc: time.UTC, Runner: &Runner{Store: st, Log: obs.NewLogger(io.Discard, "text", "error"), Metrics: obs.NewMetrics(),
+				Now: func() time.Time { return time.Now().UTC() }, NewEnv: func(stage.Stage, *slog.Logger) *stage.Env { return &stage.Env{} }},
+				Jobs: []Job{{Stage: fakeStage{run: func(context.Context, *stage.Env, *stage.Report) error { return nil }}, Every: 24 * time.Hour}}}
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { s.Run(ctx); close(done) }()
+			synctest.Wait()
+			if got := s.Runner.Snapshot()["fake"].Outcome; got != c.want {
+				t.Errorf("%s: /health shows outcome %q after a restart, want %q", c.name, got, c.want)
+			}
+			cancel()
+			<-done
+		})
 	}
 }
 

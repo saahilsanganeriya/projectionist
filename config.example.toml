@@ -139,7 +139,7 @@ label        = "2160p 14Mbps"
 small_kbps   = 20000
 work_dir     = "/volume1/media/.projectionist/remote4k" # same share as the library: publish = one rename
 status_file  = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
-list_timeout = "5s" # an app slower than this leaves its half of the list empty for that run
+list_timeout = "30s" # an app slower than this leaves its half of the list empty for that run (a busy Plex needs > 5 s)
 
 # Watch state (played, play count, resume position, rating) kept the same in Plex and Jellyfin from projectionist's
 # own record: Plex's webhook and the Jellyfin Webhook plugin push plays to /hooks/{plex,jellyfin} (a Jellyfin push

@@ -10,7 +10,8 @@
 //	            English, textless or the title's own language, best voted first, near-duplicates dropped by dHash
 //	judge       one vision call per title on the owner's Anthropic key, the model chosen by the dated policy
 //	            (env.LLM), under a hard budget; a backlog goes through the Message Batches API at half price. The
-//	            owner's UPLOAD is never replaced, the owner's PICK only by a candidate scored at least 2 points higher
+//	            owner's UPLOAD and PICK are never replaced, Plex's DEFAULT only by a candidate scored at least 2 points
+//	            higher; a pool judged before is decided again from its stored scores when these rules change
 //	apply       an outbox per app (Plex, Jellyfin are sinks), retried with backoff; Plex's lock is its own step
 //
 // While anyone but the owner watches, the heavy steps wait for a later run: downloads and resizes, batch uploads and
@@ -307,7 +308,8 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 			stale = append(stale, it)
 		}
 	}
-	// A missing TMDB or fanart.tv key fails every title alike: the run stops on the first one.
+	// A missing TMDB or fanart.tv key, or a thumbnail cache that cannot be written, fails every title alike: the run
+	// stops on the first one.
 	gctx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
 	parallel(gctx, opt.FetchWorkers, stale, func(it *row) {
@@ -316,7 +318,7 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 			return
 		}
 		if err := r.gather(gctx, it); err != nil {
-			if errors.Is(err, tmdb.ErrNoCredentials) || errors.Is(err, fanart.ErrNoKey) {
+			if errors.Is(err, tmdb.ErrNoCredentials) || errors.Is(err, fanart.ErrNoKey) || errors.Is(err, errThumbCache) {
 				stop(err)
 			}
 			env.Log.Warn("candidates", "event", "gather_failed", "item", it.Title.Key, "err", err)
