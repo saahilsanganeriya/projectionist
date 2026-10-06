@@ -1,19 +1,14 @@
 package tonight
 
 import (
+	"cmp"
 	"context"
-	"encoding/csv"
+	"database/sql"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"hash/fnv"
-	"html"
-	"io"
-	"net/http"
-	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,13 +21,16 @@ import (
 	"projectionist/internal/lbpace"
 	"projectionist/internal/library"
 	"projectionist/internal/stage"
+	"projectionist/internal/stages/letterboxd"
 	"projectionist/internal/store"
 	"projectionist/internal/tmdb"
+	"projectionist/internal/watch"
 )
 
-// ---- Letterboxd: the export CSVs plus the public RSS, which carries TMDB ids ----
+// ---- Letterboxd: each person's export, feed and films page, read through the letterboxd stage's reader ----
 
-// entry is one film in his Letterboxd history. TMDB is 0 for export rows (the export has no TMDB ids).
+// entry is one film in a person's Letterboxd history. TMDB is 0 for export rows and films-page films (neither carries
+// TMDB ids: they are matched by title and year).
 type entry struct {
 	Name    string  `json:"name"`
 	Year    int     `json:"year"`
@@ -42,163 +40,130 @@ type entry struct {
 	Watched string  `json:"watched,omitempty"` // YYYY-MM-DD: watched, or for an export row without that, logged
 }
 
-// readExport reads ratings, reviews, diary and watched from the export in dir, or from the newest
-// "letterboxd-*" export folder inside it. A missing export is not an error: the RSS alone still works.
-func readExport(dir string) ([]entry, error) {
-	if _, err := os.Stat(filepath.Join(dir, "ratings.csv")); err != nil {
-		subs, _ := filepath.Glob(filepath.Join(dir, "letterboxd-*", "ratings.csv"))
-		if len(subs) == 0 {
-			return nil, nil
-		}
-		sort.Strings(subs) // export folders are named by date, so the last is the newest
-		dir = filepath.Dir(subs[len(subs)-1])
-	}
-	var out []entry
-	// ratings.csv first: it holds his current rating, and history keeps the first rating it sees per film
-	for _, f := range []string{"ratings.csv", "reviews.csv", "diary.csv", "watched.csv"} {
-		rows, err := readCSV(filepath.Join(dir, f))
-		if err != nil {
-			return nil, err
-		}
-		for _, r := range rows {
-			year, _ := strconv.Atoi(r["Year"])
-			rating, _ := strconv.ParseFloat(r["Rating"], 64)
-			watched := r["Watched Date"]
-			if watched == "" {
-				watched = r["Date"]
-			}
-			out = append(out, entry{Name: r["Name"], Year: year, Rating: rating, Review: r["Review"], Watched: watched})
-		}
-	}
-	return out, nil
+// member is one person of the household and what is cached of their public Letterboxd.
+type member struct {
+	who   letterboxd.Person
+	cache memberCache
 }
 
-func readCSV(path string) ([]map[string]string, error) {
-	f, err := os.Open(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	recs, err := csv.NewReader(f).ReadAll()
-	if err != nil || len(recs) == 0 {
-		return nil, err
-	}
-	var rows []map[string]string
-	for _, rec := range recs[1:] {
-		row := map[string]string{}
-		for i, h := range recs[0] {
-			if i < len(rec) {
-				row[h] = rec[i]
-			}
-		}
-		rows = append(rows, row)
-	}
-	return rows, nil
+// memberCache is kept per person between runs, so a run costs Letterboxd one small conditional GET per person.
+type memberCache struct {
+	Feed    letterboxd.FeedCache `json:"feed"`
+	FeedErr string               `json:"feed_err,omitempty"` // the latest failed feed read; "" once one answers
+	FilmsAt time.Time            `json:"films_at,omitzero"`  // the latest films-page read, answered or not
+	// Every diary entry seen (the feed shows the latest 50), by viewing id, and every films-page film, by "film:<slug>".
+	Entries map[string]entry `json:"entries"`
 }
 
-type rssFeed struct {
-	Items []struct {
-		GUID        string  `xml:"guid"`
-		Watched     string  `xml:"https://letterboxd.com watchedDate"`
-		Title       string  `xml:"https://letterboxd.com filmTitle"`
-		Year        int     `xml:"https://letterboxd.com filmYear"`
-		Rating      float64 `xml:"https://letterboxd.com memberRating"`
-		TMDB        int     `xml:"https://themoviedb.org movieId"`
-		Description string  `xml:"description"`
-	} `xml:"channel>item"`
-}
-
-var paragraph = regexp.MustCompile(`(?s)<p>(.*?)</p>`)
-var tag = regexp.MustCompile(`<[^>]+>`)
-
-// parseRSS returns the feed's diary entries keyed by guid; list entries carry no film and are skipped.
-func parseRSS(body []byte) (map[string]entry, error) {
-	var feed rssFeed
-	if err := xml.Unmarshal(body, &feed); err != nil {
-		return nil, fmt.Errorf("letterboxd rss: %w", err)
-	}
-	out := map[string]entry{}
-	for _, it := range feed.Items {
-		if it.Title == "" || it.TMDB == 0 {
-			continue
-		}
-		var review []string
-		for _, m := range paragraph.FindAllStringSubmatch(it.Description, -1) {
-			text := strings.TrimSpace(html.UnescapeString(tag.ReplaceAllString(m[1], "")))
-			if text != "" && !strings.HasPrefix(text, "Watched on ") && !strings.HasPrefix(text, "This review may contain spoilers") {
-				review = append(review, text)
-			}
-		}
-		out[it.GUID] = entry{Name: it.Title, Year: it.Year, TMDB: it.TMDB, Rating: it.Rating, Watched: it.Watched,
-			Review: strings.Join(review, " ")}
-	}
-	return out, nil
-}
-
-// rssCache keeps every diary entry ever seen (the feed shows only the latest 50) and the validators for a
-// conditional GET, so each run costs Letterboxd at most one small request.
-type rssCache struct {
-	ETag         string           `json:"etag"`
-	LastModified string           `json:"last_modified"`
-	Entries      map[string]entry `json:"entries"`
-}
-
-// limiter paces the RSS read together with every other stage's Letterboxd requests; tests replace it with one on a
+// limiter paces these reads together with every other stage's Letterboxd requests; tests replace it with one on a
 // fake clock.
 var limiter = lbpace.Shared
 
-func refreshRSS(ctx context.Context, env *stage.Env, url string) (rssCache, error) {
-	var c rssCache
-	if _, err := env.Store.GetJSON(ctx, name, "rss", &c); err != nil {
-		return c, err
+// loadMembers reads each person's cache. With fetch it first reads their feed (every run) and, for a person with no
+// export, page 1 of their films (once a day), keeping what was cached when a read fails.
+func loadMembers(ctx context.Context, env *stage.Env, opt Options, fetch bool) ([]member, error) {
+	reader := letterboxd.NewReader(opt.LetterboxdURL, limiter, 2*len(opt.People))
+	members := make([]member, 0, len(opt.People))
+	for _, p := range opt.People {
+		m := member{who: p}
+		key := "member:" + p.Person
+		if _, err := env.Store.GetJSON(ctx, name, key, &m.cache); err != nil {
+			return nil, err
+		}
+		if m.cache.Entries == nil {
+			m.cache.Entries = map[string]entry{}
+		}
+		if fetch {
+			if err := m.refresh(ctx, env, reader); err != nil {
+				return nil, err
+			}
+			if err := env.Store.PutJSON(ctx, name, key, m.cache); err != nil {
+				return nil, err
+			}
+		}
+		members = append(members, m)
 	}
-	if c.Entries == nil {
-		c.Entries = map[string]entry{}
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return c, err
-	}
-	req.Header.Set("User-Agent", userAgent)
-	if c.ETag != "" {
-		req.Header.Set("If-None-Match", c.ETag)
-	}
-	if c.LastModified != "" {
-		req.Header.Set("If-Modified-Since", c.LastModified)
-	}
-	if err := limiter.Wait(ctx); err != nil {
-		return c, err
-	}
-	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
-	if err != nil {
-		return c, fmt.Errorf("letterboxd rss: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotModified {
-		return c, nil
-	}
-	if resp.StatusCode != http.StatusOK {
-		return c, fmt.Errorf("letterboxd rss: HTTP %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil {
-		return c, fmt.Errorf("letterboxd rss: %w", err)
-	}
-	fresh, err := parseRSS(body)
-	if err != nil {
-		return c, err
-	}
-	for k, v := range fresh {
-		c.Entries[k] = v
-	}
-	c.ETag, c.LastModified = resp.Header.Get("ETag"), resp.Header.Get("Last-Modified")
-	return c, env.Store.PutJSON(ctx, name, "rss", c)
+	return members, nil
 }
 
-const userAgent = "projectionist/1.0 (personal home-media server; one RSS read per 30 min)"
+func (m *member) refresh(ctx context.Context, env *stage.Env, reader *letterboxd.Reader) error {
+	now := env.Now()
+	entries, feed, _, err := reader.Feed(ctx, m.who.User, m.cache.Feed, now)
+	switch {
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case err != nil:
+		m.cache.FeedErr = err.Error()
+		env.Log.Warn("letterboxd feed unavailable; using what is cached", "event", "letterboxd_rss_error", "person", m.who.Person, "err", err)
+	default:
+		m.cache.Feed, m.cache.FeedErr = feed, ""
+		for _, e := range entries {
+			m.cache.Entries[e.ID] = entry{Name: e.Title, Year: e.Year, TMDB: e.TMDB, Rating: float64(e.Rating) / 2, Review: e.Review,
+				Watched: e.Watched}
+		}
+	}
+	if m.who.ExportDir != "" || now.Sub(m.cache.FilmsAt) < 24*time.Hour {
+		return nil
+	}
+	m.cache.FilmsAt = now
+	films, err := reader.Films(ctx, m.who.User)
+	switch {
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case err != nil:
+		env.Log.Warn("letterboxd films page unavailable; using what is cached", "event", "letterboxd_films_error", "person", m.who.Person, "err", err)
+	}
+	for _, f := range films {
+		m.cache.Entries["film:"+f.Slug] = entry{Name: f.Title, Year: f.Year, Rating: float64(f.Rating) / 2}
+	}
+	return nil
+}
+
+// export reads the person's newest export, if they have one. Ratings come first: history keeps the first rating it
+// sees of a film.
+func (m member) export() ([]entry, error) {
+	if m.who.ExportDir == "" {
+		return nil, nil
+	}
+	ex, _, err := letterboxd.ReadExport(m.who.ExportDir, m.who.User)
+	if err != nil {
+		return nil, err
+	}
+	var out []entry
+	for _, rows := range [][]letterboxd.ExportRow{ex.Ratings, ex.Reviews, ex.Diary, ex.Watched} {
+		for _, r := range rows {
+			out = append(out, entry{Name: r.Title, Year: r.Year, Rating: float64(r.Rating) / 2, Review: r.Review,
+				Watched: cmp.Or(r.Watched, r.Date)})
+		}
+	}
+	return out, nil
+}
+
+// feedStale is how long a person's feed may go unanswered before the day's picks tell the owner they were made
+// without it (the letterboxd stage's own alarm uses the same).
+const feedStale = 48 * time.Hour
+
+// outdated describes each person whose feed has not answered for feedStale, and what the picks used of them instead.
+func outdated(members []member, exports map[string]int, now time.Time) []string {
+	var out []string
+	for _, m := range members {
+		read := m.cache.Feed.ReadAt
+		if !read.IsZero() && now.Sub(read) < feedStale {
+			continue
+		}
+		since := "it was first asked"
+		if !read.IsZero() {
+			since = read.Format(time.RFC3339)
+		}
+		used := "their export and cached entries are used"
+		if exports[m.who.Person]+len(m.cache.Entries) == 0 {
+			used = "left out of the taste profile: nothing of theirs is cached"
+		}
+		out = append(out, fmt.Sprintf("%s (Letterboxd %s: feed unanswered since %s, latest error %q; %s)", m.who.Person, m.who.User,
+			since, m.cache.FeedErr, used))
+	}
+	return out
+}
 
 // ---- the taste profile: the stable, cached prefix of the prompt ----
 
@@ -210,8 +175,8 @@ type rated struct {
 	Last   string // the latest day he logged it, YYYY-MM-DD
 }
 
-// history merges the export and the feed into one latest rating (and longest review) per film. The feed is
-// newer than the export, so its ratings win.
+// history merges one person's export and cached entries into one latest rating (and longest review) per film. The
+// cached entries are newer than the export, so their ratings win.
 func history(export []entry, rss map[string]entry) []rated {
 	byFilm := map[string]*rated{}
 	merge := func(e entry, wins bool) {
@@ -247,22 +212,23 @@ func history(export []entry, rss map[string]entry) []rated {
 	return out
 }
 
-// tasteBytes bounds the taste block, the prompt's largest part: 40.6 KB (about 18,400 tokens) on 2026-10-05, and his
-// diary added up to 10 KB a year (2022: 279 ratings, 33 reviews). At Sonnet prices each 1,000 tokens more leaves room
-// for about 14 fewer candidates under the cap, so unbounded growth would end in no call at all within a few years.
+// tasteBytes bounds the taste blocks together, the prompt's largest part, shared evenly by the viewers: the owner's
+// alone was 40.6 KB (about 18,400 tokens) on 2026-10-05, and his diary added up to 10 KB a year (2022: 279 ratings, 33
+// reviews). At Sonnet prices each 1,000 tokens more leaves room for about 14 fewer candidates under the cap, so
+// unbounded growth would end in no call at all within a few years.
 const tasteBytes = 48 << 10
 
-// tasteText renders his ratings grouped by stars, then his reviews, in at most maxBytes: past that it keeps the films
-// he rated 4★ or more, then his newest reviews, then the newest of his other ratings. Sorted, so the bytes (and the
-// prompt cache) change only when his diary does.
-func tasteText(films []rated, maxReview, maxBytes int) string {
+// tasteText renders one viewer's ratings grouped by stars, then their reviews, in at most maxBytes: past that it keeps
+// the films they rated 4★ or more, then their newest reviews, then the newest of their other ratings. Sorted, so the
+// bytes (and the provider's prompt cache) change only when a diary does. The viewer is named by label alone.
+func tasteText(label string, films []rated, maxReview, maxBytes int) string {
 	sort.Slice(films, func(i, j int) bool {
 		if films[i].Rating != films[j].Rating {
 			return films[i].Rating > films[j].Rating
 		}
 		return filmKey(films[i].Name, films[i].Year) < filmKey(films[j].Name, films[j].Year)
 	})
-	const ratingsHead, reviewsHead = "HIS LETTERBOXD RATINGS (stars out of 5):\n", "\n\nHIS REVIEWS:\n"
+	ratingsHead, reviewsHead := "VIEWER "+label+"'S LETTERBOXD RATINGS (stars out of 5):\n", "\n\nVIEWER "+label+"'S REVIEWS:\n"
 	stars := func(r float64) string { return strconv.FormatFloat(r, 'f', -1, 64) + "★" }
 	rating := func(f rated) string { return fmt.Sprintf("%s (%d)", f.Name, f.Year) }
 	review := func(f rated) string {
@@ -533,26 +499,54 @@ type candidate struct {
 	Score float64
 }
 
-// watchedSets is every way the stage learns he has seen a film: Letterboxd ids (feed), Letterboxd title+year
-// (export rows have no ids), and the play state Plex and Jellyfin report for his accounts.
+// watchedSets is every way the stage learns someone in the household has seen a film: Letterboxd ids (feeds),
+// Letterboxd title+year (export rows and films pages have no ids), the watch record, and the play state Plex and
+// Jellyfin report for the owner's accounts.
 type watchedSets struct {
-	IDs  map[int]string // tmdb → source
+	IDs  map[int]string // tmdb → who or where
 	Keys map[string]bool
 }
 
-func newWatched(export []entry, rss map[string]entry) watchedSets {
-	w := watchedSets{IDs: map[int]string{}, Keys: map[string]bool{}}
+func newWatched() watchedSets { return watchedSets{IDs: map[int]string{}, Keys: map[string]bool{}} }
+
+// add records one person's Letterboxd history: by TMDB id where the feed names it, by title and year for every film.
+func (w watchedSets) add(who string, export []entry, cached map[string]entry) {
 	for _, e := range export {
 		w.Keys[filmKey(e.Name, e.Year)] = true
 	}
-	for _, e := range rss {
-		w.IDs[e.TMDB] = "letterboxd"
+	for _, e := range cached {
+		if e.TMDB > 0 {
+			w.IDs[e.TMDB] = who
+		}
 		w.Keys[filmKey(e.Name, e.Year)] = true
 	}
-	return w
 }
 
-// seen reports whether a library film appears in his history. Title+year matching tries the folder title, TMDB's
+// recordWatched is what the watch record (jfsync's Plex and Jellyfin plays, the letterboxd stage's diary events) says
+// the household has seen: each film one of them played or rated, by TMDB id, with who.
+func recordWatched(ctx context.Context, db *sql.DB, members []member) (map[int]string, error) {
+	if err := watch.Open(ctx, db); err != nil {
+		return nil, err
+	}
+	states, err := watch.States(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	household := map[string]bool{}
+	for _, m := range members {
+		household[m.who.Person] = true
+	}
+	out := map[int]string{}
+	for k, s := range states {
+		id, ok := strings.CutPrefix(k.Item, "movie/tmdb-") // watch.MovieItem of a {tmdb-N} film
+		if n, err := strconv.Atoi(id); ok && err == nil && household[k.Person] && (s.Played || s.Rating != nil) {
+			out[n] = k.Person
+		}
+	}
+	return out, nil
+}
+
+// seen reports whether a library film appears in anyone's history. Title+year matching tries the folder title, TMDB's
 // title and TMDB's original title, one year either side (festival vs release years differ).
 func (w watchedSets) seen(f film) bool {
 	if w.IDs[f.TMDB] != "" {
@@ -572,23 +566,22 @@ func (w watchedSets) seen(f film) bool {
 }
 
 // rankCandidates returns the unseen films, best first: TMDB's vote shrunk toward a prior (so a 9.0 from 12
-// votes does not beat a 8.1 from 20 000), plus his average for the film's director, plus a per-day jitter so
-// the list the model sees rotates from day to day.
+// votes does not beat a 8.1 from 20 000), plus the household's average rating for the film's director, plus a per-day
+// jitter so the list the model sees rotates from day to day. history holds every person's ratings.
 func rankCandidates(lib map[int]film, w watchedSets, history []rated, recent map[int]string, day string) []candidate {
 	dirRatings := map[string][]float64{}
-	ratingOf := map[string]float64{}
+	ratingsOf := map[string][]float64{}
 	for _, h := range history {
 		if h.Rating > 0 {
-			ratingOf[filmKey(h.Name, h.Year)] = h.Rating
+			k := filmKey(h.Name, h.Year)
+			ratingsOf[k] = append(ratingsOf[k], h.Rating)
 		}
 	}
 	for _, f := range lib {
-		r, ok := ratingOf[filmKey(f.Title, f.Year)]
-		if !ok {
-			continue
-		}
-		for _, d := range f.Directors {
-			dirRatings[d] = append(dirRatings[d], r)
+		for _, r := range ratingsOf[filmKey(f.Title, f.Year)] {
+			for _, d := range f.Directors {
+				dirRatings[d] = append(dirRatings[d], r)
+			}
 		}
 	}
 	var out []candidate

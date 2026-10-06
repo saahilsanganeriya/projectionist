@@ -88,7 +88,7 @@ type Options struct {
 type Person struct {
 	Person       string `toml:"person"`
 	User         string `toml:"user"`          // their Letterboxd username
-	ExportDir    string `toml:"export_dir"`    // "" = none; a folder of their own (tonight reads every export in the owner's)
+	ExportDir    string `toml:"export_dir"`    // "" = none; may be the owner's: only folders named for User are read
 	History      bool   `toml:"history"`       // as the owner's history
 	Collection   string `toml:"collection"`    // "" = none
 	JellyfinUser string `toml:"jellyfin_user"` // whose played flags their collection follows; "" = Person
@@ -569,25 +569,13 @@ func (r *run) readFeed(ctx context.Context) error {
 	if _, err := r.env.Store.GetJSON(ctx, r.ns, "rss", &c); err != nil {
 		return storeErr{err}
 	}
-	hdr := map[string]string{"Accept": "application/rss+xml"}
-	if c.ETag != "" {
-		hdr["If-None-Match"] = c.ETag
-	}
-	if c.LastModified != "" {
-		hdr["If-Modified-Since"] = c.LastModified
-	}
-	p, err := r.fetch.get(ctx, fmt.Sprintf("%s/%s/rss/", r.opt.LetterboxdURL, r.opt.User), hdr)
+	entries, next, changed, err := r.fetch.feed(ctx, r.opt.LetterboxdURL, r.opt.User, c, r.env.Now())
 	if err != nil {
 		return err
 	}
-	c.ReadAt = r.env.Now()
-	if p.status == http.StatusNotModified {
+	if !changed {
 		r.count("rss_not_modified", 1)
-		return r.env.Store.PutJSON(ctx, r.ns, "rss", c)
-	}
-	entries, err := parseRSS(p.body)
-	if err != nil {
-		return err
+		return r.env.Store.PutJSON(ctx, r.ns, "rss", next)
 	}
 	// A rating's time orders it against his other ratings of the film in the watch record (see events): an entry's
 	// is when it was logged, until a read finds its rating changed; then it is that read's, a new Rated event.
@@ -616,7 +604,7 @@ func (r *run) readFeed(ctx context.Context) error {
 	if err := r.retract(ctx, entries); err != nil {
 		return err
 	}
-	return r.env.Store.PutJSON(ctx, r.ns, "rss", feedCache{ETag: p.header.Get("ETag"), LastModified: p.header.Get("Last-Modified"), ReadAt: c.ReadAt})
+	return r.env.Store.PutJSON(ctx, r.ns, "rss", next)
 }
 
 // retract drops the stored diary entries he has deleted on Letterboxd. The feed holds his latest 50 entries in the

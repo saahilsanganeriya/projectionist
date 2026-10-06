@@ -137,8 +137,8 @@ plex_watchlist = false                    # also mirror onto his plex.tv watchli
 run_budget     = "25m"                    # no Plex/Jellyfin/plex.tv call starts later than this into a run; keep it under every
 dry_run        = false                    # count events and collection writes only
 # More members, each synced after him on the same max_fetches: their diary becomes watch events for person (a name in
-# jfsync's users). user is their Letterboxd username. Optional: history (false, as his), export_dir ("" = none; a folder
-# of their own, since tonight reads every export in his), collection ("" = none: the Watchlist collections, the
+# jfsync's users). user is their Letterboxd username. Optional: history (false, as his), export_dir ("" = none; it may
+# be his: each member reads only the letterboxd-<user>-* folders named for them), collection ("" = none: the Watchlist collections, the
 # missing-films file and the plex.tv watchlist stay his) and jellyfin_user (whose played flags their collection follows;
 # default person). Their Plex collection ignores Plex views (the server token's are his) and is never put on his Home.
 # people = [{ person = "roger", user = "<her Letterboxd username>" }]
@@ -242,10 +242,14 @@ legacy_quota  = "/volume1/PlexMediaServer/subtitle-downloads" # subfetch2.py's q
 # undo_logs = [...]                    # rename logs for original names a note lacks; default: the details stage's list
 # output_dir = "/volume1/PlexMediaServer/projectionist-test/subtitles/out" # test runs: write sidecars here instead
 
-# Five unseen films for tonight, picked once a day by one model call over his Letterboxd ratings and reviews; a
-# Plex Movies collection "Tonight" promoted to his own Home as the first Movies row (below Continue Watching, On Deck
-# and the rows of libraries ordered before Movies), and the same BoxSet in Jellyfin.
-# Reconciles every 30 min: a pick he has since watched leaves the row at once.
+# Five films for the household that none of them has seen, picked once a day by one model call over each person's
+# Letterboxd ratings and reviews; a Plex Movies collection "Tonight" promoted to his Home and to the Home of everyone
+# the library is shared with, as the first Movies row (below Continue Watching, On Deck and the rows of libraries
+# ordered before Movies), and the same BoxSet in Jellyfin. Nothing personal reaches it: the model knows the people only
+# as viewers A, B, C, and a reason that quotes a review (6 words of one, or a short one whole) is retried, then dropped.
+# Unseen: in no one's Letterboxd (export, feed, films page) and in no one's watch record (each person's plays and
+# ratings, from jfsync and letterboxd), nor played on his own Plex or Jellyfin account.
+# Reconciles every 30 min: a pick anyone has since watched leaves the row at once.
 # daily_cap_usd is a hard cap: the call and its one retry are sized together before the first is sent, each at its
 # worst (the input estimated at 3 bytes a token and all of max_tokens as output, at the dearest price the gateway
 # lists for the tonight task's models), and the candidate list is cut until the pair fits. At DeepSeek V4.1 Flash's
@@ -257,14 +261,24 @@ daily_cap_usd   = 0.15                           # hard: see the comment above t
 pick_after      = "05:00"                        # in timezone: a new day's picks after this
 picks           = 5
 max_candidates  = 400                            # unseen films shown, best-ranked first; fewer when the cap needs it
-letterboxd_dir  = "/volume1/docker/projectionist/data/letterboxd" # the export CSVs, or the newest export folder in it
-letterboxd_rss  = "https://letterboxd.com/saahilsan/rss/"
 movies_dir      = "/volume1/media/Movies"
 section         = 4
 collection      = "Tonight"
-jellyfin_user   = "saahil"
+jellyfin_user   = "saahil"                       # his own account, whose played flags count
 sink_timeout    = "3m"                           # per sink per run; a failed write is retried with backoff
 plex_map_timeout = "10m"                         # the daily TMDB id → ratingKey listing; a page took 112 s in a scan
+# The household. person: their name in jfsync's users (their plays and ratings in the watch record count as seen);
+# user: their Letterboxd username; export_dir: a folder holding their own letterboxd-<user>-* export ("" = none). Every
+# run reads each feed (the latest 50 diary entries, reviews included), and once a day page 1 of the films of anyone
+# without an export (their newest 72, rated): Cloudflare refuses deeper and sorted pages, so for them only what those
+# show, kept since the first run, and the watch record count as seen. All paced with every stage (lbpace). A person
+# whose feed has not answered for 48 h does not stop the picks: they are made from the others and whatever of theirs is
+# cached, and the day's picks raise one alert naming them. Unset: him alone.
+people = [
+  { person = "saahil", user = "saahilsan",  export_dir = "/volume1/docker/projectionist/data/letterboxd" },
+  { person = "roger",  user = "auralb" }, # Aurelia
+  { person = "aaron", user = "aaron1009" },
+]
 
 # Real-time trigger: inotify on the library and finished downloads. A top-level folder (a movie, a show, a download)
 # that changed and then stayed quiet for `quiet` triggers each stage in `trigger`; each is a reconciler that finds its
