@@ -131,6 +131,7 @@ type world struct {
 	wikidata, sitemap string
 	captures, saved   map[string]string
 	requests          map[string]int
+	waybackDown       bool
 }
 
 // set changes the fake servers' behaviour between runs.
@@ -193,6 +194,9 @@ func newWorld(t *testing.T, opts string) *world {
 			reply(rw, w.wikidata)
 		case p == "/films.xml":
 			reply(rw, w.sitemap)
+		case w.waybackDown && (p == "/cdx/search/cdx" || strings.HasPrefix(p, "/web/")):
+			w.requests["cdx "+r.URL.Query().Get("url")]++
+			rw.WriteHeader(http.StatusServiceUnavailable)
 		case p == "/cdx/search/cdx":
 			w.requests["cdx "+r.URL.Query().Get("url")]++
 			reply(rw, w.captures[r.URL.Query().Get("url")])

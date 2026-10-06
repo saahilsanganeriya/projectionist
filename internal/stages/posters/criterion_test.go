@@ -13,16 +13,17 @@ import (
 
 const alphaPage = "https://www.criterion.com/films/100-alpha"
 
-// criterionWorld is newWorld where Criterion released Alpha (Plex's default), Beta (the owner's upload) and Delta (a
-// film no copy of whose page the archive holds), and the archive's latest good copy of Alpha's page names a yellow cover.
+// criterionWorld is newWorld where Criterion released Alpha (Plex's default), Beta (the owner's upload) and Aardvark (a
+// film no copy of whose page the archive holds; looked up first), and the archive's latest good copy of Alpha's page
+// names a yellow cover.
 func criterionWorld(t *testing.T, opts string) *world {
 	w := newWorld(t, opts)
-	os.MkdirAll(filepath.Join(w.lib, "Movies/Delta (2004) {tmdb-4}"), 0o755)
+	os.MkdirAll(filepath.Join(w.lib, "Movies/Aardvark (2004) {tmdb-4}"), 0o755)
 	w.wikidata = `{"results":{"bindings":[{"tmdb":{"value":"1"},"criterion":{"value":"100"}},
  {"tmdb":{"value":"2"},"criterion":{"value":"200"}}, {"tmdb":{"value":"4"},"criterion":{"value":"400"}},
  {"tmdb":{"value":"999"},"criterion":{"value":"9"}}]}}`
 	w.sitemap = `<urlset><url><loc>` + alphaPage + `</loc></url><url><loc>https://www.criterion.com/films/200-beta</loc></url>
- <url><loc>https://www.criterion.com/films/400-delta</loc></url></urlset>`
+ <url><loc>https://www.criterion.com/films/400-aardvark</loc></url></urlset>`
 	w.captures[alphaPage] = "20260207161506\n20260823033519\n"
 	w.saved["20260207161506id_/"+alphaPage] = `<meta property="og:image" content="` + w.api.URL + `/criterion/blue.jpg" />`
 	w.saved["20260823033519id_/"+alphaPage] = `<html><head><meta property="og:title" content="Alpha" />
@@ -33,8 +34,9 @@ func criterionWorld(t *testing.T, opts string) *world {
 // Catches: a Criterion film without its cover in the pool, or with it unlabelled for the judge (the prompt's rule on
 // its logo and band would then apply to nothing); an older copy of the page read instead of the latest; the owner's
 // upload looked up or pooled with the cover (his upload and picks are never replaced); and the archive, Wikidata or
-// the sitemap asked again on the next run (the cover is kept for good, the catalogue for a week), or a page with no
-// copy asked again before criterionRecheck.
+// the sitemap asked again on the next run (the cover is kept for good, the catalogue for a week); a page with no copy
+// asked again before criterionRecheck; and a found cover dropped while the archive is down, which would gather and
+// judge every Criterion film again.
 func TestCriterionCover(t *testing.T) {
 	w := criterionWorld(t, "dry_run = true\n")
 	w.run(t)
@@ -62,27 +64,32 @@ func TestCriterionCover(t *testing.T) {
 	}
 
 	asked := func() []int {
-		return []int{w.requests["/sparql"], w.requests["/films.xml"], w.requests["cdx "+alphaPage], w.requests["cdx https://www.criterion.com/films/400-delta"]}
+		return []int{w.requests["/sparql"], w.requests["/films.xml"], w.requests["cdx "+alphaPage], w.requests["cdx https://www.criterion.com/films/400-aardvark"]}
 	}
 	for _, c := range []struct {
 		after time.Duration
-		want  []int // Wikidata, sitemap, Alpha's lookups, Delta's lookups
+		down  bool  // the archive answers 503
+		want  []int // Wikidata, sitemap, Alpha's lookups, Aardvark's lookups
 	}{
-		{0, []int{1, 1, 1, 1}},
-		{time.Hour, []int{1, 1, 1, 1}},
-		{8 * 24 * time.Hour, []int{2, 2, 1, 1}},
-		{31 * 24 * time.Hour, []int{3, 3, 1, 2}},
+		{0, false, []int{1, 1, 1, 1}},
+		{time.Hour, false, []int{1, 1, 1, 1}},
+		{8 * 24 * time.Hour, false, []int{2, 2, 1, 1}},
+		{31 * 24 * time.Hour, false, []int{3, 3, 1, 2}},
+		{31 * 24 * time.Hour, true, []int{4, 4, 1, 5}}, // Aardvark's lookup tried three times, then none this run
 	} {
 		w.h.Now = w.h.Now.Add(c.after)
+		if c.down {
+			w.set(func() { w.waybackDown = true })
+		}
 		if c.after > 0 {
 			w.run(t)
 		}
 		if got := asked(); !slices.Equal(got, c.want) {
-			t.Fatalf("after %v: Wikidata, sitemap, Alpha, Delta asked %v times, want %v", c.after, got, c.want)
+			t.Fatalf("after %v (archive down %v): Wikidata, sitemap, Alpha, Aardvark asked %v times, want %v", c.after, c.down, got, c.want)
 		}
 	}
-	if n := len(w.gateway.Calls()); n != 2 {
-		t.Fatalf("%d judge calls, want 2 (Alpha, Gamma): a cached cover leaves the pool as it was", n)
+	if n := len(w.gateway.Calls()); n != 2 || w.pool("movie:tmdb-1")[1].Source != srcCriterion {
+		t.Fatalf("%d judge calls, want 2 (Alpha, Gamma): a cover found once stays in the pool, the archive up or down", n)
 	}
 }
 
