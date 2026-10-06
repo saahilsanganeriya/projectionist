@@ -84,7 +84,8 @@ func (j *jellyfinSink) load(ctx context.Context) appReport {
 	for _, t := range tasks {
 		j.scanning = j.scanning || (t.Key == "RefreshLibrary" && t.State == "Running")
 	}
-	const list = "/Items?Recursive=true&IncludeItemTypes=Movie&Fields=ProviderIds&EnableImages=false"
+	// collapseBoxSetItems=false: by default Jellyfin answers a film in a collection with the collection, the shelves too
+	const list = "/Items?Recursive=true&IncludeItemTypes=Movie&collapseBoxSetItems=false&Fields=ProviderIds&EnableImages=false"
 	if ok && m.User != "" && !j.scanning &&
 		j.w.read(ctx, "movies", func(ctx context.Context) error { return j.env.Jellyfin.GetJSON(ctx, list, &all) }) &&
 		j.w.read(ctx, "played movies", func(ctx context.Context) error {

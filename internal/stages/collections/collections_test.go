@@ -543,6 +543,26 @@ func TestSlowPlexHoldsUpNeitherJellyfinNorTheRun(t *testing.T) {
 	}
 }
 
+// Catches: the movie listing left to collapse collections. Jellyfin then answers each film in a collection with the
+// collection, whose path is outside the library, so a film already on a shelf was never added to another one.
+func TestJellyfinAddressesFilmsInCollections(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	h.Jellyfin.HandleFunc("GET", "/Items", func(w http.ResponseWriter, r *http.Request) {
+		item := map[string]string{"Id": "jf1", "Path": moviePath(1)}
+		if r.URL.Query().Get("collapseBoxSetItems") != "false" { // Jellyfin's default for a movie query
+			item = map[string]string{"Id": "box1", "Path": "/config/data/collections/Scary Movie [boxset]"}
+		}
+		writeJSON(w, map[string]any{"Items": []any{item}})
+	})
+	got, err := (&jellyfinSink{c: h.Env.Jellyfin}).Address(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[int]string{1: "jf1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("addressed %v, want %v (film 1 is in a Jellyfin collection)", got, want)
+	}
+}
+
 // Catches: the app's item list read again on every run, up to hourly, for as long as a wanted film is missing from it
 // (Jellyfin lacks 120 of them), instead of once a day plus one more look an hour or more after it was first missed.
 func TestItemListIsReadOnceADay(t *testing.T) {

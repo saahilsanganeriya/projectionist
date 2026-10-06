@@ -612,7 +612,8 @@ func (j *jellyfinSink) Address(ctx context.Context) (map[int]string, error) {
 	out := map[int]string{}
 	for start := 0; ; start += pageSize {
 		var res jfItems
-		if err := j.c.GetJSON(ctx, fmt.Sprintf("/Items?IncludeItemTypes=Movie&Recursive=true&Fields=Path&StartIndex=%d&Limit=%d", start, pageSize), &res); err != nil {
+		// collapseBoxSetItems=false: by default Jellyfin answers a film in a collection with the collection
+		if err := j.c.GetJSON(ctx, fmt.Sprintf("/Items?IncludeItemTypes=Movie&Recursive=true&collapseBoxSetItems=false&Fields=Path&StartIndex=%d&Limit=%d", start, pageSize), &res); err != nil {
 			return nil, err
 		}
 		for _, it := range res.Items {

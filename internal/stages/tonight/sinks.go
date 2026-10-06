@@ -495,7 +495,8 @@ func jellyfinMap(ctx context.Context, jf *jellyfin.Client, user string) (idMap, 
 		return idMap{}, fmt.Errorf("jellyfin: no user %q", user)
 	}
 	var all, played jfItems
-	const q = "/Items?IncludeItemTypes=Movie&Recursive=true&Fields=ProviderIds&EnableImages=false"
+	// collapseBoxSetItems=false: by default Jellyfin answers a film in a collection with the collection, Tonight too
+	const q = "/Items?IncludeItemTypes=Movie&Recursive=true&collapseBoxSetItems=false&Fields=ProviderIds&EnableImages=false"
 	if err := jf.GetJSON(ctx, q+"&EnableUserData=false", &all); err != nil {
 		return idMap{}, err
 	}
