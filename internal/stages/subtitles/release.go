@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -78,6 +77,7 @@ var (
 		"bluray": {"source", "bluray"}, "blu": {"source", "bluray"}, "bdrip": {"source", "bluray"}, "brrip": {"source", "bluray"},
 		"bd": {"source", "bluray"}, "remux": {"source", "bluray"}, "web": {"source", "web"}, "webdl": {"source", "web"}, "webrip": {"source", "web"},
 		"hdtv": {"source", "hdtv"}, "pdtv": {"source", "hdtv"}, "dvdrip": {"source", "dvd"}, "dvd": {"source", "dvd"},
+		"hdrip": {"source", "hdrip"}, "dvdscr": {"source", "screener"}, "cam": {"source", "cam"}, "ts": {"source", "telesync"},
 		"480p": {"res", "480p"}, "576p": {"res", "576p"}, "720p": {"res", "720p"}, "1080p": {"res", "1080p"},
 		"2160p": {"res", "2160p"}, "4k": {"res", "2160p"}, "uhd": {"res", "2160p"},
 		"amzn": {"service", "amzn"}, "nf": {"service", "nf"}, "dsnp": {"service", "dsnp"}, "hmax": {"service", "hmax"},
@@ -177,6 +177,9 @@ func originOf(names []string) origin {
 		if o.group == "" {
 			o.group = releaseGroup(n)
 		}
+		if videoExt[strings.ToLower(filepath.Ext(n))] { // a .ts video is no telesync
+			n = strings.TrimSuffix(n, filepath.Ext(n))
+		}
 		r := parseRelease(n)
 		for _, f := range []struct {
 			dst *string
@@ -191,19 +194,26 @@ func originOf(names []string) origin {
 	return o
 }
 
-// releaseMatched tells whether c was made for this very release, so it may be written without reading the video. An
-// OpenSubtitles candidate must match the file's hash and be labelled with this title. Any other must be labelled with
-// it too (this film, this episode), and one of the releases its text names (Addic7ed lists every release a subtitle
-// fits: "WEB.InChY, PSA, iP.WEB-DL.RAWR") must carry the file's group while contradicting neither its source,
-// resolution, streaming service, edition nor episode.
+// releaseMatched tells whether c was made for this very release, so it may be written without reading the video. A
+// commentary's or another language's file never is. An OpenSubtitles candidate must match the file's hash, be
+// labelled with this title, and its name contradict neither the file's source, edition nor episode (Bazarr's rule: a
+// hash is error-prone; Counterpart's BluRay file matched a WEB subtitle). Any other must be labelled with it too (this
+// film, this episode), and one of the releases its text names (Addic7ed lists every release a subtitle fits:
+// "WEB.InChY, PSA, iP.WEB-DL.RAWR") must carry the file's group while contradicting neither its source, resolution,
+// streaming service, edition nor episode.
 func (t *title) releaseMatched(c Candidate) bool {
+	differ := func(a, b string) bool { return a != "" && b != "" && a != b }
+	if wrongText(c) {
+		return false
+	}
 	if metered(c.provider) {
-		return c.HashMatch && c.ours
+		r := parseRelease(c.Release + " " + c.FileName)
+		return c.HashMatch && c.ours && !differ(r.source, t.origin.rel.source) && (r.editions == "" || r.editions == t.origin.rel.editions) &&
+			(t.show == "" || !differ(r.sxe, sxe(t.season, t.episode)))
 	}
 	if !c.ours || t.origin.group == "" || t.origin.rel.sxe != "" && t.show != "" && t.origin.rel.sxe != sxe(t.season, t.episode) {
 		return false
 	}
-	differ := func(a, b string) bool { return a != "" && b != "" && a != b }
 	for _, alt := range append(strings.FieldsFunc(c.Release, func(r rune) bool { return r == ',' || r == '/' }), c.FileName) {
 		r := parseRelease(alt)
 		if !r.tokens[t.origin.group] || differ(r.source, t.origin.rel.source) || differ(r.res, t.origin.rel.res) ||
@@ -310,22 +320,67 @@ func cheapCheck(spans []span, lo, hi, videoFPS, fps float64) string {
 	return ""
 }
 
-// arrange orders a search's candidates (rank's order) for trying: provider by provider in the providers' order, so a
-// later provider's are tried only once an earlier one's failed; within a provider its hash match and the subtitles
-// naming the file's own source (BluRay, WEB, ...) first; in sampled mode a subtitle made for this release before all.
-func (t *title) arrange(cands []Candidate, providers []Provider, sampled bool) []Candidate {
-	first := func(c Candidate) bool {
-		return c.HashMatch && c.ours || t.origin.rel.source != "" && parseRelease(c.Release+" "+c.FileName).source == t.origin.rel.source
+// tier is how surely c was made for this very file: 1 made for it (releaseMatched), 2 of its source (BluRay for a
+// BluRay file, WEB from the same service where both name one) and not timed for another frame rate where it says,
+// 3 the rest, a commentary's or another language's file included.
+func (t *title) tier(c Candidate) int {
+	if t.releaseMatched(c) {
+		return 1
 	}
-	sort.SliceStable(cands, func(i, j int) bool {
-		a, b := cands[i], cands[j]
-		if ma, mb := t.releaseMatched(a), t.releaseMatched(b); sampled && ma != mb {
-			return ma
+	r, o, fps := parseRelease(c.Release+" "+c.FileName), t.origin.rel, subFPS(c)
+	if o.source == "" || r.source != o.source || r.service != "" && o.service != "" && r.service != o.service ||
+		fps > 0 && t.fps > 0 && math.Abs(fps-t.fps) > 0.0005*t.fps || wrongText(c) {
+		return 3
+	}
+	return 2
+}
+
+// arrange orders a title's candidates (rank's order) for trying: by tier across providers; within a tier the free
+// providers before a metered one (OpenSubtitles' downloads are rationed), each in the providers' order.
+func (t *title) arrange(cands []Candidate, providers []Provider) []Candidate {
+	type keyed struct {
+		c Candidate
+		k [3]int // tier, metered, provider
+	}
+	ks := make([]keyed, len(cands))
+	for i, c := range cands {
+		m := 0
+		if metered(c.provider) {
+			m = 1
 		}
-		if pa, pb := slices.Index(providers, a.provider), slices.Index(providers, b.provider); pa != pb {
-			return pa < pb
-		}
-		return first(a) && !first(b)
-	})
+		ks[i] = keyed{c, [3]int{t.tier(c), m, slices.Index(providers, c.provider)}}
+	}
+	slices.SortStableFunc(ks, func(a, b keyed) int { return slices.Compare(a.k[:], b.k[:]) })
+	for i := range ks {
+		cands[i] = ks[i].c
+	}
 	return cands
+}
+
+// wrongText tells whether c's text is not the film's dialogue in English: a commentary track's subtitle, or a file its
+// name ends with another language's code or name (Dark.Phoenix.2019.720p.BluRay.x264-GECKOS-heb.srt).
+func wrongText(c Candidate) bool {
+	if parseRelease(c.Release + " " + c.FileName).tokens["commentary"] {
+		return true
+	}
+	toks := tokenRe.FindAllString(pyLower(c.FileName), -1)
+	for len(toks) > 0 && fileFlags[toks[len(toks)-1]] {
+		toks = toks[:len(toks)-1]
+	}
+	return len(toks) > 0 && otherLanguages[toks[len(toks)-1]]
+}
+
+var (
+	fileFlags      = map[string]bool{"srt": true, "sub": true, "ass": true, "ssa": true, "vtt": true, "hi": true, "sdh": true, "cc": true, "nhi": true, "forced": true}
+	otherLanguages = map[string]bool{}
+)
+
+func init() {
+	// ISO 639-2 codes and English names; no two-letter codes ("hi" marks a hearing-impaired file) or English words.
+	for _, w := range strings.Fields(`ara arabic bul bulgarian chi zho chinese cze ces czech dan danish dut nld dutch fin finnish fre fra french
+		ger deu german gre ell greek heb hebrew hin hindi hun hungarian ind indonesian ita italian jpn japanese kor korean nor norwegian fas
+		persian farsi pol polish por portuguese rum ron romanian rus russian spa spanish swe swedish tha thai tur turkish ukr ukrainian vie
+		vietnamese hrv croatian srp serbian slv slovenian slk slovak msa malay`) {
+		otherLanguages[w] = true
+	}
 }

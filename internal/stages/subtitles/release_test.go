@@ -12,9 +12,12 @@ import (
 // codec or a "-DL" suffix, a source, resolution, service or edition the file's release contradicts (a named cut such
 // as Final Cut, Ultimate Cut, Special Edition or Redux is an edition), another episode (S03E06 or 3x06),
 // a subtitle labelled with another title, a word in trailing parentheses that names no resolution or source taken for
-// a group, or an OpenSubtitles candidate trusted without its file-hash match. Also a
-// real match missed: Addic7ed's lists of the releases a subtitle fits, a re-encoder's group in its trailing
-// parentheses, a SITEB bracket tag, and the group taken from the folder when the file name lacks one. Release texts are
+// a group, an OpenSubtitles candidate trusted without its file-hash match, or with one its name contradicts (another
+// source: Counterpart's and Big Little Lies' BluRay files matched WEB and HDTV subtitles; another edition; another
+// episode: Broadchurch), a commentary's or another language's file (Dark Phoenix; -heb.srt), and HDRip, a screener,
+// a cam or a telesync read as no source (Wrath of Man: EVO's WEB-DL and EVO's HDRip). Also a real match missed: Addic7ed's lists of the releases a subtitle fits, a re-encoder's group in its trailing
+// parentheses, a SITEB bracket tag, the group taken from the folder when the file name lacks one, a hash match whose
+// name agrees, and a .ts file or a word such as Tsotsi read as a telesync. Release texts are
 // Gestdown's and the library's own (2026-10-05).
 func TestReleaseMatched(t *testing.T) {
 	gd, os := &gestdown{}, &legacy{}
@@ -72,6 +75,28 @@ func TestReleaseMatched(t *testing.T) {
 		{"OpenSubtitles hash match", []string{got}, false, false, Candidate{HashMatch: true, provider: os}, true},
 		{"OpenSubtitles hash match of another title", []string{got}, false, true, Candidate{HashMatch: true, provider: os}, false},
 		{"OpenSubtitles group match without the hash", []string{got}, false, false, Candidate{Release: "WEB-DL-NTb", provider: os}, false},
+		{"hash match named for another source (Counterpart: a BluRay file, a WEB subtitle)", []string{"Counterpart.S01E01.1080p.BluRay.x264-YELLOWBiRD.mkv"},
+			false, false, Candidate{Release: "Counterpart.S01E01.WEB.H264-DEFLATE[sited].en-US", HashMatch: true, provider: os}, false},
+		{"hash match named HDTV for a BluRay file (Big Little Lies)", []string{"Big.Little.Lies.S01E01.1080p.BluRay.x264-JOY.mkv"}, false, false,
+			Candidate{Release: "Big.Little.Lies.S01E01.HDTV.x264-SVA", HashMatch: true, provider: os}, false},
+		{"hash match named for another episode (Broadchurch)", []string{"broadchurch.s01e01.1080p.bluray.x264-shortbrehd.mkv"}, false, false,
+			Candidate{Release: "Broadchurch.S01E02.BluRay.x264-RiVER", HashMatch: true, provider: os}, false},
+		{"hash match named for another edition", []string{"Heat.1995.1080p.BluRay.x264-GRP.mkv"}, true, false,
+			Candidate{Release: "Heat.1995.Directors.Cut.1080p.BluRay", HashMatch: true, provider: os}, false},
+		{"hash match of the commentary (Dark Phoenix)", []string{"Dark.Phoenix.2019.1080p.BluRay.x264-MW.mkv"}, true, false,
+			Candidate{Release: "1080p.BluRay.x264.DTS-HD.MA.7.1-FGT (Commentary ONLY)", HashMatch: true, provider: os}, false},
+		{"hash match of a Hebrew file", []string{"Dark.Phoenix.2019.1080p.BluRay.x264-MW.mkv"}, true, false,
+			Candidate{Release: "Dark.Phoenix.2019.720p.BluRay.x264-GECKOS", FileName: "Dark.Phoenix.2019.720p.BluRay.x264-GECKOS-heb.HI.srt", HashMatch: true, provider: os}, false},
+		{"hash match named for the file's source", []string{"Dark.Phoenix.2019.1080p.BluRay.x264-MW.mkv"}, true, false,
+			Candidate{Release: "Dark.Phoenix.2019.720p.BluRay.x264-GECKOS", FileName: "Dark.Phoenix.2019.720p.BluRay.x264-GECKOS.eng.srt", HashMatch: true, provider: os}, true},
+		{"group, but the commentary", []string{got}, false, false, Candidate{Release: "WEB-DL-NTb Commentary"}, false},
+		{"group, but HDRip (Wrath of Man: EVO's WEB-DL)", []string{"Wrath.of.Man.2021.1080p.WEB-DL.DDP5.1.H.264-EVO.mkv"}, true, false,
+			Candidate{Release: "Wrath.of.Man.2021.HDRip.XviD.AC3-EVO"}, false},
+		{"group, but a telesync", []string{"Wrath.of.Man.2021.1080p.WEB-DL.DDP5.1.H.264-EVO.mkv"}, true, false, Candidate{Release: "Wrath.of.Man.2021.TS.XviD-EVO"}, false},
+		{"group, but a cam", []string{"Wrath.of.Man.2021.1080p.WEB-DL.DDP5.1.H.264-EVO.mkv"}, true, false, Candidate{Release: "Wrath.of.Man.2021.CAM.XviD-EVO"}, false},
+		{"group, but a screener", []string{"Wrath.of.Man.2021.1080p.WEB-DL.DDP5.1.H.264-EVO.mkv"}, true, false, Candidate{Release: "Wrath.of.Man.2021.DVDScr.XviD-EVO"}, false},
+		{"a .ts file is no telesync", []string{"Show.S01E01.720p.HDTV.x264-KILLERS.ts"}, false, false, Candidate{Release: "720p.HDTV.x264-KILLERS"}, true},
+		{"ts only as a word (Tsotsi)", []string{"Tsotsi.2005.1080p.BluRay.x264-GRP.mkv"}, true, false, Candidate{Release: "Tsotsi.2005.x264-GRP"}, true}, // no source word to outvote one read from "tsotsi"
 	} {
 		ti := &title{origin: originOf(c.names)}
 		if !c.movie {
@@ -204,36 +229,31 @@ func TestPlausible(t *testing.T) {
 	}
 }
 
-// Catches the order candidates are tried in losing the providers' order (a later provider's popular subtitle tried
-// before an earlier provider's), a subtitle of the file's own source (BluRay, Blu-ray, BDRip, REMUX for a BluRay file)
-// not first within its provider, a hash match pushed below one, or, in sampled mode, a subtitle made for this very
-// release (group SITEA, or the hash match) not ahead of all. The input is rank's order.
+// Catches the order candidates are tried in not being by tier across providers: 1 made for this file (its group, or a
+// hash match its name does not contradict), 2 of its source (WEB from the same service where both name one, timed
+// for its frame rate where the subtitle says), 3 the rest; within a tier a metered provider (OpenSubtitles' quota) not
+// last, the providers' order lost, or rank's order lost. Also a commentary or another language's file ranked by its
+// source. The input is rank's order; the file is NTb's AMZN WEB-DL at 23.976 fps.
 func TestArrange(t *testing.T) {
 	gd, sd, os := &gestdown{}, &subdl{}, &legacy{}
 	cands := []Candidate{
-		{ID: "sd-web", Release: "Show.S01E01.WEB-DL", Downloads: 9000, provider: sd},
-		{ID: "gd-web", Release: "WEB-DL", ours: true, provider: gd},
-		{ID: "os-hash", Release: "Show.S01E01.HDTV", HashMatch: true, ours: true, provider: os},
-		{ID: "os-web", Release: "Show.S01E01.1080p.WEB-DL", Downloads: 9000, provider: os},
-		{ID: "gd-blu", Release: "720p.Blu-ray.SiNNERS", ours: true, provider: gd},
-		{ID: "os-remux", Release: "Show.S01E01.2160p.REMUX", provider: os},
-		{ID: "gd-group", Release: "x265-SITEA", ours: true, provider: gd},
-		{ID: "sd-bd", FileName: "show.s01e01.bdrip.srt", provider: sd},
+		{ID: "os-web", Release: "Show.S01E01.1080p.WEB-DL", Downloads: 9000, ours: true, provider: os},
+		{ID: "sd-bluray", Release: "Show.S01E01.1080p.BluRay", provider: sd},
+		{ID: "gd-nf", Release: "NF.WEB-DL", ours: true, provider: gd},
+		{ID: "sd-amzn", Release: "Show.S01E01.AMZN.WEBRip", provider: sd},
+		{ID: "gd-web", Release: "WEB", ours: true, provider: gd},
+		{ID: "os-hash-hdtv", Release: "Show.S01E01.HDTV.x264-LOL", HashMatch: true, ours: true, provider: os},
+		{ID: "gd-25fps", Release: "WEB-DL 25fps", ours: true, provider: gd},
+		{ID: "sd-web-commentary", Release: "Show.S01E01.WEB-DL Commentary", provider: sd},
+		{ID: "gd-group", Release: "WEB-DL-NTb", ours: true, provider: gd},
+		{ID: "os-hash", Release: "Show.S01E01.WEB-DL", HashMatch: true, ours: true, provider: os},
 	}
-	ti := &title{origin: originOf([]string{"Show.S01E01.1080p.BluRay.x265-SITEA.mp4"}), show: "Show", season: 1, episode: 1}
-	for _, c := range []struct {
-		sampled bool
-		want    string
-	}{
-		{false, "gd-blu gd-web gd-group sd-bd sd-web os-hash os-remux os-web"},
-		{true, "gd-group os-hash gd-blu gd-web sd-bd sd-web os-remux os-web"}, // the hash match is made for this file too
-	} {
-		var got []string
-		for _, x := range ti.arrange(slices.Clone(cands), []Provider{gd, sd, os}, c.sampled) {
-			got = append(got, x.ID)
-		}
-		if strings.Join(got, " ") != c.want {
-			t.Errorf("sampled %v: %s; want %s", c.sampled, strings.Join(got, " "), c.want)
-		}
+	ti := &title{origin: originOf([]string{"Show.S01E01.1080p.AMZN.WEB-DL.DDP5.1.H.264-NTb.mkv"}), show: "Show", season: 1, episode: 1, fps: 23.976}
+	var got []string
+	for _, x := range ti.arrange(slices.Clone(cands), []Provider{gd, os, sd}) { // OpenSubtitles listed before Subdl, as deployed
+		got = append(got, x.ID)
+	}
+	if want := "gd-group os-hash gd-web sd-amzn os-web gd-nf gd-25fps sd-bluray sd-web-commentary os-hash-hdtv"; strings.Join(got, " ") != want {
+		t.Errorf("%s; want %s", strings.Join(got, " "), want)
 	}
 }

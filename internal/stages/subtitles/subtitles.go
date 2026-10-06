@@ -5,11 +5,14 @@
 // fitted to the video's captions or speech.
 //
 //	embedded English text track       -> skipped: the players show it, so nothing is fetched and nothing read
-//	else candidates from the providers (Gestdown, SITEC, Subdl with a key; OpenSubtitles legacy and .com last), provider
-//	by provider in the providers' order, each one's hash match and subtitles of the file's own source (BluRay, WEB,
-//	...) first, skipping any already rejected for this file, and per title the first route that succeeds:
+//	else candidates from the providers (Gestdown, SITEC, Subdl with a key; OpenSubtitles legacy and .com searched last),
+//	by tier across providers: 1 made for this file (release-matched), 2 of its source (BluRay for BluRay, WEB from
+//	the same service) at its frame rate, 3 the rest (a commentary's or another language's file too); within a tier
+//	the free providers first, in the providers' order; skipping any already rejected for this file, and per title the
+//	first route that succeeds:
 //	  a. release-matched               -> written WITHOUT reading the video once cheapCheck passes: an OpenSubtitles
-//	                                      file-hash match, or a subtitle naming the file's original release group
+//	                                      file-hash match its name does not contradict (source, edition, episode),
+//	                                      or a subtitle naming the file's original release group
 //	  sampled mode (the default) only:
 //	  b. an English VobSub sidecar     -> each plausible candidate fitted to <video>.en.idx's caption starts (its text
 //	                                      only) and written retimed onto them; still no read of the video
@@ -28,8 +31,8 @@
 //
 // Careful mode is the rollback: routes a and d only, and the queue aligns at any hour. OpenSubtitles is searched only
 // once no other provider's release-matched subtitle passed, and only its hash match is downloaded before the queue,
-// which tries its others after every other provider's; while it is out (its day's downloads spent) a title waits for
-// it only when nothing else aligned. The duration, frame rate and tracks come from the probe cache, else the
+// which tries its others by tier among the others', last within a tier; while it is out (its day's downloads spent) a
+// title waits for it only when nothing else aligned. The duration, frame rate and tracks come from the probe cache, else the
 // .details note (ffprobe runs only for a video that has neither, or once the sampled fit needs its stream indexes); the
 // original release name from that note, else the rename logs. Three titles at a time look for a subtitle, and one at a
 // time reads its windows; the queue aligns one at a time, and an alignment counts against align_per_day only once it
@@ -857,7 +860,7 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 			}
 			r.alertParked(p, t.path, err)
 		}
-		cands = t.arrange(order(cands, t.release), r.providers, r.sampled())
+		cands = t.arrange(order(cands, t.release), r.providers)
 		found += len(cands)
 		for _, c := range cands {
 			if rejected[c.key()] == "aligned" {
@@ -898,6 +901,7 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 			pool = append(pool, c)
 		}
 	}
+	pool = t.arrange(pool, r.providers) // OpenSubtitles' (searched last) by tier among the others'
 	switch {
 	case out || meteredOut && len(pool) == 0: // a provider that was out might have had what this title needs
 		return outcome{result: "deferred", detail: "a provider was out"}

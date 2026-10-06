@@ -841,11 +841,13 @@ func TestRunReleaseMatchedReadsNoVideo(t *testing.T) {
 	}
 }
 
-// Catches the queue stopping at the first provider that had candidates: Show's five Gestdown subtitles are another
-// film's, so it must try Gestdown's first maxTries, then fall through to OpenSubtitles, there trying the Blu-ray
-// subtitle (the file's source; rank alone puts the more popular WEB one first) before the WEB one. And, while
-// OpenSubtitles' day's downloads are spent (its download refused mid-queue, or its search skipped from the start) or
-// Gestdown fails mid-queue (5xx: parked), a title nothing else aligned refused instead of waiting in the queue for it.
+// Catches the queue not trying a title's candidates by tier across providers, or stopping at the first that fails:
+// OpenSubtitles' Blu-ray subtitle (the file's source: tier 2) must come before Gestdown's five WEB ones (tier 3)
+// though OpenSubtitles is searched last; it is another film's, so the queue goes on to Gestdown's first maxTries
+// (another film's too), then to OpenSubtitles' popular WEB one, last in its tier (OpenSubtitles' downloads are
+// rationed). And, while OpenSubtitles' day's downloads are spent (its download refused mid-queue, or its search
+// skipped from the start) or Gestdown fails mid-queue (5xx: parked), a title nothing else aligned refused instead of
+// waiting in the queue for it.
 func TestRunQueueFallsThrough(t *testing.T) {
 	for _, c := range []string{"falls through", "quota spent at its download", "quota spent before its search", "Gestdown down at its download"} {
 		down := c == "Gestdown down at its download" // and OpenSubtitles has nothing for Show
@@ -881,6 +883,8 @@ func TestRunQueueFallsThrough(t *testing.T) {
 				w.Write([]byte(`[` + cand("web", "Show.S01E01.1080p.WEB-DL", 9999) + `,` + cand("bluray", "Show.S01E01.1080p.Blu-ray", 1) + `]`))
 			case strings.HasPrefix(r.URL.Path, "/dl/") && quota.Load():
 				w.WriteHeader(429)
+			case r.URL.Path == "/dl/bluray.gz":
+				w.Write(gz(srt(otherTimes(), 0)))
 			case strings.HasPrefix(r.URL.Path, "/dl/"):
 				w.Write(gz(srt(f.ts, 1)))
 			default:
@@ -915,10 +919,17 @@ func TestRunQueueFallsThrough(t *testing.T) {
 		if c == "quota spent at its download" {
 			blu = 2 // the refused download, then the one that came back
 		}
+		var first string
+		f.h.Env.Store.DB().QueryRow(`SELECT json_extract(fields, '$.id') FROM events WHERE item=? AND status='rejected_misaligned' ORDER BY id LIMIT 1`,
+			f.path(show)).Scan(&first)
+		if c == "falls through" && first != "opensubtitles:bluray" {
+			t.Errorf("%s: %s refused first; want OpenSubtitles' Blu-ray (tier 2) before Gestdown's WEB (tier 3)", c, first)
+		}
 		if o := f.outcomes()[f.path(show)]; o != "kept" || f.sidecar(t, show) != stripAds(srt(f.ts, 1)) || !slices.Equal(tried, []int{1, 1, 1, 1, 0}) ||
-			osCalls("/dl/bluray.gz") != blu || osCalls("/dl/web.gz") != 0 {
-			t.Errorf("%s: Show %q; Gestdown's downloaded %v; OpenSubtitles' Blu-ray %d, WEB %d; want written from the Blu-ray, "+
-				"Gestdown's first %d once each, Blu-ray %d, WEB never", c, o, tried, osCalls("/dl/bluray.gz"), osCalls("/dl/web.gz"), maxTries, blu)
+			osCalls("/dl/bluray.gz") != blu || osCalls("/dl/web.gz") != 1 || f.verdict(show, "kept")["id"] != "opensubtitles:web" {
+			t.Errorf("%s: Show %q from %v; Gestdown's downloaded %v; OpenSubtitles' Blu-ray %d, WEB %d; want written from the WEB, "+
+				"Gestdown's first %d once each, Blu-ray %d, WEB once", c, o, f.verdict(show, "kept")["id"], tried, osCalls("/dl/bluray.gz"),
+				osCalls("/dl/web.gz"), maxTries, blu)
 		}
 	}
 }
