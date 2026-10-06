@@ -1,6 +1,6 @@
 package letterboxd
 
-// ---- Letterboxd facts → the watch events his diary implies, and one want per TMDB film for the collections ----
+// ---- Letterboxd facts → the watch events a diary implies, and one want per TMDB film for the Plex watchlist ----
 
 import (
 	"sort"
@@ -37,7 +37,7 @@ type libraryFilm struct {
 	Year  int
 }
 
-// want is what Letterboxd says of one film (TMDB movie id) that the Watchlist collections need.
+// want is what Letterboxd says of one film (TMDB movie id) that the Plex watchlist needs.
 type want struct {
 	TMDB      int
 	Title     string
@@ -267,7 +267,7 @@ func (f facts) events(person string, loc *time.Location, history bool, since tim
 		return film.TMDB, ok && film.Kind == "movie" && film.TMDB > 0
 	}
 	event := func(tmdb int, ref string, kind watch.Kind, at time.Time) watch.Event {
-		return watch.Event{Person: person, Item: watch.MovieItem(library.ID{Source: "tmdb", Value: strconv.Itoa(tmdb)}),
+		return watch.Event{Person: person, Item: movieItem(tmdb),
 			Ref: name + ":" + ref, Source: name, At: at, Kind: kind}
 	}
 	type viewing struct {
@@ -338,16 +338,19 @@ func (f facts) events(person string, loc *time.Location, history bool, since tim
 	return out
 }
 
-// have is one app's state for one film: a row of letterboxd_sink.
+func movieItem(tmdb int) string {
+	return watch.MovieItem(library.ID{Source: "tmdb", Value: strconv.Itoa(tmdb)})
+}
+
+// have is one film on a member's Plex watchlist: a row of letterboxd_sink.
 type have struct {
-	Item   string // Plex ratingKey, Jellyfin item id, or plex.tv metadata id
-	Played bool   // the app shows it watched: a Plex view; Jellyfin's own flag, set past 90 % (its count rises at the start)
-	Member bool   // in the Watchlist collection / on the plex.tv watchlist
+	Item   string // plex.tv metadata id
+	Member bool   // on the watchlist
 	Added  bool   // put there by this stage, so this stage may take it out again
 }
 
-// planMembers diffs a membership (a collection, the plex.tv watchlist) against the desired set. It removes only
-// what this stage added: anything the owner put there himself stays.
+// planMembers diffs the Plex watchlist against the desired set. It removes only what this stage added: anything
+// the member put there by hand stays.
 func planMembers(desired map[int]bool, haves map[int]have) (add, remove []int) {
 	for _, id := range sortedKeys(desired) {
 		if !haves[id].Member {
@@ -362,14 +365,12 @@ func planMembers(desired map[int]bool, haves map[int]have) (add, remove []int) {
 	return add, remove
 }
 
-// unwatchedWatchlist is the films on the Letterboxd watchlist watched neither there nor in the app (a film he only
-// started in Jellyfin has a play count there, and is still unwatched). inApp (an app's own collection) keeps only
-// films the app lists; the plex.tv watchlist takes any film.
-func unwatchedWatchlist(wants []want, haves map[int]have, inApp bool) map[int]bool {
+// unwatchedWatchlist is the films on the Letterboxd watchlist watched neither on Letterboxd nor, as played (watch
+// record items) has it, in Plex or Jellyfin. Films not on the NAS are kept: the Plex watchlist takes any film.
+func unwatchedWatchlist(wants []want, played map[string]bool) map[int]bool {
 	out := map[int]bool{}
 	for _, w := range wants {
-		h := haves[w.TMDB]
-		if w.Watchlist && !w.Watched && !h.Played && (!inApp || h.Item != "") {
+		if w.Watchlist && !w.Watched && !played[movieItem(w.TMDB)] {
 			out[w.TMDB] = true
 		}
 	}

@@ -112,36 +112,39 @@ backup_max_age        = "36h"          # alert while appbackup's newest version 
 "https://plex.example.com"    = 401
 "https://nas.example.com" = 200
 
-# The owner's Letterboxd diary → projectionist's watch record (jfsync, the one writer, carries it to Plex and
-# Jellyfin), and his watchlist as a "Watchlist" collection in both apps, promoted to his Plex Home.
+# Each member's Letterboxd diary → projectionist's watch record (jfsync, the one writer, carries it to Plex and
+# Jellyfin), and each member's Letterboxd watchlist → their own Plex watchlist (plex.tv, per user; never a server
+# collection, which everyone the server is shared with would see).
 [stages.letterboxd]
-every          = "30m"                    # the RSS feed is read every run; grid pages once per pages_every. Letterboxd is paced
-                                          # at one request per 2 s for the whole process, shared with lists and tonight
-user           = "saahilsan"
-max_fetches    = 400                      # Letterboxd requests per run; the first lookups resume over a few runs
-pages_every    = "24h"                    # watchlist + watched-films grid crawl
-export_dir     = "/volume1/docker/projectionist/data/letterboxd" # unzipped account exports; the newest folder wins
-movies_dir     = "/volume1/media/Movies"
-missing_file   = "/volume1/media/_watchlist-missing.txt" # watchlist films not on the NAS; "" = none
-sink_refresh   = "24h"                    # re-read what Plex (one paged listing) and plex.tv hold this often; Plex also before a collection write, once a day per film
-jellyfin_refresh = "24h"                  # re-read what Jellyfin holds this often (15-30 s a read); also before a collection write, once a day per film
-plex_section   = 4
-jellyfin_user  = "saahil"
-person         = "saahil"                 # the owner in the watch record: his name in jfsync's users (jfsync alerts on any other)
-# false: only diary entries he logs after this stage first runs become watch events. true: also the export and the
-# feed's backlog (on 2026-10-05 about 465 Plex watched marks and 649 ratings, which Plex shows his friends: watch
-# history to friends of friends, ratings to friends). His decision.
-history        = false
-collection     = "Watchlist"              # "" = no Watchlist collection
-plex_watchlist = false                    # also mirror onto his plex.tv watchlist (his Plex friends can see it)
-run_budget     = "25m"                    # no Plex/Jellyfin/plex.tv call starts later than this into a run; keep it under every
-dry_run        = false                    # count events and collection writes only
+every           = "30m"                   # the RSS feeds are read every run. Letterboxd is paced at one request per 2 s for
+                                          # the whole process, shared with lists and tonight; it offers no webhooks, so it is polled
+user            = "saahilsan"
+max_fetches     = 400                     # Letterboxd requests per run; the first lookups resume over a few runs
+watchlist_every = "6h"                    # each member's watchlist grid crawl
+pages_every     = "24h"                   # his watched-films grid crawl
+export_dir      = "/volume1/docker/projectionist/data/letterboxd" # unzipped account exports; the newest folder wins
+movies_dir      = "/volume1/media/Movies"
+missing_file    = "/volume1/media/_watchlist-missing.txt" # his watchlist films not on the NAS; "" = none
+sink_refresh    = "24h"                   # re-read each Plex watchlist this often; also before any write to it
+person          = "saahil"                # the owner in the watch record: his name in jfsync's users (jfsync alerts on any other)
+# false: only diary entries logged after a member's first run become watch events. true: also the export and the
+# feed's backlog (for him on 2026-10-05 about 465 Plex watched marks and 649 ratings, which Plex shows his friends:
+# watch history to friends of friends, ratings to friends). His decision.
+history         = false
+# Each member's Letterboxd watchlist films they have not watched (on Letterboxd, or in Plex or Jellyfin as the watch
+# record has it) go on their own Plex watchlist, films not on the NAS included; only films this stage added are taken
+# off again, so what they add by hand stays. His is written with the server's own sign-in, a person's through a Plex
+# Home switch to their plex_user (a managed user has a watchlist too). Visible as each Plex account's privacy allows.
+plex_watchlist  = false
+run_budget      = "25m"                   # no plex.tv call starts later than this into a run; keep it under every
+dry_run         = false                   # count events and watchlist writes only
 # More members, each synced after him on the same max_fetches: their diary becomes watch events for person (a name in
-# jfsync's users). user is their Letterboxd username. Optional: history (false, as his), export_dir ("" = none; it may
-# be his: each member reads only the letterboxd-<user>-* folders named for them), collection ("" = none: the Watchlist collections, the
-# missing-films file and the plex.tv watchlist stay his) and jellyfin_user (whose played flags their collection follows;
-# default person). Their Plex collection ignores Plex views (the server token's are his) and is never put on his Home.
-# people = [{ person = "roger", user = "<her Letterboxd username>" }]
+# jfsync's users). user is their Letterboxd username; plex_user, their Plex Home user (its username, or a managed user's
+# name), is where their watchlist goes ("" = their watchlist is not read). Optional: history (false, as his) and
+# export_dir ("" = none; it may be his: each member reads only the letterboxd-<user>-* folders named for them). A Home
+# user with a PIN cannot be switched to: the run alerts and skips that member's watchlist.
+# people = [{ person = "roger", user = "auralb", plex_user = "roger" },
+#           { person = "aaron", user = "aaron1009", plex_user = "aarontest941" }]
 
 # Small 4K copies of the films listed as "Remote 4K" (Plex playlist, Jellyfin playlist or Jellyfin collection);
 # replaces scripts/remote4k.py (DSM task 9).

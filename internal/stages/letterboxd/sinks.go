@@ -1,15 +1,15 @@
 package letterboxd
 
-// ---- sinks: what Plex, Jellyfin and plex.tv hold of the watchlist (snapshots), and the writes that close the gap ----
+// ---- the sink: each member's own Plex watchlist on plex.tv, kept in step with their Letterboxd watchlist ----
 //
-// Each app runs in its own goroutine, so a slow Plex never holds up Jellyfin. A stored snapshot only ever shows
-// that nothing needs doing: writes are planned against a read of the app made in the same run (see planned).
-// Snapshots are also re-read every sink_refresh (Jellyfin: jellyfin_refresh), and each successful write updates its
-// stored row, so a rerun plans nothing. Idempotent calls get 3 attempts (2 s, 4 s apart); a write that may have
-// landed with its answer lost is not repeated in the run. 3 failed calls in a row end that app's run, and what is
-// left stays in the diff for the next run. A film whose writes fail in 3 runs in a row parks, with one alert.
+// What the watchlist holds is a stored snapshot, re-read every sink_refresh and before any write (a film the member
+// added or removed by hand since the last read must count), and each successful write updates its stored row, so a
+// rerun plans nothing. Calls get 3 attempts (2 s, 4 s apart); 3 failed calls in a row end the member's part of the
+// run, and what is left stays in the diff for the next run. A film whose writes fail in 3 runs in a row parks, with
+// one alert.
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -24,15 +24,13 @@ import (
 	"time"
 
 	"projectionist/internal/store"
+	"projectionist/internal/watch"
 )
 
+const app = "plextv" // the sink's key in letterboxd_sink, letterboxd_retry and the counts
+
 type sinkMeta struct {
-	FetchedAt  time.Time `json:"fetched_at"`
-	Machine    string    `json:"machine,omitempty"`     // Plex machineIdentifier, for collection item URIs
-	UserID     string    `json:"user_id,omitempty"`     // Jellyfin user
-	Collection string    `json:"collection,omitempty"`  // Watchlist collection id; "" until created
-	Index      int       `json:"index,omitempty"`       // Plex: the collection's tag id, which filters the section listing
-	PromotedID string    `json:"promoted_id,omitempty"` // Plex: the collection this stage put on the owner's Home
+	FetchedAt time.Time `json:"fetched_at"`
 }
 
 var (
@@ -42,15 +40,9 @@ var (
 
 type breaker struct{ fails int }
 
-// call runs one idempotent app request with retries; a call that still fails counts toward the breaker.
+// call runs one plex.tv request with retries (each is safe to repeat); a call that still fails counts toward the
+// breaker.
 func (r *run) call(ctx context.Context, b *breaker, f func() error) error {
-	return r.callOnce(ctx, b, true, f)
-}
-
-// callOnce is call for a request that must not be repeated blindly (a create makes a second collection, and re-adding
-// a member answers HTTP 500): when it may have reached the app but its answer was lost (any transport error, timeouts included),
-// or f itself reports errUnconfirmed, it returns at once with errUnconfirmed instead of retrying.
-func (r *run) callOnce(ctx context.Context, b *breaker, idempotent bool, f func() error) error {
 	if b.fails >= 3 {
 		return errBreakerOpen
 	}
@@ -61,8 +53,7 @@ func (r *run) callOnce(ctx context.Context, b *breaker, idempotent bool, f func(
 				return serr
 			}
 		}
-		// A busy Plex answers a page in a minute (its Butler tasks, on the NAS), and a run waits for every app:
-		// past the budget no call starts, so the next run's feed read and Jellyfin writes are not held back.
+		// Past the budget no call starts, so a slow plex.tv cannot hold back the next run's feed read.
 		if !r.env.Now().Before(r.until) {
 			b.fails = 3
 			r.count("out_of_time", 1)
@@ -75,49 +66,41 @@ func (r *run) callOnce(ctx context.Context, b *breaker, idempotent bool, f func(
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		var transport *url.Error
-		if !idempotent && errors.As(err, &transport) {
-			err = fmt.Errorf("%w: %w", errUnconfirmed, err)
-		}
-		if errors.Is(err, errUnconfirmed) {
-			break
-		}
 	}
 	b.fails++
 	return err
 }
 
-var errUnconfirmed = errors.New("sent, outcome unknown")
-
-func (r *run) loadHaves(ctx context.Context, app string) (map[int]have, error) {
+func (r *run) loadHaves(ctx context.Context) (map[int]have, error) {
 	out := map[int]have{}
-	err := query(ctx, r.db, `SELECT tmdb, item, played, member, added FROM letterboxd_sink WHERE app=?`, func(rows *sql.Rows) error {
+	err := query(ctx, r.db, `SELECT tmdb, item, member, added FROM letterboxd_sink WHERE app=?`, func(rows *sql.Rows) error {
 		var id int
 		var h have
-		err := rows.Scan(&id, &h.Item, &h.Played, &h.Member, &h.Added)
+		err := rows.Scan(&id, &h.Item, &h.Member, &h.Added)
 		out[id] = h
 		return err
 	}, r.sinkKey(app))
 	return out, err
 }
 
-// putSink stores a row. plays, rating and last are no longer read (jfsync writes watch state); they stay in the table
-// so the rows of state DBs made before still fit it.
-const putSink = `INSERT OR REPLACE INTO letterboxd_sink(app, tmdb, item, plays, played, rating, last, member, added) VALUES (?, ?, ?, 0, ?, 0, '', ?, ?)`
+// putSink stores a row. plays, played, rating and last are no longer read (they held the server collections' watch
+// marks); they stay in the table so the rows of state DBs made before still fit it.
+const putSink = `INSERT OR REPLACE INTO letterboxd_sink(app, tmdb, item, plays, played, rating, last, member, added) VALUES (?, ?, ?, 0, 0, 0, '', ?, ?)`
 
 // saveHave stores one film's row and keeps haves, the in-memory copy of the rows, in step.
-func (r *run) saveHave(ctx context.Context, app string, haves map[int]have, id int, h have) error {
-	if _, err := r.db.ExecContext(ctx, putSink, r.sinkKey(app), id, h.Item, h.Played, h.Member, h.Added); err != nil {
+func (r *run) saveHave(ctx context.Context, haves map[int]have, id int, h have) error {
+	if _, err := r.db.ExecContext(ctx, putSink, r.sinkKey(app), id, h.Item, h.Member, h.Added); err != nil {
 		return storeErr{err}
 	}
 	haves[id] = h
 	return nil
 }
 
-// replaceSnapshot stores a fresh read of an app, keeping the "added by this stage" marks. Rows the app no longer
-// lists are dropped, or (keepUnlisted: plex.tv lookups for films not on the watchlist) kept as non-members.
-func (r *run) replaceSnapshot(ctx context.Context, app string, fresh map[int]have, keepUnlisted bool) error {
-	old, err := r.loadHaves(ctx, app)
+// replaceSnapshot stores a fresh read of the watchlist, keeping the "added by this stage" marks of films still on
+// it: a film the member put there by hand is never marked, however often it is read. Films no longer listed are kept
+// as non-members, so their plex.tv id is not looked up again.
+func (r *run) replaceSnapshot(ctx context.Context, fresh map[int]have) error {
+	old, err := r.loadHaves(ctx)
 	if err != nil {
 		return err
 	}
@@ -130,7 +113,7 @@ func (r *run) replaceSnapshot(ctx context.Context, app string, fresh map[int]hav
 		return err
 	}
 	put := func(id int, h have) error {
-		_, err := tx.ExecContext(ctx, putSink, r.sinkKey(app), id, h.Item, h.Played, h.Member, h.Added)
+		_, err := tx.ExecContext(ctx, putSink, r.sinkKey(app), id, h.Item, h.Member, h.Added)
 		return err
 	}
 	for id, h := range fresh {
@@ -139,112 +122,59 @@ func (r *run) replaceSnapshot(ctx context.Context, app string, fresh map[int]hav
 			return err
 		}
 	}
-	if keepUnlisted {
-		for id, h := range old {
-			if _, ok := fresh[id]; !ok && h.Item != "" {
-				if err := put(id, have{Item: h.Item}); err != nil {
-					return err
-				}
+	for id, h := range old {
+		if _, ok := fresh[id]; !ok && h.Item != "" {
+			if err := put(id, have{Item: h.Item}); err != nil {
+				return err
 			}
 		}
 	}
 	return tx.Commit()
 }
 
-// storedSnapshot returns an app's stored snapshot; due is true when it must be re-read: forced, or older than every.
-func (r *run) storedSnapshot(ctx context.Context, app string, every time.Duration, force bool) (m sinkMeta, haves map[int]have, due bool, err error) {
-	if _, err = r.env.Store.GetJSON(ctx, r.ns, "sink."+app, &m); err != nil {
-		return m, nil, false, err
+// snapshot returns the member's Plex watchlist as stored, re-read when forced or older than sink_refresh; fresh
+// reports a read made now. Films are keyed by TMDB movie id: a show's TMDB id is in another number space, so the
+// member's shows are left out (and so never touched).
+func (r *run) snapshot(ctx context.Context, b *breaker, force bool) (haves map[int]have, fresh bool, err error) {
+	var m sinkMeta
+	if _, err := r.env.Store.GetJSON(ctx, r.ns, "sink."+app, &m); err != nil {
+		return nil, false, err
 	}
-	if force || r.env.Now().Sub(m.FetchedAt) >= every {
-		return m, nil, true, nil
+	if !force && r.env.Now().Sub(m.FetchedAt) < r.opt.SinkRefresh {
+		haves, err = r.loadHaves(ctx)
+		return haves, false, err
 	}
-	haves, err = r.loadHaves(ctx, app)
-	return m, haves, false, err
-}
-
-// storeSnapshot saves a fresh read of an app (see replaceSnapshot), stamps m with its time, and returns it as stored.
-func (r *run) storeSnapshot(ctx context.Context, app string, m *sinkMeta, fresh map[int]have, keepUnlisted bool) (map[int]have, error) {
-	if err := r.replaceSnapshot(ctx, app, fresh, keepUnlisted); err != nil {
-		return nil, storeErr{err}
+	listed := map[int]have{}
+	const page = 100 // plex.tv refuses 200 ("Invalid value provided for x-plex-container-size", 2026-10-05)
+	for start := 0; ; start += page {
+		var l plexListing
+		path := fmt.Sprintf("/library/sections/watchlist/all?includeGuids=1&X-Plex-Container-Start=%d&X-Plex-Container-Size=%d", start, page)
+		if err := r.discover(ctx, b, http.MethodGet, path, &l); err != nil {
+			return nil, false, err
+		}
+		for _, it := range l.Metadata {
+			if id := tmdbFromGuids(it.Guid); id > 0 && it.Type == "movie" {
+				listed[id] = have{Item: it.RatingKey, Member: true}
+			}
+		}
+		if len(l.Metadata) < page || start+page >= l.TotalSize {
+			break
+		}
+	}
+	if err := r.replaceSnapshot(ctx, listed); err != nil {
+		return nil, false, storeErr{err}
 	}
 	m.FetchedAt = r.env.Now()
-	if err := r.putMeta(ctx, app, *m); err != nil {
-		return nil, err
+	if err := r.env.Store.PutJSON(ctx, r.ns, "sink."+app, m); err != nil {
+		return nil, false, storeErr{err}
 	}
 	r.count(app+".snapshot", 1)
-	return r.loadHaves(ctx, app)
+	haves, err = r.loadHaves(ctx)
+	return haves, err == nil, err
 }
 
-// mark records films as members or not, and whether this stage put them there.
-func (r *run) mark(ctx context.Context, app string, haves map[int]have, ids []int, member, added bool) error {
-	for _, id := range ids {
-		h := haves[id]
-		h.Member, h.Added = member, added
-		if err := r.saveHave(ctx, app, haves, id, h); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// sinkPlan is the Watchlist collection writes one app needs.
+// sinkPlan is the watchlist writes one run needs.
 type sinkPlan struct{ add, remove []int }
-
-func (r *run) planSink(wants []want, haves map[int]have) (p sinkPlan) {
-	if r.opt.Collection != "" {
-		p.add, p.remove = planMembers(unwatchedWatchlist(wants, haves, true), haves)
-	}
-	return p
-}
-
-// planned plans an app's writes and counts them. A stored snapshot may only show that nothing needs doing: a plan
-// with work in it is made again against a read made now (he watches a film in Plex and it must leave the
-// collection; he adds one by hand, and re-adding a member answers HTTP 500). Each film forces that read at most once
-// per rereadEvery, so a write that keeps failing cannot page all of Plex every run.
-func (r *run) planned(ctx context.Context, app string, snapshot func(context.Context, bool) (sinkMeta, map[int]have, bool, error),
-	wants []want) (sinkMeta, map[int]have, sinkPlan, error) {
-	m, haves, readNow, err := snapshot(ctx, false)
-	if err != nil {
-		return m, nil, sinkPlan{}, fmt.Errorf("%s snapshot: %w", app, err)
-	}
-	retries, err := r.loadRetries(ctx, app)
-	if err != nil {
-		return m, nil, sinkPlan{}, err
-	}
-	p := r.planSink(wants, haves)
-	if !readNow {
-		var due []int
-		for _, id := range sortedKeys(p.films()) {
-			if t := retries[id]; !t.parked(haves[id].Item) && r.env.Now().Sub(t.RereadAt) >= rereadEvery {
-				due = append(due, id)
-			}
-		}
-		if len(due) > 0 {
-			if m, haves, _, err = snapshot(ctx, true); err != nil {
-				return m, nil, sinkPlan{}, fmt.Errorf("%s snapshot: %w", app, err)
-			}
-			readNow = true
-			p = r.planSink(wants, haves)
-			for _, id := range due {
-				t := retries[id]
-				t.RereadAt = r.env.Now()
-				if r.opt.DryRun { // a dry run's read must not keep the apply after it from reading again
-					continue
-				}
-				if err := r.saveRetry(ctx, app, id, t); err != nil {
-					return m, nil, sinkPlan{}, err
-				}
-				retries[id] = t
-			}
-		}
-	}
-	if p, err = r.settle(ctx, app, p, haves, retries, !readNow); err != nil {
-		return m, nil, sinkPlan{}, err
-	}
-	r.countPlan(app, p)
-	return m, haves, p, nil
-}
 
 // films is every film the plan writes to.
 func (p sinkPlan) films() map[int]bool {
@@ -255,33 +185,27 @@ func (p sinkPlan) films() map[int]bool {
 	return out
 }
 
-// ---- writes that keep failing: one forced read per film per day, then parked ----
+// ---- writes that keep failing: parked after 3 runs in a row ----
 
 const (
-	rereadEvery = 24 * time.Hour // a film's writes force a full read of its app at most this often
+	rereadEvery = 24 * time.Hour // an unreadable Letterboxd answer is asked again after this
 	parkAfter   = 3              // runs in a row with a failed write for a film, after which its writes stop
 )
 
-// retry is a row of letterboxd_retry: what one film's writes have cost in one app.
+// retry is a row of letterboxd_retry: what one film's writes have cost.
 type retry struct {
-	Item     string    // the app item the failures were against; a new one (the app re-indexed it) starts afresh
-	RereadAt time.Time // last full read forced by this film's writes; zero = never
-	Tries    int       // runs in a row in which a write for this film failed or went unconfirmed
+	Item  string // the plex.tv id the failures were against
+	Tries int    // runs in a row in which a write for this film failed
 }
 
 func (t retry) parked(item string) bool { return t.Tries >= parkAfter && t.Item == item }
 
-func (r *run) loadRetries(ctx context.Context, app string) (map[int]retry, error) {
+func (r *run) loadRetries(ctx context.Context) (map[int]retry, error) {
 	out := map[int]retry{}
-	err := query(ctx, r.db, `SELECT tmdb, item, reread_at, tries FROM letterboxd_retry WHERE app=?`, func(rows *sql.Rows) error {
+	err := query(ctx, r.db, `SELECT tmdb, item, tries FROM letterboxd_retry WHERE app=?`, func(rows *sql.Rows) error {
 		var id int
 		var t retry
-		var at string
-		if err := rows.Scan(&id, &t.Item, &at, &t.Tries); err != nil {
-			return err
-		}
-		var err error
-		t.RereadAt, err = time.Parse(store.TimeFormat, at)
+		err := rows.Scan(&id, &t.Item, &t.Tries)
 		out[id] = t
 		return err
 	}, r.sinkKey(app))
@@ -291,91 +215,54 @@ func (r *run) loadRetries(ctx context.Context, app string) (map[int]retry, error
 	return out, nil
 }
 
-func (r *run) saveRetry(ctx context.Context, app string, id int, t retry) error {
-	if _, err := r.db.ExecContext(ctx, `INSERT OR REPLACE INTO letterboxd_retry(app, tmdb, item, reread_at, tries) VALUES (?, ?, ?, ?, ?)`,
-		r.sinkKey(app), id, t.Item, t.RereadAt.UTC().Format(store.TimeFormat), t.Tries); err != nil {
-		return storeErr{err}
-	}
-	return nil
-}
-
-// settle applies the failure records to a plan: a film with nothing left to do starts any later count afresh, and
-// a parked film is left out. stale means every film with work forced a read within rereadEvery, so none was made
-// now: its writes wait for the next read.
-func (r *run) settle(ctx context.Context, app string, p sinkPlan, haves map[int]have, retries map[int]retry, stale bool) (sinkPlan, error) {
+// settle applies the failure records to a plan: a film with nothing left to do forgets its failures (a later one
+// starts a fresh count), and a parked film is left out; parked counts those.
+func (r *run) settle(ctx context.Context, p sinkPlan, haves map[int]have, retries map[int]retry) (out sinkPlan, parked int, err error) {
 	work := p.films()
 	for _, id := range sortedKeys(retries) {
-		switch t := retries[id]; {
-		case work[id]:
-		case r.env.Now().Sub(t.RereadAt) >= rereadEvery:
+		if !work[id] {
 			if _, err := r.db.ExecContext(ctx, `DELETE FROM letterboxd_retry WHERE app=? AND tmdb=?`, r.sinkKey(app), id); err != nil {
-				return p, storeErr{err}
-			}
-		case t.Tries != 0:
-			t.Tries = 0
-			if err := r.saveRetry(ctx, app, id, t); err != nil {
-				return p, err
+				return p, 0, storeErr{err}
 			}
 		}
 	}
-	parked, deferred := map[int]bool{}, map[int]bool{}
-	for id := range work {
-		if retries[id].parked(haves[id].Item) {
-			parked[id] = true
-		}
-	}
-	var out sinkPlan
 	keep := func(ids []int) (kept []int) {
 		for _, id := range ids {
-			switch {
-			case parked[id]:
-			case stale:
-				deferred[id] = true
-			default:
-				kept = append(kept, id)
+			if retries[id].parked(haves[id].Item) {
+				parked++
+				continue
 			}
+			kept = append(kept, id)
 		}
 		return kept
 	}
-	out.add, out.remove = keep(p.add), keep(p.remove)
-	r.count(app+".parked", len(parked))
-	r.count(app+".deferred", len(deferred))
-	return out, nil
+	return sinkPlan{add: keep(p.add), remove: keep(p.remove)}, parked, nil
 }
 
-// recordFails counts, per film, the runs in a row in which one of its writes failed or went unconfirmed, and tells
-// the owner once when films park.
+// recordFails counts, per film, the runs in a row in which one of its writes failed, and tells the owner once when
+// films park.
 func (r *run) recordFails(ctx context.Context, wants []want) error {
 	titles := map[int]string{}
 	for _, w := range wants {
 		titles[w.TMDB] = w.Title
 	}
-	for _, app := range sortedKeys(r.fails) {
-		var parked []string
-		for _, id := range sortedKeys(r.fails[app]) {
-			var tries int
-			err := r.db.QueryRowContext(ctx, `INSERT INTO letterboxd_retry(app, tmdb, item, reread_at, tries)
-				VALUES (?1, ?2, COALESCE((SELECT item FROM letterboxd_sink WHERE app=?1 AND tmdb=?2), ''), ?3, 1)
-				ON CONFLICT(app, tmdb) DO UPDATE SET tries = CASE WHEN item = excluded.item THEN tries + 1 ELSE 1 END, item = excluded.item
-				RETURNING tries`, r.sinkKey(app), id, time.Time{}.Format(store.TimeFormat)).Scan(&tries)
-			if err != nil {
-				return storeErr{err}
-			}
-			if tries == parkAfter {
-				parked = append(parked, fmt.Sprintf("%s (TMDB %d)", titles[id], id))
-			}
+	var parked []string
+	for _, id := range sortedKeys(r.fails) {
+		var tries int
+		err := r.db.QueryRowContext(ctx, `INSERT INTO letterboxd_retry(app, tmdb, item, reread_at, tries)
+			VALUES (?1, ?2, COALESCE((SELECT item FROM letterboxd_sink WHERE app=?1 AND tmdb=?2), ''), ?3, 1)
+			ON CONFLICT(app, tmdb) DO UPDATE SET tries = CASE WHEN item = excluded.item THEN tries + 1 ELSE 1 END, item = excluded.item
+			RETURNING tries`, r.sinkKey(app), id, time.Time{}.Format(store.TimeFormat)).Scan(&tries)
+		if err != nil {
+			return storeErr{err}
 		}
-		if len(parked) > 0 {
-			r.alert("%s: writes for %s failed in %d runs in a row; parked until the app lists the film anew or it needs nothing more",
-				app, strings.Join(parked, ", "), parkAfter)
+		if tries == parkAfter {
+			parked = append(parked, fmt.Sprintf("%s (TMDB %d)", titles[id], id))
 		}
 	}
-	return nil
-}
-
-func (r *run) putMeta(ctx context.Context, app string, m sinkMeta) error {
-	if err := r.env.Store.PutJSON(ctx, r.ns, "sink."+app, m); err != nil {
-		return storeErr{err}
+	if len(parked) > 0 {
+		r.alert("Plex watchlist: writes for %s failed in %d runs in a row; parked until the film needs nothing more",
+			strings.Join(parked, ", "), parkAfter)
 	}
 	return nil
 }
@@ -392,44 +279,19 @@ func tmdbFromGuids(guids []struct {
 	return 0
 }
 
-// countPlan records the planned collection writes, and logs them.
-func (r *run) countPlan(app string, p sinkPlan) {
-	r.count(app+".collection_add", len(p.add))
-	r.count(app+".collection_remove", len(p.remove))
-	if len(p.add)+len(p.remove) > 0 {
-		r.env.Log.Info("collection planned", "event", "collection_plan", "app", app, "add", p.add, "remove", p.remove, "dry_run", r.opt.DryRun)
-	}
+// failed reports a write that failed, for the film it was for.
+func (r *run) failed(what string, err error, id int) {
+	r.count(app+".failed", 1)
+	r.env.Log.Warn("write failed", "event", "sink_write_failed", "app", app, "what", what, "person", r.opt.Person, "tmdb", id, "err", err)
+	r.fails[id] = true
 }
 
-// failed reports a write that failed or went unconfirmed, for the films it was for (none: not a film's write).
-func (r *run) failed(app, what string, err error, ids ...int) {
-	kind, event := ".failed", "sink_write_failed"
-	if errors.Is(err, errUnconfirmed) { // sent, answer lost: the next read of the app shows whether it landed
-		kind, event = ".unconfirmed", "sink_write_unconfirmed"
-	}
-	r.count(app+kind, 1)
-	r.env.Log.Warn("write failed or unconfirmed", "event", event, "app", app, "what", what, "tmdb", ids, "err", err)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.fails[app] == nil {
-		r.fails[app] = map[int]bool{}
-	}
-	for _, id := range ids {
-		r.fails[app][id] = true
-	}
-}
-
-// ---- Plex ----
-
-const plexLib = "identifier=com.plexapp.plugins.library"
+// ---- plex.tv ----
 
 type plexItem struct {
 	RatingKey string `json:"ratingKey"`
 	PlexGUID  string `json:"guid"` // the string "plex://movie/..."; without its own field Go's case-insensitive keys pour it into Guid
 	Type      string `json:"type"`
-	Title     string `json:"title"`
-	Index     int    `json:"index"` // a collection's tag id
-	ViewCount int    `json:"viewCount"`
 	Guid      []struct {
 		ID string `json:"id"`
 	} `json:"Guid"`
@@ -440,404 +302,30 @@ type plexListing struct {
 	Metadata  []plexItem `json:"Metadata"`
 }
 
-// plexPages reads the Movies section in lean 100-film pages, each page retried: with the NAS busy, one 500-film
-// page outlasted a 60 s timeout while 100-film pages took 4-17 s. filter narrows it ("&collection=<tag id>").
-func (r *run) plexPages(ctx context.Context, b *breaker, filter string, visit func(plexItem)) error {
-	const page = 100
-	for start := 0; ; start += page {
-		var l plexListing
-		path := fmt.Sprintf("/library/sections/%d/all?type=1%s&includeGuids=1&excludeElements=Media,Genre,Country,Director,Writer,Role,Collection,Label,Field"+
-			"&excludeFields=summary,tagline&X-Plex-Container-Start=%d&X-Plex-Container-Size=%d", r.opt.PlexSection, filter, start, page)
-		if err := r.call(ctx, b, func() error { return r.env.Plex.GetJSON(ctx, path, &l) }); err != nil {
-			return err
-		}
-		for _, it := range l.Metadata {
-			visit(it)
-		}
-		if len(l.Metadata) < page || start+page >= l.TotalSize {
-			return nil
-		}
+var plexTVClient = &http.Client{Timeout: 20 * time.Second}
+
+// clientID is the X-Plex-Client-Identifier the member's calls carry: a person's own, so that the device a Home switch
+// signs in is theirs and never one of the owner's.
+func (r *run) clientID() string {
+	if r.who == "" {
+		return "projectionist"
 	}
+	return "projectionist-watchlist-" + r.who
 }
 
-// plexSnapshot re-reads the Movies section and the Watchlist collection's members when due or forced; otherwise
-// it returns the stored snapshot. The bool reports a re-read. A listing that fails is retried whole next run.
-func (r *run) plexSnapshot(ctx context.Context, force bool) (sinkMeta, map[int]have, bool, error) {
-	m, haves, due, err := r.storedSnapshot(ctx, "plex", r.opt.SinkRefresh, force)
-	if err != nil || !due {
-		return m, haves, false, err
-	}
-	b := &breaker{}
-	var ident struct {
-		MachineIdentifier string `json:"machineIdentifier"`
-	}
-	if err := r.call(ctx, b, func() error { return r.env.Plex.GetJSON(ctx, "/identity", &ident) }); err != nil {
-		return m, nil, false, err
-	}
-	m.Machine = ident.MachineIdentifier
-	fresh, byKey := map[int]have{}, map[string]int{}
-	if err := r.plexPages(ctx, b, "", func(it plexItem) {
-		if id := tmdbFromGuids(it.Guid); id > 0 {
-			fresh[id] = have{Item: it.RatingKey, Played: it.ViewCount > 0 && r.who == ""} // the server token's views are the owner's
-			byKey[it.RatingKey] = id
-		}
-	}); err != nil {
-		return m, nil, false, err
-	}
-	m.Collection, m.Index = "", 0
-	if r.opt.Collection != "" {
-		if err := r.call(ctx, b, func() (err error) { m.Collection, m.Index, err = r.plexCollectionID(ctx); return err }); err != nil {
-			return m, nil, false, err
-		}
-		if m.Collection != "" {
-			// The section listing filtered on the collection's tag: /library/collections/<id>/children outlasted 120 s
-			// on the busy NAS while this listed all 110 members in 0.2 s. (Each film's own Collection tags will not do:
-			// a listing shows at most two per film.)
-			if err := r.plexPages(ctx, b, fmt.Sprintf("&collection=%d", m.Index), func(it plexItem) {
-				if id, ok := byKey[it.RatingKey]; ok {
-					h := fresh[id]
-					h.Member = true
-					fresh[id] = h
-				}
-			}); err != nil {
-				return m, nil, false, err
-			}
-		}
-	}
-	haves, err = r.storeSnapshot(ctx, "plex", &m, fresh, false)
-	return m, haves, err == nil, err
-}
-
-// plexCollectionID finds the Watchlist collection by title, with its tag id; "" when it does not exist yet.
-func (r *run) plexCollectionID(ctx context.Context) (string, int, error) {
-	var cols plexListing
-	if err := r.env.Plex.GetJSON(ctx, fmt.Sprintf("/library/sections/%d/collections", r.opt.PlexSection), &cols); err != nil {
-		return "", 0, err
-	}
-	for _, c := range cols.Metadata {
-		if c.Title == r.opt.Collection {
-			return c.RatingKey, c.Index, nil
-		}
-	}
-	return "", 0, nil
-}
-
-func (r *run) syncPlex(ctx context.Context, wants []want) error {
-	const app = "plex"
-	m, haves, p, err := r.planned(ctx, app, r.plexSnapshot, wants)
+// plexTV sends one request to plex.tv or its Discover service (an absolute URL) with tok, and decodes the JSON answer
+// into out (nil: none). The token goes in a header, never in the URL, so no error or log names it.
+func (r *run) plexTV(ctx context.Context, tok, method, rawURL string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
 	if err != nil {
 		return err
 	}
-	if r.opt.Collection != "" && r.who == "" && (m.Collection == "" && len(p.add) > 0 || m.Collection != "" && m.PromotedID != m.Collection) {
-		r.count(app+".home_promote", 1)
-	}
-	if r.opt.DryRun || r.opt.Collection == "" {
-		return nil
-	}
-	return r.plexCollection(ctx, &breaker{}, m, haves, p.add, p.remove)
-}
-
-func (r *run) plexCollection(ctx context.Context, b *breaker, m sinkMeta, haves map[int]have, add, remove []int) error {
-	const app = "plex"
-	uri := func(ids []int) string {
-		keys := make([]string, len(ids))
-		for i, id := range ids {
-			keys[i] = haves[id].Item
-		}
-		return url.QueryEscape("server://" + m.Machine + "/com.plexapp.plugins.library/library/metadata/" + strings.Join(keys, ","))
-	}
-	for len(add) > 0 {
-		batch := add[:min(len(add), 50)]
-		add = add[len(batch):]
-		// Marked as added before the write: a busy Plex can apply an add and lose the answer, and the next run's
-		// fresh listing then shows them as members this stage put there, free to leave once watched. Neither a
-		// create nor an add is repeated blindly: re-adding a member answers HTTP 500.
-		if err := r.mark(ctx, app, haves, batch, false, true); err != nil {
-			return err
-		}
-		known := m.Collection
-		err := r.callOnce(ctx, b, false, func() error {
-			if m.Collection != "" {
-				return r.env.Plex.Do(ctx, http.MethodPut, "/library/collections/"+m.Collection+"/items?uri="+uri(batch))
-			}
-			id, index, err := r.plexCollectionID(ctx) // by title first: a create whose answer was lost must not run twice
-			if err != nil {
-				return err
-			}
-			if id != "" { // made by an earlier attempt whose answer was lost; its members are read next run
-				m.Collection, m.Index = id, index
-				return errUnconfirmed
-			}
-			if err := r.env.Plex.Do(ctx, http.MethodPost, fmt.Sprintf("/library/collections?type=1&smart=0&sectionId=%d&title=%s&uri=%s",
-				r.opt.PlexSection, url.QueryEscape(r.opt.Collection), uri(batch))); err != nil {
-				return err
-			}
-			// plex.Client does not return the create answer's body, so read the new id back.
-			if id, index, err = r.plexCollectionID(ctx); err != nil {
-				return err
-			}
-			if id == "" {
-				return fmt.Errorf("plex: collection %q not listed after creating it", r.opt.Collection)
-			}
-			m.Collection, m.Index = id, index
-			return nil
-		})
-		if m.Collection != known {
-			if err := r.putMeta(ctx, app, m); err != nil {
-				return err
-			}
-		}
-		if err != nil {
-			r.failed(app, "collection_add", err, batch...)
-			return nil
-		}
-		if err := r.mark(ctx, app, haves, batch, true, true); err != nil {
-			return err
-		}
-		r.count(app+".collection_added", len(batch))
-	}
-	for _, id := range remove {
-		if err := r.call(ctx, b, func() error {
-			return r.env.Plex.Do(ctx, http.MethodDelete, "/library/collections/"+m.Collection+"/items/"+url.PathEscape(haves[id].Item))
-		}); err != nil {
-			r.failed(app, "collection_remove", err, id)
-			return nil
-		}
-		if err := r.mark(ctx, app, haves, []int{id}, false, false); err != nil {
-			return err
-		}
-		r.count(app+".collection_removed", 1)
-	}
-	// Promoted once per collection, so if he takes it off his Home it stays off. A person's is not his to promote.
-	if m.Collection != "" && m.PromotedID != m.Collection && r.who == "" {
-		// Shared home off explicitly: left out, Plex 1.43 promotes the hub to every shared user's Home too.
-		if err := r.call(ctx, b, func() error {
-			return r.env.Plex.Do(ctx, http.MethodPost, fmt.Sprintf("/hubs/sections/%d/manage?metadataItemId=%s&promotedToOwnHome=1&promotedToRecommended=1&promotedToSharedHome=0",
-				r.opt.PlexSection, m.Collection))
-		}); err != nil {
-			r.failed(app, "home_promote", err)
-			return nil
-		}
-		m.PromotedID = m.Collection
-		if err := r.putMeta(ctx, app, m); err != nil {
-			return err
-		}
-		r.count(app+".home_promoted", 1)
-	}
-	return nil
-}
-
-// ---- Jellyfin ----
-
-type jfItem struct {
-	ID          string            `json:"Id"`
-	Name        string            `json:"Name"`
-	Path        string            `json:"Path"`
-	ProviderIDs map[string]string `json:"ProviderIds"`
-	UserData    struct {
-		Played bool `json:"Played"`
-	} `json:"UserData"`
-}
-
-type jfItems struct {
-	Items            []jfItem `json:"Items"`
-	TotalRecordCount int      `json:"TotalRecordCount"`
-}
-
-// jfPages reads a Jellyfin item listing in 100-item pages, each retried: on the busy NAS a cold Jellyfin took 31 s
-// to list 299 movies at once and 8.7 s for a page of 100, and the library holds 2,240.
-func (r *run) jfPages(ctx context.Context, b *breaker, query string, visit func(jfItem)) error {
-	const page = 100
-	for start := 0; ; start += page {
-		var l jfItems
-		path := fmt.Sprintf("/Items?%s&SortBy=SortName,ProductionYear,DateCreated&StartIndex=%d&Limit=%d", query, start, page)
-		if err := r.call(ctx, b, func() error { return r.env.Jellyfin.GetJSON(ctx, path, &l) }); err != nil {
-			return err
-		}
-		for _, it := range l.Items {
-			visit(it)
-		}
-		if len(l.Items) < page || start+page >= l.TotalRecordCount {
-			return nil
-		}
-	}
-}
-
-// jfTMDB prefers the folder's {tmdb-N} (the library's own identity) over Jellyfin's provider id.
-func jfTMDB(path string, providers map[string]string) int {
-	if i := strings.Index(path, "{tmdb-"); i >= 0 {
-		if j := strings.IndexByte(path[i:], '}'); j > 0 {
-			if id, err := strconv.Atoi(path[i+6 : i+j]); err == nil {
-				return id
-			}
-		}
-	}
-	id, _ := strconv.Atoi(providers["Tmdb"])
-	return id
-}
-
-// jellyfinSnapshot is plexSnapshot for Jellyfin: the user's movies, then the collection's.
-func (r *run) jellyfinSnapshot(ctx context.Context, force bool) (sinkMeta, map[int]have, bool, error) {
-	m, haves, due, err := r.storedSnapshot(ctx, "jellyfin", r.opt.JFRefresh, force)
-	if err != nil || !due {
-		return m, haves, false, err
-	}
-	b := &breaker{}
-	var users []struct {
-		ID   string `json:"Id"`
-		Name string `json:"Name"`
-	}
-	if err := r.call(ctx, b, func() error { return r.env.Jellyfin.GetJSON(ctx, "/Users", &users) }); err != nil {
-		return m, nil, false, err
-	}
-	m.UserID = ""
-	for _, u := range users {
-		if u.Name == r.opt.JellyfinUser {
-			m.UserID = u.ID
-		}
-	}
-	if m.UserID == "" {
-		return m, nil, false, fmt.Errorf("jellyfin: no user %q", r.opt.JellyfinUser)
-	}
-	fresh := map[int]have{}
-	if err := r.jfPages(ctx, b, "userId="+m.UserID+"&IncludeItemTypes=Movie&Recursive=true&Fields=Path,ProviderIds&EnableImages=false&EnableUserData=true", func(it jfItem) {
-		if id := jfTMDB(it.Path, it.ProviderIDs); id > 0 {
-			fresh[id] = have{Item: it.ID, Played: it.UserData.Played}
-		}
-	}); err != nil {
-		return m, nil, false, err
-	}
-	m.Collection = ""
-	if r.opt.Collection != "" {
-		if err := r.call(ctx, b, func() (err error) { m.Collection, err = r.jfCollectionID(ctx, m.UserID); return err }); err != nil {
-			return m, nil, false, err
-		}
-		if m.Collection != "" {
-			if err := r.jfPages(ctx, b, "userId="+m.UserID+"&ParentId="+m.Collection+"&Fields=Path,ProviderIds&EnableImages=false", func(k jfItem) {
-				if id := jfTMDB(k.Path, k.ProviderIDs); id > 0 {
-					h := fresh[id]
-					h.Member = true
-					fresh[id] = h
-				}
-			}); err != nil {
-				return m, nil, false, err
-			}
-		}
-	}
-	haves, err = r.storeSnapshot(ctx, "jellyfin", &m, fresh, false)
-	return m, haves, err == nil, err
-}
-
-// jfCollectionID finds the Watchlist collection by name; "" when it does not exist yet.
-func (r *run) jfCollectionID(ctx context.Context, userID string) (string, error) {
-	var sets jfItems
-	if err := r.env.Jellyfin.GetJSON(ctx, "/Items?userId="+userID+"&IncludeItemTypes=BoxSet&Recursive=true&EnableImages=false", &sets); err != nil {
-		return "", err
-	}
-	for _, s := range sets.Items {
-		if s.Name == r.opt.Collection {
-			return s.ID, nil
-		}
-	}
-	return "", nil
-}
-
-func (r *run) syncJellyfin(ctx context.Context, wants []want) error {
-	const app = "jellyfin"
-	m, haves, p, err := r.planned(ctx, app, r.jellyfinSnapshot, wants)
-	if err != nil {
-		return err
-	}
-	if r.opt.DryRun || r.opt.Collection == "" {
-		return nil
-	}
-	b := &breaker{}
-	ids := func(tmdbs []int) string {
-		out := make([]string, len(tmdbs))
-		for i, id := range tmdbs {
-			out[i] = haves[id].Item
-		}
-		return strings.Join(out, ",")
-	}
-	add := p.add
-	for len(add) > 0 {
-		batch := add[:min(len(add), 50)]
-		add = add[len(batch):]
-		// Marked as added first, as in Plex; adding a film Jellyfin already holds is a no-op, so retries are safe.
-		if err := r.mark(ctx, app, haves, batch, false, true); err != nil {
-			return err
-		}
-		known := m.Collection
-		err := r.call(ctx, b, func() error {
-			if m.Collection == "" { // by name first, so a create whose answer was lost is never repeated
-				id, err := r.jfCollectionID(ctx, m.UserID)
-				if err != nil {
-					return err
-				}
-				if id == "" {
-					var made struct {
-						ID string `json:"Id"`
-					}
-					if err := r.env.Jellyfin.PostJSON(ctx, "/Collections?name="+url.QueryEscape(r.opt.Collection)+"&ids="+ids(batch), nil, &made); err != nil {
-						return err
-					}
-					if made.ID == "" {
-						return errors.New("jellyfin: collection created without an id")
-					}
-					m.Collection = made.ID
-					return nil
-				}
-				m.Collection = id
-			}
-			return r.env.Jellyfin.PostJSON(ctx, "/Collections/"+m.Collection+"/Items?ids="+ids(batch), nil, nil)
-		})
-		if m.Collection != known {
-			if err := r.putMeta(ctx, app, m); err != nil {
-				return err
-			}
-		}
-		if err != nil {
-			r.failed(app, "collection_add", err, batch...)
-			return nil
-		}
-		if err := r.mark(ctx, app, haves, batch, true, true); err != nil {
-			return err
-		}
-		r.count(app+".collection_added", len(batch))
-	}
-	if len(p.remove) > 0 {
-		if err := r.call(ctx, b, func() error {
-			return r.env.Jellyfin.Delete(ctx, "/Collections/"+m.Collection+"/Items?ids="+ids(p.remove))
-		}); err != nil {
-			r.failed(app, "collection_remove", err, p.remove...)
-			return nil
-		}
-		if err := r.mark(ctx, app, haves, p.remove, false, false); err != nil {
-			return err
-		}
-		r.count(app+".collection_removed", len(p.remove))
-	}
-	return nil
-}
-
-// ---- plex.tv watchlist (the Discover watchlist every Plex app shows) ----
-
-var discoverClient = &http.Client{Timeout: 20 * time.Second}
-
-func (r *run) discover(ctx context.Context, method, path string, out any) error {
-	prefs, err := r.env.Plex.Prefs() // the server's own sign-in token is the owner's plex.tv token
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, method, r.opt.DiscoverURL+path, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("X-Plex-Token", prefs["PlexOnlineToken"])
+	path := req.URL.Path
+	req.Header.Set("X-Plex-Token", tok)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Plex-Client-Identifier", "projectionist")
+	req.Header.Set("X-Plex-Client-Identifier", r.clientID())
 	req.Header.Set("X-Plex-Product", "projectionist")
-	resp, err := discoverClient.Do(req)
+	resp, err := plexTVClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("plex.tv %s %s: %w", method, path, err)
 	}
@@ -852,126 +340,191 @@ func (r *run) discover(ctx context.Context, method, path string, out any) error 
 	if out == nil {
 		return nil
 	}
-	var wrap struct {
-		MediaContainer json.RawMessage `json:"MediaContainer"`
-	}
-	if err := json.Unmarshal(body, &wrap); err != nil {
+	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("plex.tv %s %s: %w", method, path, err)
 	}
-	return json.Unmarshal(wrap.MediaContainer, out)
+	return nil
 }
 
-func (r *run) plexTVSnapshot(ctx context.Context, b *breaker) (map[int]have, error) {
-	m, haves, due, err := r.storedSnapshot(ctx, "plextv", r.opt.SinkRefresh, false)
-	if err != nil || !due {
-		return haves, err
+// discover is one call to the Discover service as the member, under the run's budget and breaker; out, when not
+// nil, receives the answer's MediaContainer.
+func (r *run) discover(ctx context.Context, b *breaker, method, path string, out *plexListing) error {
+	tok, err := r.plexToken(ctx, b)
+	if err != nil {
+		return err
 	}
-	fresh := map[int]have{}
-	const page = 100
-	for start := 0; ; start += page {
-		var l plexListing
-		path := fmt.Sprintf("/library/sections/watchlist/all?includeGuids=1&X-Plex-Container-Start=%d&X-Plex-Container-Size=%d", start, page)
-		if err := r.call(ctx, b, func() error { return r.discover(ctx, http.MethodGet, path, &l) }); err != nil {
-			return nil, err
+	return r.call(ctx, b, func() error {
+		if out == nil {
+			return r.plexTV(ctx, tok, method, r.opt.DiscoverURL+path, nil)
 		}
-		for _, it := range l.Metadata {
-			// Shows on his watchlist are his own; their TMDB ids live in another number space than films'.
-			if id := tmdbFromGuids(it.Guid); id > 0 && it.Type == "movie" {
-				fresh[id] = have{Item: it.RatingKey, Member: true}
-			}
-		}
-		if len(l.Metadata) < page || start+page >= l.TotalSize {
-			break
-		}
-	}
-	return r.storeSnapshot(ctx, "plextv", &m, fresh, true)
+		var wrap struct{ MediaContainer *plexListing }
+		wrap.MediaContainer = out
+		return r.plexTV(ctx, tok, method, r.opt.DiscoverURL+path, &wrap)
+	})
 }
 
-// syncPlexTV mirrors the Letterboxd watchlist (minus watched films) onto the owner's plex.tv watchlist. Films he
-// added there himself, shows included, are never removed.
-func (r *run) syncPlexTV(ctx context.Context, wants []want) error {
-	const app = "plextv"
+// homeUser is one member of the owner's Plex Home, as plex.tv lists them.
+type homeUser struct {
+	UUID      string `json:"uuid"`
+	Title     string `json:"title"`
+	Username  string `json:"username"`  // "" for a managed user
+	Protected bool   `json:"protected"` // has a PIN
+}
+
+// plexToken is the member's plex.tv token: the owner's is the server's own sign-in (Preferences.xml), a person's the
+// owner's Plex Home switched to their Home user (POST /api/v2/home/users/<uuid>/switch, as Plex Web does), once per
+// run and never stored. A managed user (no plex.tv account of their own) has a watchlist of their own too: Aurelia's
+// held 137 items on 2026-10-05.
+func (r *run) plexToken(ctx context.Context, b *breaker) (string, error) {
+	if r.token != "" {
+		return r.token, nil
+	}
+	prefs, err := r.env.Plex.Prefs()
+	if err != nil {
+		return "", err
+	}
+	owner := prefs["PlexOnlineToken"]
+	if owner == "" {
+		return "", errors.New("plex: Preferences.xml has no PlexOnlineToken")
+	}
+	if r.who == "" {
+		r.token = owner
+		return owner, nil
+	}
+	var home struct {
+		Users []homeUser `json:"users"`
+	}
+	if err := r.call(ctx, b, func() error {
+		return r.plexTV(ctx, owner, http.MethodGet, r.opt.PlexTVURL+"/api/v2/home/users", &home)
+	}); err != nil {
+		return "", err
+	}
+	i := slices.IndexFunc(home.Users, func(u homeUser) bool { return cmp.Or(u.Username, u.Title) == r.opt.PlexUser })
+	switch {
+	case i < 0:
+		r.alert("no Plex Home user %q (its username, or a managed user's name), so the Plex watchlist is not synced", r.opt.PlexUser)
+		return "", fmt.Errorf("plex home user %q: not in the owner's Plex Home", r.opt.PlexUser)
+	case home.Users[i].Protected:
+		r.alert("Plex Home user %q has a PIN, which projectionist cannot enter, so the Plex watchlist is not synced", r.opt.PlexUser)
+		return "", fmt.Errorf("plex home user %q: protected by a PIN", r.opt.PlexUser)
+	}
+	var sw struct {
+		AuthToken string `json:"authToken"`
+	}
+	if err := r.call(ctx, b, func() error {
+		return r.plexTV(ctx, owner, http.MethodPost, r.opt.PlexTVURL+"/api/v2/home/users/"+url.PathEscape(home.Users[i].UUID)+"/switch", &sw)
+	}); err != nil {
+		return "", err
+	}
+	if sw.AuthToken == "" {
+		return "", errors.New("plex.tv: the Home switch answered no token")
+	}
+	r.token = sw.AuthToken
+	return r.token, nil
+}
+
+// played is the items the member has watched, as the watch record has them (jfsync folds Plex's and Jellyfin's
+// events into it): one they only started is not played.
+func (r *run) played(ctx context.Context) (map[string]bool, error) {
+	states, err := watch.States(ctx, r.db)
+	if err != nil {
+		return nil, storeErr{err}
+	}
+	out := map[string]bool{}
+	for k, s := range states {
+		if k.Person == r.opt.Person && s.Played {
+			out[k.Item] = true
+		}
+	}
+	return out, nil
+}
+
+// syncWatchlist keeps the member's own Plex watchlist holding the films of their Letterboxd watchlist they have not
+// watched (see unwatchedWatchlist). It writes only against a read made in the same run, and takes out only films it
+// added: a film the member put there by hand, shows included, stays.
+func (r *run) syncWatchlist(ctx context.Context, wants []want) error {
 	if !r.opt.PlexWatchlist {
 		return nil
 	}
+	played, err := r.played(ctx)
+	if err != nil {
+		return err
+	}
+	desired := unwatchedWatchlist(wants, played)
+	retries, err := r.loadRetries(ctx)
+	if err != nil {
+		return err
+	}
 	b := &breaker{}
-	haves, err := r.plexTVSnapshot(ctx, b)
-	if err != nil {
-		return fmt.Errorf("plex.tv watchlist snapshot: %w", err)
+	var haves map[int]have
+	var p sinkPlan
+	var parked int
+	for _, force := range []bool{false, true} {
+		var read bool
+		if haves, read, err = r.snapshot(ctx, b, force); err != nil {
+			return fmt.Errorf("plex watchlist snapshot: %w", err)
+		}
+		add, remove := planMembers(desired, haves)
+		if p, parked, err = r.settle(ctx, sinkPlan{add: add, remove: remove}, haves, retries); err != nil {
+			return err
+		}
+		if read || len(p.add)+len(p.remove) == 0 { // a stored snapshot may only show that nothing needs doing
+			break
+		}
 	}
-	retries, err := r.loadRetries(ctx, app)
-	if err != nil {
-		return err
+	r.count(app+".parked", parked)
+	r.count(app+".watchlist_add", len(p.add))
+	r.count(app+".watchlist_remove", len(p.remove))
+	if len(p.add)+len(p.remove) > 0 {
+		r.env.Log.Info("plex watchlist planned", "event", "watchlist_plan", "person", r.opt.Person, "add", p.add, "remove", p.remove, "dry_run", r.opt.DryRun)
 	}
-	plexHaves, err := r.loadHaves(ctx, "plex")
-	if err != nil {
-		return err
-	}
-	desired := map[int]bool{}
-	for id := range unwatchedWatchlist(wants, plexHaves, false) {
-		desired[id] = true
-	}
-	add, remove := planMembers(desired, haves)
-	p, err := r.settle(ctx, app, sinkPlan{add: add, remove: remove}, haves, retries, false) // a watchlist add or removal is safe to repeat
-	if err != nil {
-		return err
-	}
-	add, remove = p.add, p.remove
-	r.count(app+".watchlist_add", len(add))
-	r.count(app+".watchlist_remove", len(remove))
 	if r.opt.DryRun {
 		return nil
 	}
-	for _, id := range add {
+	for _, id := range p.add {
 		h := haves[id]
 		if h.Item == "" {
 			var match plexListing
-			if err := r.call(ctx, b, func() error {
-				return r.discover(ctx, http.MethodGet, fmt.Sprintf("/library/metadata/matches?type=1&guid=tmdb://%d", id), &match)
-			}); err != nil {
-				r.failed(app, "match", err, id)
+			if err := r.discover(ctx, b, http.MethodGet, fmt.Sprintf("/library/metadata/matches?type=1&guid=tmdb://%d", id), &match); err != nil {
+				r.failed("match", err, id)
 				if b.fails >= 3 {
 					return errBreakerOpen
 				}
 				continue
 			}
 			if len(match.Metadata) == 0 { // a failure like any other, so a film plex.tv lacks parks
-				r.failed(app, "match", fmt.Errorf("plex.tv lists no film tmdb://%d", id), id)
+				r.failed("match", fmt.Errorf("plex.tv lists no film tmdb://%d", id), id)
 				continue
 			}
 			h.Item = match.Metadata[0].RatingKey
-			if err := r.saveHave(ctx, app, haves, id, h); err != nil {
+			if err := r.saveHave(ctx, haves, id, h); err != nil {
 				return err
 			}
 		}
-		if err := r.call(ctx, b, func() error {
-			return r.discover(ctx, http.MethodPut, "/actions/addToWatchlist?ratingKey="+url.QueryEscape(h.Item), nil)
-		}); err != nil {
-			r.failed(app, "watchlist_add", err, id)
+		if err := r.discover(ctx, b, http.MethodPut, "/actions/addToWatchlist?ratingKey="+url.QueryEscape(h.Item), nil); err != nil {
+			r.failed("watchlist_add", err, id)
 			if b.fails >= 3 {
 				return errBreakerOpen
 			}
 			continue
 		}
 		h.Member, h.Added = true, true
-		if err := r.saveHave(ctx, app, haves, id, h); err != nil {
+		if err := r.saveHave(ctx, haves, id, h); err != nil {
 			return err
 		}
 		r.count(app+".watchlist_added", 1)
 	}
-	for _, id := range remove {
+	for _, id := range p.remove {
 		h := haves[id]
-		if err := r.call(ctx, b, func() error {
-			return r.discover(ctx, http.MethodPut, "/actions/removeFromWatchlist?ratingKey="+url.QueryEscape(h.Item), nil)
-		}); err != nil {
-			r.failed(app, "watchlist_remove", err, id)
+		if err := r.discover(ctx, b, http.MethodPut, "/actions/removeFromWatchlist?ratingKey="+url.QueryEscape(h.Item), nil); err != nil {
+			r.failed("watchlist_remove", err, id)
 			if b.fails >= 3 {
 				return errBreakerOpen
 			}
 			continue
 		}
 		h.Member, h.Added = false, false
-		if err := r.saveHave(ctx, app, haves, id, h); err != nil {
+		if err := r.saveHave(ctx, haves, id, h); err != nil {
 			return err
 		}
 		r.count(app+".watchlist_removed", 1)
