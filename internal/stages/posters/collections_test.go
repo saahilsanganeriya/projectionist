@@ -392,6 +392,52 @@ func TestDirectorBelowTheBar(t *testing.T) {
 	}
 }
 
+// Catches: the owner's-taste backfill missing a title or franchise judged under the older prompts (its stored verdict
+// redecided instead), paying again for a director (his prompt has not changed), paying again on every later run (the
+// verdict saved without the prompts it was judged under), or calling for a pool no rule needs a judge for.
+func TestOlderPromptsJudgedAgain(t *testing.T) {
+	w := collectionWorld(t, "dry_run = true\n", true)
+	w.h.TMDB.Handle("GET", "/movie/111/credits", 200, `{"crew":[{"id":99,"name":"Kathryn Bigelow","job":"Director"}]}`)
+	w.set(func() {
+		commons := w.commons
+		w.commons = func(rw http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Query().Get("gsrsearch"), `"Kathryn Bigelow" filming`) {
+				reply(rw, `{"query":{"pages":[{"title":"File:Kathryn Bigelow filming.jpg","imageinfo":[{"url":"x","thumburl":"`+w.api.URL+
+					`/t/p/c/500px-redwide.jpg","mime":"image/jpeg","width":3000,"height":1500,"extmetadata":{}}]}]}}`)
+				return
+			}
+			commons(rw, r)
+		}
+	})
+	asked := func() []string {
+		var heads []string
+		for _, c := range w.gateway.Calls() {
+			heads = append(heads, strings.SplitN(c.Messages[len(c.Messages)-1].Content[0].Text, ":", 2)[1][1:4])
+		}
+		slices.Sort(heads)
+		w.gateway = llmtest.New(w.gateway.Reply)
+		w.h.Env.LLM = llmtest.Client(t, w.gateway, w.h.Env.Store, w.h.Env.Now, llm.Config{})
+		return heads
+	}
+	w.run(t)
+	db := w.h.Env.Store.DB()
+	db.Exec(`INSERT INTO collections_new(name, sort_title, at) VALUES ('Kathryn Bigelow', 'zzKathryn Bigelow', '')`)
+	db.Exec(`INSERT INTO collections_joins(collection, tmdb, reason, at) VALUES ('Kathryn Bigelow', 111, 'x', '')`)
+	w.run(t)
+	if got := asked(); !slices.Equal(got, []string{"Alp", "Gam", "Kat", "Sca"}) {
+		t.Fatalf("judged %v; want Alpha, Gamma, Kathryn Bigelow and Scary Movie", got)
+	}
+	db.Exec(`UPDATE posters_items SET verdict = json_remove(verdict, '$.prompt') WHERE verdict IS NOT NULL`) // as saved before
+	w.run(t)
+	if got := asked(); !slices.Equal(got, []string{"Alp", "Gam", "Sca"}) {
+		t.Fatalf("verdicts from the older prompts: judged %v again; want Alpha, Gamma and Scary Movie, not the director", got)
+	}
+	w.run(t)
+	if got := asked(); len(got) != 0 {
+		t.Fatalf("a third run judged %v again; want nothing", got)
+	}
+}
+
 // Catches: a collections file that cannot be read failing the whole run, so no title is judged either.
 func TestBadCollectionFilesSkipOnlyCollections(t *testing.T) {
 	w := newWorld(t, "dry_run = true\ncollections_owner_file = \"/nonexistent/owner.json\"\ncollections_approved_file = \"/nonexistent/approved.json\"\n")

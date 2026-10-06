@@ -20,38 +20,67 @@ import (
 
 const letters = "ABCDEF"
 
-const systemPrompt = `You are the art director of a cinephile's film library. You will see the candidate posters for one title,
-each labelled with a letter. Score every candidate from 1 to 10 for how good it would look as this title's poster.
+// systemPrompt and franchisePrompt judge to the owner's taste, in his words (2026-10-05): illustrated, artistic fan art
+// over mainstream key art, creative over plain minimalism, and the title the only text. His own director posters are
+// textless photos, so directorPrompt keeps to that.
+const systemPrompt = `You choose the posters for one cinephile's film library, to his taste. You will see the candidate posters for
+one title, each labelled with a letter. Score every candidate from 1 to 10 for how much he would want it as this
+title's poster.
 
-Reward: a strong composition with a clear focal point; originality (not a collage of floating heads); typography that
-belongs to the design, or tasteful textless art; a mood true to the title; clean, high-resolution artwork.
+His taste, in his words: "I like illustrated artistic posters, fanart usually, not mainstream posters. I do not need
+minimalism, something creative is often good. The only text on the poster should be the movie name."
 
-Penalise: DVD or Blu-ray cover layouts; review quotes, award banners and credit blocks; text-heavy key art; air dates
-and "premieres" or "now streaming" lines; TV network or streaming-service logos; text in a language other than English
-or the title's own; watermarks; low-resolution, pixelated, stretched or badly cropped images (deliberate soft focus or
-grain is a style, not a flaw); art for a different title; and, for a season, art for the complete series or another
-season instead of this one.
+Reward: illustrated, painted, drawn or screen-printed art; fan art and alternative posters; an original, creative idea
+(a striking concept, a scene reimagined, a visual metaphor); a mood true to the title; the title set as part of the
+design, or no text at all. Creative beats plain: a bare minimalist design (one small object on a flat colour) scores
+below an inventive illustrated one.
+
+Penalise mainstream studio key art: floating heads, a row of star faces, a star posed in front of a backdrop, generic
+photo collages, DVD or Blu-ray cover layouts, and TV network or streaming-service art.
+
+The title is the only text he wants. Penalise heavily any other text: credit blocks and billing, taglines, review
+quotes, award laurels, dates, "premieres" or "now streaming" lines, and studio, network or streaming logos; the more
+of it, the lower the score.
+
+Also penalise heavily: text in a language other than English or the title's own; watermarks; low-resolution,
+pixelated, stretched or badly cropped images (deliberate soft focus or grain is a style, not a flaw); art for a
+different title; and, for a season, art for the complete series or another season instead of this one.
 
 Score near-duplicates (the same art cropped, resized or recoloured) the same. Answer with JSON only, in exactly this
 shape: {"scores": {"A": 7, "B": 4}, "reason": "<at most 15 words on why the best one wins>"}`
 
-// franchisePrompt and directorPrompt judge a collection's pool. The owner's own collection posters set the style: a
-// franchise's carry its title in the series' typography, a director's are textless photos, most of them on set.
-const franchisePrompt = `You are the art director of a cinephile's film library. You will see the candidate posters for one
-franchise collection (the shelf that holds every film of a series), each labelled with a letter and where it comes from.
-Score every candidate from 1 to 10 for how good it would look as the collection's poster.
+const franchisePrompt = `You choose the posters for one cinephile's film library, to his taste. You will see the candidate posters
+for one franchise collection (the shelf that holds every film of a series), each labelled with a letter and where it
+comes from. Score every candidate from 1 to 10 for how much he would want it as the collection's poster.
 
-The library's other franchise posters are clean key art made for the whole series, with the franchise's title (often
-with the word COLLECTION) set in the series' own typography. Reward: art made for the whole collection over one film's
-poster; a strong composition with a clear focal point; typography that belongs to the design; a mood true to the series;
-clean, high-resolution artwork.
+His taste, in his words: "I like illustrated artistic posters, fanart usually, not mainstream posters. I do not need
+minimalism, something creative is often good. The only text on the poster should be the movie name."
 
-Penalise: collages of floating heads; DVD or Blu-ray box layouts; review quotes, award banners and credit blocks; text in
-a language other than English or the series' own; watermarks; low-resolution, stretched or badly cropped images; and art
-for another franchise.
+Reward: art made for the whole series over one film's poster; illustrated, painted or drawn art, fan art, and an
+original, creative idea; a mood true to the series; the series' title (often with the word COLLECTION) set as part of
+the design, or no text at all. Creative beats plain: a bare minimalist design scores below an inventive illustrated one.
+
+Penalise mainstream studio key art: floating heads, a row of star faces, generic photo collages, and DVD or Blu-ray box
+layouts. The series' title is the only text he wants: credit blocks, taglines, review quotes, award banners, dates and
+logos are a heavy penalty. Also penalise heavily: text in a language other than English or the series' own;
+watermarks; low-resolution, stretched or badly cropped images; and art for another franchise.
 
 Score near-duplicates the same. Answer with JSON only, in exactly this shape:
 {"scores": {"A": 7, "B": 4}, "reason": "<at most 15 words on why the best one wins>"}`
+
+// referencesHead introduces the owner's own posters for other films (taste_references), shown before the candidates.
+const referencesHead = "Posters this owner chose for other films in his library, to show his taste. They are not candidates: " +
+	"judge the candidates by the taste these show, never by how much they look like these films."
+
+// promptVersion names the prompts a verdict was judged under: a title's or franchise's verdict under an older one is
+// judged again (the owner's-taste backfill), and a change of model alone judges nothing again. The director prompt has
+// not changed, so its verdicts keep the empty version they were saved with.
+func promptVersion(k kind) string {
+	if k == director {
+		return ""
+	}
+	return "owner-taste-2026-10"
+}
 
 const directorPrompt = `You are the photo editor of a cinephile's film library. You will see candidate photos for one director
 collection (the shelf of films by one director), each labelled with a letter, the site it comes from, its full size and
@@ -83,7 +112,8 @@ type Verdict struct {
 	Boxes  map[string][]float64 `json:"boxes,omitempty"`  // a director's photos: where the director is, by Candidate.URL
 	OnSet  []string             `json:"on_set,omitempty"` // a director's photos taken on a film set (Candidate.URL)
 	Model  string               `json:"model,omitempty"`
-	Of     string               `json:"of"` // setID of what was judged
+	Prompt string               `json:"prompt,omitempty"` // promptVersion of the title's kind when it was saved
+	Of     string               `json:"of"`               // setID of what was judged
 	At     time.Time            `json:"at"`
 }
 
@@ -126,10 +156,12 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 		if inFlight[it.Title.Key+" "+of] {
 			continue
 		}
-		// A title's pool decided before is decided again by today's rules from its stored scores, with no call; a
-		// collection keeps its verdict (its rules are its own). An unjudged pool whose unusable answers no longer
-		// count (callState) is asked again.
-		if old := it.Verdict; old != nil && old.Of == of && (old.Rule != "unjudged" || unusable[it.Title.Key+" "+of] >= 2) {
+		// A title's pool decided before under today's prompts is decided again by today's rules from its stored
+		// scores, with no call; a collection keeps its verdict (its rules are its own). An unjudged pool whose
+		// unusable answers no longer count (callState) is asked again, and one judged under older prompts is judged
+		// again.
+		if old := it.Verdict; old != nil && old.Of == of && old.Prompt == promptVersion(it.Title.Kind) &&
+			(old.Rule != "unjudged" || unusable[it.Title.Key+" "+of] >= 2) {
 			if it.Title.Kind.collection() {
 				continue
 			}
@@ -160,6 +192,9 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 	}
 	if len(todo) == 0 {
 		return nil
+	}
+	if r.refs, err = r.references(ctx); err != nil {
+		return err
 	}
 	titles, collections := r.env.LLM.Session("posters"), r.env.LLM.Session("collections")
 	session := func(it *row) *llm.Session {
@@ -305,8 +340,53 @@ func (r *run) request(ctx context.Context, it *row) (llm.Request, error) {
 		tokens += llm.EstimateTokens(label) + ((c.W+27)/28)*((c.H+27)/28)
 	}
 	content = append(content, llm.Text("Score every candidate."))
+	messages := []llm.Message{llm.System(system)}
+	if r.refs.message != nil && t.Kind != director {
+		messages = append(messages, *r.refs.message)
+		tokens += r.refs.tokens
+	}
 	return llm.Request{MaxTokens: r.opt.MaxTokens, InputTokens: tokens, ResponseFormat: answerFormat(t.Kind, len(it.Cands)),
-		Messages: []llm.Message{llm.System(system), llm.User(content...)}}, nil
+		Messages: append(messages, llm.User(content...))}, nil
+}
+
+// references is the message that shows the judge the owner's own posters for other films (taste_references: title
+// keys of his uploads and picks), sent between the prompt and every title's and franchise's candidates. It is the same
+// bytes in every call, marked for the gateway's prompt cache, so after the first call it costs a tenth of its tokens.
+// A key that is not his upload or pick fails the run: the list stands for his taste, and a wrong key would quietly
+// teach the judge Plex's.
+func (r *run) references(ctx context.Context) (refs, error) {
+	if len(r.opt.TasteReferences) == 0 {
+		return refs{}, nil
+	}
+	parts := []llm.Part{llm.Text(referencesHead)}
+	tokens := llm.EstimateTokens(referencesHead)
+	for _, k := range r.opt.TasteReferences {
+		p := r.owners[k]
+		if p.State != ownerUpload && p.State != ownerPick {
+			return refs{}, fmt.Errorf("posters: taste_references: %s is not a poster the owner uploaded or picked (%q)", k, p.State)
+		}
+		var raw string
+		var t Title
+		var thumb []byte
+		c := Candidate{Thumb: "owner:" + p.File}
+		err := r.env.Store.DB().QueryRowContext(ctx, `SELECT title FROM posters_items WHERE key=?`, k).Scan(&raw)
+		if err == nil {
+			err = json.Unmarshal([]byte(raw), &t)
+		}
+		if err == nil {
+			err = r.withThumb(ctx, &c) // its size, for the token estimate
+		}
+		if err == nil {
+			thumb, err = r.thumb(ctx, c)
+		}
+		if err != nil {
+			return refs{}, fmt.Errorf("posters: taste_references: %s: %w", k, err)
+		}
+		label := fmt.Sprintf("%s (%d):", t.Name, t.Year)
+		parts = append(parts, llm.Text(label), llm.JPEG(thumb))
+		tokens += llm.EstimateTokens(label) + ((c.W+27)/28)*((c.H+27)/28)
+	}
+	return refs{&llm.Message{Role: "user", Content: parts, CacheControl: llm.Ephemeral}, tokens}, nil
 }
 
 // answerFormat is the JSON schema of the answer the prompt asks for, over the letters this pool uses; a model that

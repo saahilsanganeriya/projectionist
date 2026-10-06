@@ -84,13 +84,13 @@ func scoreOf(jpg []byte) int {
 	return 3
 }
 
-// answer is the fake judge: it scores each labelled image by its colour, so a letter mixed up with another
-// candidate's image shows up as a wrong choice, and puts a director in the left quarter of every photo. Like a model
-// that ignores the schema it was given, it adds a second JSON object after the answer.
+// answer is the fake judge: it scores each labelled image of the last message (the candidates) by its colour, so a
+// letter mixed up with another candidate's image shows up as a wrong choice, and puts a director in the left quarter
+// of every photo. Like a model that ignores the schema it was given, it adds a second JSON object after the answer.
 func answer(req llm.Request) llmtest.Answer {
 	var scores, boxes []string
 	label := ""
-	for _, p := range req.Messages[1].Content {
+	for _, p := range req.Messages[len(req.Messages)-1].Content {
 		if p.Type == "text" && len(p.Text) >= 2 && p.Text[1] == ':' {
 			label = p.Text[:1]
 		}
@@ -609,6 +609,36 @@ func TestOwnerPickKept(t *testing.T) {
 		len(w.h.TMDB.Calls("GET", "/movie/1/images")) != 0 {
 		t.Fatalf("Alpha, the owner's pick: rule %q choice %s, %d judge calls (want 1, Gamma's), %d TMDB image lists (want 0)",
 			v.Rule, v.Choice, w.messages, len(w.h.TMDB.Calls("GET", "/movie/1/images")))
+	}
+}
+
+// Catches: the owner's taste references missing from a title's call, sent inside the candidates (their images read
+// as candidates, a letter shifted), sent unmarked for the gateway's cache or in different bytes from call to call (a
+// prefix the cache cannot reuse, billed in full every time); and a reference that is not the owner's upload or pick
+// (here Plex's default) shown as his taste instead of failing the run before any call.
+func TestTasteReferences(t *testing.T) {
+	w := newWorld(t, "dry_run = true\ntaste_references = [\"movie:tmdb-2\"]\n")
+	w.run(t)
+	calls := w.gateway.Calls()
+	first, _ := json.Marshal(calls[0].Messages[1])
+	for _, c := range calls {
+		refs, _ := json.Marshal(c.Messages[1])
+		ref := c.Messages[1]
+		if len(c.Messages) != 3 || ref.CacheControl == nil || ref.CacheControl.Type != "ephemeral" || ref.Content[0].Text != referencesHead ||
+			ref.Content[1].Text != "Beta (2002):" || len(ref.Content) != 3 || ref.Content[2].Type != "image_url" || string(refs) != string(first) {
+			t.Fatalf("%d messages, the second %s; want the prompt, Beta's poster as the one reference (marked for the cache, the same "+
+				"bytes in every call), then the candidates", len(c.Messages), refs)
+		}
+	}
+	if v := w.verdict(t, "movie:tmdb-1"); len(calls) != 2 || !strings.HasSuffix(v.Choice, "/red.jpg") {
+		t.Fatalf("%d calls, Alpha chose %s; want 2 calls (Alpha, Gamma) and Alpha's red", len(calls), v.Choice)
+	}
+
+	w = newWorld(t, "dry_run = true\ntaste_references = [\"movie:tmdb-1\"]\n")
+	var rep stage.Report
+	if err := (Stage{}).Run(context.Background(), w.h.Env, &rep); err == nil || !strings.Contains(err.Error(), "taste_references: movie:tmdb-1") ||
+		w.messages != 0 {
+		t.Fatalf("Alpha (Plex's default) as a reference: run error %v after %d judge calls; want the run failed, naming it, before any", err, w.messages)
 	}
 }
 

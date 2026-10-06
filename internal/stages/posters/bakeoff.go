@@ -14,8 +14,8 @@ import (
 )
 
 // Bakeoff lends the judge to cmd/bakeoff, so a candidate model sees exactly what the stage would send: the same
-// prompt, thumbnails and schema, read back the same way. It reads the store and the thumbnail cache, and writes a
-// thumbnail only when the cache lacks it.
+// prompt, taste references, thumbnails and schema, read back the same way. It reads the store and the thumbnail cache,
+// and writes a thumbnail only when the cache lacks it.
 type Bakeoff struct{ r *run }
 
 // Stored is one title as the stage left it: its pool and verdict.
@@ -30,8 +30,18 @@ func NewBakeoff(env *stage.Env) (*Bakeoff, error) {
 	if err := env.Options(&opt); err != nil {
 		return nil, err
 	}
-	return &Bakeoff{r: &run{env: env, opt: opt, http: &http.Client{Timeout: 2 * time.Minute}, rep: &stage.Report{},
-		budgetAlerted: map[bool]bool{}}}, nil
+	r := &run{env: env, opt: opt, http: &http.Client{Timeout: 2 * time.Minute}, rep: &stage.Report{}, budgetAlerted: map[bool]bool{}}
+	if len(opt.TasteReferences) > 0 {
+		owners, err := loadOwners(context.Background(), env.Store.DB())
+		if err != nil {
+			return nil, err
+		}
+		r.owners = owners
+		if r.refs, err = r.references(context.Background()); err != nil {
+			return nil, err
+		}
+	}
+	return &Bakeoff{r: r}, nil
 }
 
 // Load is the stored title key.

@@ -146,7 +146,8 @@ func TestInFlightBound(t *testing.T) {
 // attempt counted as free; the worst case (the reservation) priced below the dearest model the task may reach, or below
 // what a provider bills at its peak (twice the model list's price, live); and a
 // cost figure in a shape the client does not know (an object, text with units: the documented answer has none) taken
-// for an unreadable answer, asked again and paid twice.
+// for an unreadable answer, asked again and paid twice; and the billed figure (usage.cost) ignored, so input read
+// from the prompt cache is counted at the full input price (twice the real cost of an Opus judge call).
 func TestCost(t *testing.T) {
 	cheap, dear := llmtest.Model{ID: "test/cheap", In: 1, Out: 2}, llmtest.Model{ID: "test/dear", In: 10, Out: 20}
 	tasks := map[string]llm.Task{"t": {Model: "test/cheap", Fallbacks: []string{"test/dear"}}}
@@ -156,6 +157,7 @@ func TestCost(t *testing.T) {
 		usd     float64
 	}{
 		{"the gateway's figure", []llmtest.Answer{{Text: "x", In: 1000, Out: 100, Meta: `{"gateway":{"cost":"$0.0123"}}`}}, 0.0123},
+		{"what the gateway billed, cached input at the cache's price", []llmtest.Answer{{Text: "x", In: 1000, Out: 100, Billed: 0.0004}}, 0.0004},
 		{"usage at the model's price", []llmtest.Answer{{Text: "x", In: 1000, Out: 100}}, (1000*1 + 100*2) / 1e6},
 		{"a cost in another shape", []llmtest.Answer{{Text: "x", In: 1000, Out: 100, Meta: `{"gateway":{"cost":{"usd":"9"}}}`}}, (1000*1 + 100*2) / 1e6},
 		{"a cost with units", []llmtest.Answer{{Text: "x", In: 1000, Out: 100, Meta: `{"gateway":{"cost":"9 USD"}}`}}, (1000*1 + 100*2) / 1e6},
@@ -372,8 +374,8 @@ func TestBillingHold(t *testing.T) {
 }
 
 // Catches: a judge that reasons (paid output, and minutes per call) because "off" was sent in a form the model does
-// not take, or an effort sent to a model that lists none; and fallbacks, the bearer key or a one-part message sent
-// in a shape the gateway does not read.
+// not take, or an effort sent to a model that lists none; fallbacks, the bearer key or a one-part message sent in a
+// shape the gateway does not read; and a message's cache mark dropped, which bills a repeated prefix in full.
 func TestRequestShape(t *testing.T) {
 	cases := []struct {
 		model  llmtest.Model
@@ -403,9 +405,13 @@ func TestRequestShape(t *testing.T) {
 	}
 	one, _ := json.Marshal(llm.System("be brief"))
 	two, _ := json.Marshal(llm.User(llm.Text("a"), llm.JPEG([]byte{1})))
+	cachedOne, _ := json.Marshal(llm.Message{Role: "user", Content: []llm.Part{llm.Text("a")}, CacheControl: llm.Ephemeral})
+	cachedTwo, _ := json.Marshal(llm.Message{Role: "user", Content: []llm.Part{llm.Text("a"), llm.Text("b")}, CacheControl: llm.Ephemeral})
 	if string(one) != `{"role":"system","content":"be brief"}` ||
-		string(two) != `{"role":"user","content":[{"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,AQ=="}}]}` {
-		t.Fatalf("messages: %s %s", one, two)
+		string(two) != `{"role":"user","content":[{"type":"text","text":"a"},{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,AQ=="}}]}` ||
+		string(cachedOne) != `{"role":"user","content":"a","cache_control":{"type":"ephemeral"}}` ||
+		string(cachedTwo) != `{"role":"user","content":[{"type":"text","text":"a"},{"type":"text","text":"b"}],"cache_control":{"type":"ephemeral"}}` {
+		t.Fatalf("messages: %s %s %s %s", one, two, cachedOne, cachedTwo)
 	}
 }
 

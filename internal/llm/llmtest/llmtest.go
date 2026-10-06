@@ -49,6 +49,7 @@ type Answer struct {
 	Finish  string // "" = "stop"
 	In, Out int    // usage
 	Meta    string // the message's provider_metadata, raw JSON; "" = none
+	Billed  float64 // usage.cost, what the gateway billed; 0 = none
 	Model   string // the model that answered; "" = the request's
 
 	Status        int // an error answer when set
@@ -163,10 +164,14 @@ func (g *Gateway) write(w http.ResponseWriter, r *http.Request, req llm.Request,
 	if a.Meta != "" {
 		msg["provider_metadata"] = json.RawMessage(a.Meta)
 	}
+	usage := map[string]any{"prompt_tokens": a.In, "completion_tokens": a.Out, "total_tokens": a.In + a.Out}
+	if a.Billed != 0 {
+		usage["cost"] = a.Billed
+	}
 	json.NewEncoder(w).Encode(map[string]any{
 		"id": "gen_fake", "object": "chat.completion", "model": model,
 		"choices": []any{map[string]any{"index": 0, "message": msg, "finish_reason": finish}},
-		"usage":   map[string]int{"prompt_tokens": a.In, "completion_tokens": a.Out, "total_tokens": a.In + a.Out},
+		"usage":   usage,
 	})
 }
 
