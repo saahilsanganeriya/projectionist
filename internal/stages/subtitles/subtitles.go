@@ -32,17 +32,17 @@
 // Careful mode is the rollback: routes a and d only, and the queue aligns at any hour. OpenSubtitles is searched only
 // once no other provider's release-matched subtitle passed, and only its hash match is downloaded before the queue,
 // which tries its others by tier among the others', last within a tier; while it is out (its day's downloads spent) a
-// title waits for it only when nothing else aligned. The duration, frame rate and tracks come from the probe cache, else the
-// .details note (ffprobe runs only for a video that has neither, or once the sampled fit needs its stream indexes); the
-// original release name from that note, else the rename logs. Three titles at a time look for a subtitle, and one at a
-// time reads its windows; the queue aligns one at a time, and an alignment counts against align_per_day only once it
-// is about to read the whole video. While anyone but the owner is watching no title starts, and every running
-// ffmpeg/ffprobe/alass is stopped. Every attempt is an event, each verdict with the bytes read from the video (and of
-// those, from the disk); a title that got no subtitle is tried again after retry_after, then after 2, 4 and 8 times it,
-// and a queued title is searched again on the same schedule. A title is recorded only once TMDB and every provider it
-// needs answered (and alass ran, where it is needed); else it is deferred, not recorded, and an alert names the cause
-// (a spent download quota is routine and only logged). Each run also refreshes sub_stats.py's TSV over the whole
-// library. Jellyfin hears of each new sidecar through a queue kept in the store; Plex watches the disk.
+// title waits for it only when nothing else aligned. The duration, frame rate and tracks come from the probe cache,
+// else the .details note (ffprobe runs only for a video that has neither, or once the sampled fit needs its stream
+// indexes); the original release name from that note, else the rename logs. Three titles at a time look for a subtitle,
+// and one at a time reads its windows; the queue aligns one at a time, and an alignment counts against align_per_day
+// only once it is about to read the whole video. While anyone but the owner is watching no title starts, and every
+// running ffmpeg/ffprobe/alass is stopped. Every attempt is an event, each verdict with the bytes read from the video
+// (and of those, from the disk); a title that got no subtitle is tried again after retry_after, then after 2, 4 and 8
+// times it, and a queued title is searched again on the same schedule. A title is recorded only once TMDB and every
+// provider it needs answered (and alass ran, where it is needed); else it is deferred, not recorded, and an alert names
+// the cause (a spent download quota is routine and only logged). Each run also refreshes sub_stats.py's TSV over the
+// whole library. Jellyfin hears of each new sidecar through a queue kept in the store; Plex watches the disk.
 package subtitles
 
 import (
