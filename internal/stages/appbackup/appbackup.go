@@ -292,11 +292,6 @@ func (c *copier) copyEntry(path string, d fs.DirEntry) error {
 		}
 	}
 	n, err := copyFile(path, dst, info)
-	if errors.Is(err, fs.ErrNotExist) {
-		c.files--
-		c.bytes -= info.Size()
-		return nil
-	}
 	c.copied += n
 	return err
 }
@@ -304,6 +299,9 @@ func (c *copier) copyEntry(path string, d fs.DirEntry) error {
 // copyFile copies src's bytes to a new dst with src's permissions, mtime and owner.
 func copyFile(src, dst string, info fs.FileInfo) (int64, error) {
 	in, err := os.Open(src)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil // deleted since its folder was listed: an app's temporary file
+	}
 	if err != nil {
 		return 0, err
 	}
