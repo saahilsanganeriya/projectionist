@@ -97,7 +97,7 @@ func (r *run) loadHaves(ctx context.Context, app string) (map[int]have, error) {
 		err := rows.Scan(&id, &h.Item, &h.Played, &h.Member, &h.Added)
 		out[id] = h
 		return err
-	}, app)
+	}, r.sinkKey(app))
 	return out, err
 }
 
@@ -107,7 +107,7 @@ const putSink = `INSERT OR REPLACE INTO letterboxd_sink(app, tmdb, item, plays, 
 
 // saveHave stores one film's row and keeps haves, the in-memory copy of the rows, in step.
 func (r *run) saveHave(ctx context.Context, app string, haves map[int]have, id int, h have) error {
-	if _, err := r.db.ExecContext(ctx, putSink, app, id, h.Item, h.Played, h.Member, h.Added); err != nil {
+	if _, err := r.db.ExecContext(ctx, putSink, r.sinkKey(app), id, h.Item, h.Played, h.Member, h.Added); err != nil {
 		return storeErr{err}
 	}
 	haves[id] = h
@@ -126,11 +126,11 @@ func (r *run) replaceSnapshot(ctx context.Context, app string, fresh map[int]hav
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM letterboxd_sink WHERE app=?`, app); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM letterboxd_sink WHERE app=?`, r.sinkKey(app)); err != nil {
 		return err
 	}
 	put := func(id int, h have) error {
-		_, err := tx.ExecContext(ctx, putSink, app, id, h.Item, h.Played, h.Member, h.Added)
+		_, err := tx.ExecContext(ctx, putSink, r.sinkKey(app), id, h.Item, h.Played, h.Member, h.Added)
 		return err
 	}
 	for id, h := range fresh {
@@ -153,7 +153,7 @@ func (r *run) replaceSnapshot(ctx context.Context, app string, fresh map[int]hav
 
 // storedSnapshot returns an app's stored snapshot; due is true when it must be re-read: forced, or older than every.
 func (r *run) storedSnapshot(ctx context.Context, app string, every time.Duration, force bool) (m sinkMeta, haves map[int]have, due bool, err error) {
-	if _, err = r.env.Store.GetJSON(ctx, name, "sink."+app, &m); err != nil {
+	if _, err = r.env.Store.GetJSON(ctx, r.ns, "sink."+app, &m); err != nil {
 		return m, nil, false, err
 	}
 	if force || r.env.Now().Sub(m.FetchedAt) >= every {
@@ -284,7 +284,7 @@ func (r *run) loadRetries(ctx context.Context, app string) (map[int]retry, error
 		t.RereadAt, err = time.Parse(store.TimeFormat, at)
 		out[id] = t
 		return err
-	}, app)
+	}, r.sinkKey(app))
 	if err != nil {
 		return nil, storeErr{err}
 	}
@@ -293,7 +293,7 @@ func (r *run) loadRetries(ctx context.Context, app string) (map[int]retry, error
 
 func (r *run) saveRetry(ctx context.Context, app string, id int, t retry) error {
 	if _, err := r.db.ExecContext(ctx, `INSERT OR REPLACE INTO letterboxd_retry(app, tmdb, item, reread_at, tries) VALUES (?, ?, ?, ?, ?)`,
-		app, id, t.Item, t.RereadAt.UTC().Format(store.TimeFormat), t.Tries); err != nil {
+		r.sinkKey(app), id, t.Item, t.RereadAt.UTC().Format(store.TimeFormat), t.Tries); err != nil {
 		return storeErr{err}
 	}
 	return nil
@@ -308,7 +308,7 @@ func (r *run) settle(ctx context.Context, app string, p sinkPlan, haves map[int]
 		switch t := retries[id]; {
 		case work[id]:
 		case r.env.Now().Sub(t.RereadAt) >= rereadEvery:
-			if _, err := r.db.ExecContext(ctx, `DELETE FROM letterboxd_retry WHERE app=? AND tmdb=?`, app, id); err != nil {
+			if _, err := r.db.ExecContext(ctx, `DELETE FROM letterboxd_retry WHERE app=? AND tmdb=?`, r.sinkKey(app), id); err != nil {
 				return p, storeErr{err}
 			}
 		case t.Tries != 0:
@@ -357,7 +357,7 @@ func (r *run) recordFails(ctx context.Context, wants []want) error {
 			err := r.db.QueryRowContext(ctx, `INSERT INTO letterboxd_retry(app, tmdb, item, reread_at, tries)
 				VALUES (?1, ?2, COALESCE((SELECT item FROM letterboxd_sink WHERE app=?1 AND tmdb=?2), ''), ?3, 1)
 				ON CONFLICT(app, tmdb) DO UPDATE SET tries = CASE WHEN item = excluded.item THEN tries + 1 ELSE 1 END, item = excluded.item
-				RETURNING tries`, app, id, time.Time{}.Format(store.TimeFormat)).Scan(&tries)
+				RETURNING tries`, r.sinkKey(app), id, time.Time{}.Format(store.TimeFormat)).Scan(&tries)
 			if err != nil {
 				return storeErr{err}
 			}
@@ -366,7 +366,7 @@ func (r *run) recordFails(ctx context.Context, wants []want) error {
 			}
 		}
 		if len(parked) > 0 {
-			r.rep.Alert("%s: writes for %s failed in %d runs in a row; parked until the app lists the film anew or it needs nothing more",
+			r.alert("%s: writes for %s failed in %d runs in a row; parked until the app lists the film anew or it needs nothing more",
 				app, strings.Join(parked, ", "), parkAfter)
 		}
 	}
@@ -374,7 +374,7 @@ func (r *run) recordFails(ctx context.Context, wants []want) error {
 }
 
 func (r *run) putMeta(ctx context.Context, app string, m sinkMeta) error {
-	if err := r.env.Store.PutJSON(ctx, name, "sink."+app, m); err != nil {
+	if err := r.env.Store.PutJSON(ctx, r.ns, "sink."+app, m); err != nil {
 		return storeErr{err}
 	}
 	return nil
@@ -478,7 +478,7 @@ func (r *run) plexSnapshot(ctx context.Context, force bool) (sinkMeta, map[int]h
 	fresh, byKey := map[int]have{}, map[string]int{}
 	if err := r.plexPages(ctx, b, "", func(it plexItem) {
 		if id := tmdbFromGuids(it.Guid); id > 0 {
-			fresh[id] = have{Item: it.RatingKey, Played: it.ViewCount > 0}
+			fresh[id] = have{Item: it.RatingKey, Played: it.ViewCount > 0 && r.who == ""} // the server token's views are the owner's
 			byKey[it.RatingKey] = id
 		}
 	}); err != nil {
@@ -528,7 +528,7 @@ func (r *run) syncPlex(ctx context.Context, wants []want) error {
 	if err != nil {
 		return err
 	}
-	if r.opt.Collection != "" && (m.Collection == "" && len(p.add) > 0 || m.Collection != "" && m.PromotedID != m.Collection) {
+	if r.opt.Collection != "" && r.who == "" && (m.Collection == "" && len(p.add) > 0 || m.Collection != "" && m.PromotedID != m.Collection) {
 		r.count(app+".home_promote", 1)
 	}
 	if r.opt.DryRun || r.opt.Collection == "" {
@@ -608,8 +608,8 @@ func (r *run) plexCollection(ctx context.Context, b *breaker, m sinkMeta, haves 
 		}
 		r.count(app+".collection_removed", 1)
 	}
-	// Promoted once per collection, so if he takes it off his Home it stays off.
-	if m.Collection != "" && m.PromotedID != m.Collection {
+	// Promoted once per collection, so if he takes it off his Home it stays off. A person's is not his to promote.
+	if m.Collection != "" && m.PromotedID != m.Collection && r.who == "" {
 		// Shared home off explicitly: left out, Plex 1.43 promotes the hub to every shared user's Home too.
 		if err := r.call(ctx, b, func() error {
 			return r.env.Plex.Do(ctx, http.MethodPost, fmt.Sprintf("/hubs/sections/%d/manage?metadataItemId=%s&promotedToOwnHome=1&promotedToRecommended=1&promotedToSharedHome=0",

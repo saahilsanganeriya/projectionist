@@ -42,7 +42,7 @@ type fakeLetterboxd struct {
 }
 
 func newLetterboxd(t *testing.T) *fakeLetterboxd {
-	lids := map[string]string{"qTKY": "licorice-pizza", "aAst": "ad-astra-2019", "okja1": "okja"}
+	lids := map[string]string{"qTKY": "licorice-pizza", "aAst": "ad-astra-2019", "okja1": "okja", "ring1": "the-ring-2002"}
 	tmdb := map[string]int{"the-ring-2002": 565, "what-happened-was": 18, "okja": 387426, "primetime-2026": 999001, "licorice-pizza": 718032}
 	files := map[string]string{"/saahilsan/watchlist/": "watchlist.html", "/saahilsan/films/": "films.html"}
 	lb := &fakeLetterboxd{hits: map[string]int{}, challenge: map[string]bool{}, pages: map[string]string{}, moved: map[string]string{}, status: map[string]int{}, feed: fixture(t, "rss.xml"), etag: `"v1"`}
@@ -163,6 +163,7 @@ type jfFilm struct {
 type apps struct {
 	mu               sync.Mutex
 	plex             map[string]*plexFilm // ratingKey →
+	title            string               // the Watchlist collection's name in both apps
 	collection       []string
 	promoted         bool
 	loseCreateAnswer bool
@@ -178,7 +179,8 @@ func libraryPath(tmdb int) string {
 
 func setupApps(t *testing.T, h *fake.Harness) *apps {
 	a := &apps{
-		plex: map[string]*plexFilm{"10": {tmdb: 718032, views: 1}, "20": {tmdb: 419704}, "30": {tmdb: 565}, "40": {tmdb: 1248832, views: 5, rating: 8}},
+		title: "Watchlist",
+		plex:  map[string]*plexFilm{"10": {tmdb: 718032, views: 1}, "20": {tmdb: 419704}, "30": {tmdb: 565}, "40": {tmdb: 1248832, views: 5, rating: 8}},
 		jf: map[string]*jfFilm{"j10": {tmdb: 718032}, "j20": {tmdb: 419704}, "j30": {tmdb: 565},
 			"j40": {tmdb: 1248832, plays: 7, played: true, rating: ptr(8.0), last: "2026-10-04T21:00:00Z"}},
 	}
@@ -206,7 +208,7 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 		defer a.mu.Unlock()
 		md := []map[string]any{{"ratingKey": "800", "title": "Pixar"}}
 		if a.collection != nil {
-			md = append(md, map[string]any{"ratingKey": "900", "title": "Watchlist", "index": 9000})
+			md = append(md, map[string]any{"ratingKey": "900", "title": a.title, "index": 9000})
 		}
 		reply(w, map[string]any{"Metadata": md})
 	})
@@ -217,7 +219,7 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 	px.HandleFunc("POST", "/library/collections", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		if r.URL.Query().Get("title") != "Watchlist" || !strings.HasPrefix(r.URL.Query().Get("uri"), "server://m1/com.plexapp.plugins.library/library/metadata/") {
+		if r.URL.Query().Get("title") != a.title || !strings.HasPrefix(r.URL.Query().Get("uri"), "server://m1/com.plexapp.plugins.library/library/metadata/") {
 			http.Error(w, "bad create", 400)
 			return
 		}
@@ -285,7 +287,11 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 			for _, id := range sortedKeys(a.jf) {
 				out = append(out, item(id, a.jf[id]))
 			}
-		case q.Get("userId") != "u1":
+		case q.Get("userId") == "u2" && q.Get("IncludeItemTypes") == "Movie": // roger, who has played none of them
+			for _, id := range sortedKeys(a.jf) {
+				out = append(out, item(id, &jfFilm{tmdb: a.jf[id].tmdb}))
+			}
+		case q.Get("userId") != "u1" && q.Get("userId") != "u2":
 			http.Error(w, "wrong user", 400)
 			return
 		case q.Get("IncludeItemTypes") == "Movie":
@@ -293,7 +299,7 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 				out = append(out, item(id, a.jf[id]))
 			}
 		case q.Get("IncludeItemTypes") == "BoxSet" && a.jfSet != nil:
-			out = append(out, map[string]any{"Id": "c1", "Name": "Watchlist"})
+			out = append(out, map[string]any{"Id": "c1", "Name": a.title})
 		case q.Get("ParentId") == "c1":
 			for _, id := range a.jfSet {
 				out = append(out, item(id, a.jf[id]))
@@ -1221,5 +1227,201 @@ func TestFilmsCrawlEndsAtItsRefusedPageOnceADay(t *testing.T) {
 	w.h.Now = w.h.Now.Add(20 * time.Hour) // the next day
 	if rep := w.run(t, ""); w.lb.hits["/saahilsan/films/"] != 2 || rep.Counts["films_partial"] != 1 || rep.Counts["challenged.films"] != 0 {
 		t.Errorf("next day: page 1 read %d times in all (counts %v); want 2, logged once, no backoff", w.lb.hits["/saahilsan/films/"], rep.Counts)
+	}
+}
+
+// ---- a second person beside the owner ----
+
+// Her username sorts after his: the export pick before people took the last folder name in sort order, any user's.
+const people = "[[people]]\nperson = \"roger\"\nuser = \"zaurelia\"\n"
+
+// herFeed is her RSS feed holding these diary items, newest first.
+func herFeed(items ...string) string {
+	return `<?xml version='1.0' encoding='utf-8'?><rss version="2.0" xmlns:letterboxd="https://letterboxd.com" xmlns:tmdb="https://themoviedb.org"><channel>` +
+		strings.Join(items, "") + `</channel></rss>`
+}
+
+// herItem is one of her diary entries, logged at the given UTC time.
+func herItem(id, slug, title string, year, tmdb int, logged time.Time, watched, stars string) string {
+	return fmt.Sprintf(`<item> <link>https://letterboxd.com/zaurelia/film/%s/</link> <guid isPermaLink="false">letterboxd-watch-%s</guid>`+
+		` <pubDate>%s</pubDate> <letterboxd:watchedDate>%s</letterboxd:watchedDate> <letterboxd:filmTitle>%s</letterboxd:filmTitle>`+
+		` <letterboxd:filmYear>%d</letterboxd:filmYear> <letterboxd:memberRating>%s</letterboxd:memberRating> <tmdb:movieId>%d</tmdb:movieId> </item>`,
+		slug, id, logged.Format("Mon, 2 Jan 2006 15:04:05 -0700"), watched, title, year, stars, tmdb)
+}
+
+// personEvents lists the stage's events in the watch record for one person, oldest first.
+func personEvents(t *testing.T, db *sql.DB, person string) string {
+	t.Helper()
+	var lines []string
+	err := query(context.Background(), db, `SELECT kind, item, ref, at, plays, coalesce(rating, 0) FROM watch_events
+		WHERE source = 'letterboxd' AND person = ? ORDER BY id`, func(rows *sql.Rows) error {
+		var kind, item, ref, at string
+		var plays int
+		var rating float64
+		err := rows.Scan(&kind, &item, &ref, &at, &plays, &rating)
+		lines = append(lines, fmt.Sprintf("%s %s %s %s plays=%d rating=%g", kind, item, ref, at[:16], plays, rating))
+		return err
+	}, person)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// ownerCounts drops the person's counts and the shared fetch budget, which is all a person may change in his.
+func ownerCounts(rep stage.Report) map[string]int {
+	out := map[string]int{}
+	for k, v := range rep.Counts {
+		if !strings.HasPrefix(k, "roger.") && k != "letterboxd_fetches" {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func readFile(path string) string { b, _ := os.ReadFile(path); return string(b) }
+
+// Catches, with Aurelia (person roger) added beside the owner, step by step against a world where he is alone: her
+// entries logged after his deploy but before her own first run recorded (her history is off, so her start is her first
+// run, not his); her diary recorded under his person, or his under hers; her viewing of a film he also logged
+// counted in his plays; her export beside his, read as his (The Ring, which she watched, would leave his Watchlist
+// collections); his retraction deleting her stored entries (it alerts on The Ring); her grid pages or either
+// app read for her when she names no collection; any change in his events, counts, collections, missing-films file or
+// summary; and her feed going unread without an alert that names her.
+func TestSecondPersonsDiary(t *testing.T) {
+	alone, both := newWorld(t), newWorld(t)
+	her := filepath.Join(filepath.Dir(both.missing), "export", "letterboxd-zaurelia-2026-10-01-10-00-utc")
+	os.MkdirAll(her, 0o755)
+	for n, body := range map[string]string{"watched.csv": "Date,Name,Year,Letterboxd URI\n2026-09-30,The Ring,2002,https://boxd.it/ring1\n",
+		"diary.csv": "Date,Name,Year,Letterboxd URI,Rating,Rewatch,Tags,Watched Date\n", "ratings.csv": "Date,Name,Year,Letterboxd URI,Rating\n",
+		"watchlist.csv": "Date,Name,Year,Letterboxd URI\n"} {
+		if err := os.WriteFile(filepath.Join(her, n), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at := func(hhmm string) time.Time { ts, _ := time.Parse(time.RFC3339, "2026-10-05T"+hhmm+":00Z"); return ts }
+	okja := herItem("1540000001", "okja", "Okja", 2017, 387426, at("06:30"), "2026-10-04", "4.5")
+	ring := herItem("1540000002", "the-ring-2002", "The Ring", 2002, 565, at("07:30"), "2026-10-05", "4.0")
+	db := both.h.Env.Store.DB()
+	step := func(name string, d time.Duration, edit func(*world), extra string) stage.Report {
+		t.Helper()
+		var reps [2]stage.Report
+		for i, w := range []*world{alone, both} {
+			w.h.Now = w.h.Now.Add(d)
+			if edit != nil {
+				edit(w)
+			}
+			opts := ""
+			if w == both {
+				opts = extra
+			}
+			reps[i] = w.run(t, opts)
+		}
+		a, b := reps[0], reps[1]
+		if got, want := personEvents(t, db, "saahil"), personEvents(t, alone.h.Env.Store.DB(), "saahil"); got != want {
+			t.Errorf("%s: his events with her beside him\n%s\nwant (alone)\n%s", name, got, want)
+		}
+		if got, want := ownerCounts(b), ownerCounts(a); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("%s: his counts with her beside him %v, want (alone) %v", name, got, want)
+		}
+		if fmt.Sprint(both.apps.collection, both.apps.jfSet, both.apps.promoted) != fmt.Sprint(alone.apps.collection, alone.apps.jfSet, alone.apps.promoted) {
+			t.Errorf("%s: his collections plex %v jellyfin %v, want (alone) %v %v", name, both.apps.collection, both.apps.jfSet, alone.apps.collection, alone.apps.jfSet)
+		}
+		missing := func(w *world) string { return strings.ReplaceAll(readFile(w.missing), w.lb.URL, "") }
+		if got, want := missing(both), missing(alone); got != want || !strings.Contains(got, "(1)") {
+			t.Errorf("%s: his missing-films file %q, want (alone) %q", name, got, want)
+		}
+		if extra != "" && !strings.HasPrefix(b.Summary, a.Summary+"; roger: ") || len(b.Alerts) != 0 {
+			t.Errorf("%s: summary %q (alone %q), alerts %v", name, b.Summary, a.Summary, b.Alerts)
+		}
+		return b
+	}
+
+	step("his deploy", 0, nil, "")
+	both.lb.serve("/zaurelia/rss/", herFeed(okja)) // Okja, logged at 06:30, after his deploy and before her first run
+	rep := step("her first run", time.Hour, nil, people)
+	if got := personEvents(t, db, "roger"); got != "" || rep.Counts["roger.rss_entries"] != 1 {
+		t.Errorf("her first run recorded\n%s\n(counts %v); want her entry stored and nothing recorded", got, rep.Counts)
+	}
+	if rep.Counts["roger.plex.snapshot"]+rep.Counts["roger.jellyfin.snapshot"] != 0 {
+		t.Errorf("an app read for a person with no collection: counts %v", rep.Counts)
+	}
+	both.lb.serve("/zaurelia/rss/", herFeed(ring, okja)) // she logs The Ring at 07:30; he logs it too (07:00)
+	step("both log The Ring", time.Hour, func(w *world) { w.lb.logRing() }, people)
+	want := "logged movie/tmdb-565 letterboxd:1540000002 2026-10-05T07:30 plays=1 rating=0\n" +
+		"rated movie/tmdb-565 letterboxd:1540000002 2026-10-05T07:30 plays=0 rating=8"
+	if got := personEvents(t, db, "roger"); got != want {
+		t.Errorf("her events\n%s\nwant\n%s", got, want)
+	}
+	rep = step("he edits his rating", 30*time.Minute, func(w *world) {
+		w.lb.editFeed("<letterboxd:memberRating>4.0<", "<letterboxd:memberRating>3.5<") // his feed is read whole again
+	}, people)
+	if got := personEvents(t, db, "roger"); got != want || rep.Counts["roger.events.logged"]+rep.Counts["roger.events.rated"] != 0 {
+		t.Errorf("a later run: her events\n%s\n(counts %v)", got, rep.Counts)
+	}
+	for _, path := range []string{"/zaurelia/watchlist/", "/zaurelia/films/"} {
+		if both.lb.hits[path] != 0 {
+			t.Errorf("%s read %d times for a person with no collection", path, both.lb.hits[path])
+		}
+	}
+	both.lb.fail("/zaurelia/rss/", http.StatusInternalServerError)
+	both.h.Now = both.h.Now.Add(feedStale + time.Hour)
+	if rep := both.run(t, people); len(rep.Alerts) != 1 || !strings.HasPrefix(rep.Alerts[0], "roger: Letterboxd feed unread since") {
+		t.Errorf("her feed unread for days: alerts %v", rep.Alerts)
+	}
+}
+
+// Catches, for a person who names a collection: it not made in both apps under her name, a film he watched (Digger:
+// his Plex views, his Jellyfin played flag) kept out of hers, the server token's Plex views or his Jellyfin user
+// standing for hers, her collection put on his Home, her films grid read (letterboxd_seen is his), her app rows
+// stored over his (his Plex row for Digger must stay played), and his plex.tv watchlist mirrored for her.
+func TestPersonsOwnCollection(t *testing.T) {
+	w := newWorld(t)
+	w.apps.title = "Aurelia Watchlist"
+	w.lb.serve("/zaurelia/rss/", herFeed())
+	w.lb.serve("/zaurelia/watchlist/", `<div class="cols-2 js-watchlist-content" data-num-entries="2"><ul class="grid">`+
+		gridEntry("Digger (2026)", "digger-2026")+gridEntry("The Ring (2002)", "the-ring-2002")+`</ul></div><div class="paginate-nextprev"><span class="next">Older</span></div>`)
+	opts := fmt.Sprintf("collection = \"\"\nplex_watchlist = true\ndiscover_url = %q\n", w.h.Plex.URL) + people + "collection = \"Aurelia Watchlist\"\n"
+	rep := w.run(t, opts)
+	sorted := func(ids []string) string { return strings.Join(slices.Sorted(slices.Values(ids)), ",") }
+	if got, jf := sorted(w.apps.collection), sorted(w.apps.jfSet); got != "30,40" || jf != "j30,j40" || rep.Counts["roger.plex.collection_added"] != 2 {
+		t.Errorf("her collection: plex %v, jellyfin %v (counts %v); want The Ring and Digger in both", got, jf, rep.Counts)
+	}
+	if w.apps.promoted || len(w.h.Plex.Calls("POST", "/hubs/sections/4/manage")) != 0 || rep.Counts["roger.plex.home_promote"] != 0 {
+		t.Errorf("her collection promoted to his Home")
+	}
+	if rep.Counts["roger.sink_errors"] != 0 { // the fake plex.tv answers 404, which only his mirror may meet
+		t.Errorf("a plex.tv watchlist mirrored for her: counts %v", rep.Counts)
+	}
+	if w.lb.hits["/zaurelia/watchlist/"] != 1 || w.lb.hits["/zaurelia/films/"] != 0 {
+		t.Errorf("her grid pages: watchlist read %d times, films %d; want 1, 0", w.lb.hits["/zaurelia/watchlist/"], w.lb.hits["/zaurelia/films/"])
+	}
+	var his, hers bool
+	db := w.h.Env.Store.DB()
+	if err := db.QueryRow(`SELECT (SELECT played FROM letterboxd_sink WHERE app='plex' AND tmdb=1248832),
+		(SELECT played FROM letterboxd_sink WHERE app='roger/plex' AND tmdb=1248832)`).Scan(&his, &hers); err != nil || !his || hers {
+		t.Errorf("Digger's Plex rows: his played %v, hers %v (%v); want true, false", his, hers, err)
+	}
+	w.h.Now = w.h.Now.Add(time.Minute)
+	before := writes(w.h)
+	if again := w.run(t, opts); writes(w.h) != before {
+		t.Errorf("the next run wrote %d times (counts %v)", writes(w.h)-before, again.Counts)
+	}
+}
+
+// Catches a people entry that would share state with the owner or another person, or has no feed to read.
+func TestPeopleNeedTheirOwnPersonAndAUser(t *testing.T) {
+	for _, tc := range []struct{ name, people string }{
+		{"the owner's person", `[{ person = "saahil", user = "zaurelia" }]`},
+		{"a person twice", `[{ person = "roger", user = "zaurelia" }, { person = "roger", user = "other" }]`},
+		{"no user", `[{ person = "roger" }]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorld(t)
+			w.h.SetOptions(w.opts + "people = " + tc.people + "\n")
+			if err := w.st.Run(context.Background(), w.h.Env, &stage.Report{}); err == nil || !strings.Contains(err.Error(), "a person of its own") {
+				t.Errorf("err = %v", err)
+			}
+		})
 	}
 }
