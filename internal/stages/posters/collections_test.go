@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"projectionist/internal/fake"
+	"projectionist/internal/llm"
+	"projectionist/internal/llm/llmtest"
 )
 
 func init() { WikimediaPace = func(bool) time.Duration { return 0 } }
@@ -281,6 +283,23 @@ func TestComposeFramesTheDirector(t *testing.T) {
 	}
 	if out.Bounds() != image.Rect(0, 0, 1000, 1500) || red < 300*200/10 {
 		t.Fatalf("poster %v with %d red samples of %d; want 1000x1500 holding the director (about a quarter of it)", out.Bounds(), red, 300*200)
+	}
+}
+
+// Catches collections judged on the posters task's model, or titles on the collections task's: each task's model is
+// configured on its own.
+func TestCollectionsJudgeOnTheirTask(t *testing.T) {
+	w := collectionWorld(t, "dry_run = true\n", true)
+	w.h.Env.LLM = llmtest.Client(t, w.gateway, w.h.Env.Store, w.h.Env.Now, llm.Config{Tasks: map[string]llm.Task{
+		"posters": {Model: "google/gemma-4-31b-it"}, "collections": {Model: "zai/glm-5.3-flash"}}})
+	w.run(t)
+	asked := map[string][]string{}
+	for _, c := range w.gateway.Calls() {
+		collection := c.Messages[0].Content[0].Text != systemPrompt
+		asked[c.Model] = append(asked[c.Model], fmt.Sprint(collection))
+	}
+	if g, z := asked["google/gemma-4-31b-it"], asked["zai/glm-5.3-flash"]; len(g) == 0 || len(z) == 0 || slices.Contains(g, "true") || slices.Contains(z, "false") {
+		t.Fatalf("collection calls by model: %v; want titles on gemma and collections on glm only", asked)
 	}
 }
 
