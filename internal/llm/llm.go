@@ -61,21 +61,23 @@ type Task struct {
 	Reasoning string   `toml:"reasoning"`
 }
 
-// The bake-off's picks (2026-10-06): the posters and collections judge, and the cheap fallback for every task.
+// The bake-offs' picks: the posters and collections judge and its fallback (the owner's-taste test, 2026-10-06: the
+// cheap models nearest Opus at choosing the poster he picked), and tonight's cheap fallback.
 const (
-	VisionModel   = "alibaba/qwen3-vl-instruct"
-	FallbackModel = "alibaba/qwen3.7-flash"
+	VisionModel    = "openai/gpt-5.6-luna"
+	VisionFallback = "alibaba/qwen3-vl-instruct"
+	FallbackModel  = "alibaba/qwen3.7-flash"
 )
 
-// Defaults is the configuration a missing [llm] key takes. The vision tasks send effort "none": "off" reads the
-// first model's controls, and qwen3-vl-instruct has none, so the fallback would reason.
+// Defaults is the configuration a missing [llm] key takes. The vision tasks send effort "none" rather than "off":
+// "off" reads only the first model's controls, and a fallback may read effort differently.
 func Defaults() Config {
 	return Config{
 		API: "https://ai-gateway.vercel.sh/v1", KeyFile: "/run/secrets/ai_gateway_api_key",
 		InFlight: 8, Timeout: 120 * time.Second, Attempts: 4, ParkAfter: 5,
 		Tasks: map[string]Task{
-			"posters":     {Model: VisionModel, Fallbacks: []string{FallbackModel}, Reasoning: "none"},
-			"collections": {Model: VisionModel, Fallbacks: []string{FallbackModel}, Reasoning: "none"},
+			"posters":     {Model: VisionModel, Fallbacks: []string{VisionFallback}, Reasoning: "none"},
+			"collections": {Model: VisionModel, Fallbacks: []string{VisionFallback}, Reasoning: "none"},
 			"tonight":     {Model: "deepseek/deepseek-v4.1-flash", Fallbacks: []string{FallbackModel}, Reasoning: "off"},
 		},
 	}

@@ -29,7 +29,8 @@ type Model struct {
 	Toggle  bool
 }
 
-// Catalogue is the gateway's real list (2026-10-05) for the models the defaults and the bake-off name.
+// Catalogue is the gateway's real list (2026-10-05; luna and opus 2026-10-06, US prices) for the models the defaults and
+// the bake-offs name.
 var Catalogue = []Model{
 	{ID: "deepseek/deepseek-v4-flash-0731", In: 0.13, Out: 0.26, Toggle: true, Efforts: []string{"none", "low", "medium", "high"}},
 	{ID: "deepseek/deepseek-v4.1-flash", In: 0.30, Out: 1.20, Vision: true, Toggle: true, Efforts: []string{"none", "low", "high", "max"}},
@@ -39,6 +40,8 @@ var Catalogue = []Model{
 	{ID: "deepseek/deepseek-v4-flash-vision-exp", In: 0.2156, Out: 0.6468, Vision: true, Toggle: true, Efforts: []string{"none", "low", "medium", "high"}},
 	{ID: "anthropic/claude-sonnet-5.5", In: 2.2, Out: 11, Vision: true, Efforts: []string{"low", "medium", "high", "xhigh", "max"}},
 	{ID: "alibaba/qwen3-vl-instruct", In: 0.40, Out: 1.60, Vision: true},
+	{ID: "openai/gpt-5.6-luna", In: 0.22, Out: 1.32, Vision: true, Toggle: true, Efforts: []string{"none", "low", "medium", "high", "xhigh", "max"}},
+	{ID: "anthropic/claude-opus-5.5", In: 4.4, Out: 22, Vision: true, Efforts: []string{"low", "medium", "high", "xhigh", "max"}},
 	{ID: "alibaba/qwen3.7-flash", In: 0.03, Out: 0.13, Vision: true, Toggle: true,
 		Efforts: []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}},
 }

@@ -95,14 +95,14 @@ read on every request. `[llm]` in the config sets the gateway and each task; `co
 
 | Task | Default model, then fallback | Reasoning | Why |
 |---|---|---|---|
-| `posters` (movie, show, season judge) | `alibaba/qwen3-vl-instruct`, then `alibaba/qwen3.7-flash` | none | vision; the bake-off's best rank correlation, and its fallback at a tenth of the price |
+| `posters` (movie, show, season judge) | `openai/gpt-5.6-luna`, then `alibaba/qwen3-vl-instruct` | none | vision; the owner's-taste test's cheap pick (below), and its steadiest cheap model as the fallback. The one-time backfill runs on `anthropic/claude-opus-5.5` |
 | `collections` (franchise and director judges) | the same | none | vision; director photos were not in any bake-off |
 | `tonight` (daily picks) | `deepseek/deepseek-v4.1-flash`, then `alibaba/qwen3.7-flash` | off | text; the judges' first choice, and the most reliable and cheapest |
 
-The vision tasks send effort `"none"`, not `"off"`: `"off"` asks for the least the *first* model allows, and
-qwen3-vl-instruct has no reasoning control, so nothing would be sent and qwen3.7-flash, answering as the fallback,
-would reason. Both models answered a live call with `"reasoning": {"effort": "none"}` (2026-10-06T02Z, HTTP 200; 0
-reasoning tokens). tonight's `"off"` sends effort `"none"` too, which both of its models list.
+The vision tasks send effort `"none"`, not `"off"`: `"off"` asks for the least the *first* model allows, and a
+fallback may read it differently (qwen3-vl-instruct has no reasoning control, so behind it qwen3.7-flash would reason).
+qwen3-vl-instruct and qwen3.7-flash answered a live call with `"reasoning": {"effort": "none"}` (2026-10-06T02Z, HTTP
+200; 0 reasoning tokens), and so did gpt-5.6-luna and claude-opus-5.5 (2026-10-06T04Z; 0 reasoning tokens). tonight's `"off"` sends effort `"none"` too, which both of its models list.
 
 Each task may list `fallbacks`: the gateway tries them in order when the model fails (its `models` field), and the
 answer names the model that served it. A task table that leaves `fallbacks` out keeps the default's; `fallbacks = []`
@@ -152,11 +152,14 @@ $0.80) that is 8 × 3 × $0.0021 ≈ $0.05: a six-candidate title estimates abou
 6 × 126 image patches for 252×392 thumbnails, the framing) plus all 1,024 output tokens. On the dearest bake-off model, `alibaba/qwen3.8-27b` ($0.99 /
 $4.35), it is about $0.14. tonight's pair is sized the same way and logs `tonight_over_cap` when lost answers pass it.
 
-The cost figure is `provider_metadata.gateway.cost` (the message's, else the answer's). The Chat Completions docs
-(fetched 2026-10-06) show no cost field, but the live answer of 2026-10-06T01:12Z carries it as a decimal string
-(`"cost": "0.00000572"`, beside `marketCost`, `inferenceCost` and the routing), and `usage.cost` as a number. It is read
-when it is a number or a decimal string, with or without "$"; any other shape (an object, text with units, a metadata
-that is not an object) counts as no figure, never as an unreadable answer that would be asked again and paid twice.
+The cost figure is `usage.cost`, else `provider_metadata.gateway.cost` (the message's, else the answer's). The Chat
+Completions docs (fetched 2026-10-06) show no cost field, but the live answer of 2026-10-06T01:12Z carries `usage.cost` as
+a number and the metadata's as a decimal string (`"cost": "0.00000572"`, beside `marketCost`, `inferenceCost` and the
+routing); Opus's answers of 2026-10-06T04Z carry only `usage.cost`. `usage.cost` is what the gateway billed: it prices
+input read from the prompt cache at the cache's rate, where usage at the list price counts it in full (twice the real
+cost of an Opus judge call with the taste references). A figure is read when it is a number or a decimal string, with
+or without "$"; any other shape (an object, text with units, a metadata that is not an object) counts as no figure,
+never as an unreadable answer that would be asked again and paid twice.
 
 **The bake-off** (`cmd/bakeoff`, a tool, not a test) sends each candidate model exactly what the stage would: 60 titles
 drawn from a copy of the production store with stored Sonnet verdicts (owner picks and Plex defaults; uploads are never
