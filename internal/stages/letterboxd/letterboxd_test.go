@@ -1151,18 +1151,19 @@ func watchlistPage(films ...string) string {
 
 // Catches, with all three members: a film put on another member's Plex watchlist (the owner's token, or another Home
 // user's, standing for a person's; Aurelia found by her name, Aaron by his username); a film a member put there by
-// hand taken out, also one on their Letterboxd watchlist too (never this stage's add) and one this stage added for
-// another member (his What Happened Was, while hers was her own); a film this stage added kept once it leaves her
-// Letterboxd watchlist, or once the watch record has her playing it; her watchlist crawled again before
-// watchlist_every (6 h by default); and a Home switch made by a run with nothing to read or write.
+// hand taken out, or added again: one on their Letterboxd watchlist too (never this stage's add), one added by hand
+// since the last read, and one this stage added for another member (his What Happened Was, while hers was her own);
+// a film this stage added kept once it leaves her Letterboxd watchlist, or once the watch record has her playing it,
+// or taken off Aaron's for her play; her watchlist crawled again before watchlist_every (6 h by default); and a
+// Home switch made by a run with nothing to read or write.
 func TestEachMembersOwnPlexWatchlist(t *testing.T) {
 	w := newWorld(t)
 	okja, ring := gridEntry("Okja (2017)", "okja"), gridEntry("The Ring (2002)", "the-ring-2002")
-	whw := gridEntry("What Happened Was... (1994)", "what-happened-was")
+	whw, prime := gridEntry("What Happened Was... (1994)", "what-happened-was"), gridEntry("Primetime (2026)", "primetime-2026")
 	w.lb.serve("/zaurelia/rss/", herFeed())
 	w.lb.serve("/zaaron/rss/", herFeed())
 	w.lb.serve("/zaurelia/watchlist/", watchlistPage(okja, ring, whw))
-	w.lb.serve("/zaaron/watchlist/", watchlistPage(gridEntry("Licorice Pizza (2021)", "licorice-pizza")))
+	w.lb.serve("/zaaron/watchlist/", watchlistPage(gridEntry("Licorice Pizza (2021)", "licorice-pizza"), okja))
 	w.pt.set(rogerToken, "m18", "m999") // What Happened Was and a film of her own, both put there by hand
 	lists := func() string {
 		return fmt.Sprintf("his %s; hers %s; Aaron's %s", w.pt.list(fake.PlexToken), w.pt.list(rogerToken), w.pt.list(aaronToken))
@@ -1171,26 +1172,29 @@ func TestEachMembersOwnPlexWatchlist(t *testing.T) {
 	step := func(name string, d time.Duration, want string, wantSwitches int) {
 		t.Helper()
 		w.h.Now = w.h.Now.Add(d)
-		if rep := w.run(t, threePeople); lists() != want || switches() != wantSwitches || len(rep.Alerts) != 0 {
-			t.Fatalf("%s: %s, %d switches to her, alerts %v\nwant %s, %d switches", name, lists(), switches(), rep.Alerts, want, wantSwitches)
+		rep := w.run(t, threePeople)
+		failed := rep.Counts["plextv.failed"] + rep.Counts["roger.plextv.failed"] + rep.Counts["aaron.plextv.failed"]
+		if lists() != want || switches() != wantSwitches || len(rep.Alerts)+failed != 0 {
+			t.Fatalf("%s: %s, %d switches to her, alerts %v, %d failed writes\nwant %s, %d switches", name, lists(), switches(), rep.Alerts, failed, want, wantSwitches)
 		}
 	}
-	step("first run", 0, "his m18,m565,show565; hers m18,m387426,m565,m999; Aaron's m718032", 1)
+	step("first run", 0, "his m18,m565,show565; hers m18,m387426,m565,m999; Aaron's m387426,m718032", 1)
 
-	w.lb.serve("/zaurelia/watchlist/", watchlistPage(okja)) // she takes The Ring and What Happened Was off it
+	w.lb.serve("/zaurelia/watchlist/", watchlistPage(okja, prime)) // she takes The Ring and What Happened Was off it, adds Primetime,
+	w.pt.set(rogerToken, "m18", "m999", "m387426", "m565", "m999001") // which she also puts on her Plex watchlist by hand
 	hits := w.lb.hits["/zaurelia/watchlist/"]
-	step("an hour later", time.Hour, "his m18,m565,show565; hers m18,m387426,m565,m999; Aaron's m718032", 1)
+	step("an hour later", time.Hour, "his m18,m565,show565; hers m18,m387426,m565,m999,m999001; Aaron's m387426,m718032", 1)
 	if w.lb.hits["/zaurelia/watchlist/"] != hits {
 		t.Errorf("her watchlist crawled again after an hour")
 	}
-	step("her next crawl", 5*time.Hour, "his m18,m565,show565; hers m18,m387426,m999; Aaron's m718032", 2)
+	step("her next crawl", 5*time.Hour, "his m18,m565,show565; hers m18,m387426,m999,m999001; Aaron's m387426,m718032", 2)
 
 	err := watch.Add(context.Background(), w.h.Env.Store.DB(), watch.Event{Person: "roger", Item: movieItem(387426), Ref: "plex:77",
 		Source: "plex-webhook", At: w.h.Now, Kind: watch.Finished}) // she watches Okja in Plex; jfsync records it
 	if err != nil {
 		t.Fatal(err)
 	}
-	step("after she watched Okja", 30*time.Minute, "his m18,m565,show565; hers m18,m999; Aaron's m718032", 3)
+	step("after she watched Okja", 30*time.Minute, "his m18,m565,show565; hers m18,m999,m999001; Aaron's m387426,m718032", 3)
 }
 
 // Catches a person whose Plex Home user projectionist cannot switch to (no user by that name; one behind a PIN, which
