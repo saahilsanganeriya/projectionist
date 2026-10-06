@@ -53,6 +53,17 @@ services:
       # The owner's unzipped Letterboxd export: lists' export_dir (a missing or empty folder is an alert on every run),
       # the letterboxd stage's export_dir and tonight's letterboxd_dir (for those two, a missing folder is no export).
       - /volume1/docker/projectionist/data/letterboxd:/volume1/docker/projectionist/data/letterboxd:ro
+      # health: the NVMe app-data volume's mount, fullness and top-level entries; appbackup reads its roots here.
+      # The superblock's own rw/ro still shows through this read-only bind, so health sees a read-only remount.
+      - { type: bind, source: /volume2, target: /volume2, read_only: true, bind: { create_host_path: false } }
+      # appbackup: SQLite's online backup opens each database's -shm read-write, so these folders are writable.
+      - type: bind
+        source: /volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases
+        target: /volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases
+        bind: { create_host_path: false }
+      - { type: bind, source: /volume2/jellyfin/config/data, target: /volume2/jellyfin/config/data, bind: { create_host_path: false } }
+      - { type: bind, source: /volume2/projectionist/state, target: /volume2/projectionist/state, bind: { create_host_path: false } } # = /state
+      - /volume1/PlexMediaServer/nvme-backup:/volume1/PlexMediaServer/nvme-backup # appbackup's nightly versions
     secrets: [jellyfin_key, tmdb_read_token, tmdb_api_key, fanart_api_key, anthropic_api_key] # /run/secrets/<name>, read-only
     logging:
       driver: json-file

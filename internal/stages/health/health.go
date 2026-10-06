@@ -30,6 +30,13 @@
 // once per 24 h, recorded before it is sent. The next runs follow it in Plex's /activities and time nothing; the first
 // after it ends times the hubs again, logs before and after, and alerts on every run while they stay slow. An
 // optimize Plex still lists after 1 h alerts. Only maintenance of the sink: the hub loads' answers are not read.
+//
+// The app-data NVMe volume (`volume2`, mounted read-only). Every run alerts while it is not a mounted filesystem's
+// root (on the host, /volume2 would then be a folder on the system partition and the apps would write there), while
+// its filesystem is read-only (ext4 remounts read-only after an I/O error), while it is `volume2_max_used` percent
+// full or more, and while it holds a top-level entry outside `volume2_allow`: app data only, never images, scratch,
+// downloads or backups. It also alerts while the appbackup stage's newest version is older than `backup_max_age`,
+// which catches a backup that stopped running as well as one that fails.
 package health
 
 import (
@@ -40,15 +47,19 @@ import (
 	"maps"
 	"net"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"projectionist/internal/config"
 	"projectionist/internal/jellyfin"
 	"projectionist/internal/stage"
+	"projectionist/internal/stages/appbackup"
 	"projectionist/internal/viewers"
 )
 
@@ -79,6 +90,11 @@ type Options struct {
 	PlexSlow           time.Duration `toml:"plex_slow"`            // a hub load slower than this is slow
 	PlexBatch          int           `toml:"plex_batch"`           // library changes since the last optimize that make one due
 	PlexOptimizeWindow string        `toml:"plex_optimize_window"` // "HH:MM-HH:MM" in the config time zone
+
+	Volume2        string        `toml:"volume2"`          // the app-data NVMe volume; "" = no volume checks
+	Volume2MaxUsed float64       `toml:"volume2_max_used"` // percent used that alerts
+	Volume2Allow   []string      `toml:"volume2_allow"`    // the only top-level entries it may hold
+	BackupMaxAge   time.Duration `toml:"backup_max_age"`   // the appbackup stage's newest version; 0 = no check
 }
 
 func defaults() Options {
@@ -94,6 +110,10 @@ func defaults() Options {
 		PlexSlow:             5 * time.Second,
 		PlexBatch:            500,
 		PlexOptimizeWindow:   "03:00-06:00",
+		Volume2MaxUsed:       75,
+		Volume2Allow: []string{"PlexAppData", "jellyfin", "projectionist", "transcode", "transcode.img", "swapfile",
+			"lost+found", "aquota.user", "aquota.group", "@eaDir", "@tmp", ".move"},
+		BackupMaxAge: 36 * time.Hour,
 	}
 }
 
@@ -146,7 +166,8 @@ type State struct {
 }
 
 type Stage struct {
-	Sleep func(ctx context.Context, d time.Duration) error // nil: real time; tests move the harness clock instead
+	Sleep     func(ctx context.Context, d time.Duration) error // nil: real time; tests move the harness clock instead
+	Mountinfo string                                           // "": /proc/self/mountinfo
 }
 
 func (Stage) Name() string { return name }
@@ -244,12 +265,85 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 		}
 	}
 	rep.Summary = summarize(results)
+	if opt.Volume2 != "" {
+		mountinfo := s.Mountinfo
+		if mountinfo == "" {
+			mountinfo = "/proc/self/mountinfo"
+		}
+		rep.Summary += "; " + checkVolume(env, mountinfo, opt.Volume2, opt.Volume2MaxUsed, opt.Volume2Allow, rep)
+	}
+	if opt.BackupMaxAge > 0 {
+		last, found, err := appbackup.Newest(ctx, env)
+		if err != nil {
+			return err
+		}
+		if age := env.Now().Sub(last.At); found && age > opt.BackupMaxAge {
+			rep.Alert("the newest app-data backup (%s) finished %s ago, over backup_max_age %s", last.Day, age.Round(time.Minute), opt.BackupMaxAge)
+		}
+	}
 	env.Log.Info("probes done", "event", "health_checked", "probes", len(results), "failed", len(results)-countPassed(results))
 	plexUp := slices.ContainsFunc(results, func(r result) bool { return r.probe == "plex" && r.fault == passed })
 	if err := upkeepPlex(ctx, env, opt, window, &st, plexUp, rep); err != nil {
 		return err
 	}
 	return env.Store.PutJSON(context.WithoutCancel(ctx), name, "state", st)
+}
+
+// checkVolume alerts on each condition the package doc lists for volume2 and returns its line for the summary.
+func checkVolume(env *stage.Env, mountinfo, dir string, maxUsed float64, allow []string, rep *stage.Report) string {
+	data, err := os.ReadFile(mountinfo)
+	if err != nil {
+		rep.Alert("%s: cannot read the mount table: %v", dir, err)
+		return dir + " unchecked"
+	}
+	// <id> <parent> <dev> <root> <mount point> <options> [optional...] - <fstype> <source> <superblock options>
+	unescape := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`)
+	var root, super string
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Fields(line)
+		if sep := slices.Index(f, "-"); sep >= 6 && len(f) > sep+3 && unescape.Replace(f[4]) == dir {
+			root, super = unescape.Replace(f[3]), f[sep+3] // a later mount on dir hides an earlier one
+		}
+	}
+	switch {
+	case root == "":
+		rep.Alert("%s is not mounted in this container", dir)
+		return dir + " not mounted"
+	case root != "/":
+		rep.Alert("%s is not mounted on the host: it is the folder %s of another filesystem", dir, root)
+		return dir + " not mounted"
+	case slices.Contains(strings.Split(super, ","), "ro"):
+		// The superblock's options, not this container's read-only bind: they say whether the apps can write.
+		rep.Alert("%s is read-only (%s)", dir, super)
+	}
+	line := dir
+	var st unix.Statfs_t
+	if err := unix.Statfs(dir, &st); err != nil {
+		rep.Alert("%s: statfs: %v", dir, err)
+	} else if used := st.Blocks - st.Bfree; used+st.Bavail > 0 {
+		pct := float64(used) * 100 / float64(used+st.Bavail) // as df counts it: root's reserved blocks are not free
+		free := float64(st.Bavail*uint64(st.Bsize)) / 1e9
+		env.Metrics.Set("projectionist_health_volume_used_ratio", pct/100, "volume", dir)
+		if pct >= maxUsed {
+			rep.Alert("%s is %.0f%% full (alert at %.0f%%), %.0f GB free", dir, pct, maxUsed, free)
+		}
+		line = fmt.Sprintf("%s %.0f%% used, %.0f GB free", dir, pct, free)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		rep.Alert("%s: %v", dir, err)
+		return line
+	}
+	var stray []string
+	for _, e := range entries {
+		if !slices.Contains(allow, e.Name()) {
+			stray = append(stray, e.Name())
+		}
+	}
+	if len(stray) > 0 {
+		rep.Alert("%s holds %s, outside volume2_allow (app data only)", dir, strings.Join(stray, ", "))
+	}
+	return line
 }
 
 // restart records the restart, stops c with a long grace, then brings it back. A shutdown never cuts it between the

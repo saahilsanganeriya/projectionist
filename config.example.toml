@@ -100,6 +100,13 @@ plex_movies_section   = 4
 plex_slow             = "5s"           # a cold Movies tab took 26.8 s on a fragmented database, 17 ms after an optimize
 plex_batch            = 500            # details notes + rename moves + Plex collection edits since the last optimize
 plex_optimize_window  = "03:00-06:00"  # when an optimize may start (timezone above); the 2026-10-05 one took 4 min 21 s
+# The app-data NVMe volume, mounted read-only: alerts on every run while it is not mounted on the host, read-only, too
+# full, or holds anything but app data. "" = no volume checks.
+volume2               = "/volume2"
+volume2_max_used      = 75             # percent, as df counts it
+volume2_allow         = ["PlexAppData", "jellyfin", "projectionist", "transcode", "transcode.img", "swapfile",
+                         "lost+found", "aquota.user", "aquota.group", "@eaDir", "@tmp", ".move"] # .move: drop after the move
+backup_max_age        = "36h"          # alert while appbackup's newest version is older; "0s" = no check
 [stages.health.public] # URL = the status it must answer through the Cloudflare tunnel; redirects are not followed
 "https://jellyfin.example.com"    = 302
 "https://plex.example.com"    = 401
@@ -372,3 +379,20 @@ until = 2026-11-05T08:00:00Z # 00:00 PST
 
 [[llm.policy]]
 model = "haiku:latest"
+
+# Nightly versions of the NVMe app data on volume1: SQLite's online backup of each database, then the roots file by
+# file, hardlinking what did not change since the newest version. Needs /volume2 read-only, each database's folder
+# read-write (SQLite opens the -shm read-write) and target read-write (see compose.yaml).
+[stages.appbackup]
+every     = "24h"
+window    = "04:30-06:30"
+databases = [
+  "/volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db",
+  "/volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.blobs.db",
+  "/volume2/jellyfin/config/data/jellyfin.db",
+  "/volume2/projectionist/state/projectionist.db",
+]
+roots     = ["/volume2/PlexAppData", "/volume2/jellyfin", "/volume2/projectionist"]
+exclude   = ["/volume2/transcode", "/volume2/transcode.img"] # transcoder scratch, never copied
+target    = "/volume1/PlexMediaServer/nvme-backup"           # <target>/<YYYY-MM-DD>/<the source path>
+keep      = 7
