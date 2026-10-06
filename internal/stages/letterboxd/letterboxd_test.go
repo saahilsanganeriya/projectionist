@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +24,7 @@ import (
 	"projectionist/internal/stage"
 	"projectionist/internal/stages/jfsync"
 	"projectionist/internal/store"
+	"projectionist/internal/watch"
 )
 
 // ---- a fake Letterboxd (letterboxd.com + boxd.it on one server) serving the captured pages ----
@@ -147,7 +147,7 @@ func (lb *fakeLetterboxd) total() int {
 	return n
 }
 
-// ---- stateful fake Plex and Jellyfin: writes change what the next listing returns ----
+// ---- stateful fake Plex and Jellyfin for jfsync (this stage sends neither a call) ----
 
 type plexFilm struct {
 	tmdb, views, rating int
@@ -161,15 +161,9 @@ type jfFilm struct {
 }
 
 type apps struct {
-	mu               sync.Mutex
-	plex             map[string]*plexFilm // ratingKey →
-	title            string               // the Watchlist collection's name in both apps
-	collection       []string
-	promoted         bool
-	loseCreateAnswer bool
-	jf               map[string]*jfFilm // item id →
-	jfSet            []string
-	failJFSet        bool // Jellyfin's collection calls answer 500
+	mu   sync.Mutex
+	plex map[string]*plexFilm // ratingKey →
+	jf   map[string]*jfFilm   // item id →
 }
 
 // libraryPath is where both apps hold a film: the library's naming scheme, which jfsync addresses items by.
@@ -179,82 +173,24 @@ func libraryPath(tmdb int) string {
 
 func setupApps(t *testing.T, h *fake.Harness) *apps {
 	a := &apps{
-		title: "Watchlist",
-		plex:  map[string]*plexFilm{"10": {tmdb: 718032, views: 1}, "20": {tmdb: 419704}, "30": {tmdb: 565}, "40": {tmdb: 1248832, views: 5, rating: 8}},
+		plex: map[string]*plexFilm{"10": {tmdb: 718032, views: 1}, "20": {tmdb: 419704}, "30": {tmdb: 565}, "40": {tmdb: 1248832, views: 5, rating: 8}},
 		jf: map[string]*jfFilm{"j10": {tmdb: 718032}, "j20": {tmdb: 419704}, "j30": {tmdb: 565},
 			"j40": {tmdb: 1248832, plays: 7, played: true, rating: ptr(8.0), last: "2026-10-04T21:00:00Z"}},
 	}
 	px, jf := h.Plex, h.Jellyfin
 	reply := func(w http.ResponseWriter, v any) { json.NewEncoder(w).Encode(map[string]any{"MediaContainer": v}) }
-	px.HandleFunc("GET", "/identity", func(w http.ResponseWriter, r *http.Request) { reply(w, map[string]any{"machineIdentifier": "m1"}) })
 	px.HandleFunc("GET", "/library/sections/4/all", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		var md []map[string]any
 		for _, k := range sortedKeys(a.plex) {
 			f := a.plex[k]
-			if c := r.URL.Query().Get("collection"); c != "" && (c != "9000" || !slices.Contains(a.collection, k)) {
-				continue // filtered on a collection's tag id: its members only
-			}
-			// Real Plex sends both "guid" (a string) and "Guid" (a list); Go's case-insensitive keys must not mix them.
 			md = append(md, map[string]any{"ratingKey": k, "guid": "plex://movie/" + k, "viewCount": f.views, "userRating": f.rating,
 				"Guid":  []map[string]string{{"id": "imdb://tt0"}, {"id": fmt.Sprintf("tmdb://%d", f.tmdb)}},
 				"Media": []map[string]any{{"Part": []map[string]string{{"file": libraryPath(f.tmdb)}}}}})
 		}
 		reply(w, map[string]any{"totalSize": len(md), "Metadata": md})
 	})
-	px.HandleFunc("GET", "/library/sections/4/collections", func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		md := []map[string]any{{"ratingKey": "800", "title": "Pixar"}}
-		if a.collection != nil {
-			md = append(md, map[string]any{"ratingKey": "900", "title": a.title, "index": 9000})
-		}
-		reply(w, map[string]any{"Metadata": md})
-	})
-	keys := func(r *http.Request) []string {
-		uri := r.URL.Query().Get("uri")
-		return strings.Split(uri[strings.LastIndex(uri, "/")+1:], ",")
-	}
-	px.HandleFunc("POST", "/library/collections", func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		if r.URL.Query().Get("title") != a.title || !strings.HasPrefix(r.URL.Query().Get("uri"), "server://m1/com.plexapp.plugins.library/library/metadata/") {
-			http.Error(w, "bad create", 400)
-			return
-		}
-		a.collection = keys(r)
-		if a.loseCreateAnswer { // the busy-Plex case seen on the NAS: created, but the answer never arrives
-			a.loseCreateAnswer = false
-			http.Error(w, "busy", http.StatusInternalServerError)
-		}
-	})
-	px.HandleFunc("PUT", "/library/collections/900/items", func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		for _, k := range keys(r) {
-			if slices.Contains(a.collection, k) { // what real Plex does when a film is already in the collection
-				http.Error(w, "already a member", http.StatusInternalServerError)
-				return
-			}
-		}
-		a.collection = append(a.collection, keys(r)...)
-	})
-	for k := range a.plex {
-		px.HandleFunc("DELETE", "/library/collections/900/items/"+k, func(w http.ResponseWriter, r *http.Request) {
-			a.mu.Lock()
-			defer a.mu.Unlock()
-			a.collection = slices.DeleteFunc(a.collection, func(c string) bool { return c == k })
-		})
-	}
-	px.HandleFunc("POST", "/hubs/sections/4/manage", func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		q := r.URL.Query()
-		a.promoted = q.Get("metadataItemId") == "900" && q.Get("promotedToOwnHome") == "1" && q.Get("promotedToRecommended") == "1" &&
-			q.Get("promotedToSharedHome") == "0" // his watchlist is not for the Home of everyone he shares with
-	})
-	// Watch state: jfsync's writes (this stage sends none).
 	px.HandleFunc("GET", "/:/scrobble", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
@@ -280,30 +216,9 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 	jf.HandleFunc("GET", "/Items", func(w http.ResponseWriter, r *http.Request) {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		q := r.URL.Query()
 		out := []map[string]any{}
-		switch {
-		case q.Get("userId") == "" && q.Get("IncludeItemTypes") == "Movie,Episode": // jfsync's listing of the library
-			for _, id := range sortedKeys(a.jf) {
-				out = append(out, item(id, a.jf[id]))
-			}
-		case q.Get("userId") == "u2" && q.Get("IncludeItemTypes") == "Movie": // roger, who has played none of them
-			for _, id := range sortedKeys(a.jf) {
-				out = append(out, item(id, &jfFilm{tmdb: a.jf[id].tmdb}))
-			}
-		case q.Get("userId") != "u1" && q.Get("userId") != "u2":
-			http.Error(w, "wrong user", 400)
-			return
-		case q.Get("IncludeItemTypes") == "Movie":
-			for _, id := range sortedKeys(a.jf) {
-				out = append(out, item(id, a.jf[id]))
-			}
-		case q.Get("IncludeItemTypes") == "BoxSet" && a.jfSet != nil:
-			out = append(out, map[string]any{"Id": "c1", "Name": a.title})
-		case q.Get("ParentId") == "c1":
-			for _, id := range a.jfSet {
-				out = append(out, item(id, a.jf[id]))
-			}
+		for _, id := range sortedKeys(a.jf) {
+			out = append(out, item(id, a.jf[id]))
 		}
 		json.NewEncoder(w).Encode(map[string]any{"Items": out})
 	})
@@ -338,27 +253,101 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 			}
 		})
 	}
-	jf.HandleFunc("POST", "/Collections", func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		if a.failJFSet {
-			http.Error(w, "busy", http.StatusInternalServerError)
-			return
-		}
-		a.jfSet = strings.Split(r.URL.Query().Get("ids"), ",")
-		io.WriteString(w, `{"Id":"c1"}`)
-	})
-	jf.HandleFunc("DELETE", "/Collections/c1/Items", func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		if a.failJFSet {
-			http.Error(w, "busy", http.StatusInternalServerError)
-			return
-		}
-		gone := strings.Split(r.URL.Query().Get("ids"), ",")
-		a.jfSet = slices.DeleteFunc(a.jfSet, func(id string) bool { return slices.Contains(gone, id) })
-	})
 	return a
+}
+
+// ---- a fake plex.tv: the owner's Plex Home (list, switch) and each Home user's Discover watchlist, by token ----
+
+// The Home: the owner (the server's token), Aurelia as the managed user "roger" (no username), Aaron by username, and
+// a child profile behind a PIN.
+const (
+	rogerToken  = "test-token-roger"
+	aaronToken = "test-token-aaron"
+)
+
+type fakePlexTV struct {
+	*httptest.Server
+	mu      sync.Mutex
+	lists   map[string][]string // token → plex.tv ids on that user's watchlist ("m<tmdb>" a film, "show<tmdb>" a show)
+	refuse  map[string]bool     // plex.tv ids whose add or removal answers 500
+	unknown map[int]bool        // TMDB ids plex.tv has no film for
+	calls   map[string]int      // "METHOD path" →
+}
+
+func newPlexTV(t *testing.T) *fakePlexTV {
+	pt := &fakePlexTV{lists: map[string][]string{fake.PlexToken: {"show565"}, rogerToken: {}, aaronToken: {}},
+		refuse: map[string]bool{}, unknown: map[int]bool{}, calls: map[string]int{}}
+	switched := map[string]string{"u-roger": rogerToken, "u-aaron": aaronToken}
+	pt.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pt.mu.Lock()
+		defer pt.mu.Unlock()
+		pt.calls[r.Method+" "+r.URL.Path]++
+		tok, q := r.Header.Get("X-Plex-Token"), r.URL.Query()
+		list, known := pt.lists[tok]
+		reply := func(v any) { json.NewEncoder(w).Encode(map[string]any{"MediaContainer": v}) }
+		switch uuid := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v2/home/users/"), "/switch"); {
+		case !known:
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		case strings.HasPrefix(r.URL.Path, "/api/v2/home/") && tok != fake.PlexToken: // only the Home admin manages the Home
+			http.Error(w, "forbidden", http.StatusForbidden)
+		case r.Method == "GET" && r.URL.Path == "/api/v2/home/users":
+			io.WriteString(w, `{"id":1,"users":[{"id":1,"uuid":"u-owner","title":"Saahil","username":"saahilsanganeriya","admin":true},`+
+				`{"id":3,"uuid":"u-kid","title":"kid","username":null,"restricted":true,"protected":true},`+
+				`{"id":4,"uuid":"u-roger","title":"roger","username":null,"restricted":true,"protected":false},`+
+				`{"id":5,"uuid":"u-aaron","title":"Aaron Test","username":"aarontest941","protected":false}]}`)
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/switch") && switched[uuid] != "":
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{"uuid": uuid, "authToken": switched[uuid]})
+		case r.Method == "GET" && r.URL.Path == "/library/sections/watchlist/all":
+			start, _ := strconv.Atoi(q.Get("X-Plex-Container-Start"))
+			size, _ := strconv.Atoi(q.Get("X-Plex-Container-Size"))
+			md := []map[string]any{}
+			for _, k := range list[min(start, len(list)):min(start+size, len(list))] {
+				kind, id := "movie", strings.TrimPrefix(k, "m")
+				if strings.HasPrefix(k, "show") {
+					kind, id = "show", strings.TrimPrefix(k, "show")
+				}
+				md = append(md, map[string]any{"ratingKey": k, "type": kind, "guid": "plex://" + kind + "/" + k, "Guid": []map[string]string{{"id": "tmdb://" + id}}})
+			}
+			reply(map[string]any{"totalSize": len(list), "Metadata": md})
+		case r.Method == "GET" && r.URL.Path == "/library/metadata/matches":
+			id, _ := strconv.Atoi(strings.TrimPrefix(q.Get("guid"), "tmdb://"))
+			md := []map[string]any{}
+			if !pt.unknown[id] {
+				md = append(md, map[string]any{"ratingKey": fmt.Sprintf("m%d", id), "type": "movie"})
+			}
+			reply(map[string]any{"Metadata": md})
+		case pt.refuse[q.Get("ratingKey")]:
+			http.Error(w, "busy", http.StatusInternalServerError)
+		case r.Method == "PUT" && r.URL.Path == "/actions/addToWatchlist" && !slices.Contains(list, q.Get("ratingKey")):
+			pt.lists[tok] = append(list, q.Get("ratingKey"))
+		case r.Method == "PUT" && r.URL.Path == "/actions/removeFromWatchlist":
+			pt.lists[tok] = slices.DeleteFunc(slices.Clone(list), func(k string) bool { return k == q.Get("ratingKey") })
+		default:
+			http.Error(w, "unexpected", http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(pt.Close)
+	return pt
+}
+
+// list is a user's watchlist, sorted.
+func (pt *fakePlexTV) list(tok string) string {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	return strings.Join(slices.Sorted(slices.Values(pt.lists[tok])), ",")
+}
+
+func (pt *fakePlexTV) set(tok string, ids ...string) {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	pt.lists[tok] = ids
+}
+
+func (pt *fakePlexTV) count(call string) int {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	return pt.calls[call]
 }
 
 func ptr[T any](v T) *T { return &v }
@@ -408,15 +397,16 @@ type world struct {
 	h       *fake.Harness
 	lb      *fakeLetterboxd
 	apps    *apps
+	pt      *fakePlexTV
 	st      Stage
-	sleeps  []time.Duration // app retry waits
+	sleeps  []time.Duration // plex.tv retry waits
 	pace    *paceClock      // Letterboxd waits
 	missing string
 	opts    string
 }
 
 func newWorld(t *testing.T) *world {
-	w := &world{h: fake.NewEnv(t, nil), lb: newLetterboxd(t)}
+	w := &world{h: fake.NewEnv(t, nil), lb: newLetterboxd(t), pt: newPlexTV(t)}
 	w.apps = setupApps(t, w.h)
 	root := t.TempDir()
 	movies := filepath.Join(root, "Movies")
@@ -425,8 +415,8 @@ func newWorld(t *testing.T) *world {
 	}
 	writeExport(t, filepath.Join(root, "export"))
 	w.missing = filepath.Join(root, "_watchlist-missing.txt")
-	w.opts = fmt.Sprintf("letterboxd_url = %q\nboxd_url = %q\nexport_dir = %q\nmovies_dir = %q\nmissing_file = %q\n",
-		w.lb.URL, w.lb.URL+"/boxd", filepath.Join(root, "export"), movies, w.missing)
+	w.opts = fmt.Sprintf("letterboxd_url = %q\nboxd_url = %q\nexport_dir = %q\nmovies_dir = %q\nmissing_file = %q\nplex_watchlist = true\nplex_tv = %q\ndiscover_url = %q\n",
+		w.lb.URL, w.lb.URL+"/boxd", filepath.Join(root, "export"), movies, w.missing, w.pt.URL, w.pt.URL)
 	w.pace = &paceClock{now: w.h.Now}
 	w.st = Stage{sleep: func(_ context.Context, d time.Duration) error { w.sleeps = append(w.sleeps, d); return nil },
 		pace: lbpace.New(w.pace.Now, w.pace.Sleep)}
@@ -444,17 +434,9 @@ func (w *world) run(t *testing.T, extra string) stage.Report {
 	return rep
 }
 
-// writes counts every write either app was sent.
-func writes(h *fake.Harness) int {
-	n := watchWrites(h)
-	for _, c := range [][]fake.Call{h.Plex.Calls("POST", "/library/collections"), h.Plex.Calls("PUT", "/library/collections/900/items"),
-		h.Plex.Calls("POST", "/hubs/sections/4/manage"), h.Jellyfin.Calls("POST", "/Collections"), h.Jellyfin.Calls("DELETE", "/Collections/c1/Items")} {
-		n += len(c)
-	}
-	for _, k := range []string{"10", "20", "30", "40"} {
-		n += len(h.Plex.Calls("DELETE", "/library/collections/900/items/"+k))
-	}
-	return n
+// writes counts every write sent: plex.tv watchlist adds and removals, and watch state to either app.
+func (w *world) writes() int {
+	return watchWrites(w.h) + w.pt.count("PUT /actions/addToWatchlist") + w.pt.count("PUT /actions/removeFromWatchlist")
 }
 
 // watchWrites counts the watch-state writes either app was sent: jfsync's alone, never this stage's.
@@ -470,22 +452,21 @@ func watchWrites(h *fake.Harness) int {
 	return n
 }
 
-// Catches, end to end against a fake Letterboxd and stateful fake Plex/Jellyfin: a dry run that writes, a wrong
-// count of planned collection writes, this stage writing any watch state (jfsync is its one writer), the Watchlist
-// collection not created or not on Home, a Letterboxd request that does not wait its 2 s on the shared limiter, or
-// one for a page it has cached, a second run (or a run after the daily re-read) writing anything, the snapshot read in
-// a run that then writes being stored with an older time (so the app is paged again next run), and the collection put
-// back on his Home after he took it off.
+// Catches, end to end against a fake Letterboxd and a stateful fake plex.tv: a dry run that writes, a wrong count of
+// planned watchlist writes, this stage writing any watch state (jfsync is its one writer), his show (TMDB TV id 565)
+// taken for the film The Ring (TMDB movie id 565) so the film is never added, a Letterboxd request that does not wait
+// its 2 s on the shared limiter, or one for a page it has cached, a second run (or a run after the daily re-read)
+// writing anything or looking a film up again, and the re-read losing the "added by this stage" mark.
 func TestRunEndToEnd(t *testing.T) {
 	w := newWorld(t)
 	dry := w.run(t, "dry_run = true\n")
-	if n := writes(w.h); n != 0 {
+	if n := w.writes(); n != 0 {
 		t.Fatalf("dry run made %d writes", n)
 	}
 	if _, err := os.Stat(w.missing); !os.IsNotExist(err) {
 		t.Fatalf("dry run wrote the missing file: %v", err)
 	}
-	for k, v := range map[string]int{"plex.collection_add": 1, "plex.home_promote": 1, "jellyfin.collection_add": 1, "missing_films": 1, "unresolved": 0} {
+	for k, v := range map[string]int{"plextv.watchlist_add": 2, "missing_films": 1, "unresolved": 0} {
 		if dry.Counts[k] != v {
 			t.Errorf("dry run %s = %d, want %d (all: %v)", k, dry.Counts[k], v, dry.Counts)
 		}
@@ -500,48 +481,41 @@ func TestRunEndToEnd(t *testing.T) {
 		}
 	}
 
-	w.h.Now = w.h.Now.Add(25 * time.Hour) // the apply's own Plex read is due, so its time must survive the create and promotion
+	w.h.Now = w.h.Now.Add(25 * time.Hour)
 	w.run(t, "")
-	a := w.apps
 	if n := watchWrites(w.h); n != 0 {
 		t.Errorf("letterboxd sent %d watch-state writes; jfsync is their one writer", n)
 	}
-	if len(a.collection) != 1 || a.collection[0] != "30" || !a.promoted {
-		t.Errorf("plex collection = %v promoted=%v", a.collection, a.promoted)
-	}
-	if len(a.jfSet) != 1 || a.jfSet[0] != "j30" {
-		t.Errorf("jellyfin collection = %v", a.jfSet)
+	// The Ring (on the NAS) and What Happened Was (not on it) are unwatched; Digger is watched.
+	if got := w.pt.list(fake.PlexToken); got != "m18,m565,show565" {
+		t.Errorf("his Plex watchlist = %s", got)
 	}
 	text, _ := os.ReadFile(w.missing)
 	if !strings.Contains(string(text), "What Happened Was... (1994)\t"+w.lb.URL+"/film/what-happened-was/\n") || strings.Contains(string(text), "Okja") {
 		t.Errorf("missing file = %q", text)
 	}
 
-	w.h.Now = w.h.Now.Add(time.Minute) // both apps were read by the run that wrote; nothing to do, so no re-read
-	before, hits := writes(w.h), w.lb.total()
+	w.h.Now = w.h.Now.Add(time.Minute) // the watchlist was read by the run that wrote; nothing to do, so no re-read
+	before, hits := w.writes(), w.lb.total()
 	again := w.run(t, "")
-	if again.Counts["plex.snapshot"] != 0 || again.Counts["jellyfin.snapshot"] != 0 {
-		t.Errorf("want neither app re-read: %v", again.Counts)
-	}
-	if n := writes(w.h) - before; n != 0 {
-		t.Errorf("second run made %d writes (counts %v)", n, again.Counts)
+	if again.Counts["plextv.snapshot"] != 0 || w.writes() != before {
+		t.Errorf("second run: %d writes (counts %v)", w.writes()-before, again.Counts)
 	}
 	if n := w.lb.total() - hits; n != 1 || again.Counts["rss_not_modified"] != 1 {
 		t.Errorf("second run made %d Letterboxd requests, want 1 conditional feed read", n)
 	}
 
-	w.apps.promoted = false               // he takes the Watchlist off his Home
-	w.h.Now = w.h.Now.Add(25 * time.Hour) // the daily re-read of both apps must agree with what was written
+	w.h.Now = w.h.Now.Add(25 * time.Hour) // the daily re-read must agree with what was written
 	day := w.run(t, "")
-	if n := writes(w.h) - before; n != 0 || day.Counts["plex.snapshot"] != 1 || day.Counts["jellyfin.snapshot"] != 1 {
-		t.Errorf("after the daily re-read: %d writes, counts %v", n, day.Counts)
+	if w.writes() != before || day.Counts["plextv.snapshot"] != 1 || w.pt.count("GET /library/metadata/matches") != 2 {
+		t.Errorf("after the daily re-read: %d writes, %d lookups, counts %v", w.writes()-before, w.pt.count("GET /library/metadata/matches"), day.Counts)
 	}
 	w.h.Now = w.h.Now.Add(25 * time.Hour) // only "not modified" feed answers since the first read: still fresh
 	if late := w.run(t, ""); len(late.Alerts) != 0 {
 		t.Errorf("a feed answering 304 was reported stale: %v", late.Alerts)
 	}
-	var added int // the re-read must keep "added by this stage", or the film could never leave the collection
-	if err := w.h.Env.Store.DB().QueryRow(`SELECT added FROM letterboxd_sink WHERE app='plex' AND tmdb=565`).Scan(&added); err != nil || added != 1 {
+	var added int // the re-read must keep "added by this stage", or the film could never leave the watchlist
+	if err := w.h.Env.Store.DB().QueryRow(`SELECT added FROM letterboxd_sink WHERE app='plextv' AND tmdb=565`).Scan(&added); err != nil || added != 1 {
 		t.Errorf("The Ring added mark after the re-read = %d (%v)", added, err)
 	}
 }
@@ -749,166 +723,6 @@ func TestRunSurvivesBlocks(t *testing.T) {
 	}
 }
 
-// Catches, against a fake plex.tv on the fake Plex: the owner's show (TMDB TV id 565) taken for the film The
-// Ring (TMDB movie id 565) so the film is never added, removing anything he put there himself, a lookup
-// repeated for a film already matched, and a second run writing again.
-func TestPlexWatchlistMirror(t *testing.T) {
-	w := newWorld(t)
-	// plex.tv metadata ids on the watchlist; the owner's show carries TMDB TV id 565, the same number as a film
-	list := []string{"show565"}
-	px := w.h.Plex
-	px.HandleFunc("GET", "/library/sections/watchlist/all", func(rw http.ResponseWriter, r *http.Request) {
-		md := []map[string]any{}
-		for _, k := range list {
-			kind, id := "movie", strings.TrimPrefix(k, "m")
-			if strings.HasPrefix(k, "show") {
-				kind, id = "show", strings.TrimPrefix(k, "show")
-			}
-			md = append(md, map[string]any{"ratingKey": k, "type": kind, "guid": "plex://" + kind + "/" + k, "Guid": []map[string]string{{"id": "tmdb://" + id}}})
-		}
-		json.NewEncoder(rw).Encode(map[string]any{"MediaContainer": map[string]any{"totalSize": len(md), "Metadata": md}})
-	})
-	px.HandleFunc("GET", "/library/metadata/matches", func(rw http.ResponseWriter, r *http.Request) {
-		id := strings.TrimPrefix(r.URL.Query().Get("guid"), "tmdb://")
-		json.NewEncoder(rw).Encode(map[string]any{"MediaContainer": map[string]any{"Metadata": []map[string]any{{"ratingKey": "m" + id}}}})
-	})
-	px.HandleFunc("PUT", "/actions/addToWatchlist", func(rw http.ResponseWriter, r *http.Request) {
-		list = append(list, r.URL.Query().Get("ratingKey"))
-	})
-	opts := fmt.Sprintf("plex_watchlist = true\ndiscover_url = %q\n", px.URL)
-	rep := w.run(t, opts)
-	sort.Strings(list)
-	if want := []string{"m18", "m565", "show565"}; strings.Join(list, ",") != strings.Join(want, ",") || rep.Counts["plextv.watchlist_added"] != 2 {
-		t.Fatalf("plex.tv watchlist = %v (counts %v)", list, rep.Counts)
-	}
-	w.h.Now = w.h.Now.Add(25 * time.Hour) // re-read: the two adds are now listed members, the show still the owner's
-	again := w.run(t, opts)
-	if n := len(px.Calls("PUT", "/actions/addToWatchlist")); n != 2 || len(px.Calls("PUT", "/actions/removeFromWatchlist")) != 0 ||
-		len(px.Calls("GET", "/library/metadata/matches")) != 2 {
-		t.Errorf("second run: %d adds total, counts %v", n, again.Counts)
-	}
-}
-
-// Catches: a Plex collection create that took effect but whose answer was lost being sent again (a second
-// "Watchlist"), the film it put there being re-added (real Plex answers that with HTTP 500, as on the NAS), and the
-// "added by this stage" mark lost on the way, so the film could never leave the collection.
-func TestCollectionCreateAnswerLost(t *testing.T) {
-	w := newWorld(t)
-	w.apps.loseCreateAnswer = true
-	if rep := w.run(t, ""); rep.Counts["plex.unconfirmed"] != 1 {
-		t.Errorf("lost create answer: counts %v", rep.Counts)
-	}
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	rep := w.run(t, "")
-	if len(w.apps.collection) != 1 || !w.apps.promoted || rep.Counts["plex.failed"] != 0 {
-		t.Errorf("collection %v promoted=%v counts %v", w.apps.collection, w.apps.promoted, rep.Counts)
-	}
-	if n, m := len(w.h.Plex.Calls("POST", "/library/collections")), len(w.h.Plex.Calls("PUT", "/library/collections/900/items")); n != 1 || m != 0 {
-		t.Errorf("collection created %d times, added to %d times", n, m)
-	}
-	var added int
-	if err := w.h.Env.Store.DB().QueryRow(`SELECT added FROM letterboxd_sink WHERE app='plex' AND tmdb=565`).Scan(&added); err != nil || added != 1 {
-		t.Errorf("The Ring added mark = %d (%v)", added, err)
-	}
-}
-
-// Catches: a watchlist film he watched in Plex and then logged left in either app's Watchlist collection (before
-// these fakes had DELETE routes, both removal calls could be wrong and every test still passed), an existing
-// collection's members misread (every film taken for one, so none is ever added), a film he put there himself taken
-// out, this stage adding a Plex view for the logged viewing, and the run after paging Plex again.
-func TestWatchedFilmLeavesTheCollections(t *testing.T) {
-	w := newWorld(t)
-	w.apps.collection = []string{"40"} // his Watchlist already exists, holding Digger, which he put there and has watched
-	w.run(t, "")                       // The Ring is on his watchlist, unwatched: in both Watchlist collections
-	if !slices.Contains(w.apps.collection, "30") || !slices.Contains(w.apps.jfSet, "j30") {
-		t.Fatalf("setup: collections plex %v, jellyfin %v", w.apps.collection, w.apps.jfSet)
-	}
-	w.apps.mu.Lock()
-	w.apps.plex["30"].views = 1 // he watches it in Plex...
-	w.apps.mu.Unlock()
-	w.lb.logRing() // ...and logs it on Letterboxd
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	rep := w.run(t, "")
-	if v := w.apps.plex["30"].views; v != 1 || watchWrites(w.h) != 0 {
-		t.Errorf("one viewing became %d Plex views (%d watch-state writes)", v, watchWrites(w.h))
-	}
-	if strings.Join(w.apps.collection, ",") != "40" || slices.Contains(w.apps.jfSet, "j30") {
-		t.Errorf("collections: plex %v (want only his own 40), jellyfin %v (counts %v)", w.apps.collection, w.apps.jfSet, rep.Counts)
-	}
-	w.h.Now = w.h.Now.Add(time.Minute)
-	before := writes(w.h)
-	if again := w.run(t, ""); writes(w.h) != before || again.Counts["plex.snapshot"] != 0 {
-		t.Errorf("the run after made %d writes (counts %v)", writes(w.h)-before, again.Counts)
-	}
-}
-
-// Catches, on Jellyfin's Watchlist collection: a write that keeps failing re-paging the app every run (a film may
-// force one full read a day), a film inside that day written from an older listing, a dry run's read keeping the
-// apply after it from reading again, idempotent calls not retried 2 s and 4 s apart, a film whose writes failed in 3
-// runs in a row still written, the owner told of it more than once, and a film the app lists anew never tried again.
-func TestFailingWritesRereadOncePerDayThenPark(t *testing.T) {
-	w := newWorld(t)
-	w.apps.failJFSet = true
-	creates := func() int { return len(w.h.Jellyfin.Calls("POST", "/Collections")) }
-	w.run(t, "dry_run = true\n")
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	if rep := w.run(t, "dry_run = true\n"); rep.Counts["jellyfin.snapshot"] != 1 {
-		t.Fatalf("setup: a dry run whose plan has work reads Jellyfin again: %v", rep.Counts)
-	}
-	for i, step := range []struct {
-		after                         time.Duration
-		reads, creates, alerts, parks int
-	}{
-		{30 * time.Minute, 1, 3, 0, 0}, // a read now, the dry runs' notwithstanding; the create tried 3 times
-		{30 * time.Minute, 0, 0, 0, 0}, // a read within the day: the write waits for the next one
-		{25 * time.Hour, 1, 3, 0, 0},   // the daily read: the second failed run
-		{25 * time.Hour, 1, 3, 1, 0},   // the third: parked, he is told
-		{30 * time.Minute, 0, 0, 0, 1},
-		{25 * time.Hour, 1, 0, 0, 1}, // parked still after the daily read
-	} {
-		w.h.Now = w.h.Now.Add(step.after)
-		before := creates()
-		rep := w.run(t, "")
-		if rep.Counts["jellyfin.snapshot"] != step.reads || creates()-before != step.creates || len(rep.Alerts) != step.alerts ||
-			rep.Counts["jellyfin.parked"] != step.parks {
-			t.Errorf("run %d: %d reads, %d creates, alerts %q (counts %v); want %d, %d, %d alerts, %d parked", i+1,
-				rep.Counts["jellyfin.snapshot"], creates()-before, rep.Alerts, rep.Counts, step.reads, step.creates, step.alerts, step.parks)
-		}
-	}
-	if !slices.Contains(w.sleeps, 2*time.Second) || !slices.Contains(w.sleeps, 4*time.Second) {
-		t.Errorf("no 2 s / 4 s retry backoff: %v", w.sleeps)
-	}
-	w.apps.mu.Lock()
-	w.apps.jf["j31"], w.apps.failJFSet = w.apps.jf["j30"], false // Jellyfin lists The Ring anew: worth trying again
-	delete(w.apps.jf, "j30")
-	w.apps.mu.Unlock()
-	w.h.Now = w.h.Now.Add(25 * time.Hour)
-	if rep := w.run(t, ""); strings.Join(w.apps.jfSet, ",") != "j31" {
-		t.Errorf("after Jellyfin listed The Ring anew: its Watchlist %v (counts %v)", w.apps.jfSet, rep.Counts)
-	}
-}
-
-// Catches: failures that are not in a row parking a film. The Ring's add fails in two runs, then lands; when he
-// watches it and its removal fails once, that is one failed run, not a third.
-func TestFailuresParkOnlyInARow(t *testing.T) {
-	w := newWorld(t)
-	w.apps.failJFSet = true
-	w.run(t, "")
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	w.run(t, "") // a forced read, and the second failed run
-	w.apps.failJFSet = false
-	w.h.Now = w.h.Now.Add(25 * time.Hour)
-	w.run(t, "") // the daily read: the add lands
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	w.run(t, "") // nothing left to do for The Ring
-	w.apps.failJFSet = true
-	w.lb.logRing() // he watches it: it must leave the collection
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	if rep := w.run(t, ""); len(rep.Alerts) != 0 || rep.Counts["jellyfin.failed"] != 1 {
-		t.Errorf("one failed run after a success parked the film: alerts %v (counts %v)", rep.Alerts, rep.Counts)
-	}
-}
-
 // Catches: a diary entry he deleted (a double log) not dropped, or dropped without telling him its play stays in
 // the watch record and that only Jellyfin's unplayed mark undoes it (Plex sends no webhook for one); an entry that
 // only fell off the bottom of the feed taken for deleted; one deleted before it was ever recorded (logged before
@@ -964,79 +778,19 @@ func (c cancelOn) Handle(_ context.Context, r slog.Record) error {
 	return nil
 }
 
-// Catches: a Plex or Jellyfin listing that stops after its first page, or skips or repeats one (the NAS library
-// holds 2,240 films; a page holds 100, so 250 crosses two page boundaries and ends on a partial page).
-func TestListingsReadEveryPage(t *testing.T) {
-	h := fake.NewEnv(t, nil)
-	const n = 250
-	h.Plex.HandleFunc("GET", "/library/sections/4/all", func(w http.ResponseWriter, r *http.Request) {
-		start, _ := strconv.Atoi(r.URL.Query().Get("X-Plex-Container-Start"))
-		size, _ := strconv.Atoi(r.URL.Query().Get("X-Plex-Container-Size"))
-		md := []map[string]any{}
-		for i := start; i < min(start+size, n); i++ {
-			md = append(md, map[string]any{"ratingKey": strconv.Itoa(i)})
-		}
-		json.NewEncoder(w).Encode(map[string]any{"MediaContainer": map[string]any{"totalSize": n, "Metadata": md}})
-	})
-	h.Jellyfin.HandleFunc("GET", "/Items", func(w http.ResponseWriter, r *http.Request) {
-		start, _ := strconv.Atoi(r.URL.Query().Get("StartIndex"))
-		limit, _ := strconv.Atoi(r.URL.Query().Get("Limit"))
-		items := []map[string]any{}
-		for i := start; i < min(start+limit, n); i++ {
-			items = append(items, map[string]any{"Id": strconv.Itoa(i)})
-		}
-		json.NewEncoder(w).Encode(map[string]any{"Items": items, "TotalRecordCount": n})
-	})
-	r := &run{env: h.Env, opt: defaults(), until: h.Now.Add(time.Hour), sleep: func(context.Context, time.Duration) error { return nil }}
-	seen := map[string]int{}
-	if err := r.plexPages(context.Background(), &breaker{}, "", func(it plexItem) { seen["plex "+it.RatingKey]++ }); err != nil {
-		t.Fatal(err)
-	}
-	if err := r.jfPages(context.Background(), &breaker{}, "userId=u1", func(it jfItem) { seen["jellyfin "+it.ID]++ }); err != nil {
-		t.Fatal(err)
-	}
-	for k, c := range seen {
-		if c != 1 {
-			t.Errorf("%s listed %d times", k, c)
-		}
-	}
-	if len(seen) != 2*n {
-		t.Errorf("listed %d distinct items, want %d", len(seen), 2*n)
-	}
-}
-
-// Catches: a Plex that answers each call in a minute (its maintenance tasks, as on the NAS) holding the run open
-// past its budget, which would hold back the next run's feed read and Jellyfin writes.
-func TestSlowPlexEndsItsPartOfTheRun(t *testing.T) {
-	w := newWorld(t)
-	var mu sync.Mutex
-	now := w.h.Now
-	w.h.Env.Now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
-	w.h.Plex.HandleFunc("GET", "/identity", func(rw http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		now = now.Add(26 * time.Minute) // past the 25 min budget before the first listing page
-		mu.Unlock()
-		json.NewEncoder(rw).Encode(map[string]any{"MediaContainer": map[string]any{"machineIdentifier": "m1"}})
-	})
-	rep := w.run(t, "")
-	if n := len(w.h.Plex.Calls("GET", "/library/sections/4/all")); n != 0 || rep.Counts["out_of_time"] == 0 || rep.Counts["sink_errors"] == 0 {
-		t.Errorf("%d Plex listing calls after the budget (counts %v)", n, rep.Counts)
-	}
-}
-
 // Catches: plex.tv's watchlist listing read outside r.call, so neither the run budget nor the breaker covers it
 // and a slow plex.tv holds the run open.
 func TestPlexTVInsideRunBudget(t *testing.T) {
 	w := newWorld(t)
-	rep := w.run(t, fmt.Sprintf("plex_watchlist = true\ndiscover_url = %q\nrun_budget = \"0s\"\n", w.h.Plex.URL))
-	if n := len(w.h.Plex.Calls("GET", "/library/sections/watchlist/all")); n != 0 || rep.Counts["out_of_time"] == 0 {
+	rep := w.run(t, "run_budget = \"0s\"\n")
+	if n := w.pt.count("GET /library/sections/watchlist/all"); n != 0 || rep.Counts["out_of_time"] == 0 {
 		t.Errorf("%d plex.tv listing calls with the run budget spent (counts %v)", n, rep.Counts)
 	}
 }
 
 // Catches: a watchlist page that answers 200 but lists no films (an interstitial, a redirect's body, new markup)
-// taken for the end of a complete crawl, which empties both Watchlist collections and the missing-films file; and
-// a watchlist he really emptied, which the page states as data-num-entries="0", never synced.
+// taken for the end of a complete crawl, which takes this stage's films off his Plex watchlist and empties the
+// missing-films file; and a watchlist he really emptied, which the page states as data-num-entries="0", never synced.
 func TestEmptyWatchlistPageIsRefused(t *testing.T) {
 	w := newWorld(t)
 	w.run(t, "")
@@ -1045,14 +799,14 @@ func TestEmptyWatchlistPageIsRefused(t *testing.T) {
 	w.h.Now = w.h.Now.Add(25 * time.Hour) // the daily crawl
 	rep := w.run(t, "")
 	text, _ := os.ReadFile(w.missing)
-	if !slices.Contains(w.apps.collection, "30") || !slices.Contains(w.apps.jfSet, "j30") || string(text) != string(before) || rep.Counts["challenged.watchlist"] != 1 {
-		t.Errorf("a page listing no films ended the crawl: Watchlist plex %v, jellyfin %v, missing file %q (counts %v)", w.apps.collection, w.apps.jfSet, text, rep.Counts)
+	if got := w.pt.list(fake.PlexToken); got != "m18,m565,show565" || string(text) != string(before) || rep.Counts["challenged.watchlist"] != 1 {
+		t.Errorf("a page listing no films ended the crawl: his Plex watchlist %s, missing file %q (counts %v)", got, text, rep.Counts)
 	}
 	w.lb.serve("/saahilsan/watchlist/", `<div class="cols-2 js-watchlist-content" data-num-entries="0"></div>`) // he empties it
 	w.h.Now = w.h.Now.Add(25 * time.Hour)
 	w.run(t, "")
-	if text, _ := os.ReadFile(w.missing); slices.Contains(w.apps.collection, "30") || slices.Contains(w.apps.jfSet, "j30") || !strings.Contains(string(text), "(0)") {
-		t.Errorf("an emptied watchlist not synced: Watchlist plex %v, jellyfin %v, missing file %q", w.apps.collection, w.apps.jfSet, text)
+	if text, _ := os.ReadFile(w.missing); w.pt.list(fake.PlexToken) != "show565" || !strings.Contains(string(text), "(0)") {
+		t.Errorf("an emptied watchlist not synced: his Plex watchlist %s, missing file %q", w.pt.list(fake.PlexToken), text)
 	}
 }
 
@@ -1061,8 +815,8 @@ func gridEntry(name, slug string) string {
 	return `<li class="griditem"> <div data-item-name="` + name + `" data-item-slug="` + slug + `"></div> </li>`
 }
 
-// Catches a crawl that completes short of the watchlist, so The Ring, on page 2, leaves both Watchlist collections
-// with no alert (live, 95 of the 110 films in his Plex Home row): a page-1 pagination link Letterboxd writes another
+// Catches a crawl that completes short of the watchlist, so The Ring, on page 2, leaves his Plex watchlist with no
+// alert (live, 95 of the 110 films in his Plex Home row): a page-1 pagination link Letterboxd writes another
 // way (`<a href=… class="next">`, the reviewer's repro on eae8ec1) taken for the last page, and a film he removes
 // between the page 1 and page 2 requests, which shifts The Ring onto page 1 after it was read while the pages read
 // still add up to the size page 2 states.
@@ -1085,15 +839,15 @@ func TestWatchlistCrawlCompletesOnlyAtTheStatedCount(t *testing.T) {
 			w.lb.serve("/saahilsan/watchlist/", tc.page1)
 			w.lb.serve("/saahilsan/watchlist/page/2/", tc.page2)
 			w.run(t, "")
-			if !slices.Contains(w.apps.collection, "30") || !slices.Contains(w.apps.jfSet, "j30") {
-				t.Fatalf("setup: Watchlist plex %v, jellyfin %v", w.apps.collection, w.apps.jfSet)
+			if !strings.Contains(w.pt.list(fake.PlexToken), "m565") {
+				t.Fatalf("setup: his Plex watchlist %s", w.pt.list(fake.PlexToken))
 			}
 			w.lb.serve("/saahilsan/watchlist/", tc.laterPage1)
 			w.lb.serve("/saahilsan/watchlist/page/2/", tc.laterPage2)
 			w.h.Now = w.h.Now.Add(25 * time.Hour) // the daily crawl
 			rep := w.run(t, "")
-			if !slices.Contains(w.apps.collection, "30") || !slices.Contains(w.apps.jfSet, "j30") || rep.Counts["challenged.watchlist"] != 1 {
-				t.Errorf("a crawl short of the watchlist completed: Watchlist plex %v, jellyfin %v (counts %v)", w.apps.collection, w.apps.jfSet, rep.Counts)
+			if !strings.Contains(w.pt.list(fake.PlexToken), "m565") || rep.Counts["challenged.watchlist"] != 1 {
+				t.Errorf("a crawl short of the watchlist completed: his Plex watchlist %s (counts %v)", w.pt.list(fake.PlexToken), rep.Counts)
 			}
 		})
 	}
@@ -1152,7 +906,7 @@ func TestUnreadableEverywhereBacksOffTheKind(t *testing.T) {
 }
 
 // Catches: a refusal that lasts staying silent while what it feeds freezes (the reviewer's case: watchlist pages that
-// stop stating data-num-entries leave both Watchlist collections as they were, so new watchlist films never appear),
+// stop stating data-num-entries leave his Plex watchlist as it was, so new watchlist films never appear),
 // likewise films pages failing with an error and a film page that stays unreadable; the owner told before three days;
 // and told still once the pages read again, or once that film no longer needs its page (the feed names its TMDB id).
 func TestLastingRefusalsAlert(t *testing.T) {
@@ -1183,8 +937,8 @@ func TestLastingRefusalsAlert(t *testing.T) {
 }
 
 // Catches: a state DB made before letterboxd_sink.played and letterboxd_entry.rated_at failing every run with "no
-// such column" (CREATE TABLE IF NOT EXISTS leaves an older table as it is), and the added columns left unfilled: a
-// stored rating with no time (no later run could read it) and a Plex film he has views of taken for unwatched.
+// such column" (CREATE TABLE IF NOT EXISTS leaves an older table as it is, and every watchlist row names played), and
+// a stored rating left with no time, which no later run could read.
 func TestOlderStateDBGainsTheNewColumns(t *testing.T) {
 	w := newWorld(t)
 	db := w.h.Env.Store.DB()
@@ -1193,18 +947,14 @@ func TestOlderStateDBGainsTheNewColumns(t *testing.T) {
 	CREATE TABLE letterboxd_sink (app TEXT NOT NULL, tmdb INTEGER NOT NULL, item TEXT NOT NULL,
 	  plays INTEGER NOT NULL, rating INTEGER NOT NULL, last TEXT NOT NULL, member INTEGER NOT NULL, added INTEGER NOT NULL,
 	  PRIMARY KEY (app, tmdb));
-	INSERT INTO letterboxd_entry VALUES ('1100000000', 'licorice-pizza', 718032, 'Licorice Pizza', 2021, '2026-01-02', 10, '2026-01-02T06:00:00.000000000Z');
-	INSERT INTO letterboxd_sink VALUES ('plex', 718032, '10', 1, 0, '', 0, 0);`); err != nil {
+	INSERT INTO letterboxd_entry VALUES ('1100000000', 'licorice-pizza', 718032, 'Licorice Pizza', 2021, '2026-01-02', 10, '2026-01-02T06:00:00.000000000Z');`); err != nil {
 		t.Fatal(err)
 	}
-	w.h.Plex.Handle("GET", "/identity", http.StatusServiceUnavailable, "") // Plex is down, so its rows stay as migrated
-	w.run(t, "dry_run = true\n")
+	rep := w.run(t, "")
 	var ratedAt string
-	var played bool
-	err := db.QueryRow(`SELECT e.rated_at, s.played FROM letterboxd_entry e, letterboxd_sink s
-		WHERE e.id='1100000000' AND s.app='plex' AND s.tmdb=718032`).Scan(&ratedAt, &played)
-	if err != nil || ratedAt != "2026-01-02T06:00:00.000000000Z" || !played {
-		t.Errorf("migrated rows: rated_at %q, Plex played %v (%v); want the logged time, played", ratedAt, played, err)
+	if err := db.QueryRow(`SELECT rated_at FROM letterboxd_entry WHERE id='1100000000'`).Scan(&ratedAt); err != nil ||
+		ratedAt != "2026-01-02T06:00:00.000000000Z" || rep.Counts["plextv.watchlist_added"] != 2 {
+		t.Errorf("migrated: rated_at %q (%v), counts %v; want the logged time, and the watchlist written", ratedAt, err, rep.Counts)
 	}
 }
 
@@ -1284,10 +1034,10 @@ func readFile(path string) string { b, _ := os.ReadFile(path); return string(b) 
 // Catches, with Aurelia (person roger) added beside the owner, step by step against a world where he is alone: her
 // entries logged after his deploy but before her own first run recorded (her history is off, so her start is her first
 // run, not his); her diary recorded under his person, or his under hers; her viewing of a film he also logged
-// counted in his plays; her export beside his, read as his (The Ring, which she watched, would leave his Watchlist
-// collections); his retraction deleting her stored entries (it alerts on The Ring); her grid pages or either
-// app read for her when she names no collection; any change in his events, counts, collections, missing-films file or
-// summary; and her feed going unread without an alert that names her.
+// counted in his plays; her export beside his, read as his (The Ring, which she watched, would leave his Plex
+// watchlist); his retraction deleting her stored entries (it alerts on The Ring); her grid pages or plex.tv read for
+// her when she names no Plex user; any change in his events, counts, Plex watchlist, missing-films file or summary; and
+// her feed going unread without an alert that names her.
 func TestSecondPersonsDiary(t *testing.T) {
 	alone, both := newWorld(t), newWorld(t)
 	her := filepath.Join(filepath.Dir(both.missing), "export", "letterboxd-zaurelia-2026-10-01-10-00-utc")
@@ -1324,8 +1074,8 @@ func TestSecondPersonsDiary(t *testing.T) {
 		if got, want := ownerCounts(b), ownerCounts(a); fmt.Sprint(got) != fmt.Sprint(want) {
 			t.Errorf("%s: his counts with her beside him %v, want (alone) %v", name, got, want)
 		}
-		if fmt.Sprint(both.apps.collection, both.apps.jfSet, both.apps.promoted) != fmt.Sprint(alone.apps.collection, alone.apps.jfSet, alone.apps.promoted) {
-			t.Errorf("%s: his collections plex %v jellyfin %v, want (alone) %v %v", name, both.apps.collection, both.apps.jfSet, alone.apps.collection, alone.apps.jfSet)
+		if got, want := both.pt.list(fake.PlexToken), alone.pt.list(fake.PlexToken); got != want {
+			t.Errorf("%s: his Plex watchlist %s, want (alone) %s", name, got, want)
 		}
 		missing := func(w *world) string { return strings.ReplaceAll(readFile(w.missing), w.lb.URL, "") }
 		if got, want := missing(both), missing(alone); got != want || !strings.Contains(got, "(1)") {
@@ -1343,8 +1093,8 @@ func TestSecondPersonsDiary(t *testing.T) {
 	if got := personEvents(t, db, "roger"); got != "" || rep.Counts["roger.rss_entries"] != 1 {
 		t.Errorf("her first run recorded\n%s\n(counts %v); want her entry stored and nothing recorded", got, rep.Counts)
 	}
-	if rep.Counts["roger.plex.snapshot"]+rep.Counts["roger.jellyfin.snapshot"] != 0 {
-		t.Errorf("an app read for a person with no collection: counts %v", rep.Counts)
+	if rep.Counts["roger.plextv.snapshot"] != 0 || both.pt.count("GET /api/v2/home/users") != 0 {
+		t.Errorf("plex.tv read for a person with no Plex user: counts %v", rep.Counts)
 	}
 	both.lb.serve("/zaurelia/rss/", herFeed(ring, okja)) // she logs The Ring at 07:30; he logs it too (07:00)
 	step("both log The Ring", time.Hour, func(w *world) { w.lb.logRing() }, people)
@@ -1361,51 +1111,13 @@ func TestSecondPersonsDiary(t *testing.T) {
 	}
 	for _, path := range []string{"/zaurelia/watchlist/", "/zaurelia/films/"} {
 		if both.lb.hits[path] != 0 {
-			t.Errorf("%s read %d times for a person with no collection", path, both.lb.hits[path])
+			t.Errorf("%s read %d times for a person with no Plex user", path, both.lb.hits[path])
 		}
 	}
 	both.lb.fail("/zaurelia/rss/", http.StatusInternalServerError)
 	both.h.Now = both.h.Now.Add(feedStale + time.Hour)
 	if rep := both.run(t, people); len(rep.Alerts) != 1 || !strings.HasPrefix(rep.Alerts[0], "roger: Letterboxd feed unread since") {
 		t.Errorf("her feed unread for days: alerts %v", rep.Alerts)
-	}
-}
-
-// Catches, for a person who names a collection: it not made in both apps under her name, a film he watched (Digger:
-// his Plex views, his Jellyfin played flag) kept out of hers, the server token's Plex views or his Jellyfin user
-// standing for hers, her collection put on his Home, her films grid read (letterboxd_seen is his), her app rows
-// stored over his (his Plex row for Digger must stay played), and his plex.tv watchlist mirrored for her.
-func TestPersonsOwnCollection(t *testing.T) {
-	w := newWorld(t)
-	w.apps.title = "Aurelia Watchlist"
-	w.lb.serve("/zaurelia/rss/", herFeed())
-	w.lb.serve("/zaurelia/watchlist/", `<div class="cols-2 js-watchlist-content" data-num-entries="2"><ul class="grid">`+
-		gridEntry("Digger (2026)", "digger-2026")+gridEntry("The Ring (2002)", "the-ring-2002")+`</ul></div><div class="paginate-nextprev"><span class="next">Older</span></div>`)
-	opts := fmt.Sprintf("collection = \"\"\nplex_watchlist = true\ndiscover_url = %q\n", w.h.Plex.URL) + people + "collection = \"Aurelia Watchlist\"\n"
-	rep := w.run(t, opts)
-	sorted := func(ids []string) string { return strings.Join(slices.Sorted(slices.Values(ids)), ",") }
-	if got, jf := sorted(w.apps.collection), sorted(w.apps.jfSet); got != "30,40" || jf != "j30,j40" || rep.Counts["roger.plex.collection_added"] != 2 {
-		t.Errorf("her collection: plex %v, jellyfin %v (counts %v); want The Ring and Digger in both", got, jf, rep.Counts)
-	}
-	if w.apps.promoted || len(w.h.Plex.Calls("POST", "/hubs/sections/4/manage")) != 0 || rep.Counts["roger.plex.home_promote"] != 0 {
-		t.Errorf("her collection promoted to his Home")
-	}
-	if rep.Counts["roger.sink_errors"] != 0 { // the fake plex.tv answers 404, which only his mirror may meet
-		t.Errorf("a plex.tv watchlist mirrored for her: counts %v", rep.Counts)
-	}
-	if w.lb.hits["/zaurelia/watchlist/"] != 1 || w.lb.hits["/zaurelia/films/"] != 0 {
-		t.Errorf("her grid pages: watchlist read %d times, films %d; want 1, 0", w.lb.hits["/zaurelia/watchlist/"], w.lb.hits["/zaurelia/films/"])
-	}
-	var his, hers bool
-	db := w.h.Env.Store.DB()
-	if err := db.QueryRow(`SELECT (SELECT played FROM letterboxd_sink WHERE app='plex' AND tmdb=1248832),
-		(SELECT played FROM letterboxd_sink WHERE app='roger/plex' AND tmdb=1248832)`).Scan(&his, &hers); err != nil || !his || hers {
-		t.Errorf("Digger's Plex rows: his played %v, hers %v (%v); want true, false", his, hers, err)
-	}
-	w.h.Now = w.h.Now.Add(time.Minute)
-	before := writes(w.h)
-	if again := w.run(t, opts); writes(w.h) != before {
-		t.Errorf("the next run wrote %d times (counts %v)", writes(w.h)-before, again.Counts)
 	}
 }
 
@@ -1423,5 +1135,132 @@ func TestPeopleNeedTheirOwnPersonAndAUser(t *testing.T) {
 				t.Errorf("err = %v", err)
 			}
 		})
+	}
+}
+
+// threePeople adds Aurelia (person roger: the managed Plex user "roger", who has no username) and Aaron (by his Plex
+// username; his title is "Aaron Test") beside the owner.
+const threePeople = "[[people]]\nperson = \"roger\"\nuser = \"zaurelia\"\nplex_user = \"roger\"\n" +
+	"[[people]]\nperson = \"aaron\"\nuser = \"zaaron\"\nplex_user = \"aarontest941\"\n"
+
+// watchlistPage is a whole one-page Letterboxd watchlist holding these grid entries.
+func watchlistPage(films ...string) string {
+	return fmt.Sprintf(`<div class="cols-2 js-watchlist-content" data-num-entries="%d"><ul class="grid">%s</ul></div>`+
+		`<div class="paginate-nextprev"><span class="next">Older</span></div>`, len(films), strings.Join(films, ""))
+}
+
+// Catches, with all three members: a film put on another member's Plex watchlist (the owner's token, or another Home
+// user's, standing for a person's; Aurelia found by her name, Aaron by his username); a film a member put there by
+// hand taken out, also one on their Letterboxd watchlist too (never this stage's add) and one this stage added for
+// another member (his What Happened Was, while hers was her own); a film this stage added kept once it leaves her
+// Letterboxd watchlist, or once the watch record has her playing it; her watchlist crawled again before
+// watchlist_every (6 h by default); and a Home switch made by a run with nothing to read or write.
+func TestEachMembersOwnPlexWatchlist(t *testing.T) {
+	w := newWorld(t)
+	okja, ring := gridEntry("Okja (2017)", "okja"), gridEntry("The Ring (2002)", "the-ring-2002")
+	whw := gridEntry("What Happened Was... (1994)", "what-happened-was")
+	w.lb.serve("/zaurelia/rss/", herFeed())
+	w.lb.serve("/zaaron/rss/", herFeed())
+	w.lb.serve("/zaurelia/watchlist/", watchlistPage(okja, ring, whw))
+	w.lb.serve("/zaaron/watchlist/", watchlistPage(gridEntry("Licorice Pizza (2021)", "licorice-pizza")))
+	w.pt.set(rogerToken, "m18", "m999") // What Happened Was and a film of her own, both put there by hand
+	lists := func() string {
+		return fmt.Sprintf("his %s; hers %s; Aaron's %s", w.pt.list(fake.PlexToken), w.pt.list(rogerToken), w.pt.list(aaronToken))
+	}
+	switches := func() int { return w.pt.count("POST /api/v2/home/users/u-roger/switch") }
+	step := func(name string, d time.Duration, want string, wantSwitches int) {
+		t.Helper()
+		w.h.Now = w.h.Now.Add(d)
+		if rep := w.run(t, threePeople); lists() != want || switches() != wantSwitches || len(rep.Alerts) != 0 {
+			t.Fatalf("%s: %s, %d switches to her, alerts %v\nwant %s, %d switches", name, lists(), switches(), rep.Alerts, want, wantSwitches)
+		}
+	}
+	step("first run", 0, "his m18,m565,show565; hers m18,m387426,m565,m999; Aaron's m718032", 1)
+
+	w.lb.serve("/zaurelia/watchlist/", watchlistPage(okja)) // she takes The Ring and What Happened Was off it
+	hits := w.lb.hits["/zaurelia/watchlist/"]
+	step("an hour later", time.Hour, "his m18,m565,show565; hers m18,m387426,m565,m999; Aaron's m718032", 1)
+	if w.lb.hits["/zaurelia/watchlist/"] != hits {
+		t.Errorf("her watchlist crawled again after an hour")
+	}
+	step("her next crawl", 5*time.Hour, "his m18,m565,show565; hers m18,m387426,m999; Aaron's m718032", 2)
+
+	err := watch.Add(context.Background(), w.h.Env.Store.DB(), watch.Event{Person: "roger", Item: movieItem(387426), Ref: "plex:77",
+		Source: "plex-webhook", At: w.h.Now, Kind: watch.Finished}) // she watches Okja in Plex; jfsync records it
+	if err != nil {
+		t.Fatal(err)
+	}
+	step("after she watched Okja", 30*time.Minute, "his m18,m565,show565; hers m18,m999; Aaron's m718032", 3)
+}
+
+// Catches a person whose Plex Home user projectionist cannot switch to (no user by that name; one behind a PIN, which
+// it cannot enter) failing without telling the owner, switched to anyway, or keeping his own watchlist from syncing.
+func TestHomeUserProblemsAlert(t *testing.T) {
+	for _, tc := range []struct{ plexUser, alert string }{{"nobody", `no Plex Home user "nobody"`}, {"kid", `"kid" has a PIN`}} {
+		w := newWorld(t)
+		w.lb.serve("/zaurelia/rss/", herFeed())
+		w.lb.serve("/zaurelia/watchlist/", watchlistPage(gridEntry("Okja (2017)", "okja")))
+		rep := w.run(t, fmt.Sprintf("[[people]]\nperson = \"roger\"\nuser = \"zaurelia\"\nplex_user = %q\n", tc.plexUser))
+		if len(rep.Alerts) != 1 || !strings.HasPrefix(rep.Alerts[0], "roger: ") || !strings.Contains(rep.Alerts[0], tc.alert) ||
+			w.pt.count("POST /api/v2/home/users/u-kid/switch") != 0 || w.pt.list(fake.PlexToken) != "m18,m565,show565" {
+			t.Errorf("%s: alerts %q, his watchlist %s", tc.plexUser, rep.Alerts, w.pt.list(fake.PlexToken))
+		}
+	}
+}
+
+// Catches a Plex watchlist listing that stops after its first page, or skips or repeats one (Aurelia's held 137 items
+// on 2026-10-05, and plex.tv refuses pages of 200; 250 crosses two page boundaries and ends on a partial page): The
+// Ring, listed last, would be added a second time, and the films he put there by hand past page 1 forgotten.
+func TestWatchlistListingReadsEveryPage(t *testing.T) {
+	w := newWorld(t)
+	var mine []string
+	for i := range 249 {
+		mine = append(mine, fmt.Sprintf("m%d", 900000+i))
+	}
+	w.pt.set(fake.PlexToken, append(mine, "m565")...)
+	rep := w.run(t, "")
+	var listed int
+	w.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM letterboxd_sink WHERE app='plextv' AND member=1`).Scan(&listed)
+	if rep.Counts["plextv.watchlist_added"] != 1 || rep.Counts["plextv.failed"] != 0 || listed != 251 {
+		t.Errorf("counts %v, %d films stored as listed; want only What Happened Was added, and 251", rep.Counts, listed)
+	}
+}
+
+// Catches, on the Plex watchlist: calls not retried 2 s and 4 s apart, a film whose writes failed in 3 runs in a row
+// still sent, the owner told more than once, a parked film making every run re-read the watchlist, a film plex.tv has
+// no match for never parking, and failures that are not in a row parking a film (The Ring's add fails in two runs,
+// then lands; when he logs it and its removal fails once, that is one failed run, not a third).
+func TestFailingWatchlistWritesPark(t *testing.T) {
+	w := newWorld(t)
+	w.pt.refuse["m565"], w.pt.unknown[18] = true, true
+	for i, step := range []struct{ reads, adds, alerts, parked int }{{1, 3, 0, 0}, {1, 3, 0, 0}, {1, 3, 1, 0}, {0, 0, 0, 2}} {
+		adds := w.pt.count("PUT /actions/addToWatchlist")
+		rep := w.run(t, "")
+		if rep.Counts["plextv.snapshot"] != step.reads || w.pt.count("PUT /actions/addToWatchlist")-adds != step.adds ||
+			len(rep.Alerts) != step.alerts || rep.Counts["plextv.parked"] != step.parked {
+			t.Errorf("run %d: alerts %q, %d adds (counts %v); want %+v", i+1, rep.Alerts, w.pt.count("PUT /actions/addToWatchlist")-adds, rep.Counts, step)
+		}
+		if step.alerts > 0 && (!strings.Contains(rep.Alerts[0], "The Ring") || !strings.Contains(rep.Alerts[0], "What Happened Was")) {
+			t.Errorf("run %d: the parked films are not named: %q", i+1, rep.Alerts)
+		}
+		w.h.Now = w.h.Now.Add(30 * time.Minute)
+	}
+	if !slices.Contains(w.sleeps, 2*time.Second) || !slices.Contains(w.sleeps, 4*time.Second) {
+		t.Errorf("no 2 s / 4 s retry backoff: %v", w.sleeps)
+	}
+
+	w = newWorld(t)
+	w.pt.refuse["m565"] = true
+	for i := range 4 { // two failed runs, the add lands, a run with nothing to do
+		if i == 2 {
+			w.pt.refuse["m565"] = false
+		}
+		w.run(t, "")
+		w.h.Now = w.h.Now.Add(30 * time.Minute)
+	}
+	w.pt.refuse["m565"] = true
+	w.lb.logRing() // he watches it: it must leave the watchlist
+	if rep := w.run(t, ""); len(rep.Alerts) != 0 || rep.Counts["plextv.failed"] != 1 {
+		t.Errorf("one failed run after a success parked the film: alerts %v (counts %v)", rep.Alerts, rep.Counts)
 	}
 }
