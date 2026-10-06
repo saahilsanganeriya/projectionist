@@ -430,7 +430,8 @@ func (s *sampler) readAll(ctx context.Context) (string, error) {
 
 // readWindows reads windows from the image track (one ffprobe over all of them) or the audio (one ffmpeg each). Each
 // read may take four times its share of the file plus 64 MiB (slack for the seek to a keyframe); a helper reading past
-// that is killed (Linux), and the title is not sampled: its seeks do not use an index.
+// that is killed (Linux), and the title is not sampled: its seeks do not use an index. An episode's four windows are a
+// quarter of it, so there the image track's allowance passes the file's size: unindexed, it costs at most the file.
 //
 // ffprobe ends an interval at the first packet past its end among the streams it shows, so it shows them all: shown
 // only the image track, it read on to the next caption, which after the last one (a window in the end credits) is the
