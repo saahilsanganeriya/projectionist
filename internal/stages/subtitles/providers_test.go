@@ -4,13 +4,16 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unicode/utf16"
@@ -106,7 +109,8 @@ func counter(t *testing.T, handle func(w http.ResponseWriter, r *http.Request, n
 
 // Catches: path parameters out of alphabetical order (the legacy API answers nothing then), a redirect (the API's
 // "nothing" for a search it rewrites, pointing at host "_") followed instead of read as no results, the name search
-// skipped when the IMDb search finds nothing, or a neighbouring episode's subtitle kept from a text search.
+// skipped when the IMDb search finds nothing, a neighbouring episode's subtitle kept from a text search, or the
+// subtitle id both OpenSubtitles APIs share lost.
 func TestLegacySearchEpisode(t *testing.T) {
 	var paths []string
 	srv, _ := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
@@ -115,7 +119,7 @@ func TestLegacySearchEpisode(t *testing.T) {
 		case r.Header.Get("X-User-Agent") == "":
 			w.WriteHeader(403)
 		case strings.Contains(r.URL.Path, "moviehash-"):
-			w.Write([]byte(`[{"IDSubtitleFile":"1","MatchedBy":"moviehash","SubFormat":"srt","SeriesSeason":"1","SeriesEpisode":"9"}]`))
+			w.Write([]byte(`[{"IDSubtitle":"11","IDSubtitleFile":"1","MatchedBy":"moviehash","SubFormat":"srt","SeriesSeason":"1","SeriesEpisode":"9"}]`))
 		case strings.Contains(r.URL.Path, "imdbid-"):
 			http.Redirect(w, r, "http://_/search/imdbid-1234/sublanguageid-eng", http.StatusMovedPermanently)
 		default:
@@ -132,7 +136,7 @@ func TestLegacySearchEpisode(t *testing.T) {
 	for _, c := range got {
 		ids = append(ids, c.Source+":"+c.ID)
 	}
-	if err != nil || strings.Join(ids, " ") != "opensubtitles-hash:1 opensubtitles-query:3" {
+	if err != nil || strings.Join(ids, " ") != "opensubtitles-hash:1 opensubtitles-query:3" || got[0].openSubtitlesID != "11" {
 		t.Errorf("kept %v, %v", ids, err)
 	}
 	want := []string{"/search/moviebytesize-42/moviehash-00ff/sublanguageid-eng",
@@ -313,38 +317,228 @@ func TestSubdl(t *testing.T) {
 	}
 }
 
-// Catches: OpenSubtitles.com asked without its Api-Key or for the episode by anything but the show's IMDb id plus
-// season and episode, a multi-file or machine-translated subtitle kept, and a 406 (the day's downloads spent) not
-// parking the provider.
+// dotComSecrets writes the three files OpenSubtitles.com needs into a fresh secrets_dir.
+func dotComSecrets(t *testing.T) string {
+	dir := t.TempDir()
+	for name, v := range map[string]string{"opensubtitles_api_key": "k\n", "opensubtitles_username": "u\n", "opensubtitles_password": "p\n"} {
+		os.WriteFile(filepath.Join(dir, name), []byte(v), 0o600)
+	}
+	return dir
+}
+
+// Catches OpenSubtitles.com used without a user's login (a free user's downloads are counted per user) or its token
+// sent anywhere but the host the login answered (base_url), a film asked for by anything but its IMDb id (else its
+// TMDB id) or an episode by anything but the show's IMDb id with season and episode, a multi-file or
+// machine-translated subtitle kept, the subtitle id both OpenSubtitles APIs share lost, a download that leaves none
+// (remaining 0) or is refused (406) not parking the provider until the reset the API names, kept for later runs, and
+// a 429 without Retry-After (its limit is 5 requests a second) parking it for longer than a minute.
 func TestDotCom(t *testing.T) {
 	var query string
-	srv, _ := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+	api, apiCalls := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+		var dl struct {
+			FileID int `json:"file_id"`
+		}
+		json.NewDecoder(r.Body).Decode(&dl)
+		reset := `"reset_time_utc":"2026-10-06T13:03:15.000Z"`
 		switch {
-		case r.Header.Get("Api-Key") != "k" || r.Header.Get("User-Agent") == "":
-			w.WriteHeader(401)
-		case r.URL.Path == "/subtitles":
+		case r.URL.Path == "/file": // the temporary link the download answers: no key, no token
+			w.Write([]byte("1\n00:00:01,000 --> 00:00:02,000\nHi\n"))
+		case r.Header.Get("Api-Key") != "k" || r.Header.Get("User-Agent") != userAgent || r.Header.Get("Authorization") != "Bearer tok":
+			w.WriteHeader(403)
+		case strings.Contains(r.URL.RawQuery, "imdb_id=429"):
+			w.WriteHeader(429)
+		case r.URL.Path == "/api/v1/subtitles":
 			query = r.URL.RawQuery
 			ep := `"feature_details":{"season_number":1,"episode_number":2}`
 			w.Write([]byte(`{"data":[{"attributes":{"files":[{"file_id":1},{"file_id":2}],` + ep + `}},` +
 				`{"attributes":{"machine_translated":true,"files":[{"file_id":3}],` + ep + `}},` +
-				`{"attributes":{"moviehash_match":true,"ratings":7.5,"files":[{"file_id":4,"file_name":"a.srt"}],` + ep + `}}]}`))
-		default:
+				`{"attributes":{"moviehash_match":true,"ratings":7.5,"legacy_subtitle_id":77,"files":[{"file_id":4,"file_name":"a.srt"}],` + ep + `}}]}`))
+		case r.URL.Path == "/api/v1/download" && dl.FileID == 6:
 			w.WriteHeader(406)
+			w.Write([]byte(`{"requests":21,"remaining":0,` + reset + `}`))
+		case r.URL.Path == "/api/v1/download":
+			left := map[int]string{4: "1", 5: "0"}[dl.FileID]
+			w.Write([]byte(`{"link":"http://` + r.Host + `/file","remaining":` + left + `,` + reset + `}`))
 		}
 	})
-	key := filepath.Join(t.TempDir(), "opensubtitles_api_key")
-	os.WriteFile(key, []byte("k\n"), 0o600)
-	now := time.Unix(0, 0)
-	o := &dotCom{base: srv.URL, keyFile: key, userAgent: userAgent, hc: srv.Client(), pace: testPacer(&recorder{}, &now)}
+	login, logins := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+		var creds struct{ Username, Password string }
+		json.NewDecoder(r.Body).Decode(&creds)
+		if r.Method != http.MethodPost || r.Header.Get("Api-Key") != "k" || r.Header.Get("User-Agent") != userAgent || creds.Username != "u" || creds.Password != "p" {
+			w.WriteHeader(401)
+			return
+		}
+		w.Write([]byte(`{"token":"tok","base_url":"` + strings.TrimPrefix(api.URL, "http://") + `","status":200}`))
+	})
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	var saved quotaState
+	open := func() *dotCom {
+		o := &dotCom{base: login.URL + "/api/v1", secrets: dotComSecrets(t), userAgent: userAgent, hc: api.Client(), pace: testPacer(&recorder{}, &now),
+			keep: func(st quotaState) { saved = st }}
+		o.pace.quota429 = true
+		return o
+	}
+	o := open()
 	got, err := o.Search(context.Background(), Query{Hash: "00ff", IMDb: 1400, Show: true, Season: 1, Episode: 2})
-	if err != nil || len(got) != 1 || got[0].ID != "4" || !got[0].HashMatch || got[0].Rating != 7.5 {
+	if err != nil || len(got) != 1 || got[0].ID != "4" || !got[0].HashMatch || got[0].Rating != 7.5 || got[0].openSubtitlesID != "77" {
 		t.Fatalf("search: %+v %v", got, err)
 	}
 	if want := "episode_number=2&languages=en&moviehash=00ff&parent_imdb_id=1400&season_number=1"; query != want {
 		t.Errorf("query %q, want %q", query, want)
 	}
-	if _, err := o.Download(context.Background(), got[0]); !errors.Is(err, errQuota) {
-		t.Errorf("406: %v", err)
+	if got, err := o.Search(context.Background(), Query{Hash: "00ff", TMDB: "949"}); err != nil || len(got) != 1 || !got[0].ours ||
+		query != "languages=en&moviehash=00ff&tmdb_id=949" {
+		t.Errorf("film without an IMDb id: query %q, %+v %v; want it asked by its TMDB id", query, got, err)
+	}
+	if n := logins("/api/v1/login"); n != 1 {
+		t.Errorf("%d logins for two searches; want 1", n)
+	}
+	reset := time.Date(2026, 10, 6, 13, 3, 15, 0, time.UTC)
+	if txt, err := o.Download(context.Background(), Candidate{ID: "4"}); err != nil || txt != "1\n00:00:01,000 --> 00:00:02,000\nHi\n" || o.pace.parkedErr() != nil {
+		t.Errorf("download with one left: %q %v, parked %v", txt, err, o.pace.parkedErr())
+	}
+	if txt, err := o.Download(context.Background(), Candidate{ID: "5"}); err != nil || txt == "" || !errors.Is(o.pace.parkedErr(), errQuota) || !saved.ResumeAfter.Equal(reset) {
+		t.Errorf("the day's last download: %q %v, parked %v, saved %v; want the text, then parked until %v", txt, err, o.pace.parkedErr(), saved.ResumeAfter, reset)
+	}
+	before := apiCalls("/api/v1/download")
+	if _, err := o.Download(context.Background(), Candidate{ID: "4"}); !errors.Is(err, errQuota) || apiCalls("/api/v1/download") != before {
+		t.Errorf("download after the last: %v; want refused without a request", err)
+	}
+	saved = quotaState{}
+	if _, err := open().Download(context.Background(), Candidate{ID: "6"}); !errors.Is(err, errQuota) || !saved.ResumeAfter.Equal(reset) {
+		t.Errorf("406: %v, saved %v; want parked until %v", err, saved.ResumeAfter, reset)
+	}
+	if _, err := open().Search(context.Background(), Query{IMDb: 429}); !errors.Is(err, errQuota) || !saved.ResumeAfter.Equal(now.Add(time.Minute)) {
+		t.Errorf("429: %v, saved %v; want parked for a minute", err, saved.ResumeAfter)
+	}
+}
+
+// Catches an expired token (401) not renewed by one fresh login, or a request refused after that login retried with
+// yet more logins: the API asks clients to stop sending credentials it rejects (logins: 1 a second, 30 an hour).
+func TestDotComRelogin(t *testing.T) {
+	var expired atomic.Bool
+	srv, calls := counter(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		switch {
+		case r.URL.Path == "/api/v1/login":
+			w.Write([]byte(`{"token":"tok` + strconv.Itoa(n) + `","base_url":"` + r.Host + `"}`))
+		case r.Header.Get("Authorization") == "Bearer tok1" || expired.Load():
+			w.WriteHeader(401)
+		default:
+			w.Write([]byte(`{"data":[]}`))
+		}
+	})
+	now := time.Unix(0, 0)
+	o := &dotCom{base: srv.URL + "/api/v1", secrets: dotComSecrets(t), userAgent: userAgent, hc: srv.Client(), pace: testPacer(&recorder{}, &now)}
+	if _, err := o.Search(context.Background(), Query{IMDb: 1}); err != nil || calls("/api/v1/login") != 2 || calls("/api/v1/subtitles") != 2 {
+		t.Errorf("expired token: %v after %d logins, %d searches; want found after 2 and 2", err, calls("/api/v1/login"), calls("/api/v1/subtitles"))
+	}
+	expired.Store(true)
+	var se *statusError
+	if _, err := o.Search(context.Background(), Query{IMDb: 1}); !errors.As(err, &se) || se.code != 401 || calls("/api/v1/login") != 3 || calls("/api/v1/subtitles") != 4 {
+		t.Errorf("refused after a fresh login: %v after %d logins, %d searches; want the 401 after 3 and 4", err, calls("/api/v1/login"), calls("/api/v1/subtitles"))
+	}
+}
+
+// Catches one OpenSubtitles subtitle, found through both its APIs (one database: the legacy IDSubtitle is .com's
+// legacy_subtitle_id), kept twice: it would be downloaded twice from two rationed quotas.
+func TestOrderOneOpenSubtitlesSubtitle(t *testing.T) {
+	l, d := &legacy{}, &dotCom{}
+	got := order([]Candidate{{ID: "1952263524", openSubtitlesID: "3625335", provider: l}, {ID: "9", openSubtitlesID: "3625335", provider: d},
+		{ID: "10", openSubtitlesID: "4", provider: d}}, "")
+	if len(got) != 2 || got[0].provider != l || got[1].ID != "10" {
+		t.Errorf("kept %+v; want the legacy copy of 3625335 and .com's 4", got)
+	}
+}
+
+// Catches SubSource asked without its key or User-Agent, a film by anything but its IMDb id, a show's season by
+// anything but the show's IMDb id and season (else its name, keeping only the show TMDB names), a page of a title's
+// subtitles left unread, another episode's or a multi-file (season pack) or foreign-parts-only subtitle kept, the
+// release names lost (they decide the tier), a 404 taken for an outage, or the zip's SRT not returned as text.
+func TestSubSource(t *testing.T) {
+	var searches []string
+	sub := func(id int, extra string, releases ...string) string {
+		rel, _ := json.Marshal(releases)
+		return `{"subtitleId":` + strconv.Itoa(id) + `,"language":"english","files":1,"releaseInfo":` + string(rel) + extra + `}`
+	}
+	srv, calls := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+		q := r.URL.Query()
+		list := func(pages int, subs ...string) {
+			w.Write([]byte(`{"success":true,"data":[` + strings.Join(subs, ",") + `],"pagination":{"pages":` + strconv.Itoa(pages) + `}}`))
+		}
+		switch {
+		case r.Header.Get("X-API-Key") != "k" || r.Header.Get("User-Agent") != userAgent:
+			w.WriteHeader(401)
+		case r.URL.Path == "/movies/search" && q.Get("imdb") == "tt0000404":
+			w.WriteHeader(404)
+		case r.URL.Path == "/movies/search":
+			searches = append(searches, r.URL.RawQuery)
+			switch q.Get("imdb") + q.Get("q") {
+			case "tt0113277":
+				w.Write([]byte(`{"data":[{"movieId":10,"type":"movie"}]}`))
+			case "tt0903747":
+				w.Write([]byte(`{"data":[{"movieId":20,"type":"tvseries","season":1}]}`))
+			case "Show":
+				w.Write([]byte(`{"data":[{"movieId":30,"tmdbId":"999","season":1},{"movieId":31,"tmdbId":"1400","season":1}]}`))
+			}
+		case r.URL.Path == "/subtitles" && q.Get("language") != "english":
+			w.WriteHeader(400)
+		case r.URL.Path == "/subtitles" && q.Get("movieId") == "10" && q.Get("page") == "1":
+			list(2, sub(1, `,"hearingImpaired":true,"framerate":"23.976","downloads":50`, "Heat.1995.1080p.BluRay.x264-SPARKS", "Heat.1995.720p.BluRay.x264-SPARKS"),
+				strings.Replace(sub(2, "", "Heat.1995.BluRay"), `"files":1`, `"files":2`, 1))
+		case r.URL.Path == "/subtitles" && q.Get("movieId") == "10" && q.Get("page") == "2":
+			list(2, sub(3, `,"foreignParts":true`, "Heat.1995.BluRay"), sub(4, "", "Heat.1995.DVDRip"))
+		case r.URL.Path == "/subtitles" && q.Get("movieId") == "20":
+			list(1, sub(5, "", "Breaking.Bad.S01E02.720p.BluRay-DEMAND"), sub(6, "", "Breaking.Bad.S01E03.720p.BluRay-DEMAND"),
+				sub(7, "", "Breaking.Bad.S01.720p.BluRay-DEMAND"))
+		case r.URL.Path == "/subtitles" && q.Get("movieId") == "31":
+			list(1, sub(8, "", "Show.S01E02.WEB"))
+		case r.URL.Path == "/subtitles/1/download":
+			w.Write(zipOf("Heat.srt", "1\n00:00:01,000 --> 00:00:02,000\ncaf\xe9\n"))
+		default:
+			w.WriteHeader(500)
+		}
+	})
+	key := filepath.Join(t.TempDir(), "subsource_api_key")
+	os.WriteFile(key, []byte("k\n"), 0o600)
+	now := time.Unix(0, 0)
+	o := &subsource{base: srv.URL, keyFile: key, hc: srv.Client(), pace: testPacer(&recorder{}, &now)}
+	ids := func(q Query) string {
+		got, err := o.Search(context.Background(), q)
+		var out []string
+		for _, c := range got {
+			if !c.ours || c.provider != o {
+				t.Errorf("%+v: candidate %+v not labelled as this title's", q, c)
+			}
+			out = append(out, c.ID)
+		}
+		if err != nil {
+			out = append(out, err.Error())
+		}
+		return strings.Join(out, " ")
+	}
+	film, err := o.Search(context.Background(), Query{IMDb: 113277, TMDB: "949"})
+	if err != nil || len(film) != 2 || film[0].ID != "1" || film[1].ID != "4" || calls("/subtitles") != 2 {
+		t.Fatalf("film: %+v %v after %d list pages", film, err, calls("/subtitles"))
+	}
+	if c := film[0]; c.Release != "Heat.1995.1080p.BluRay.x264-SPARKS, Heat.1995.720p.BluRay.x264-SPARKS" || !c.HearingImpaired || c.FPS != 23.976 ||
+		c.Downloads != 50 || c.key() != "subsource:1" {
+		t.Errorf("film candidate %+v", c)
+	}
+	if want := "imdb=tt0113277&searchType=imdb&type=movie"; searches[0] != want {
+		t.Errorf("film search %q, want %q", searches[0], want)
+	}
+	if got := ids(Query{IMDb: 903747, TMDB: "1396", Name: "Breaking Bad", Show: true, Season: 1, Episode: 2}); got != "5" ||
+		searches[1] != "imdb=tt0903747&searchType=imdb&season=1&type=series" {
+		t.Errorf("episode by the show's IMDb id: %q via %q; want 5 via the show's season", got, searches[1])
+	}
+	if got := ids(Query{TMDB: "1400", Name: "Show", Show: true, Season: 1, Episode: 2}); got != "8" {
+		t.Errorf("episode by the show's name: %q; want 8 (the show TMDB names)", got)
+	}
+	if got := ids(Query{TMDB: "949"}) + ids(Query{IMDb: 404}); got != "" {
+		t.Errorf("film without an IMDb id, film SubSource lacks: %q; want nothing", got)
+	}
+	if txt, err := o.Download(context.Background(), film[0]); err != nil || txt != "1\n00:00:01,000 --> 00:00:02,000\ncafé\n" {
+		t.Errorf("download: %q %v", txt, err)
 	}
 }
 
