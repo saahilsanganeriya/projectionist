@@ -227,7 +227,7 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 		case err == nil:
 		case !errors.Is(err, llm.ErrBilling):
 			r.alert("posters: judging %s parked for this run: %v", s.Name(), err)
-		case r.env.LLM.TellBilling(ctx): // true once per refusal, whichever stage or session meets it first
+		case s.TellBilling(ctx): // true once per refusal of its account, whichever stage or session meets it first
 			r.alert("posters: judging parked until the AI gateway accepts calls (it is tried again hourly; this alert comes "+
 				"once, for every stage that asks a model): %v", err)
 		default:

@@ -23,7 +23,7 @@ type Config struct {
 	FFmpeg   FFmpeg     `toml:"ffmpeg"`
 	TMDB     TMDB       `toml:"tmdb"`
 	Fanart   Fanart     `toml:"fanart"`
-	LLM      llm.Config `toml:"llm"` // the AI gateway and each task's model; unset keys take llm.Defaults
+	LLM      llm.Config `toml:"llm"` // the AI gateway and each task's model (or API of its own); unset keys take llm.Defaults
 
 	Stages map[string]toml.Primitive `toml:"stages"`
 
@@ -93,6 +93,9 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
 	cfg.md = md
+	if err := cfg.LLM.Validate(); err != nil {
+		return nil, fmt.Errorf("config %s: %w", path, err)
+	}
 	if cfg.location, err = time.LoadLocation(cfg.Timezone); err != nil {
 		return nil, fmt.Errorf("config timezone: %w", err)
 	}

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -137,4 +138,17 @@ apply = true
 		}(i)
 	}
 	wg.Wait()
+}
+
+// Catches an [llm] task on an API of its own loading without its prices (to be priced at $0 against every budget), or
+// its api and price keys not decoding.
+func TestLLMTaskValidatedAtLoad(t *testing.T) {
+	task := "[llm.tasks.posters]\napi = \"https://api.openai.com/v1\"\nmodel = \"gpt-6-astra\"\nfallbacks = []\nprice_in = 10\n"
+	for toml, wantErr := range map[string]bool{task + "price_out = 50\n": false, task: true} {
+		path := filepath.Join(t.TempDir(), "c.toml")
+		os.WriteFile(path, []byte(toml), 0o600)
+		if _, err := Load(path); (err != nil) != wantErr || wantErr && !strings.Contains(err.Error(), "llm task posters") {
+			t.Errorf("%s: %v; want an error naming the task: %v", toml, err, wantErr)
+		}
+	}
 }
