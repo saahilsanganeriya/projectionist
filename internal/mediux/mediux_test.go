@@ -48,8 +48,9 @@ func TestPosters(t *testing.T) {
 	}
 }
 
-// Catches a German or other foreign set kept (by a language word, or a word with letters beyond ASCII), and an
-// English set dropped because the collection's own name holds such a word.
+// Catches a German or other foreign set kept (by a language word, a foreign article or preposition, or a word with
+// letters beyond ASCII; MediUX artists append the local title: "Home Alone Collection - Kevin allein zu Haus
+// Collection"), and an English set dropped because the collection's own name holds such a word ("Die Hard").
 func TestForeign(t *testing.T) {
 	for _, c := range []struct {
 		set  string
@@ -62,6 +63,11 @@ func TestForeign(t *testing.T) {
 		{"The French Connection Collection", []string{"The French Connection Collection"}, false},
 		{"Amélie Collection", []string{"Amélie Collection"}, false},
 		{"Spirited Away 千と千尋", []string{"Spirited Away Collection"}, true},
+		{"Home Alone Collection - Kevin allein zu Haus Collection", []string{"Home Alone Collection"}, true},
+		{"The Mummy Collection - Die Mumie Collection", []string{"The Mummy Collection"}, true},
+		{"Meet the Parents Collection - Meine Braut Collection", []string{"Meet the Parents Collection"}, true},
+		{"Die Hard Collection", []string{"Die Hard Collection"}, false},
+		{"Back to the Future Collection - Minimalist", []string{"Back to the Future Collection"}, false},
 	} {
 		if got := (Set{Name: c.set}).Foreign(c.own...); got != c.want {
 			t.Errorf("%q: foreign %v, want %v", c.set, got, c.want)

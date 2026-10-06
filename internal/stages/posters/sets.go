@@ -109,9 +109,37 @@ type wornSet struct {
 // pools to gather. A page MediUX does not serve keeps the collection's last choice; so does one the client cannot
 // read, which also raises an alert: MediUX has changed its pages.
 func (r *run) sets(ctx context.Context, titles []Title) error {
-	shelves, err := collections.Franchises(ctx, r.env.Store.DB(), r.opt.CollectionsOwner, r.opt.CollectionsApproved)
+	groups, err := r.shelfSets(ctx, titles)
 	if err != nil {
 		return err
+	}
+	if r.refs, err = r.references(ctx); err != nil {
+		return err
+	}
+	session := r.env.LLM.Session("collections")
+	var unreadable []int
+	for _, id := range slices.Sorted(maps.Keys(groups)) {
+		readable, err := r.dress(ctx, session, groups[id])
+		if err != nil {
+			return err
+		}
+		if !readable {
+			unreadable = append(unreadable, id)
+		}
+	}
+	if len(unreadable) > 0 {
+		r.alert("posters: %d MediUX collection page(s) could not be read (first: TMDB collection %d); their films keep the "+
+			"set they wear, if any. MediUX may have changed its pages", len(unreadable), unreadable[0])
+	}
+	r.count("sets_worn", len(r.worn))
+	return nil
+}
+
+// shelfSets is every TMDB collection a franchise shelf holds films of on disk, by its id.
+func (r *run) shelfSets(ctx context.Context, titles []Title) (map[int]*shelfSet, error) {
+	shelves, err := collections.Franchises(ctx, r.env.Store.DB(), r.opt.CollectionsOwner, r.opt.CollectionsApproved)
+	if err != nil {
+		return nil, err
 	}
 	onDisk := map[int]bool{}
 	for _, t := range titles {
@@ -130,7 +158,7 @@ func (r *run) sets(ctx context.Context, titles []Title) error {
 				continue
 			}
 			if err != nil {
-				return err
+				return nil, err
 			}
 			c := d.Collection
 			if c == nil || len(s.Sets) > 0 && !slices.ContainsFunc(s.Sets, func(n string) bool { return strings.EqualFold(n, c.Name) }) {
@@ -149,28 +177,10 @@ func (r *run) sets(ctx context.Context, titles []Title) error {
 			}
 		}
 	}
-	if r.refs, err = r.references(ctx); err != nil {
-		return err
-	}
-	session := r.env.LLM.Session("collections")
-	var unreadable []int
-	for _, id := range slices.Sorted(maps.Keys(groups)) {
-		g := groups[id]
+	for _, g := range groups {
 		slices.SortStableFunc(g.films, func(a, b tmdb.Details) int { return a.Date.Compare(b.Date.Time) })
-		readable, err := r.dress(ctx, session, g)
-		if err != nil {
-			return err
-		}
-		if !readable {
-			unreadable = append(unreadable, id)
-		}
 	}
-	if len(unreadable) > 0 {
-		r.alert("posters: %d MediUX collection page(s) could not be read (first: TMDB collection %d); their films keep the "+
-			"set they wear, if any. MediUX may have changed its pages", len(unreadable), unreadable[0])
-	}
-	r.count("sets_worn", len(r.worn))
-	return nil
+	return groups, nil
 }
 
 // dress decides the set one TMDB collection wears and wears it; readable is false when MediUX's page could not be
@@ -187,40 +197,16 @@ func (r *run) dress(ctx context.Context, s *llm.Session, g *shelfSet) (readable 
 			r.wear(stored, old, g)
 		}
 	}
-	keys := map[int]string{}
-	var open []mediux.Film
-	for _, d := range g.films {
-		k := key(movie, library.ID{Source: "tmdb", Value: strconv.Itoa(d.ID)}, 0)
-		if p := r.owners[k]; p.State == ownerUpload || p.State == ownerPick {
-			continue // his poster stays: no set needs one for it
-		}
-		keys[d.ID] = k
-		open = append(open, mediux.Film{TMDB: d.ID, Title: d.Title, Year: d.Date.Year()})
-	}
-	if len(open) == 0 {
-		return true, nil
-	}
-	coll, err := r.mx.CollectionSets(ctx, g.id)
+	open, keys, cands, err := r.candidates(ctx, g)
 	if err != nil {
 		r.env.Log.Warn("mediux", "event", "mediux_failed", "tmdb_collection", g.id, "err", err)
 		r.count("mediux_failed", 1)
 		keep()
 		return !errors.Is(err, mediux.ErrParse), ctx.Err()
 	}
-	names := []string{coll.Name, g.name}
-	for _, d := range g.films {
-		names = append(names, d.Title)
+	if len(open) == 0 {
+		return true, nil
 	}
-	var cands []candidateSet
-	for _, set := range coll.Sets {
-		if set.Creator == "" || set.Foreign(names...) {
-			continue
-		}
-		if cp, byFilm := set.Posters(open); len(byFilm) == len(open) {
-			cands = append(cands, candidateSet{set, cp, byFilm})
-		}
-	}
-	cands = shortlist(cands)
 	of := setsOf(cands, keys)
 	if found && old.Of == of {
 		r.wear(stored, old, g)
@@ -275,6 +261,43 @@ func (r *run) dress(ctx context.Context, s *llm.Session, g *shelfSet) (readable 
 		"set", choice.Set, "rule", choice.Rule, "credit", choice.Credit)
 	r.wear(stored, choice, g)
 	return true, nil
+}
+
+// candidates is what one TMDB collection's sets must cover (its films on disk whose poster the owner did not upload
+// or pick, and their title keys by TMDB id) and the shortlist of sets that cover it. With nothing to cover, MediUX is
+// not asked.
+func (r *run) candidates(ctx context.Context, g *shelfSet) ([]mediux.Film, map[int]string, []candidateSet, error) {
+	keys := map[int]string{}
+	var open []mediux.Film
+	for _, d := range g.films {
+		k := key(movie, library.ID{Source: "tmdb", Value: strconv.Itoa(d.ID)}, 0)
+		if p := r.owners[k]; p.State == ownerUpload || p.State == ownerPick {
+			continue // his poster stays: no set needs one for it
+		}
+		keys[d.ID] = k
+		open = append(open, mediux.Film{TMDB: d.ID, Title: d.Title, Year: d.Date.Year()})
+	}
+	if len(open) == 0 {
+		return nil, nil, nil, nil
+	}
+	coll, err := r.mx.CollectionSets(ctx, g.id)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	names := []string{coll.Name, g.name}
+	for _, d := range g.films {
+		names = append(names, d.Title)
+	}
+	var cands []candidateSet
+	for _, set := range coll.Sets {
+		if set.Creator == "" || set.Foreign(names...) {
+			continue
+		}
+		if cp, byFilm := set.Posters(open); len(byFilm) == len(open) {
+			cands = append(cands, candidateSet{set, cp, byFilm})
+		}
+	}
+	return open, keys, shortlist(cands), nil
 }
 
 // shortlist keeps each artist's best set, those with a collection poster first, then the newest, and the first

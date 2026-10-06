@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -174,22 +175,27 @@ func fold(s string) string {
 	}), " ")
 }
 
+// languageWord names a language, or is an article or preposition of one that no English title uses: MediUX artists
+// name a set in another language by appending its local title ("The Mummy Collection - Die Mumie Collection").
 var languageWord = regexp.MustCompile(`(?i)\b(german|deutsch|french|francais|spanish|espanol|castellano|latino|italian|italiano|` +
 	`portuguese|portugues|brazilian|polish|polski|czech|dutch|nederlands|russian|japanese|chinese|korean|turkish|` +
-	`hungarian|swedish|danish|norwegian|finnish|greek|hindi)\b`)
+	`hungarian|swedish|danish|norwegian|finnish|greek|hindi|` +
+	`der|die|das|und|zu|zum|zur|mit|von|ein|eine|dem|den|le|la|les|du|et|aux|vers|el|los|las|del|al|il|lo|gli|della|di|` +
+	`para|os|het|een|och|og|mein|meine|ihr|nicht|auf|nur)\b`)
 
-// Foreign is whether the set's name says it is made in a language other than English: it names a language, or spells
-// a word with a letter beyond ASCII ("Zurück in die Zukunft"). A word or letter the collection's or its films' own
-// names hold does not count ("The French Connection", "Amélie").
+// Foreign is whether the set's name says it is made in a language other than English: it names a language, uses one
+// of its articles or prepositions, or spells a word with a letter beyond ASCII ("Zurück in die Zukunft"). A word or
+// letter the collection's or its films' own names hold does not count ("The French Connection", "Die Hard", "Amélie").
 func (s Set) Foreign(ownNames ...string) bool {
-	own := strings.ToLower(strings.Join(ownNames, " "))
+	own := strings.Fields(fold(strings.Join(ownNames, " ")))
 	for _, w := range languageWord.FindAllString(s.Name, -1) {
-		if !strings.Contains(own, strings.ToLower(w)) {
+		if !slices.Contains(own, strings.ToLower(w)) {
 			return true
 		}
 	}
+	ownText := strings.ToLower(strings.Join(ownNames, " "))
 	for _, r := range s.Name {
-		if r > unicode.MaxASCII && unicode.IsLetter(r) && !strings.ContainsRune(own, unicode.ToLower(r)) {
+		if r > unicode.MaxASCII && unicode.IsLetter(r) && !strings.ContainsRune(ownText, unicode.ToLower(r)) {
 			return true
 		}
 	}
