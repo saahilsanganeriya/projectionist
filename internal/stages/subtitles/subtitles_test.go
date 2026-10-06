@@ -1068,7 +1068,9 @@ func TestRunIdxFit(t *testing.T) {
 }
 
 // Catches sampled mode's queue aligning outside its night window, the window read in UTC rather than the config
-// timezone, or an alignment starting after the window closed while a guest kept it waiting; a run outside the window
+// timezone, or an alignment starting after the window closed while a guest kept it waiting; a guest watching past the
+// window's close holding the run (and with it the whole stage) until the guest leaves (run 687, 2026-10-06), or the
+// wait given up before the close; a run outside the window
 // that leaves a title queued not asking the scheduler for a run at the window's opening (01:00 Pacific), one with an
 // empty queue asking, or one inside the window with the day's cap spent asking for a slot after the window closes;
 // and the window applied to careful mode, which aligns at any hour.
@@ -1111,7 +1113,13 @@ func TestRunSampledQueueOnlyAtNight(t *testing.T) {
 		if want := time.Date(2026, 10, 5, 8, 0, 0, 0, time.UTC); !wake.Equal(want) { // 01:00 PDT
 			t.Errorf("sampled mode at 23:00 with Show queued asked to wake at %v, want %v", wake, want)
 		}
-		late := aligned(time.Date(2026, 10, 5, 13, 50, 0, 0, time.UTC), time.Date(2026, 10, 5, 14, 5, 0, 0, time.UTC)) // 06:50, a guest until 07:10
+		late := aligned(time.Date(2026, 10, 5, 13, 50, 0, 0, time.UTC), time.Date(2026, 10, 5, 19, 0, 0, 0, time.UTC)) // 06:50, a guest until noon
+		mu.Lock()
+		ended := now
+		mu.Unlock()
+		if closed := time.Date(2026, 10, 5, 14, 0, 0, 0, time.UTC); ended.Before(closed) || ended.After(closed.Add(10*time.Minute)) {
+			t.Errorf("sampled mode at 06:50 with a guest watching until noon ended the run at %v; want within a poll (10 min) after the window closed at %v", ended, closed)
+		}
 		spent := make([]time.Time, 20)
 		for i := range spent {
 			spent[i] = time.Date(2026, 10, 6, 8, 30, 0, 0, time.UTC) // 01:30, the day's 20
