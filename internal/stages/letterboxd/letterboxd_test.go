@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -904,25 +905,57 @@ func TestFailuresParkOnlyInARow(t *testing.T) {
 
 // Catches: a diary entry he deleted (a double log) not dropped, or dropped without telling him its play stays in
 // the watch record and that only Jellyfin's unplayed mark undoes it (Plex sends no webhook for one); an entry that
-// only fell off the bottom of the feed taken for deleted; and one deleted before it was ever recorded (logged before
-// the stage first ran) alerted.
+// only fell off the bottom of the feed taken for deleted; one deleted before it was ever recorded (logged before
+// the stage first ran) alerted; and a shutdown between two deleted entries ending the run before the alert, which
+// lost it for good (the next run finds the first entry already gone).
 func TestDeletedDiaryEntryIsRetracted(t *testing.T) {
-	w := newWorld(t)
-	db := w.h.Env.Store.DB()
-	w.lb.logRing()
-	w.lb.editFeed("<channel>", "<channel>"+strings.Replace(ringItem, "letterboxd-watch-1530000000", "letterboxd-watch-1530000001", 1)) // logged twice by mistake
-	w.run(t, "")
-	w.lb.dropItem("letterboxd-watch-1530000001")  // he deletes the double log,
-	w.lb.dropItem("letterboxd-watch-1522858910")  // and The Fox and the Hound's entry, logged before the stage first ran;
-	w.lb.dropItem("letterboxd-review-1208848714") // Ad Astra, the oldest entry, falls off the bottom of the feed
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	rep := w.run(t, "")
-	var kept string
-	db.QueryRow(`SELECT group_concat(id, ',') FROM (SELECT id FROM letterboxd_entry ORDER BY id)`).Scan(&kept)
-	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "The Ring") || strings.Contains(rep.Alerts[0], "Fox") ||
-		!strings.Contains(rep.Alerts[0], "unplayed in Jellyfin to undo") || kept != "1208848714,1519797680,1530000000" {
-		t.Errorf("alerts = %q, entries kept %s; want one naming The Ring only (undone in Jellyfin), and Ad Astra, Digger and the first Ring kept", rep.Alerts, kept)
+	for _, shutdown := range []bool{false, true} {
+		w := newWorld(t)
+		db := w.h.Env.Store.DB()
+		w.lb.logRing()
+		w.lb.editFeed("<channel>", "<channel>"+strings.Replace(ringItem, "letterboxd-watch-1530000000", "letterboxd-watch-1530000001", 1)) // logged twice by mistake
+		w.run(t, "")
+		w.lb.dropItem("letterboxd-watch-1530000001")  // he deletes the double log,
+		w.lb.dropItem("letterboxd-watch-1522858910")  // and The Fox and the Hound's entry, logged before the stage first ran;
+		w.lb.dropItem("letterboxd-review-1208848714") // Ad Astra, the oldest entry, falls off the bottom of the feed
+		w.h.Now = w.h.Now.Add(30 * time.Minute)
+		w.h.SetOptions(w.opts)
+		ctx, cancel := context.WithCancel(context.Background())
+		if shutdown {
+			w.h.Env.Log = slog.New(cancelOn{event: "rss_retracted", cancel: cancel})
+		}
+		var rep stage.Report
+		if err := w.st.Run(ctx, w.h.Env, &rep); (err != nil) != shutdown {
+			t.Fatalf("shutdown %v: run: %v", shutdown, err)
+		}
+		cancel()
+		var kept string
+		db.QueryRow(`SELECT group_concat(id, ',') FROM (SELECT id FROM letterboxd_entry ORDER BY id)`).Scan(&kept)
+		if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "The Ring") || strings.Contains(rep.Alerts[0], "Fox") ||
+			!strings.Contains(rep.Alerts[0], "unplayed in Jellyfin to undo") || kept != "1208848714,1519797680,1530000000" {
+			t.Errorf("shutdown %v: alerts = %q, entries kept %s; want one naming The Ring only (undone in Jellyfin), and Ad Astra, Digger and the first Ring kept",
+				shutdown, rep.Alerts, kept)
+		}
 	}
+}
+
+// cancelOn is a log handler that cancels the run as it logs event, to stop a run at that exact point.
+type cancelOn struct {
+	event  string
+	cancel context.CancelFunc
+}
+
+func (cancelOn) Enabled(context.Context, slog.Level) bool { return true }
+func (c cancelOn) WithAttrs([]slog.Attr) slog.Handler     { return c }
+func (c cancelOn) WithGroup(string) slog.Handler          { return c }
+func (c cancelOn) Handle(_ context.Context, r slog.Record) error {
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Key == "event" && a.Value.String() == c.event {
+			c.cancel()
+		}
+		return true
+	})
+	return nil
 }
 
 // Catches: a Plex or Jellyfin listing that stops after its first page, or skips or repeats one (the NAS library

@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -68,7 +69,8 @@ func (f fakeStage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) e
 
 // Catches: outcomes mis-recorded — alerts raised before an error lost, a panic killing the service instead of
 // failing the run, a run a shutdown cut off (context canceled, or a child process killed with it) recorded as an
-// error, alerts a cut-off run raised dropped with it (some are raised once, behind a stored marker, so a restart
+// error, a stage's own cancelled call (its error wraps context.Canceled while the service runs on) hidden as
+// interrupted, alerts a cut-off run raised dropped with it (some are raised once, behind a stored marker, so a restart
 // lost them for good), or the store not reflecting what /health shows.
 func TestRunOnceOutcomes(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "s.db"))
@@ -98,6 +100,9 @@ func TestRunOnceOutcomes(t *testing.T) {
 		{"child killed by the shutdown", func(context.Context, *stage.Env, *stage.Report) error {
 			return errors.New("ffmpeg: signal: killed")
 		}, stage.Interrupted, true},
+		{"stage's own call cancelled, no shutdown", func(context.Context, *stage.Env, *stage.Report) error {
+			return fmt.Errorf("plex hubs: %w", context.Canceled)
+		}, stage.Error, false},
 		{"ok though shut down", func(context.Context, *stage.Env, *stage.Report) error { return nil }, stage.OK, true},
 		{"alert then shutdown", func(ctx context.Context, _ *stage.Env, rep *stage.Report) error {
 			rep.Alert("Happiest Season's poster is unreadable")

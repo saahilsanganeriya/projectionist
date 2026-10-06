@@ -198,7 +198,8 @@ not send it: providers can differ in quantization, so it is the owner's call, be
   logs are not asserted). No schema change; an older image reads an `interrupted` row as neither alert nor error, so a
   rollback keeps `/health` at 200 for it. Mac `fix-batch-1-box/evidence/` (`interrupt-gate-0b4831a-and-055def2.txt`,
   `interrupt-gate-r2-486cb73.txt`, `alertstop-gate.txt`, `mutations-interrupted.txt`, `mutations-review-r2.txt`).
-- The deployed `[stages.remote4k]` still has `list_timeout = "5s"`: change it to `"30s"` or delete it (see remote4k).
+- The deployed `[stages.remote4k]` still has `list_timeout = "5s"` (read 2026-10-06T01:41Z): delete the line once an image at
+  79fc925 or later runs, whose code default is 30 s (`ListTimeout: 30 * time.Second` in `remote4k.go`, since 71c0cc1).
 - Every model call now goes through the AI gateway (llm, 79b60ae). compose maps `ai_gateway_api_key` to
   `/run/secrets/ai_gateway_api_key` (`[llm] key_file`). The deployed config's `[[llm.policy]]` tables are ignored: delete
   them, and either leave `[llm]` out (the defaults: posters and collections `alibaba/qwen3-vl-instruct`, tonight

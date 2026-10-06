@@ -548,13 +548,15 @@ func (r *run) retract(ctx context.Context, entries []rssEntry) error {
 	if err != nil {
 		return storeErr{err}
 	}
+	// A deleted entry's alert is raised only here, so a shutdown must not stop the loop between rows.
+	octx := context.WithoutCancel(ctx)
 	var names []string
 	for _, e := range gone {
-		if _, err := r.db.ExecContext(ctx, `DELETE FROM letterboxd_entry WHERE id=?`, e.ID); err != nil {
+		if _, err := r.db.ExecContext(octx, `DELETE FROM letterboxd_entry WHERE id=?`, e.ID); err != nil {
 			return storeErr{err}
 		}
 		var recorded int
-		if err := r.db.QueryRowContext(ctx, `SELECT count(*) FROM watch_events WHERE source = ? AND ref = ? AND kind = ?`,
+		if err := r.db.QueryRowContext(octx, `SELECT count(*) FROM watch_events WHERE source = ? AND ref = ? AND kind = ?`,
 			name, name+":"+e.ID, watch.Logged).Scan(&recorded); err != nil {
 			return storeErr{err}
 		}
