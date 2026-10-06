@@ -43,8 +43,8 @@ type Candidate struct {
 	Hash   uint64  `json:"dhash"`
 	W      int     `json:"w"` // thumbnail size: the judge's token cost
 	H      int     `json:"h"`
-	// Collections only: what the judge reads beside the image (where it comes from; a photo's size and caption), and
-	// a Commons file's licence.
+	// What the judge reads beside the image (a collection's: where it comes from, a photo's size and caption; a
+	// Criterion cover's label), and a Commons file's licence.
 	Caption string `json:"caption,omitempty"`
 	License string `json:"license,omitempty"`
 }
@@ -113,9 +113,13 @@ func (r *run) gather(ctx context.Context, it *row) error {
 	if err != nil {
 		return err
 	}
+	var criterion []Candidate
+	if cover := r.covers[t.Key]; cover != "" {
+		criterion = append(criterion, Candidate{URL: cover, Thumb: cover, Source: srcCriterion, Lang: "en", Caption: criterionCaption})
+	}
 	langs := []string{"", "xx", "00", "en", info.lang}
 	keep := func(c Candidate) bool { return slices.Contains(langs, c.Lang) }
-	it.Cands = r.fill(ctx, pool, slices.DeleteFunc(info.posters, func(c Candidate) bool { return !keep(c) }),
+	it.Cands = r.fill(ctx, pool, criterion, slices.DeleteFunc(info.posters, func(c Candidate) bool { return !keep(c) }),
 		slices.DeleteFunc(fan, func(c Candidate) bool { return !keep(c) }))
 	return nil
 }

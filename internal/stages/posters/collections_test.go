@@ -196,6 +196,9 @@ func TestCollectionPosters(t *testing.T) {
 		t.Fatalf("Jellyfin BoxSet jb2 got %d uploads, want 1", len(jf))
 	}
 	body, _ := base64.StdEncoding.DecodeString(string(jf[0].Body))
+	if archived, _ := os.ReadFile(filepath.Join(w.archive, "director", "paul_greengrass", "chosen.jpg")); len(archived) < 1000 || !bytes.HasSuffix(body, archived[2:]) {
+		t.Fatal("Greengrass's archived chosen.jpg must be the poster as composed for the apps (without the stage's mark)")
+	}
 	if cfg, err := jpeg.DecodeConfig(bytes.NewReader(body)); err != nil || cfg.Width != 1000 || cfg.Height != 1500 || scoreOf(body) != 9 {
 		t.Fatalf("Greengrass poster %dx%d (err %v), score %d; want 1000x1500 around the red director in the photo's left quarter",
 			cfg.Width, cfg.Height, err, scoreOf(body))
