@@ -903,8 +903,9 @@ func TestFailuresParkOnlyInARow(t *testing.T) {
 }
 
 // Catches: a diary entry he deleted (a double log) not dropped, or dropped without telling him its play stays in
-// the watch record; an entry that only fell off the bottom of the feed taken for deleted; and one deleted before it
-// was ever recorded (logged before the stage first ran) alerted.
+// the watch record and that only Jellyfin's unplayed mark undoes it (Plex sends no webhook for one); an entry that
+// only fell off the bottom of the feed taken for deleted; and one deleted before it was ever recorded (logged before
+// the stage first ran) alerted.
 func TestDeletedDiaryEntryIsRetracted(t *testing.T) {
 	w := newWorld(t)
 	db := w.h.Env.Store.DB()
@@ -919,8 +920,8 @@ func TestDeletedDiaryEntryIsRetracted(t *testing.T) {
 	var kept string
 	db.QueryRow(`SELECT group_concat(id, ',') FROM (SELECT id FROM letterboxd_entry ORDER BY id)`).Scan(&kept)
 	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "The Ring") || strings.Contains(rep.Alerts[0], "Fox") ||
-		kept != "1208848714,1519797680,1530000000" {
-		t.Errorf("alerts = %q, entries kept %s; want one naming The Ring only, and Ad Astra, Digger and the first Ring kept", rep.Alerts, kept)
+		!strings.Contains(rep.Alerts[0], "unplayed in Jellyfin to undo") || kept != "1208848714,1519797680,1530000000" {
+		t.Errorf("alerts = %q, entries kept %s; want one naming The Ring only (undone in Jellyfin), and Ad Astra, Digger and the first Ring kept", rep.Alerts, kept)
 	}
 }
 

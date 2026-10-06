@@ -345,8 +345,8 @@ func TestCollectionLeavingTheSetNeverUploads(t *testing.T) {
 }
 
 // Catches: a director's poster from a photo the judge scored below director_min_score, or chosen unjudged because it
-// was the only candidate though no source vouches for who it shows (a Commons text hit); and a director left
-// without a poster for that with no alert.
+// was the only candidate though no source vouches for who it shows (a Commons text hit); a director left without a
+// poster for that with no alert; and a later run deciding it again from its stored scores without the bar.
 func TestDirectorBelowTheBar(t *testing.T) {
 	w := collectionWorld(t, "dry_run = true\ncollection_dry_run = false\n", false)
 	w.run(t)
@@ -384,6 +384,10 @@ func TestDirectorBelowTheBar(t *testing.T) {
 	}
 	if lee.Choice != "" || queued != 0 || !slices.ContainsFunc(rep.Alerts, func(a string) bool { return strings.Contains(a, "Ang Lee") }) {
 		t.Fatalf("Ang Lee's best photo scored 3: choice %q, %d outbox rows, alerts %v; want no poster and an alert naming him", lee.Choice, queued, rep.Alerts)
+	}
+	w.run(t)
+	if lee = w.verdict(t, "collection:ang lee"); lee.Choice != "" || lee.Rule != "below_bar" {
+		t.Fatalf("Ang Lee on the next run: rule %q choice %q; his below-bar verdict must stand", lee.Rule, lee.Choice)
 	}
 }
 

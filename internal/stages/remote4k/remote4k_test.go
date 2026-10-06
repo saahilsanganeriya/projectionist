@@ -205,9 +205,10 @@ echo out_time_ms=6612000000 > "$progress"; echo encoded > "$prev"
 }
 
 // Catches: a slow app (Plex or Jellyfin) failing or hanging the run instead of leaving its half of the list empty
-// while the other half is still worked through.
+// while the other half is still worked through; and the lists bound by the process-wide clients' shorter timeout
+// instead of list_timeout (a busy Plex, slower than 5 s, left its half empty in 4 runs on the NAS).
 func TestSlowAppLeavesItsHalfEmpty(t *testing.T) {
-	for _, slow := range []string{"plex", "jellyfin"} {
+	for _, slow := range []string{"plex", "jellyfin", ""} { // "": both answer, though the shared clients time out at once
 		h := fake.NewEnv(t, nil)
 		release := make(chan struct{})
 		hang := func(w http.ResponseWriter, r *http.Request) {
@@ -228,23 +229,27 @@ func TestSlowAppLeavesItsHalfEmpty(t *testing.T) {
 				io.WriteString(w, `{"Items":[]}`)
 			}
 		})
-		if slow == "plex" {
+		shared, listTimeout := time.Hour, "20ms"
+		switch slow {
+		case "plex":
 			h.Plex.HandleFunc("GET", "/playlists", hang)
-		} else {
+		case "jellyfin":
 			h.Jellyfin.HandleFunc("GET", "/Items", hang)
+		default:
+			shared, listTimeout = time.Nanosecond, "1h"
 		}
 		t.Cleanup(func() { close(release) }) // runs before the servers' own cleanup, so Close does not wait on hang
-		h.Env.Plex = plex.New(h.Plex.URL, h.PrefsPath, time.Hour)
-		h.Env.Jellyfin = jellyfin.New(h.Jellyfin.URL, writeKey(t), time.Hour)
-		h.SetOptions(`list_timeout = "20ms"
+		h.Env.Plex = plex.New(h.Plex.URL, h.PrefsPath, shared)
+		h.Env.Jellyfin = jellyfin.New(h.Jellyfin.URL, writeKey(t), shared)
+		h.SetOptions(`list_timeout = "` + listTimeout + `"
 status_file = "` + filepath.Join(t.TempDir(), "STATUS.txt") + `"`)
 		var rep stage.Report
 		done := make(chan error, 1)
 		go func() { done <- (Stage{}).Run(context.Background(), h.Env, &rep) }()
 		select {
 		case err := <-done:
-			if err != nil || rep.Counts["requested"] != 1 || rep.Counts["list_unavailable"] != 1 {
-				t.Errorf("%s hanging: err=%v counts=%v; want the other app's one request and one unavailable list", slow, err, rep.Counts)
+			if want := map[bool]int{true: 1, false: 0}[slow != ""]; err != nil || rep.Counts["requested"] != 2-want || rep.Counts["list_unavailable"] != want {
+				t.Errorf("%q hanging: err=%v counts=%v; want %d requests and %d unavailable lists", slow, err, rep.Counts, 2-want, want)
 			}
 		case <-time.After(10 * time.Second):
 			t.Fatalf("run hung on a slow %s: the list_timeout bound is missing", slow)

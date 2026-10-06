@@ -118,6 +118,7 @@ type world struct {
 	h          *fake.Harness
 	lib        string // Movies/, TV/
 	backup     string // the owner's export: items.json, posters/, plex.db
+	cache      string // the stage's cache_dir
 	opts       string // the stage's options
 	api        *httptest.Server
 	mu         sync.Mutex
@@ -141,13 +142,13 @@ func (w *world) set(f func()) {
 	f()
 }
 
-// newWorld is a library of a movie the owner picked a poster for, one he uploaded a poster for, and a show with one
-// season he never touched. TMDB is the harness's fake; fanart.tv (the harness's too) knows none of the titles; image
+// newWorld is a library of a movie showing Plex's default poster, one the owner uploaded a poster for, and a show with
+// one season he never touched. TMDB is the harness's fake; fanart.tv (the harness's too) knows none of the titles; image
 // downloads and Anthropic are one more fake server.
 func newWorld(t *testing.T, opts string) *world {
 	w := &world{h: fake.NewEnv(t, nil), batches: map[string][]llm.BatchRequest{}}
 	lib, backup := t.TempDir(), t.TempDir()
-	w.lib, w.backup = lib, backup
+	w.lib, w.backup, w.cache = lib, backup, t.TempDir()
 	for _, d := range []string{"Movies/Alpha (2001) {tmdb-1}", "Movies/Beta (2002) {tmdb-2}", "TV/Gamma (2003) {tmdb-3}/Season 01"} {
 		os.MkdirAll(filepath.Join(lib, d), 0o755)
 	}
@@ -158,7 +159,7 @@ func newWorld(t *testing.T, opts string) *world {
  {"kind":"movie","ratingKey":"11","guid":"plex://movie/a","ids":["tmdb://1"]},
  {"kind":"movie","ratingKey":"12","guid":"plex://movie/b","ids":["tmdb://2"]}]`), 0o644)
 	plexDB(t, filepath.Join(backup, "plex.db"), `INSERT INTO metadata_items VALUES
- (11, 'plex://movie/a', 1, NULL, 'metadata://posters/x', 'lockedFields=9'),
+ (11, 'plex://movie/a', 1, NULL, 'metadata://posters/x', ''),
  (12, 'plex://movie/b', 1, NULL, 'upload://posters/y', '')`)
 
 	posters := func(names ...string) string {
@@ -252,7 +253,7 @@ owner_posters = %q
 owner_backup_db = %q
 anthropic_api = %q
 tmdb_images = %q
-`, filepath.Join(lib, "Movies"), filepath.Join(lib, "TV"), t.TempDir(), filepath.Join(backup, "items.json"),
+`, filepath.Join(lib, "Movies"), filepath.Join(lib, "TV"), w.cache, filepath.Join(backup, "items.json"),
 		filepath.Join(backup, "posters"), filepath.Join(backup, "plex.db"), w.api.URL, w.api.URL+"/t/p") + opts
 	w.h.SetOptions(w.opts)
 
@@ -348,7 +349,7 @@ func (w *world) verdict(t *testing.T, key string) Verdict {
 }
 
 // Catches, end to end: downloads, judging or uploads while a guest watches; a letter mapped to the wrong candidate
-// (the fake judge scores images by colour); the owner's upload judged or missing from Plex; the owner's pick kept
+// (the fake judge scores images by colour); the owner's upload judged or missing from Plex; Plex's default poster kept
 // against a candidate 3 points better; Plex given no lock; a failed upload that fails the run or is never retried;
 // a failed Plex lock whose retry uploads the poster again (another copy in Plex's bundle each time); a rerun that
 // pays or uploads again; and a Plex listing that fails to decode on the "guid" string Plex sends beside "Guid".
@@ -570,28 +571,107 @@ func TestGuestDefersJudging(t *testing.T) {
 	}
 }
 
-// Catches: an owner's pick that cannot be read dropping out of the pool, so any candidate replaces it with no margin;
-// and the owner's WebP posters (one movie in the real backup) being unreadable.
+// Catches: an owner's poster that cannot be read dropping out of the pool (so any candidate replaces Plex's default,
+// with no margin) or, an upload, sent to the apps; its alert raised on every run, which held /health at 503 for good (a truncated
+// JPEG in the real export), or not raised again once the file changes; and the owner's WebP posters (one movie in the
+// real backup) being unreadable.
 func TestOwnerPosterUnreadable(t *testing.T) {
 	webp, _ := base64.StdEncoding.DecodeString("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==") // 1×1 lossless
-	for _, c := range []struct {
-		name     string
-		file     []byte
-		wantRule string
-	}{{"webp", webp, "judged"}, {"corrupt", []byte("not an image"), ""}} {
-		w := newWorld(t, "dry_run = true\n")
-		os.WriteFile(filepath.Join(w.backup, "posters/movie/11.jpg"), c.file, 0o644) // Alpha's pick
+	w := newWorld(t, "dry_run = true\n")
+	alpha := filepath.Join(w.backup, "posters/movie/11.jpg")
+	os.WriteFile(alpha, webp, 0o644)
+	w.run(t)
+	if v := w.verdict(t, "movie:tmdb-1"); v.Rule != "judged" {
+		t.Fatalf("WebP owner poster: Alpha rule %q, want judged", v.Rule)
+	}
+
+	w = newWorld(t, "")
+	alpha, beta := filepath.Join(w.backup, "posters/movie/11.jpg"), filepath.Join(w.backup, "posters/movie/12.jpg") // default, upload
+	os.WriteFile(beta, poster("blue")[:2000], 0o644)                                                                // truncated
+	for i, c := range []struct {
+		alpha      []byte // nil: the file is left alone
+		wantAlerts int
+	}{{[]byte("not an image"), 2}, {nil, 0}, {poster("red")[:2000], 1}} {
+		if c.alpha != nil {
+			os.WriteFile(alpha, c.alpha, 0o644)
+		}
 		rep := w.run(t)
-		var cands []Candidate
-		raw := ""
-		w.h.Env.Store.DB().QueryRow(`SELECT coalesce(cands, '') FROM posters_items WHERE key='movie:tmdb-1'`).Scan(&raw)
-		json.Unmarshal([]byte(raw), &cands)
-		if v := w.verdict(t, "movie:tmdb-1"); v.Rule != c.wantRule || c.wantRule != "" && cands[0].Source != srcOwner {
-			t.Errorf("%s: Alpha rule %q, pool %d long (want rule %q with the owner's pick first), alerts %v", c.name, v.Rule, len(cands), c.wantRule, rep.Alerts)
+		a, b := w.verdict(t, "movie:tmdb-1"), w.verdict(t, "movie:tmdb-2")
+		if a.Rule != "" || b.Rule != "" || len(rep.Alerts) != c.wantAlerts || c.wantAlerts > 0 && !strings.Contains(rep.Alerts[0], "unreadable") {
+			t.Errorf("run %d: Alpha rule %q, Beta %q, alerts %v; want no verdicts and %d alerts", i+1, a.Rule, b.Rule, rep.Alerts, c.wantAlerts)
 		}
-		if c.wantRule == "" && (len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "unreadable")) {
-			t.Errorf("%s: alerts %v; want one naming the unreadable owner poster", c.name, rep.Alerts)
+	}
+	for _, path := range []string{"/library/metadata/101/posters", "/library/metadata/102/posters"} {
+		if n := len(w.h.Plex.Calls("POST", path)); n != 0 || len(w.h.Jellyfin.Calls("POST", "/Items/j1/Images/Primary"))+
+			len(w.h.Jellyfin.Calls("POST", "/Items/j2/Images/Primary")) != 0 {
+			t.Fatalf("%s: %d uploads of a title whose owner poster is unreadable; the apps must keep what they show", path, n)
 		}
+	}
+}
+
+// Catches: the owner's pick replaced (his picks are often deliberate alternative art the judge marks down), judged at
+// a cost, or gathered with candidates it can never lose to (TMDB asked, posters downloaded).
+func TestOwnerPickKept(t *testing.T) {
+	w := newWorld(t, "dry_run = true\n")
+	os.Remove(filepath.Join(w.backup, "plex.db"))
+	plexDB(t, filepath.Join(w.backup, "plex.db"), `INSERT INTO metadata_items VALUES
+ (11, 'plex://movie/a', 1, NULL, 'metadata://posters/x', 'lockedFields=9'), (12, 'plex://movie/b', 1, NULL, 'upload://posters/y', '')`)
+	w.run(t)
+	if v := w.verdict(t, "movie:tmdb-1"); v.Rule != "owner_pick" || !strings.HasSuffix(v.Choice, "/movie/11.jpg") || w.messages != 1 ||
+		len(w.h.TMDB.Calls("GET", "/movie/1/images")) != 0 {
+		t.Fatalf("Alpha, the owner's pick: rule %q choice %s, %d judge calls (want 1, Gamma's), %d TMDB image lists (want 0)",
+			v.Rule, v.Choice, w.messages, len(w.h.TMDB.Calls("GET", "/movie/1/images")))
+	}
+}
+
+// Catches: titles judged under the old rules (a pick replaced by a candidate 3 points better, Plex's default by one 1
+// point better) keeping those verdicts, or being paid for again: they are decided again from their stored scores.
+func TestRedecideFromStoredScores(t *testing.T) {
+	w := newWorld(t, "dry_run = true\n")
+	w.run(t) // Alpha (Plex's default, green: 6) and Gamma are judged: 2 calls
+	db := w.h.Env.Store.DB()
+	var raw string
+	var cands []Candidate
+	db.QueryRow(`SELECT cands FROM posters_items WHERE key='movie:tmdb-1'`).Scan(&raw)
+	json.Unmarshal([]byte(raw), &cands)
+	red := w.verdict(t, "movie:tmdb-1").Choice
+	for _, c := range []struct {
+		owner    string
+		redScore float64
+		wantRule string
+	}{{ownerDefault, 7, "kept"}, {ownerDefault, 8, "judged"}, {ownerPick, 9, "owner_pick"}} {
+		cands[0].Owner = c.owner
+		v := w.verdict(t, "movie:tmdb-1")
+		v.Choice, v.Rule, v.Scores[red] = red, "judged", c.redScore // what the old rules chose
+		enc, venc := must(json.Marshal(cands)), must(json.Marshal(v))
+		db.Exec(`UPDATE posters_items SET cands=?, verdict=? WHERE key='movie:tmdb-1'`, string(enc), string(venc))
+		w.run(t)
+		want := map[bool]string{true: red, false: cands[0].URL}[c.wantRule == "judged"]
+		if got := w.verdict(t, "movie:tmdb-1"); got.Rule != c.wantRule || got.Choice != want || got.Scores[red] != c.redScore || w.messages != 2 {
+			t.Errorf("%s, red scored %v: rule %q choice %s, %d judge calls; want %q %s, its scores kept, no new call",
+				c.owner, c.redScore, got.Rule, got.Choice, w.messages, c.wantRule, want)
+		}
+	}
+}
+
+func must(b []byte, _ error) []byte { return b }
+
+// Catches: a title left unjudged by two answers the old parser misread (a "reason" inside "scores": they had scores)
+// never asked again, and one left so by two truly unusable answers asked again (paid for on every run).
+func TestMisreadAnswersAskedAgain(t *testing.T) {
+	w := newWorld(t, "dry_run = true\n")
+	w.set(func() { w.garbage = true })
+	for range 3 {
+		w.run(t)
+	}
+	db := w.h.Env.Store.DB()
+	db.Exec(`UPDATE posters_calls SET error='json: cannot unmarshal string into Go struct field .scores of type float64 in "{\"scores\":{\"A\":4,…'
+		WHERE item='movie:tmdb-1'`)
+	w.set(func() { w.garbage = false })
+	w.run(t)
+	if alpha, gamma := w.verdict(t, "movie:tmdb-1"), w.verdict(t, "show:tmdb-3"); alpha.Rule != "judged" || gamma.Rule != "unjudged" || w.messages != 5 {
+		t.Fatalf("Alpha %q (misread twice: want judged), Gamma %q (unusable twice: want unjudged), %d judge calls (want 5)",
+			alpha.Rule, gamma.Rule, w.messages)
 	}
 }
 
@@ -774,14 +854,28 @@ func TestExampleConfig(t *testing.T) {
 	}
 }
 
-// Catches: a missing TMDB key logged as one warning per title (3,000 of them) while the run reports success, instead
-// of failing the run, which /health shows.
-func TestMissingKeyStopsRun(t *testing.T) {
-	w := newWorld(t, "dry_run = true\n")
-	w.h.Env.TMDB = tmdb.New(tmdb.Options{ReadTokenFile: filepath.Join(t.TempDir(), "absent"), BaseURL: w.h.TMDB.URL}, nil)
-	err := Stage{}.Run(context.Background(), w.h.Env, &stage.Report{})
-	if !errors.Is(err, tmdb.ErrNoCredentials) {
-		t.Fatalf("run with no TMDB key: %v, want tmdb.ErrNoCredentials", err)
+// Catches: what fails every title alike logged as one warning per title (3,000 of them) while the run reports
+// success, instead of failing the run, which /health shows: a missing TMDB key; a thumbnail cache that cannot be
+// written, which was also alerted as each owner poster being unreadable, once, and then never again.
+func TestWhatFailsEveryTitleStopsRun(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		fail func(w *world)
+		want error
+	}{
+		{"no TMDB key", func(w *world) {
+			w.h.Env.TMDB = tmdb.New(tmdb.Options{ReadTokenFile: filepath.Join(t.TempDir(), "absent"), BaseURL: w.h.TMDB.URL}, nil)
+		}, tmdb.ErrNoCredentials},
+		{"thumbnail cache unwritable", func(w *world) {
+			os.WriteFile(filepath.Join(w.cache, "thumbs"), nil, 0o644) // a file where its directory goes, even for root
+		}, errThumbCache},
+	} {
+		w := newWorld(t, "dry_run = true\n")
+		c.fail(w)
+		var rep stage.Report
+		if err := (Stage{}).Run(context.Background(), w.h.Env, &rep); !errors.Is(err, c.want) || len(rep.Alerts) != 0 {
+			t.Errorf("%s: run error %v, alerts %v; want %v and no alert", c.name, err, rep.Alerts, c.want)
+		}
 	}
 }
 
@@ -808,10 +902,12 @@ func TestBudget(t *testing.T) {
 	}
 }
 
-// Catches: the owner's pick replaced by a candidate only 1 point better, Plex's default kept against a better one,
-// and a tie that drops the owner's poster.
+// Catches: the owner's pick or upload replaced, however much better a candidate scores; Plex's default replaced by a
+// candidate only 1 point better (within the judge's noise), or kept against one 2 better; and a tie that drops the
+// owner's poster.
 func TestDecide(t *testing.T) {
 	pick := []Candidate{{Source: srcOwner, Owner: ownerPick}, {Source: srcTMDB}, {Source: srcTMDB}}
+	upload := []Candidate{{Source: srcOwner, Owner: ownerUpload}, {Source: srcTMDB}}
 	def := []Candidate{{Source: srcOwner, Owner: ownerDefault}, {Source: srcTMDB}}
 	remote := []Candidate{{Source: srcTMDB}, {Source: srcFanart}}
 	cases := []struct {
@@ -819,17 +915,37 @@ func TestDecide(t *testing.T) {
 		cands  []Candidate
 		scores map[int]float64
 		want   int
+		rule   string
 	}{
-		{"pick beaten by 2", pick, map[int]float64{0: 6, 1: 8, 2: 7}, 1},
-		{"pick beaten by 1", pick, map[int]float64{0: 7, 1: 8}, 0},
-		{"pick unscored", pick, map[int]float64{1: 9}, 0},
-		{"default beaten by 1", def, map[int]float64{0: 7, 1: 8}, 1},
-		{"default tied", def, map[int]float64{0: 8, 1: 8}, 0},
-		{"no owner: tie keeps the better voted", remote, map[int]float64{0: 7, 1: 7}, 0},
+		{"pick beaten by 4", pick, map[int]float64{0: 5, 1: 9, 2: 7}, 0, "owner_pick"},
+		{"upload beaten by 4", upload, map[int]float64{0: 5, 1: 9}, 0, "upload"},
+		{"default beaten by 1", def, map[int]float64{0: 7, 1: 8}, 0, "kept"},
+		{"default beaten by 2", def, map[int]float64{0: 6, 1: 8}, 1, "judged"},
+		{"default unscored", def, map[int]float64{1: 9}, 0, "kept"},
+		{"default tied", def, map[int]float64{0: 8, 1: 8}, 0, "kept"},
+		{"no owner: tie keeps the better voted", remote, map[int]float64{0: 7, 1: 7}, 0, "judged"},
 	}
 	for _, c := range cases {
-		if got, _ := decide(c.cands, c.scores, 0); got != c.want {
-			t.Errorf("%s: chose %d, want %d", c.name, got, c.want)
+		if got, rule := decide(c.cands, c.scores, 0); got != c.want || rule != c.rule {
+			t.Errorf("%s: chose %d (%s), want %d (%s)", c.name, got, rule, c.want, c.rule)
+		}
+	}
+}
+
+// Catches: an answer with its "reason" (or any other non-number) inside "scores" read as unusable, which paid for a
+// second call and then left the title unjudged (25 of the first 2,818 answers); and one with no number at all taken
+// for an answer.
+func TestParseAnswer(t *testing.T) {
+	for _, c := range []struct {
+		text string
+		want map[string]float64
+	}{
+		{`{"scores": {"A": 7, "B": 4, "reason": "B is cleaner"}, "reason": ""}`, map[string]float64{"A": 7, "B": 4}},
+		{`{"scores": {"reason": "all alike"}}`, nil},
+	} {
+		a, err := parseAnswer(c.text)
+		if fmt.Sprint(a.Scores) != fmt.Sprint(c.want) || (err == nil) != (c.want != nil) {
+			t.Errorf("%s: scores %v err %v; want %v", c.text, a.Scores, err, c.want)
 		}
 	}
 }
