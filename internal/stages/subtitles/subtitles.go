@@ -1140,8 +1140,10 @@ func (r *run) workQueue(ctx context.Context, lacking []*title) error {
 		if err != nil || len(starts) >= r.opt.AlignPerDay || !r.alignNow() {
 			return err
 		}
-		// a guest may watch past the window's end: the next title's check above then ends the queue's work
-		if err := r.env.Viewers.WaitIdle(ctx); err != nil || !r.alignNow() || !r.describe(ctx, t) {
+		if !r.waitIdle(ctx) {
+			return nil
+		}
+		if !r.describe(ctx, t) {
 			continue
 		}
 		if why := r.alassOut(); why != "" && !t.englishImage { // it would need alass: it waits, with no search or cap spent
@@ -1169,6 +1171,27 @@ func (r *run) workQueue(ctx context.Context, lacking []*title) error {
 
 // alignNow: careful mode aligns at any hour, sampled mode only inside align_window in the config timezone.
 func (r *run) alignNow() bool { return !r.sampled() || r.window.Contains(r.env.Now(), r.env.Loc) }
+
+// waitIdle waits until nobody but the owner watches; false once ctx ends or align_window closes first. A guest may watch
+// long past the close, and the stage does nothing else meanwhile: the run ends there and wake brings it back at the next
+// opening. The close is checked on env.Now, the stage's clock, after each poll.
+func (r *run) waitIdle(ctx context.Context) bool {
+	for {
+		n, err := r.env.Viewers.Count(ctx)
+		if !r.alignNow() {
+			return false
+		}
+		if err == nil && n == 0 {
+			return true
+		}
+		r.env.Log.Info("waiting for viewers", "event", "viewer_wait", "others", n, "err", err)
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(r.env.Viewers.Poll):
+		}
+	}
+}
 
 // wake is when the scheduler should run the stage again for the queue, sooner than its cadence (zero: no need). In
 // sampled mode, with titles waiting: outside the window, its opening; inside it with the day's cap spent, the moment the
