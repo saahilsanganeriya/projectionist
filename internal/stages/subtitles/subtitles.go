@@ -47,6 +47,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -190,7 +191,7 @@ type run struct {
 	rep       *stage.Report
 	written   int
 	alerted   map[string]bool
-	alassDown bool                   // alass failed on a title this run: the titles behind it wait for the next run
+	alassDown bool                   // alass or the hearing failed on a title this run: the titles behind it wait for the next run
 	window    config.Window          // sampled mode: when the queue may align
 	pools     map[string][]Candidate // titles queued this run: their candidates, so the queue need not search again
 	reading   sync.Mutex             // one title at a time reads its windows
@@ -1251,6 +1252,13 @@ func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 		if ctx.Err() != nil {
 			return outcome{result: "deferred"}
 		}
+		if ref.broken != nil { // no candidate is refused for it: this title and those behind it wait for the next run
+			r.mu.Lock()
+			r.alassDown = true
+			r.mu.Unlock()
+			r.alertOnce("alass-failed", "alass failed (titles without an English image track wait for the next run): %v", ref.broken)
+			return outcome{result: "deferred", detail: "alass failed: " + ref.broken.Error()}
+		}
 		if !ok {
 			r.event(ctx, t.path, outcome{result: "rejected_misaligned", fields: attempt})
 			continue
@@ -1297,7 +1305,7 @@ func (r *run) summarise(ctx context.Context, lacking, due int) {
 }
 
 // reference is the timing a candidate must line up with: an English image track's caption starts (from the video, or
-// in sampled mode from a VobSub sidecar's text), else alass's speech segments of the default audio track.
+// in sampled mode from a VobSub sidecar's text), else the speech heard in the default audio track, for alass.
 type reference struct {
 	label    string // "pgs" | "idx" | "alass" | "" (none)
 	why      string
@@ -1305,9 +1313,10 @@ type reference struct {
 	bits     bitset
 	starts   []float64
 	dir      string // alass work files
-	speech   string // alass's speech segments as an SRT, once heard
+	speech   string // the voiced stretches as an SRT, once heard
 	talk     bitset // the same segments as bins, for the cross-check
 	deaf     bool   // hearing failed for a rescue: no more rescues for this title
+	broken   error  // alass failed aligning a candidate to the speech: alass's fault, not the candidate's
 }
 
 func (ref *reference) cleanup() {
@@ -1362,13 +1371,13 @@ func (r *run) reference(ctx context.Context, t *title) (reference, error) {
 		if ctx.Err() != nil {
 			return reference{}, ctx.Err()
 		}
-		// This title's audio or alass itself: the title is recorded, and the titles behind it wait for the next run
+		// This title's audio or ffmpeg itself: the title is recorded, and the titles behind it wait for the next run
 		// rather than each fail the same way and lose a week.
 		r.mu.Lock()
 		r.alassDown = true
 		r.mu.Unlock()
-		r.alertOnce("alass-failed", "alass failed (titles without an English image track wait for the next run): %v", err)
-		return reference{why: "alass could not read the audio: " + err.Error()}, nil
+		r.alertOnce("hearing-failed", "hearing the audio failed (titles without an English image track wait for the next run): %v", err)
+		return reference{why: "the audio could not be heard: " + err.Error()}, nil
 	}
 	return ref, nil
 }
@@ -1383,13 +1392,16 @@ func (r *run) alassOut() string {
 		r.alertOnce("alass", "alass not found at %s: titles without an English image track wait for it", r.opt.Alass)
 		return "alass missing"
 	case down:
-		return "alass failed on another title this run"
+		return "alass or the hearing failed on another title this run"
 	}
 	return ""
 }
 
-// hear has alass find the speech in the default audio track, decoded once per title and reused per candidate: "_"
-// as the subtitle makes alass write the speech segments it found as an SRT.
+// hear finds the speech in the default audio track, decoded once per title and reused per candidate: the voice band of
+// its dialogue channel, judged hearSpan at a time as the sampled fit judges a window, written as an SRT of the voiced
+// stretches for alass to align to. alass's own hearing ("_" as the subtitle) took 85-91 % of Brooklyn Nine-Nine's
+// runtime for speech (the score under the dialogue), and its alignments of the right subtitles split and stretched at
+// random: tens of seconds off.
 func (r *run) hear(ctx context.Context, t *title, ref *reference) error {
 	dir, err := os.MkdirTemp("", "subtitles-")
 	if err != nil {
@@ -1403,15 +1415,59 @@ func (r *run) hear(ctx context.Context, t *title, ref *reference) error {
 			break
 		}
 	}
-	if _, err := r.cmd(ctx, t, r.opt.Alass, t.path, "_", ref.speech, "--index", strconv.Itoa(audio.Index)); err != nil { // the stream index
+	var heard voicing
+	d := dialogue(audio)
+	if err := r.cmdTo(ctx, t, 0, &heard, r.env.FFmpeg.FFmpegPath(), "-nostdin", "-hide_banner", "-loglevel", "error", "-i", t.path,
+		"-map", fmt.Sprintf("0:%d", audio.Index), d[0], d[1], "-ar", "16000", "-f", "s16le", "-"); err != nil {
 		return err
 	}
-	raw, err := os.ReadFile(ref.speech)
-	if err != nil {
-		return err
+	spans := heard.spans()
+	var b strings.Builder
+	for i, s := range spans {
+		fmt.Fprintf(&b, "%d\n%s --> %s\nspeech\n\n", i+1, srtTime(s.start), srtTime(s.end))
 	}
-	ref.talk = spanBits(cues(string(raw)), 1)
-	return nil
+	ref.talk = spanBits(spans, 1)
+	return os.WriteFile(ref.speech, []byte(b.String()), 0o644)
+}
+
+// hearSpan is how much 16 kHz s16le PCM voiced judges at once (90 s, a sampled window): its quiet floor is that
+// stretch's own.
+const hearSpan = 90 * 16000 * 2
+
+// voicing marks the voiced 10 ms frames of PCM streamed into it, hearSpan at a time, so a film's audio is never held
+// whole.
+type voicing struct {
+	pcm    []byte
+	voiced []bool
+}
+
+func (v *voicing) Write(p []byte) (int, error) {
+	v.pcm = append(v.pcm, p...)
+	for len(v.pcm) >= hearSpan {
+		v.voiced = append(v.voiced, voiced(voiceLevel(v.pcm[:hearSpan]))...)
+		v.pcm = v.pcm[hearSpan:]
+	}
+	return len(p), nil
+}
+
+// spans are the voiced stretches in seconds, the last partial span judged too.
+func (v *voicing) spans() []span {
+	marks := append(v.voiced, voiced(voiceLevel(v.pcm))...)
+	var out []span
+	for i := 0; i < len(marks); i++ {
+		if marks[i] && (i == 0 || !marks[i-1]) {
+			out = append(out, span{float64(i) * frame, float64(i) * frame})
+		}
+		if marks[i] {
+			out[len(out)-1].end = float64(i+1) * frame
+		}
+	}
+	return out
+}
+
+func srtTime(s float64) string {
+	ms := int64(math.Round(s * 1000))
+	return fmt.Sprintf("%02d:%02d:%02d,%03d", ms/3600000, ms/60000%60, ms/1000%60, ms%1000)
 }
 
 var ratioRe = regexp.MustCompile(`ratio is ([0-9.]+)(?:/([0-9.]+))?`)
@@ -1464,6 +1520,7 @@ func (r *run) fit(ctx context.Context, ref *reference, txt string, attempt map[s
 	}
 	aligned, ratio, err := r.realign(ctx, ref, txt)
 	if err != nil {
+		ref.broken = err
 		return "", "", false
 	}
 	moved := cues(aligned)
@@ -1472,7 +1529,7 @@ func (r *run) fit(ctx context.Context, ref *reference, txt string, attempt map[s
 	if !ok || agree < alassAgree {
 		return "", "", false
 	}
-	// Cross-check with subfetch2.py's own speech test: each cue's first second must sit on the speech alass heard, in
+	// Cross-check with subfetch2.py's own speech test: each cue's first second must sit on the speech heard, in
 	// sync by the Python's own test (6 of 8 chunks within 0.5 s, no shift or stretch left). It rejects a wrong
 	// subtitle that alass shifted whole, and an alignment left off by a drift (21 Grams: 0.6 s off its captions).
 	first := make([]span, len(moved))
@@ -1504,7 +1561,7 @@ func (r *run) rescue(ctx context.Context, t *title, ref *reference, txt string, 
 	if ref.speech == "" {
 		if err := r.hear(ctx, t, ref); err != nil {
 			ref.deaf = true
-			r.env.Log.Info("no rescue: alass could not hear the title", "event", "rescue_skipped", "item", t.path, "err", err)
+			r.env.Log.Info("no rescue: the title could not be heard", "event", "rescue_skipped", "item", t.path, "err", err)
 			return "", "", false
 		}
 	}
@@ -1621,14 +1678,23 @@ const readPoll = 20 * time.Millisecond
 // cmdUpTo is cmd, with the helper's group killed and errOverrun returned once the helper itself has read more than
 // limit bytes (rchar, polled every readPoll; Linux only; 0: no limit).
 func (r *run) cmdUpTo(ctx context.Context, t *title, limit int64, bin string, args ...string) ([]byte, error) {
+	var stdout bytes.Buffer
+	if err := r.cmdTo(ctx, t, limit, &stdout, bin, args...); err != nil {
+		return nil, err
+	}
+	return stdout.Bytes(), nil
+}
+
+// cmdTo is cmdUpTo with the helper's stdout streamed into w.
+func (r *run) cmdTo(ctx context.Context, t *title, limit int64, w io.Writer, bin string, args ...string) error {
 	c := exec.CommandContext(ctx, bin, args...)
 	c.Env = append(os.Environ(), "ALASS_FFMPEG_PATH="+r.env.FFmpeg.FFmpegPath(), "ALASS_FFPROBE_PATH="+r.env.FFmpeg.FFprobePath())
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	c.Cancel = func() error { return syscall.Kill(-c.Process.Pid, syscall.SIGKILL) }
-	var stdout, stderr bytes.Buffer
-	c.Stdout, c.Stderr = &stdout, &stderr
+	var stderr bytes.Buffer
+	c.Stdout, c.Stderr = w, &stderr
 	if err := c.Start(); err != nil {
-		return nil, err
+		return err
 	}
 	idle(c.Process.Pid)
 	done := make(chan error, 1)
@@ -1673,16 +1739,16 @@ func (r *run) cmdUpTo(ctx context.Context, t *title, limit int64, bin string, ar
 		}
 	}
 	if over {
-		return nil, fmt.Errorf("%s: %w of %d bytes", filepath.Base(bin), errOverrun, limit)
+		return fmt.Errorf("%s: %w of %d bytes", filepath.Base(bin), errOverrun, limit)
 	}
 	if err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if len(msg) > 300 {
 			msg = msg[len(msg)-300:]
 		}
-		return nil, fmt.Errorf("%s: %w: %s", filepath.Base(bin), err, msg)
+		return fmt.Errorf("%s: %w: %s", filepath.Base(bin), err, msg)
 	}
-	return stdout.Bytes(), nil
+	return nil
 }
 
 func (r *run) count(kind string) {

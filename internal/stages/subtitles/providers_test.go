@@ -266,7 +266,8 @@ func zipOf(files ...string) []byte {
 
 // Catches: Subdl asked without the key, the TMDB id or the episode, another episode kept, a two-SRT zip (a season
 // pack) taken as one, a block page taken for a subtitle instead of parking Subdl, and the key (it rides in the query
-// string) leaking into an error.
+// string, and the API appends it to each subtitle's url) leaking into an error or a candidate's id (kept in the
+// history and the store).
 func TestSubdl(t *testing.T) {
 	var query string
 	srv, _ := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
@@ -274,7 +275,7 @@ func TestSubdl(t *testing.T) {
 		case "/api":
 			query = r.URL.RawQuery
 			w.Write([]byte(`{"subtitles":[{"release_name":"Show.S01E03.WEB","url":"/s/3.zip","season":1,"episode":3},` +
-				`{"release_name":"Show.S01E02.WEB-GRP","url":"/s/2.zip","season":1,"episode":2,"hi":true}]}`))
+				`{"release_name":"Show.S01E02.WEB-GRP","url":"/s/2.zip?api_key=sekrit","season":1,"episode":2,"hi":true}]}`))
 		case "/s/2.zip":
 			w.Write(zipOf("Show.S01E02.WEB-GRP.srt", "1\n00:00:01,000 --> 00:00:02,000\ncaf\xe9\n"))
 		case "/s/pack.zip":
@@ -288,7 +289,7 @@ func TestSubdl(t *testing.T) {
 	now := time.Unix(0, 0)
 	o := &subdl{api: srv.URL + "/api", dl: srv.URL, keyFile: key, hc: srv.Client(), pace: testPacer(&recorder{}, &now)}
 	got, err := o.Search(context.Background(), Query{TMDB: "1400", Name: "Show", Show: true, Season: 1, Episode: 2})
-	if err != nil || len(got) != 1 || got[0].ID != "/s/2.zip" || !got[0].HearingImpaired {
+	if err != nil || len(got) != 1 || got[0].key() != "subdl:/s/2.zip" || !got[0].HearingImpaired {
 		t.Fatalf("search: %+v %v", got, err)
 	}
 	for _, want := range []string{"api_key=sekrit", "tmdb_id=1400", "type=tv", "season_number=1", "episode_number=2", "languages=EN"} {

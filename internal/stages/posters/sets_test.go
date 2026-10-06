@@ -263,9 +263,9 @@ func TestPosterSets(t *testing.T) {
 	if !carriesMark(f, "poster-curator 2026-10") {
 		t.Fatal("a later export would read the credited upload as the owner's: carriesMark misses the mark")
 	}
-	for _, a := range m.fullSize {
-		if !slices.Contains([]string{"red-1a", "red-1b", "red-5a", "red-5b", "green-6a"}, a) {
-			t.Errorf("full-size download of %s, which no worn set's film took", a)
+	for _, a := range m.fullSize { // the archive keeps a pool's candidates at full size: only worn sets' are pooled
+		if _, file, _ := strings.Cut(a, "-"); strings.ContainsAny(file[:1], "234") { // "<colour>-<set><film>"
+			t.Errorf("full-size download of %s, from a set no collection wears", a)
 		}
 	}
 

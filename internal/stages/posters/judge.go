@@ -11,6 +11,8 @@ import (
 	"hash/fnv"
 	"maps"
 	"math/rand/v2"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -29,6 +31,7 @@ title's poster.
 
 His taste, in his words: "I like illustrated artistic posters, fanart usually, not mainstream posters. I do not need
 minimalism, something creative is often good. The only text on the poster should be the movie name."
+He especially loves Criterion Collection cover art.
 
 Reward: illustrated, painted, drawn or screen-printed art; fan art and alternative posters; an original, creative idea
 (a striking concept, a scene reimagined, a visual metaphor); a mood true to the title; the title set as part of the
@@ -41,6 +44,10 @@ photo collages, DVD or Blu-ray cover layouts, and TV network or streaming-servic
 The title is the only text he wants. Penalise heavily any other text: credit blocks and billing, taglines, review
 quotes, award laurels, dates, "premieres" or "now streaming" lines, and studio, network or streaming logos; the more
 of it, the lower the score.
+
+A candidate labelled "` + criterionCaption + `" is a known favourite of his, not a DVD or Blu-ray layout:
+its Criterion logo, spine number and "The Criterion Collection" band are the edition's frame, not text on the poster,
+and cost nothing; judge its art, and any other text on it, as you judge every candidate.
 
 Also penalise heavily: text in a language other than English or the title's own; watermarks; low-resolution,
 pixelated, stretched or badly cropped images (deliberate soft focus or grain is a style, not a flaw); art for a
@@ -75,6 +82,8 @@ const referencesHead = "Posters this owner chose for other films in his library,
 // promptVersion names the prompts a verdict was judged under: a title's or franchise's verdict under an older one is
 // judged again (the owner's-taste backfill), and a change of model alone judges nothing again. The director prompt has
 // not changed, so its verdicts keep the empty version they were saved with.
+// The Criterion lines (2026-10-06) left it as it was: they can only change the score of a pool holding a Criterion
+// cover, and such a pool is new, so it is judged anyway.
 func promptVersion(k kind) string {
 	if k == director {
 		return ""
@@ -364,25 +373,34 @@ func (r *run) request(ctx context.Context, it *row) (llm.Request, error) {
 }
 
 // references is the message that shows the judge the owner's own posters for other films (taste_references: title
-// keys of his uploads and picks), sent between the prompt and every title's and franchise's candidates. It is the same
-// bytes in every call, marked for the gateway's prompt cache, so after the first call it costs a tenth of its tokens.
-// A key that is not his upload or pick fails the run: the list stands for his taste, and a wrong key would quietly
-// teach the judge Plex's.
+// keys of his uploads and picks; taste_references_current: titles whose current Plex poster he named), sent between
+// the prompt and every title's and franchise's candidates. It is the same bytes in every call, marked for the gateway's
+// prompt cache, so after the first call it costs a tenth of its tokens. A taste_references key that is not his upload
+// or pick fails the run: the list stands for his taste, and a wrong key would quietly teach the judge Plex's.
 func (r *run) references(ctx context.Context) (refs, error) {
-	if len(r.opt.TasteReferences) == 0 {
+	keys := append(slices.Clone(r.opt.TasteReferences), r.opt.TasteReferencesCurrent...)
+	if len(keys) == 0 {
 		return refs{}, nil
 	}
 	parts := []llm.Part{llm.Text(referencesHead)}
 	tokens := llm.EstimateTokens(referencesHead)
-	for _, k := range r.opt.TasteReferences {
-		p := r.owners[k]
-		if p.State != ownerUpload && p.State != ownerPick {
-			return refs{}, fmt.Errorf("posters: taste_references: %s is not a poster the owner uploaded or picked (%q)", k, p.State)
+	for i, k := range keys {
+		var file string
+		if i < len(r.opt.TasteReferences) {
+			p := r.owners[k]
+			if p.State != ownerUpload && p.State != ownerPick {
+				return refs{}, fmt.Errorf("posters: taste_references: %s is not a poster the owner uploaded or picked (%q)", k, p.State)
+			}
+			file = p.File
+		} else if f, err := r.currentPoster(ctx, k); err != nil {
+			return refs{}, fmt.Errorf("posters: taste_references_current: %s: %w", k, err)
+		} else {
+			file = f
 		}
 		var raw string
 		var t Title
 		var thumb []byte
-		c := Candidate{Thumb: "owner:" + p.File}
+		c := Candidate{Thumb: "owner:" + file}
 		err := r.env.Store.DB().QueryRowContext(ctx, `SELECT title FROM posters_items WHERE key=?`, k).Scan(&raw)
 		if err == nil {
 			err = json.Unmarshal([]byte(raw), &t)
@@ -401,6 +419,41 @@ func (r *run) references(ctx context.Context) (refs, error) {
 		tokens += llm.EstimateTokens(label) + ((c.W+27)/28)*((c.H+27)/28)
 	}
 	return refs{&llm.Message{Role: "user", Content: parts, CacheControl: llm.Ephemeral}, tokens}, nil
+}
+
+// currentPoster is the file of the poster Plex shows for title key k, fetched once (Plex's
+// /library/metadata/<ratingKey>/thumb, full size) and kept in the cache for good. Once this stage has put a poster of
+// its own choosing on Plex for the title, Plex no longer shows the one the owner named: the poster his export holds,
+// which Plex showed before, stands in.
+func (r *run) currentPoster(ctx context.Context, k string) (string, error) {
+	cached := filepath.Join(r.opt.CacheDir, "references", safeName(k))
+	if _, err := os.Stat(cached); err == nil {
+		return cached, nil
+	}
+	var replaced bool
+	if err := r.env.Store.DB().QueryRowContext(ctx, `SELECT count(*) > 0 FROM posters_sinks WHERE item=? AND sink=?
+		AND state IN ('uploaded', 'done') AND url NOT LIKE 'owner:%'`, k, sinkPlex).Scan(&replaced); err != nil {
+		return "", err
+	}
+	if replaced {
+		if p, ok := r.owners[k]; ok {
+			return p.File, nil
+		}
+		return "", errors.New("Plex shows the poster this stage chose, and the owner's export holds none for it")
+	}
+	idx, err := r.sinkIndex(ctx, sinkPlex)
+	if err != nil {
+		return "", err
+	}
+	target, ok := idx[k]
+	if !ok {
+		return "", errors.New("Plex does not list it")
+	}
+	img, err := r.env.Plex.Get(ctx, "/library/metadata/"+target.ID+"/thumb")
+	if err != nil {
+		return "", err
+	}
+	return cached, writeAtomic(cached, img)
 }
 
 // answerFormat is the JSON schema of the answer the prompt asks for, over the letters this pool uses; a model that

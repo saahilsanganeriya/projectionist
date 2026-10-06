@@ -34,7 +34,7 @@ import (
 )
 
 // Pages of one item make every test list Jellyfin in more than one page.
-func init() { FetchDelay, jellyfinPage = zeroDelay, 1 }
+func init() { FetchDelay, jellyfinPage, WaybackPace = zeroDelay, 1, 0 }
 
 func zeroDelay(int) time.Duration { return 0 }
 
@@ -125,6 +125,13 @@ type world struct {
 	messages   int               // answered judge calls
 	commons    http.HandlerFunc  // the Wikimedia Commons API, when set
 	ownerFile  string            // collectionWorld's collections.owner.json
+	archive    string            // the stage's archive_dir
+	// Criterion: Wikidata's TMDB → Criterion film ids, Criterion's sitemap, and the Internet Archive's copies of pages
+	// (CDX answers by page, the copies' HTML by page), each request counted by path.
+	wikidata, sitemap string
+	captures, saved   map[string]string
+	requests          map[string]int
+	waybackDown       bool
 }
 
 // set changes the fake servers' behaviour between runs.
@@ -138,9 +145,11 @@ func (w *world) set(f func()) {
 // one season he never touched. TMDB is the harness's fake; fanart.tv (the harness's too) knows none of the titles; image
 // downloads are one more fake server, and the AI gateway another, on the default tasks.
 func newWorld(t *testing.T, opts string) *world {
-	w := &world{h: fake.NewEnv(t, nil)}
+	w := &world{h: fake.NewEnv(t, nil), requests: map[string]int{}, captures: map[string]string{}, saved: map[string]string{},
+		wikidata: `{"results":{"bindings":[{"tmdb":{"value":"999"},"criterion":{"value":"9"}}]}}`,
+		sitemap:  `<urlset><url><loc>https://www.criterion.com/films/9-elsewhere</loc></url></urlset>`}
 	lib, backup := t.TempDir(), t.TempDir()
-	w.lib, w.backup, w.cache = lib, backup, t.TempDir()
+	w.lib, w.backup, w.cache, w.archive = lib, backup, t.TempDir(), t.TempDir()
 	for _, d := range []string{"Movies/Alpha (2001) {tmdb-1}", "Movies/Beta (2002) {tmdb-2}", "TV/Gamma (2003) {tmdb-3}/Season 01"} {
 		os.MkdirAll(filepath.Join(lib, d), 0o755)
 	}
@@ -179,7 +188,26 @@ func newWorld(t *testing.T, opts string) *world {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		p := r.URL.Path
+		w.requests[p]++
 		switch {
+		case p == "/sparql":
+			reply(rw, w.wikidata)
+		case p == "/films.xml":
+			reply(rw, w.sitemap)
+		case w.waybackDown && (p == "/cdx/search/cdx" || strings.HasPrefix(p, "/web/")):
+			w.requests["cdx "+r.URL.Query().Get("url")]++
+			rw.WriteHeader(http.StatusServiceUnavailable)
+		case p == "/cdx/search/cdx":
+			w.requests["cdx "+r.URL.Query().Get("url")]++
+			reply(rw, w.captures[r.URL.Query().Get("url")])
+		case strings.HasPrefix(p, "/web/"):
+			if html, ok := w.saved[strings.TrimPrefix(p, "/web/")]; ok {
+				reply(rw, html)
+				return
+			}
+			http.NotFound(rw, r)
+		case strings.HasPrefix(p, "/criterion/"):
+			rw.Write(poster(strings.TrimSuffix(filepath.Base(p), ".jpg")))
 		case strings.HasPrefix(p, "/t/p/"):
 			name := strings.TrimSuffix(filepath.Base(p), ".jpg")
 			if _, after, ok := strings.Cut(name, "px-"); ok { // a Commons rendering: "<width>px-<file>"
@@ -221,8 +249,13 @@ owner_items = %q
 owner_posters = %q
 owner_backup_db = %q
 tmdb_images = %q
+archive_dir = %q
+wikidata_sparql = %q
+criterion_sitemap = %q
+wayback = %q
 `, filepath.Join(lib, "Movies"), filepath.Join(lib, "TV"), w.cache, filepath.Join(backup, "items.json"),
-		filepath.Join(backup, "posters"), filepath.Join(backup, "plex.db"), w.api.URL+"/t/p") + opts
+		filepath.Join(backup, "posters"), filepath.Join(backup, "plex.db"), w.api.URL+"/t/p", w.archive, w.api.URL+"/sparql",
+		w.api.URL+"/films.xml", w.api.URL) + opts
 	w.h.SetOptions(w.opts)
 
 	// Real Plex sends each item's own "guid" (a string) beside includeGuids' "Guid" list.
@@ -639,6 +672,39 @@ func TestTasteReferences(t *testing.T) {
 	if err := (Stage{}).Run(context.Background(), w.h.Env, &rep); err == nil || !strings.Contains(err.Error(), "taste_references: movie:tmdb-1") ||
 		w.messages != 0 {
 		t.Fatalf("Alpha (Plex's default) as a reference: run error %v after %d judge calls; want the run failed, naming it, before any", err, w.messages)
+	}
+}
+
+// Catches: a title whose current Plex poster the owner named (Plex's default) refused as a reference, or shown in
+// another image than the one Plex shows; Plex asked for it again once it is cached; and, once this stage has put its
+// own pick on Plex for the title, that pick shown as his taste instead of the poster Plex showed before (his export's).
+func TestTasteReferencesCurrent(t *testing.T) {
+	reference := func(w *world) (string, int) {
+		calls := w.gateway.Calls()
+		ref := calls[len(calls)-1].Messages[1]
+		raw, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(ref.Content[2].ImageURL.URL, "data:image/jpeg;base64,"))
+		return ref.Content[1].Text, scoreOf(raw)
+	}
+	w := newWorld(t, "dry_run = true\ntaste_references_current = [\"movie:tmdb-1\"]\n")
+	w.h.Plex.Handle("GET", "/library/metadata/101/thumb", 200, string(poster("blue")))
+	w.run(t)
+	if label, score := reference(w); label != "Alpha (2001):" || score != 3 {
+		t.Fatalf("reference %q scored %d; want Alpha's poster as Plex shows it (blue, 3), not the export's green", label, score)
+	}
+	w.h.Env.Store.DB().Exec(`UPDATE posters_items SET verdict=NULL`) // judged again: the references are sent again
+	w.run(t)
+	if n := len(w.h.Plex.Calls("GET", "/library/metadata/101/thumb")); n != 1 || len(w.gateway.Calls()) != 4 {
+		t.Fatalf("Plex asked for Alpha's poster %d times over %d judge calls; want once, then the cached file", n, len(w.gateway.Calls()))
+	}
+
+	w = newWorld(t, "")
+	w.run(t) // Alpha's red pick goes to Plex
+	w.h.SetOptions(w.opts + "taste_references_current = [\"movie:tmdb-1\"]\n")
+	w.h.Env.Store.DB().Exec(`UPDATE posters_items SET verdict=NULL`)
+	w.run(t)
+	if _, score := reference(w); score != 6 || len(w.h.Plex.Calls("GET", "/library/metadata/101/thumb")) != 0 {
+		t.Fatalf("after this stage's pick reached Plex: reference scored %d (want the export's green, 6), Plex asked %d times (want 0)",
+			score, len(w.h.Plex.Calls("GET", "/library/metadata/101/thumb")))
 	}
 }
 

@@ -6,13 +6,15 @@
 //
 //	inventory   folder names under the Movies and TV roots → titles (identity from {tmdb-N}; no app is asked)
 //	owner       per export: which poster Plex showed at a Plex DB backup and whether the owner uploaded or picked it
-//	candidates  the owner's poster + TMDB's (every language, from env.TMDB) + fanart.tv's (env.Fanart), filtered to
-//	            English, textless or the title's own language, best voted first, near-duplicates dropped by dHash
+//	candidates  the owner's poster + a Criterion release's cover (criterion.go) + TMDB's (every language, from
+//	            env.TMDB) + fanart.tv's (env.Fanart), filtered to English, textless or the title's own language, best
+//	            voted first, near-duplicates dropped by dHash
 //	judge       one vision call per title through the AI gateway (env.LLM: the posters task's model, the collections
 //	            task's for a collection), as many at once as the client allows, under a hard budget. The owner's
 //	            UPLOAD and PICK are never replaced, Plex's DEFAULT only by a candidate scored at least 2 points higher;
 //	            a pool judged before is decided again from its stored scores when these rules change
 //	apply       an outbox per app (Plex, Jellyfin are sinks), retried with backoff; Plex's lock is its own step
+//	archive     every applied title's candidates at full size, its chosen poster and verdict.json, on volume1 (archive.go)
 //
 // While anyone but the owner watches, the heavy steps wait for a later run: downloads and resizes, judging and poster
 // uploads. The gate is asked before each title's download, its judge call and its uploads (at most once a minute).
@@ -70,6 +72,17 @@ type Options struct {
 	// The owner's own posters for other films (title keys of his uploads and picks), shown to the judge of every title
 	// and franchise as his taste; none = the prompt alone.
 	TasteReferences []string `toml:"taste_references"`
+	// Titles whose CURRENT Plex poster (his default, say) the owner named as his taste: fetched from Plex once and
+	// cached, then shown beside taste_references.
+	TasteReferencesCurrent []string `toml:"taste_references_current"`
+	// Criterion: a film the Criterion Collection released gets its cover art as a candidate (criterion.go).
+	Criterion        bool   `toml:"criterion"`
+	WikidataSPARQL   string `toml:"wikidata_sparql"`
+	CriterionSitemap string `toml:"criterion_sitemap"`
+	Wayback          string `toml:"wayback"`
+	// Every candidate a title was judged on and its chosen poster, at full size (archive.go); "" = no archive. Never
+	// on the NVMe.
+	ArchiveDir string `toml:"archive_dir"`
 	// Poster sets (sets.go), with collections on: MediUX's site and image host; mediux = "" turns them off.
 	MediUX       string `toml:"mediux"`
 	MediUXAssets string `toml:"mediux_assets"`
@@ -99,8 +112,14 @@ func defaults() Options {
 		CollectionBudgetUSD: 5,
 		DirectorMinScore:    4,
 		CommonsAPI:          "https://commons.wikimedia.org/w/api.php",
-		MediUX:              "https://mediux.pro",
-		MediUXAssets:        "https://api.mediux.pro/assets",
+
+		Criterion:        true,
+		WikidataSPARQL:   "https://query.wikidata.org/sparql",
+		CriterionSitemap: "http://sitemap.criterion.com/films.xml", // its https answers nothing (2026-10-06)
+		Wayback:          "https://web.archive.org",
+		ArchiveDir:       "/volume1/PlexMediaServer/poster-archive",
+		MediUX:           "https://mediux.pro",
+		MediUXAssets:     "https://api.mediux.pro/assets",
 	}
 }
 
@@ -189,9 +208,10 @@ type run struct {
 	gateAt   time.Time
 	gateBusy bool
 
-	collections map[string]bool // this run's collections (keys): only their outbox rows are sent
-	refs        refs            // the owner's taste references, set before judging fans out
-	ownerKeys   map[string]bool // the owner's collections' Plex ratingKeys: never a target
+	collections map[string]bool   // this run's collections (keys): only their outbox rows are sent
+	refs        refs              // the owner's taste references, set before judging fans out
+	covers      map[string]string // title key → its Criterion cover (criterionCovers)
+	ownerKeys   map[string]bool   // the owner's collections' Plex ratingKeys: never a target
 
 	mx         *mediux.Client
 	setPosters map[string][]Candidate // title key → the worn sets' posters its pool holds (sets.go)
@@ -268,6 +288,9 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	}
 	r.owners = owners
 
+	if opt.ArchiveDir != "" && onNVMe(opt.ArchiveDir) {
+		return fmt.Errorf("posters: archive_dir %s is on the NVMe; the archive belongs on volume1", opt.ArchiveDir)
+	}
 	titles, err := inventory(opt.MoviesRoot, opt.TVRoot)
 	if err != nil {
 		return err
@@ -291,6 +314,9 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		if t.Kind.collection() {
 			r.collections[t.Key] = true
 		}
+	}
+	if err := r.criterionCovers(ctx, titles); err != nil {
+		return err
 	}
 	rows, err := loadRows(ctx, db, titles, env.Now())
 	if err != nil {
@@ -362,6 +388,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		if err := r.apply(ctx); err != nil {
 			return err
 		}
+		r.archive(ctx, send)
 	}
 	spent, err := spentUSD(ctx, db, false)
 	if err != nil {
@@ -434,6 +461,9 @@ func (r *run) poolSig(t Title) string {
 	sig := "tmdb+fanart"
 	if p, ok := r.owners[t.Key]; ok {
 		sig += " owner=" + p.State + ":" + p.File
+	}
+	if cover := r.covers[t.Key]; cover != "" {
+		sig += " criterion=" + cover
 	}
 	return sig + r.setSig(t.Key)
 }

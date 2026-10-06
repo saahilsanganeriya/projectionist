@@ -323,8 +323,8 @@ probe_workers = 2                              # ffprobes on cache misses, only 
 quiet         = ["missing_english_subs"]       # grows with every download until the subtitles stage catches up
 
 # The poster the owner would choose for every movie, show and season, on Jellyfin and Plex; replaces posters/posters.py.
-# Candidates: the owner's poster (from a Plex DB backup and the export taken with it), TMDB and fanart.tv (the shared
-# clients). Judge: one vision call per title through the AI gateway, on [llm.tasks.posters]'s model (collections on
+# Candidates: the owner's poster (from a Plex DB backup and the export taken with it), a Criterion release's cover,
+# TMDB and fanart.tv (the shared clients). Judge: one vision call per title through the AI gateway, on [llm.tasks.posters]'s model (collections on
 # [llm.tasks.collections]'s), as many at once as [llm] in_flight allows, to his taste: illustrated, artistic fan art
 # over mainstream key art, creative over plain, the title the only text. Off until enabled: even with dry_run, judging
 # spends. Verdicts judged under the prompts before the owner's taste are judged again once (the backfill: run it on
@@ -367,6 +367,16 @@ director_min_score        = 4    # a director's best photo needs this judge scor
 # Bottle Rocket, Call Me by Your Name, Dunkirk.
 taste_references = ["movie:tmdb-12548", "movie:tmdb-1891", "movie:tmdb-353081", "movie:tmdb-36557", "movie:tmdb-16642",
                     "movie:tmdb-13685", "movie:tmdb-398818", "movie:tmdb-374720"]
+# Titles whose CURRENT Plex poster (his default, say) the owner named as his taste: fetched from Plex once, then kept
+# in cache_dir/references; once this stage has put its own pick on Plex, his export's poster for the title stands in.
+taste_references_current = []
+# A film the Criterion Collection released gets its cover art as a candidate: Wikidata names the films (weekly), the
+# Internet Archive's copy of each criterion.com page names the cover (www.criterion.com is never asked: it refuses
+# non-browser clients and its terms forbid automated collection). Lookups go 4 s apart; a found cover is kept for good.
+criterion = true
+# Every applied title's candidates at full size, its chosen poster and verdict.json, in <archive_dir>/<kind>/<key>/.
+# volume1 only (a run refuses /volume2 and /state, the NVMe); compose.yaml mounts it read-write. "" = no archive.
+archive_dir = "/volume1/PlexMediaServer/poster-archive"
 # commons_contact = ""           # a URL or e-mail for Wikimedia's User-Agent policy: 200 requests a minute instead
                                  # of 10 (unset, Wikimedia requests go 6.5 s apart; about 10 per director)
 # Poster sets, with collections on: every TMDB collection a franchise shelf holds (the approved ones and the owner's
