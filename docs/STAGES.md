@@ -74,7 +74,8 @@ Test LOC is `wc -l` of a stage folder's `*_test.go` against its other `.go` file
   logs are not asserted). No schema change; an older image reads an `interrupted` row as neither alert nor error, so a
   rollback keeps `/health` at 200 for it. Mac `fix-batch-1-box/evidence/` (`interrupt-gate-0b4831a-and-055def2.txt`,
   `interrupt-gate-r2-486cb73.txt`, `alertstop-gate.txt`, `mutations-interrupted.txt`, `mutations-review-r2.txt`).
-- The deployed `[stages.remote4k]` still has `list_timeout = "5s"`: change it to `"30s"` or delete it (see remote4k).
+- The deployed `[stages.remote4k]` still has `list_timeout = "5s"` (read 2026-10-06T01:41Z): delete the line once an image at
+  79fc925 or later runs, whose code default is 30 s (`ListTimeout: 30 * time.Second` in `remote4k.go`, since 71c0cc1).
 - `secrets/jellyfin_key`, which `compose.yaml` expects, is now in the secrets folder (listed at this merge, 2026-10-05 between 18:10Z and 18:12Z, names only).
   If the Jellyfin API key is rotated (see jfsync), replace this file too.
 - `config.example.toml` enables every table it holds (`enabled` defaults to true) except posters. Deploy only the tables
