@@ -868,7 +868,9 @@ func TestExampleConfig(t *testing.T) {
 
 // Catches: what fails every title alike logged as one warning per title (3,000 of them) while the run reports
 // success, instead of failing the run, which /health shows: a missing TMDB key; a thumbnail cache that cannot be
-// written, which was also alerted as each owner poster being unreadable, once, and then never again.
+// written, which was also alerted as each owner poster being unreadable, once, and then never again; a judge model
+// the gateway does not list (a typo, a withdrawn model), whose price lookup failed each call before it was sent,
+// where no session counted it towards parking.
 func TestWhatFailsEveryTitleStopsRun(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -881,6 +883,10 @@ func TestWhatFailsEveryTitleStopsRun(t *testing.T) {
 		{"thumbnail cache unwritable", func(w *world) {
 			os.WriteFile(filepath.Join(w.cache, "thumbs"), nil, 0o644) // a file where its directory goes, even for root
 		}, errThumbCache},
+		{"judge model not in the gateway's catalogue", func(w *world) {
+			w.h.Env.LLM = llmtest.Client(t, w.gateway, w.h.Env.Store, w.h.Env.Now, llm.Config{Tasks: map[string]llm.Task{
+				"posters": {Model: "deepseek/deepseek-v4.1-flsh"}}})
+		}, llm.ErrUnknownModel},
 	} {
 		w := newWorld(t, "dry_run = true\n")
 		c.fail(w)

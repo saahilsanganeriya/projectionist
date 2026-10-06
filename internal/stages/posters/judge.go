@@ -162,13 +162,22 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 		return nil
 	}
 	titles, collections := r.env.LLM.Session("posters"), r.env.LLM.Session("collections")
-	parallel(ctx, r.env.LLM.InFlight(), todo, func(it *row) {
-		s := titles
+	session := func(it *row) *llm.Session {
 		if it.Title.Kind.collection() {
-			s = collections
+			return collections
 		}
-		r.judgeNow(ctx, s, it)
-	})
+		return titles
+	}
+	// A model the catalogue does not list, or no catalogue to price by, fails every call before it is sent, where no
+	// session counts it towards parking: like any fault every title shares, it stops the run.
+	for _, s := range []*llm.Session{titles, collections} {
+		if slices.ContainsFunc(todo, func(it *row) bool { return session(it) == s }) {
+			if _, err := s.Price(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	parallel(ctx, r.env.LLM.InFlight(), todo, func(it *row) { r.judgeNow(ctx, session(it), it) })
 	for _, s := range []*llm.Session{titles, collections} {
 		switch err := s.Parked(); {
 		case err == nil:

@@ -336,6 +336,8 @@ var (
 	ErrBilling = errors.New("gateway: billing refuses calls")
 	// ErrParked marks a session that makes no more calls this run.
 	ErrParked = errors.New("llm: parked")
+	// ErrUnknownModel marks a model id the gateway's catalogue does not list: a typo, or a model withdrawn.
+	ErrUnknownModel = errors.New("model not in the gateway's catalogue")
 )
 
 // APIError is a non-2xx answer; Type is the gateway's error type ("invalid_request_error", "rate_limit_exceeded",

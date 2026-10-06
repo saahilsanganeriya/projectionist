@@ -94,7 +94,7 @@ func (c *Client) missing(id string, ok bool) error {
 	if ok {
 		return nil
 	}
-	return fmt.Errorf("model %q is not in the gateway's catalogue (%s)", id, c.cat.At.Format(time.RFC3339))
+	return fmt.Errorf("%w: %q (catalogue of %s)", ErrUnknownModel, id, c.cat.At.Format(time.RFC3339))
 }
 
 // get is a GET of the gateway's path, its body read whole.
