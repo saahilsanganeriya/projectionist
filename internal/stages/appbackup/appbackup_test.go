@@ -107,6 +107,9 @@ func TestNightlyVersions(t *testing.T) {
 	exec(`INSERT INTO plays VALUES (4)`)
 	h.Now = h.Now.Add(24 * time.Hour)
 	rep := run("night 2")
+	if exists(filepath.Join(target, "2026-10-06", "junk")) {
+		t.Errorf("night 2: the cut-off run's .partial leaked into the version")
+	}
 	run("night 2, again the same day")
 	same := func(rel string) bool {
 		a, _ := os.Stat(version("2026-10-05", rel))
@@ -119,8 +122,8 @@ func TestNightlyVersions(t *testing.T) {
 	if b, _ := os.ReadFile(version("2026-10-06", "change.txt")); same("change.txt") || string(b) != "v2" {
 		t.Errorf("night 2: change.txt = %q, hardlinked=%v; want a fresh copy of v2", b, same("change.txt"))
 	}
-	if exists(filepath.Join(target, "2026-10-06", "junk")) || rows("2026-10-06") != 4 {
-		t.Errorf("night 2: .partial leaked or the database copy is stale")
+	if n := rows("2026-10-06"); n != 4 {
+		t.Errorf("night 2: the database copy holds %d rows, want 4", n)
 	}
 
 	h.Now = h.Now.Add(24 * time.Hour)
