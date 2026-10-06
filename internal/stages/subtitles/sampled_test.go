@@ -82,8 +82,8 @@ func speechSamples(starts []float64, wins []sampleWindow) []sample {
 // from speech), another film's subtitle or another cut's written (the difference in the middle, or near either end of
 // a film or an episode, between the 3 % edge and the windows next to it), a window with too few matched lines
 // accepted, a ratio the windows cannot tell from another (all four within six minutes) taken anyway, and a subtitle
-// written with more lines than a quiet stretch holds in the edge stretch a last window moved inward from (two windows,
-// 14 lines allowed) never read.
+// written with more lines than a quiet stretch holds in the edge stretch an outer window moved inward from (the last by
+// two windows, 14 lines allowed; the first by one, 7) never read.
 func TestFitSamples(t *testing.T) {
 	const film = 3000.0
 	truth := dense(1000, 7)
@@ -117,7 +117,8 @@ func TestFitSamples(t *testing.T) {
 		fewCues = append(fewCues, c)
 	}
 	close := []sampleWindow{{1000, 90}, {1090, 90}, {1180, 90}, {1270, 90}}
-	inward := append(wins[:3:3], sampleWindow{wins[3].start - 180, 90}) // the last window moved inward twice
+	inward := append(wins[:3:3], sampleWindow{wins[3].start - 180, 90})     // the last window moved inward twice
+	onward := append([]sampleWindow{{wins[0].start + 90, 90}}, wins[1:]...) // the first moved inward once
 	skipped, hi := inward[3].start+90, wins[3].start+wins[3].dur
 	var hushed []float64 // the truth with only 14 lines, 12 s apart, in the 180 s it skipped
 	for _, c := range truth {
@@ -155,6 +156,7 @@ func TestFitSamples(t *testing.T) {
 		{"speech, a drift", cueSpans(truth, 1, 0), speechSamples(drift, wins), 0, 0, "disagree", nil},
 		{"captions, the last window moved inward over 60 lines", cueSpans(truth, 1, 0), captionSamples(truth, inward), 0, 0, "lines in the edge stretches", nil},
 		{"captions, the last window moved inward over 14 lines", cueSpans(hushed, 1, 0), captionSamples(hushed, inward), 1, 0, "", nil},
+		{"speech, the first window moved inward over 30 lines", cueSpans(truth, 1, 0), speechSamples(truth, onward), 0, 0, "lines in the edge stretches", nil},
 	}
 	for _, dur := range []float64{7200, 1320} { // a film and an episode: another cut 4 s longer from 8 % or from 92 %
 		w, truth := sampleWindowsFor(dur, 4, 90), dense(int(dur/3), 7)
