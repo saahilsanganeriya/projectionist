@@ -15,7 +15,7 @@
 //	S=/volume1/PlexMediaServer/projectionist-test/llm-gateway
 //	sqlite3 /volume1/docker/projectionist/data/projectionist.db ".backup $S/state.db"
 //	cp -r /volume1/docker/projectionist/data/posters $S/posters-cache
-//	cp /volume1/PlexMediaServer/projectionist-test/tonight/state-r5b.db $S/tonight.db # tonight's facts, maps and RSS
+//	cp /volume1/PlexMediaServer/projectionist-test/tonight/state-r5b.db $S/tonight.db # tonight's facts, maps and Letterboxd caches
 //	$S/bakeoff -config /volume1/docker/projectionist/config/projectionist.toml -db $S/state.db -tonight-db $S/tonight.db \
 //	    -posters-cache $S/posters-cache -out $S/run-$(date -u +%Y%m%dT%H%MZ) [-fake]
 //
@@ -74,7 +74,7 @@ var (
 func main() {
 	cfgPath := flag.String("config", "", "projectionist config (its [stages.posters], [stages.tonight] and [llm])")
 	dbPath := flag.String("db", "", "a copy of the production store")
-	tonightDB := flag.String("tonight-db", "", "a store holding tonight's facts, maps and RSS (default: -db)")
+	tonightDB := flag.String("tonight-db", "", "a store holding tonight's facts, maps and Letterboxd caches (default: -db)")
 	cache := flag.String("posters-cache", "", "the posters cache_dir to read thumbnails from (a copy)")
 	out := flag.String("out", "", "output directory")
 	models := flag.String("models", visionModels, "vision models to judge posters, comma-separated")

@@ -7,6 +7,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 
 	"projectionist/internal/llm"
 )
@@ -43,20 +46,23 @@ func userMessage(text string) llm.Message { return llm.User(llm.Text(text)) }
 // ---- prompt ----
 
 // The mood and liked fields hold the bookkeeping the model otherwise wrote into the reason (2026-10-05: "...of
-// Moonlight.Quiet and slow.Hmm."); the reason is then only the sentence he reads.
-const instructions = `You choose what one person watches tonight, from films he owns and has not seen.
+// Moonlight.Quiet and slow.Hmm."); the reason is then only the sentence everyone reads. The row is shared, so the
+// reason speaks of films, never of a viewer, a rating or a review.
+const instructions = `You choose what a household watches together tonight, from films they own that none of them has seen.
 
-He is a cinephile who logs and rates every film on Letterboxd right after watching it. His ratings and reviews
-follow; they are the only evidence of his taste.
+Each viewer logs and rates films on Letterboxd. Their ratings and reviews follow, one block per viewer; they are the
+only evidence of each viewer's taste.
 
 Rules:
 - Pick only films from the UNSEEN list in the user message, and give each pick's id exactly as listed.
+- Pick films the viewers would enjoy together: weigh every viewer's taste, not one viewer's alone.
 - Make the picks differ in mood (for example light, tense, moving, strange, slow) and in length: include a
   short one and a long one when the list has them. Avoid several picks from one genre, decade or country.
-- For each pick, "mood" is its mood in two or three words, and "liked" is the title of the film he rated 4 stars
-  or more that the pick draws on, written as in his ratings. Use these two fields for that bookkeeping.
-- "reason" is one finished sentence of at most 160 characters, for him to read: it names the "liked" film or its
-  director and says what tonight's film shares with it. No spoilers, no notes, no checks.
+- For each pick, "mood" is its mood in two or three words, and "liked" is the title of a film a viewer rated 4 stars
+  or more that the pick draws on, written as in their ratings. Use these two fields for that bookkeeping.
+- "reason" is one finished sentence of at most 160 characters that anyone in the house may read: it names the
+  "liked" film or its director and says, in your own words, what tonight's film shares with it. Never mention a
+  viewer, a rating or a review, and never quote a review. No spoilers, no notes, no checks.
 - Answer with JSON only, in the given schema.`
 
 var picksSchema = json.RawMessage(`{"type":"object","additionalProperties":false,"required":["picks"],
@@ -90,7 +96,7 @@ func cleanReason(s string) (reason string, cut bool) {
 	return reason, reason != strings.TrimSpace(s)
 }
 
-// lovedFilms holds the films he rated 4★ or more, keyed by title alone and by title and year (filmKey).
+// lovedFilms holds the films a viewer rated 4★ or more, keyed by title alone and by title and year (filmKey).
 func lovedFilms(hist []rated) map[string]bool {
 	loved := map[string]bool{}
 	for _, h := range hist {
@@ -112,10 +118,10 @@ func lovedKey(liked string) string {
 	return filmKey(liked, 0)
 }
 
-// validate keeps the answer's picks that name an unseen film once and draw on a film he rated 4★ or more, and lists
-// every violation for the retry. glued holds the reasons something was cut from (cleanReason), as the model wrote
-// them, so the log shows whether the cause is gone.
-func validate(text string, unseen map[int]candidate, loved map[string]bool, want int) (picks []pick, violations, glued []string) {
+// validate keeps the answer's picks that name an unseen film once, draw on a film a viewer rated 4★ or more and quote
+// no review, and lists every violation for the retry. glued holds the reasons something was cut from (cleanReason),
+// as the model wrote them, so the log shows whether the cause is gone.
+func validate(text string, unseen map[int]candidate, loved map[string]bool, quotes quoteGuard, want int) (picks []pick, violations, glued []string) {
 	var ans answer
 	if err := json.Unmarshal([]byte(text), &ans); err != nil {
 		return nil, []string{"the answer is not JSON in the schema: " + err.Error()}, nil
@@ -131,8 +137,10 @@ func validate(text string, unseen map[int]candidate, loved map[string]bool, want
 			violations = append(violations, fmt.Sprintf("pick %d: id %d is picked twice", i+1, p.ID))
 		case reason == "":
 			violations = append(violations, fmt.Sprintf("pick %d: id %d has no reason", i+1, p.ID))
+		case quotes.quoted(reason):
+			violations = append(violations, fmt.Sprintf("pick %d: the reason quotes a viewer's review; say it in your own words", i+1))
 		case !loved[lovedKey(p.Liked)]:
-			violations = append(violations, fmt.Sprintf("pick %d: liked %q is not a film he rated 4 stars or more", i+1, p.Liked))
+			violations = append(violations, fmt.Sprintf("pick %d: liked %q is not a film a viewer rated 4 stars or more", i+1, p.Liked))
 		default:
 			seen[p.ID] = true
 			if cut {
@@ -149,6 +157,55 @@ func validate(text string, unseen map[int]candidate, loved map[string]bool, want
 		violations = append(violations, fmt.Sprintf("%d valid picks; %d are needed", len(picks), want))
 	}
 	return picks, violations, glued
+}
+
+// quoteWords is the shortest run of a review's words a reason may not repeat: 6, since a shorter run is often a
+// name plus a common phrase ("Paul Thomas Anderson at his"). A review shorter than that may not be repeated whole once
+// it has 3 words (a reason may say "sad", not "sad and slow").
+const quoteWords = 6
+
+// quoteGuard holds every quoteWords-word run of the household's reviews, and each shorter review of 3 words or more
+// whole, as normalized words: the collection's summary is shared, so a reason must not quote one.
+type quoteGuard map[string]bool
+
+func newQuoteGuard(reviews []string) quoteGuard {
+	q := quoteGuard{}
+	for _, r := range reviews {
+		w := words(r)
+		if len(w) < quoteWords && len(w) >= 3 {
+			q[strings.Join(w, " ")] = true
+		}
+		for i := 0; i+quoteWords <= len(w); i++ {
+			q[strings.Join(w[i:i+quoteWords], " ")] = true
+		}
+	}
+	return q
+}
+
+func (q quoteGuard) quoted(reason string) bool {
+	w := words(reason)
+	for n := 3; n <= quoteWords; n++ {
+		for i := 0; i+n <= len(w); i++ {
+			if q[strings.Join(w[i:i+n], " ")] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// words splits s into lowercase words without accents or punctuation, as filmKey compares titles.
+func words(s string) []string {
+	var b strings.Builder
+	for _, r := range norm.NFD.String(strings.ToLower(s)) {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			b.WriteRune(r)
+		case !unicode.Is(unicode.Mn, r): // a mark NFD split off a letter is dropped; anything else ends a word
+			b.WriteByte(' ')
+		}
+	}
+	return strings.Fields(b.String())
 }
 
 func oneLine(s string, max int) string {

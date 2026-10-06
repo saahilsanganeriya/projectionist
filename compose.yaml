@@ -50,8 +50,9 @@ services:
       - /volume1/PlexMediaServer/subtitle-downloads:/volume1/PlexMediaServer/subtitle-downloads:ro
       # posters: the owner's poster exports and the Plex DB backups they are matched with, read when they change.
       - /volume1/PlexMediaServer/backups:/volume1/PlexMediaServer/backups:ro
-      # The owner's unzipped Letterboxd export: lists' export_dir (a missing or empty folder is an alert on every run),
-      # the letterboxd stage's export_dir and tonight's letterboxd_dir (for those two, a missing folder is no export).
+      # The unzipped Letterboxd exports: lists' export_dir (a missing or empty folder is an alert on every run), the
+      # letterboxd stage's and tonight's people export_dir (for those two, a missing folder is no export; each person
+      # reads only the letterboxd-<user>-* folders named for them).
       - /volume1/docker/projectionist/data/letterboxd:/volume1/docker/projectionist/data/letterboxd:ro
       # health: the NVMe app-data volume's mount, fullness and top-level entries; appbackup reads its roots here.
       # The superblock's own rw/ro still shows through this read-only bind, so health sees a read-only remount.

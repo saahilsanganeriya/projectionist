@@ -27,11 +27,11 @@ func TestParsers(t *testing.T) {
 	}
 	want := []rssEntry{
 		{ID: "1522858910", Slug: "the-fox-and-the-hound", TMDB: 10948, Title: "The Fox and the Hound", Year: 1981,
-			Watched: "2026-10-03", Rating: 7, LoggedAt: time.Date(2026, 10, 4, 6, 0, 38, 0, time.UTC)},
+			Watched: "2026-10-03", Rating: 7, LoggedAt: time.Date(2026, 10, 4, 6, 0, 38, 0, time.UTC), Review: "…"},
 		{ID: "1519797680", Slug: "digger-2026", TMDB: 1248832, Title: "Digger", Year: 2026,
-			Watched: "2026-10-02", Rating: 8, LoggedAt: time.Date(2026, 10, 2, 9, 10, 57, 0, time.UTC)},
+			Watched: "2026-10-02", Rating: 8, LoggedAt: time.Date(2026, 10, 2, 9, 10, 57, 0, time.UTC), Review: "…"},
 		{ID: "1208848714", Slug: "ad-astra-2019", TMDB: 419704, Title: "Ad Astra", Year: 2019,
-			Watched: "2026-02-18", Rating: 9, LoggedAt: time.Date(2026, 2, 18, 16, 51, 38, 0, time.UTC)},
+			Watched: "2026-02-18", Rating: 9, LoggedAt: time.Date(2026, 2, 18, 16, 51, 38, 0, time.UTC), Review: "…"},
 	}
 	if !reflect.DeepEqual(entries, want) {
 		t.Errorf("rss = %+v", entries)
