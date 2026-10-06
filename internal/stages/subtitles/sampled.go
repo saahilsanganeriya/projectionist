@@ -25,7 +25,6 @@ package subtitles
 import (
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -412,6 +411,10 @@ func (s *sampler) readAll(ctx context.Context) (string, error) {
 // readWindows reads windows from the image track (one ffprobe over all of them) or the audio (one ffmpeg each). Each
 // read may take four times its share of the file plus 64 MiB (slack for the seek to a keyframe); a helper reading past
 // that is killed (Linux), and the title is not sampled: its seeks do not use an index.
+//
+// ffprobe ends an interval at the first packet past its end among the streams it shows, so it shows them all: shown
+// only the image track, it read on to the next caption, which after the last one (a window in the end credits) is the
+// end of the file.
 func (s *sampler) readWindows(ctx context.Context, wins []sampleWindow) ([]sample, string, error) {
 	allowance := func(n int) int64 {
 		share := float64(s.t.info.Size) * float64(n) * wins[0].dur / s.t.info.Duration
@@ -429,19 +432,16 @@ func (s *sampler) readWindows(ctx context.Context, wins []sampleWindow) ([]sampl
 		}
 		var ivals []string
 		for _, w := range wins {
-			ivals = append(ivals, fmt.Sprintf("%.3f%%+%.3f", *s.start+w.start, w.dur))
+			ivals = append(ivals, fmt.Sprintf("%.3f%%%.3f", *s.start+w.start, *s.start+w.start+w.dur))
 		}
-		out, err := s.helper(ctx, allowance(len(wins)), s.r.env.FFmpeg.FFprobePath(), "-v", "error", "-select_streams",
-			strconv.Itoa(s.track.Index), "-read_intervals", strings.Join(ivals, ","), "-show_entries", "packet=pts_time,size", "-of", "json", s.t.path)
+		out, err := s.helper(ctx, allowance(len(wins)), s.r.env.FFmpeg.FFprobePath(), "-v", "error", "-read_intervals",
+			strings.Join(ivals, ","), "-show_entries", "packet=stream_index,pts_time,size", "-of", "csv=p=0", s.t.path)
 		if errors.Is(err, errOverrun) {
 			return nil, fmt.Sprintf("reading the windows was stopped past %d bytes: no usable index", allowance(len(wins))), nil
 		} else if err != nil {
 			return nil, "", err
 		}
-		starts, err := captionPackets(out, s.track.Codec, *s.start)
-		if err != nil {
-			return nil, "", err
-		}
+		starts := captionPackets(out, *s.track, *s.start)
 		got := make([]sample, len(wins))
 		for i, w := range wins {
 			got[i].win = w
@@ -510,29 +510,25 @@ var centred = map[string]bool{"3.0": true, "3.1": true, "4.0": true, "4.1": true
 	"7.1(wide-side)": true, "7.1(top)": true, "hexagonal": true, "octagonal": true, "5.1.2": true, "5.1.4": true, "7.1.2": true,
 	"7.1.4": true}
 
-// captionPackets are the display starts in ffprobe's JSON for an image track, in presentation time (less the file's
-// start): for PGS the packets that draw (larger than a "clear screen" one), for VobSub every packet.
-func captionPackets(raw []byte, codec string, start float64) ([]float64, error) {
-	var out struct {
-		Packets []struct {
-			PTS  string `json:"pts_time"`
-			Size string `json:"size"`
-		} `json:"packets"`
-	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, fmt.Errorf("ffprobe packets: %w", err)
-	}
+// captionPackets are the display starts of track among ffprobe's packets (CSV: stream index, pts_time, size), in
+// presentation time (less the file's start): for PGS the packets that draw (larger than a "clear screen" one), for
+// VobSub every packet.
+func captionPackets(raw []byte, track probe.Subtitle, start float64) []float64 {
 	var starts []float64
-	for _, p := range out.Packets {
-		size, _ := strconv.Atoi(p.Size)
-		t, err := strconv.ParseFloat(p.PTS, 64)
-		if err != nil || codec == "hdmv_pgs_subtitle" && size <= pgsMinPkt {
+	for _, line := range strings.Split(string(raw), "\n") {
+		f := strings.Split(strings.TrimSpace(line), ",")
+		if len(f) < 3 || f[0] != strconv.Itoa(track.Index) {
+			continue
+		}
+		t, err := strconv.ParseFloat(f[1], 64)
+		size, _ := strconv.Atoi(f[2])
+		if err != nil || track.Codec == "hdmv_pgs_subtitle" && size <= pgsMinPkt {
 			continue
 		}
 		starts = append(starts, t-start)
 	}
 	sort.Float64s(starts)
-	return slices.Compact(starts), nil
+	return slices.Compact(starts)
 }
 
 // voiceLevel is the voice band's (300-3000 Hz) level in dB per 10 ms frame of 16 kHz mono s16le PCM.

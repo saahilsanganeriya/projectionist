@@ -185,25 +185,23 @@ func TestSampleWindowsFor(t *testing.T) {
 	}
 }
 
-// packetsJSON is ffprobe's answer for an image track: a drawing packet (and a "clear screen" one after it) at each start.
-func packetsJSON(starts []float64, offset float64) string {
+// packetsCSV is ffprobe's answer for the windows with every stream shown: for the image track (stream track) a drawing
+// packet and a "clear screen" one after it at each start, and between them packets of the video (stream 0) and of a
+// second image track (stream 9), which are not captions.
+func packetsCSV(track int, starts []float64, offset float64) string {
 	var b strings.Builder
-	b.WriteString(`{"packets":[`)
-	for i, s := range starts {
-		if i > 0 {
-			b.WriteString(",")
-		}
-		fmt.Fprintf(&b, `{"pts_time":"%.3f","size":"4096"},{"pts_time":"%.3f","size":"30"}`, s+offset, s+offset+1.5)
+	for _, s := range starts {
+		fmt.Fprintf(&b, "%d,%.3f,4096\n0,%.3f,60000\n9,%.3f,4096\n%d,%.3f,30\n", track, s+offset, s+offset+0.5, s+offset+0.7, track, s+offset+1.5)
 	}
-	b.WriteString(`]}`)
 	return b.String()
 }
 
 // Catches the image track read over the whole file instead of the windows (one ffprobe over all of them, seeking by
-// the index), a window without dialogue judged instead of replaced by the stretch next to it toward the middle (the
-// last window by the one before it, and then the one before that, not the quiet window again), more than two
-// replacement windows read, the "clear screen" packets taken for captions, or the file's start time left in the
-// caption times.
+// the index, each window ending at its absolute end with every stream shown: shown one track, ffprobe reads on to that
+// track's next packet, the end of the file after the last caption), a window without dialogue judged instead of
+// replaced by the stretch next to it toward the middle (the last window by the one before it, and then the one before
+// that, not the quiet window again), more than two replacement windows read, another stream's packets or the "clear
+// screen" packets taken for captions, or the file's start time left in the caption times.
 func TestSamplerReadsWindowsAndReplacesQuietOnes(t *testing.T) {
 	const film = 6000.0
 	captions := dense(2000, 7)
@@ -231,9 +229,9 @@ func TestSamplerReadsWindowsAndReplacesQuietOnes(t *testing.T) {
 	} {
 		h := fake.NewEnv(t, nil)
 		dir := t.TempDir()
-		os.WriteFile(filepath.Join(dir, "packets.json"), []byte(packetsJSON(c.track, 1.4)), 0o644)
+		os.WriteFile(filepath.Join(dir, "packets.csv"), []byte(packetsCSV(3, c.track, 1.4)), 0o644)
 		h.Script(t, "ffprobe", `case "$*" in *format=start_time*) echo 1.400; exit 0;; esac
-echo "$*" >> "`+dir+`/calls"; cat "`+dir+`/packets.json"`+"\n")
+echo "$*" >> "`+dir+`/calls"; cat "`+dir+`/packets.csv"`+"\n")
 		video := filepath.Join(dir, "v.mkv")
 		os.WriteFile(video, []byte("v"), 0o644)
 		r := &run{env: h.Env, opt: Options{SampleWindows: 4, SampleLength: 90e9}, rep: &stage.Report{}}
@@ -246,7 +244,7 @@ echo "$*" >> "`+dir+`/calls"; cat "`+dir+`/packets.json"`+"\n")
 		why, err := s.readAll(context.Background())
 		calls, _ := os.ReadFile(filepath.Join(dir, "calls"))
 		lines := strings.Split(strings.TrimSpace(string(calls)), "\n")
-		if err != nil || why != c.refused || len(lines) != c.reads || !strings.Contains(lines[0], "-select_streams 3 -read_intervals 181.400%+90.000,2031.400%+90.000,") {
+		if err != nil || why != c.refused || len(lines) != c.reads || !strings.Contains(lines[0], "-v error -read_intervals 181.400%271.400,2031.400%2121.400,") {
 			t.Fatalf("%s: why %q err %v, %d reads %q; want %q, %d reads of the windows", c.name, why, err, len(lines), lines, c.refused, c.reads)
 		}
 		for i, want := range c.starts {
@@ -320,9 +318,9 @@ func sampledFixture(t *testing.T, captions bool, subs ...string) *fixture {
 		streams += `,{"index":2,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle","tags":{"language":"eng"}}`
 	}
 	os.WriteFile(filepath.Join(ff, "Show.json"), []byte(probeJSON(streams)), 0o644)
-	os.WriteFile(filepath.Join(ff, "packets.json"), []byte(packetsJSON(truth, 0)), 0o644)
+	os.WriteFile(filepath.Join(ff, "packets.csv"), []byte(packetsCSV(2, truth, 0)), 0o644)
 	f.h.Script(t, "ffprobe", `echo "$*" >> "`+ff+`/ffprobe.calls"
-case "$*" in *format=start_time*) echo 0.000; exit 0;; *-read_intervals*) cat "`+ff+`/packets.json"; exit 0;; esac
+case "$*" in *format=start_time*) echo 0.000; exit 0;; *-read_intervals*) cat "`+ff+`/packets.csv"; exit 0;; esac
 case "$*" in *"/Show "*) cat "`+ff+`/Show.json"; exit 0;; esac; exit 1
 `)
 	for _, w := range sampleWindowsFor(3000, 4, 90) {

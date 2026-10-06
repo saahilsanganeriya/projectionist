@@ -1612,9 +1612,9 @@ func (r *run) cmd(ctx context.Context, t *title, bin string, args ...string) ([]
 // errOverrun is a helper killed for reading past its allowance.
 var errOverrun = errors.New("killed: read past its allowance")
 
-// readPoll is how often a helper with an allowance has its reads counted: at the NAS disks' ~200 MB/s it reads at
-// most about 20 MB past the allowance before it is killed.
-const readPoll = 100 * time.Millisecond
+// readPoll is how often a helper with an allowance has its reads counted: a few MB past the allowance at the NAS disks'
+// ~200 MB/s, more when the demuxer re-reads what the page cache holds (one read climbed 700 MB in a 100 ms poll).
+const readPoll = 20 * time.Millisecond
 
 // cmdUpTo is cmd, with the helper's group killed and errOverrun returned once the helper itself has read more than
 // limit bytes (rchar, polled every readPoll; Linux only; 0: no limit).
