@@ -3,6 +3,8 @@ package subtitles
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 )
 
@@ -198,6 +200,40 @@ func TestPlausible(t *testing.T) {
 		c.cand.ours = !c.other
 		if got := ti.plausible(c.cand); got != c.want {
 			t.Errorf("%s: %+v against %q: %v, want %v", c.why, c.cand, c.original, got, c.want)
+		}
+	}
+}
+
+// Catches the order candidates are tried in losing the providers' order (a later provider's popular subtitle tried
+// before an earlier provider's), a subtitle of the file's own source (BluRay, Blu-ray, BDRip, REMUX for a BluRay file)
+// not first within its provider, a hash match pushed below one, or, in sampled mode, a subtitle made for this very
+// release (group SITEA, or the hash match) not ahead of all. The input is rank's order.
+func TestArrange(t *testing.T) {
+	gd, sd, os := &gestdown{}, &subdl{}, &legacy{}
+	cands := []Candidate{
+		{ID: "sd-web", Release: "Show.S01E01.WEB-DL", Downloads: 9000, provider: sd},
+		{ID: "gd-web", Release: "WEB-DL", ours: true, provider: gd},
+		{ID: "os-hash", Release: "Show.S01E01.HDTV", HashMatch: true, ours: true, provider: os},
+		{ID: "os-web", Release: "Show.S01E01.1080p.WEB-DL", Downloads: 9000, provider: os},
+		{ID: "gd-blu", Release: "720p.Blu-ray.SiNNERS", ours: true, provider: gd},
+		{ID: "os-remux", Release: "Show.S01E01.2160p.REMUX", provider: os},
+		{ID: "gd-group", Release: "x265-SITEA", ours: true, provider: gd},
+		{ID: "sd-bd", FileName: "show.s01e01.bdrip.srt", provider: sd},
+	}
+	ti := &title{origin: originOf([]string{"Show.S01E01.1080p.BluRay.x265-SITEA.mp4"}), show: "Show", season: 1, episode: 1}
+	for _, c := range []struct {
+		sampled bool
+		want    string
+	}{
+		{false, "gd-blu gd-web gd-group sd-bd sd-web os-hash os-remux os-web"},
+		{true, "gd-group os-hash gd-blu gd-web sd-bd sd-web os-remux os-web"}, // the hash match is made for this file too
+	} {
+		var got []string
+		for _, x := range ti.arrange(slices.Clone(cands), []Provider{gd, sd, os}, c.sampled) {
+			got = append(got, x.ID)
+		}
+		if strings.Join(got, " ") != c.want {
+			t.Errorf("sampled %v: %s; want %s", c.sampled, strings.Join(got, " "), c.want)
 		}
 	}
 }

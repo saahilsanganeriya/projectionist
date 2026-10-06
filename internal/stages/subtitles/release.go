@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -75,7 +76,7 @@ type release struct {
 var (
 	tokenClasses = map[string][2]string{
 		"bluray": {"source", "bluray"}, "blu": {"source", "bluray"}, "bdrip": {"source", "bluray"}, "brrip": {"source", "bluray"},
-		"bd": {"source", "bluray"}, "web": {"source", "web"}, "webdl": {"source", "web"}, "webrip": {"source", "web"},
+		"bd": {"source", "bluray"}, "remux": {"source", "bluray"}, "web": {"source", "web"}, "webdl": {"source", "web"}, "webrip": {"source", "web"},
 		"hdtv": {"source", "hdtv"}, "pdtv": {"source", "hdtv"}, "dvdrip": {"source", "dvd"}, "dvd": {"source", "dvd"},
 		"480p": {"res", "480p"}, "576p": {"res", "576p"}, "720p": {"res", "720p"}, "1080p": {"res", "1080p"},
 		"2160p": {"res", "2160p"}, "4k": {"res", "2160p"}, "uhd": {"res", "2160p"},
@@ -307,4 +308,24 @@ func cheapCheck(spans []span, lo, hi, videoFPS, fps float64) string {
 		return "cue starts span less than 70 % of the video"
 	}
 	return ""
+}
+
+// arrange orders a search's candidates (rank's order) for trying: provider by provider in the providers' order, so a
+// later provider's are tried only once an earlier one's failed; within a provider its hash match and the subtitles
+// naming the file's own source (BluRay, WEB, ...) first; in sampled mode a subtitle made for this release before all.
+func (t *title) arrange(cands []Candidate, providers []Provider, sampled bool) []Candidate {
+	first := func(c Candidate) bool {
+		return c.HashMatch && c.ours || t.origin.rel.source != "" && parseRelease(c.Release+" "+c.FileName).source == t.origin.rel.source
+	}
+	sort.SliceStable(cands, func(i, j int) bool {
+		a, b := cands[i], cands[j]
+		if ma, mb := t.releaseMatched(a), t.releaseMatched(b); sampled && ma != mb {
+			return ma
+		}
+		if pa, pb := slices.Index(providers, a.provider), slices.Index(providers, b.provider); pa != pb {
+			return pa < pb
+		}
+		return first(a) && !first(b)
+	})
+	return cands
 }

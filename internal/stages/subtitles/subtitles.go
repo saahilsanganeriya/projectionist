@@ -5,8 +5,9 @@
 // fitted to the video's captions or speech.
 //
 //	embedded English text track       -> skipped: the players show it, so nothing is fetched and nothing read
-//	else candidates from the providers (Gestdown, SITEC, Subdl with a key; OpenSubtitles legacy and .com last), best
-//	first, skipping any already rejected for this file, and per title the first route that succeeds:
+//	else candidates from the providers (Gestdown, SITEC, Subdl with a key; OpenSubtitles legacy and .com last), provider
+//	by provider in the providers' order, each one's hash match and subtitles of the file's own source (BluRay, WEB,
+//	...) first, skipping any already rejected for this file, and per title the first route that succeeds:
 //	  a. release-matched               -> written WITHOUT reading the video once cheapCheck passes: an OpenSubtitles
 //	                                      file-hash match, or a subtitle naming the file's original release group
 //	  sampled mode (the default) only:
@@ -18,7 +19,8 @@
 //	  d. otherwise                     -> the alignment queue
 //	the queue, while nobody but the owner watches, at most align_per_day titles in any 24 h (sampled mode: only inside
 //	align_window, the night; a run outside it, or inside it with the day's cap spent, asks the scheduler for a run when
-//	it may align next), best first, each candidate downloaded only once the one before it failed:
+//	it may align next), the first maxTries of each provider in that order, each candidate downloaded only once the one
+//	before it failed:
 //	  English PGS/VobSub track         -> cue starts fitted to its caption starts (that stream alone demuxed); one
 //	                                      that does not fit is rescued if alass's alignment to the speech does
 //	  else                             -> alass aligns the candidate to the speech in the audio
@@ -26,8 +28,8 @@
 //
 // Careful mode is the rollback: routes a and d only, and the queue aligns at any hour. OpenSubtitles is searched only
 // once no other provider's release-matched subtitle passed, and only its hash match is downloaded before the queue,
-// unless no other provider has any candidate (then the queue may try its others); while it is out it holds back only a
-// title no other provider has a candidate for. The duration, frame rate and tracks come from the probe cache, else the
+// which tries its others after every other provider's; while it is out (its day's downloads spent) a title waits for
+// it only when nothing else aligned. The duration, frame rate and tracks come from the probe cache, else the
 // .details note (ffprobe runs only for a video that has neither, or once the sampled fit needs its stream indexes); the
 // original release name from that note, else the rename logs. Three titles at a time look for a subtitle, and one at a
 // time reads its windows; the queue aligns one at a time, and an alignment counts against align_per_day only once it
@@ -74,7 +76,7 @@ import (
 const (
 	name       = "subtitles"
 	userAgent  = "projectionist v0.1"
-	maxTries   = 4    // candidates downloaded per title, on each route
+	maxTries   = 4    // candidates downloaded per title, on each route (the queue's: per provider)
 	alassAgree = 0.75 // alass: share of cues that must sit within 0.5 s of the median shift (6 of 8 chunks in align)
 	rescueMax  = 300  // ms: a rescued subtitle's median distance to the captions (the gate's bar)
 	// A release match cheapCheck refused waits this long in http_cache for its alignment, so it is downloaded once.
@@ -815,9 +817,9 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	}
 	// A title is recorded only once every provider has answered its search and let its candidates be tried; while one
 	// is out (an outage, the day's quota, a refusal earlier in the run) the title waits for the next run, which skips
-	// the candidates already rejected for this file. A metered provider that is out holds back only a title no cheaper
-	// provider has a candidate for: beside theirs it would add no more than a hash match, and neither route may wait on
-	// its quota. A title a provider refuses (a status no retry changes, or an answer that is not one) is recorded with
+	// the candidates already rejected for this file. A metered provider that is out here holds back only a title no
+	// cheaper provider has a candidate for: the queue tries theirs first, and the title waits for it only if none
+	// aligns (align). A title a provider refuses (a status no retry changes, or an answer that is not one) is recorded with
 	// the refusal once every other provider answered, so a refusal of that title alone cannot hold up every run.
 	out, meteredOut, refusal, found, tried := false, false, "", 0, 0
 	var pool []Candidate
@@ -855,12 +857,8 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 			}
 			r.alertParked(p, t.path, err)
 		}
-		cands = order(cands, t.release)
-		if r.sampled() { // a subtitle made for this release before any other, however popular
-			sort.SliceStable(cands, func(i, j int) bool { return t.releaseMatched(cands[i]) && !t.releaseMatched(cands[j]) })
-		}
+		cands = t.arrange(order(cands, t.release), r.providers, r.sampled())
 		found += len(cands)
-		cheaper := len(pool) // a metered provider's candidates other than its hash match join only an empty pool
 		for _, c := range cands {
 			if rejected[c.key()] == "aligned" {
 				continue
@@ -897,9 +895,7 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 				rejected[c.key()] = route // the sampled fit skips what the .idx refused
 				r.event(ctx, t.path, outcome{result: status, detail: why, fields: attempt})
 			}
-			if !last || cheaper == 0 || c.HashMatch && c.ours {
-				pool = append(pool, c)
-			}
+			pool = append(pool, c)
 		}
 	}
 	switch {
@@ -1203,9 +1199,11 @@ func (r *run) alignments(ctx context.Context) ([]time.Time, error) {
 	return slices.DeleteFunc(starts, func(s time.Time) bool { return !s.After(day) }), nil
 }
 
-// align is the queue's work on one title: its candidates downloaded one at a time, best first, each only once the one
-// before it failed (an OpenSubtitles download is quota); the reference read from the video once the first arrives (a
-// refused download costs no read); each fitted to it, and one the captions reject given to alass (the rescue).
+// align is the queue's work on one title: its candidates downloaded one at a time in the pool's order, the first
+// maxTries of each provider, each only once the one before it failed (an OpenSubtitles download is quota); the
+// reference read from the video once the first arrives (a refused download costs no read); each fitted to it, and one
+// the captions reject given to alass (the rescue). None aligning while a metered provider is out (its day's downloads
+// spent, or its search skipped for them) leaves the title waiting for it, not refused.
 func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 	var ref *reference
 	defer func() {
@@ -1213,8 +1211,12 @@ func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 			ref.cleanup()
 		}
 	}()
-	incomplete := false
-	for _, c := range pool[:min(len(pool), maxTries)] {
+	incomplete, tries := false, map[string]int{}
+	for _, c := range pool {
+		if tries[c.provider.Name()] == maxTries {
+			continue
+		}
+		tries[c.provider.Name()]++
 		attempt := map[string]any{"provider": c.Source, "candidate": c.Release + " " + c.FileName, "id": c.key(), "file": t.key}
 		txt, err := r.download(ctx, c)
 		switch {
@@ -1273,10 +1275,14 @@ func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 		}
 		return r.write(ctx, t, []byte(out), result, attempt)
 	}
-	if incomplete {
+	if incomplete || slices.ContainsFunc(r.providers, func(p Provider) bool { return metered(p) && parked(p) != nil }) {
 		return outcome{result: "deferred", detail: "a provider was out"}
 	}
-	return outcome{result: "no_aligned_candidate", detail: fmt.Sprintf("%d tried", min(len(pool), maxTries))}
+	n := 0
+	for _, k := range tries {
+		n += k
+	}
+	return outcome{result: "no_aligned_candidate", detail: fmt.Sprintf("%d tried", n)}
 }
 
 // summarise is the run's report: what was written by which route, what waits in the queue, and the cap used.
