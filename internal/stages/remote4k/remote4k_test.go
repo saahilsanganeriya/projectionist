@@ -2,12 +2,15 @@ package remote4k
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -106,12 +109,7 @@ status_file = "` + filepath.Join(statusDir, "STATUS.txt") + `"`)
 	os.WriteFile(filepath.Join(h.Env.FFmpeg.Dir, "dv5.json"), []byte(strings.Replace(string(dv8), `"dv_profile": 8`, `"dv_profile": 5`, 1)), 0o644)
 	ffdir := h.Env.FFmpeg.Dir
 	h.Script(t, "ffprobe", `case "$*" in *Ran*) cat "`+ffdir+`/dv5.json";; *) cat "`+ffdir+`/dv8.json";; esac`+"\n")
-	// Stand-in encoder: records its pid, waits for the test's go-ahead, then writes the output and progress.
-	h.Script(t, "ffmpeg", `echo $$ > "`+ffdir+`/pid"; echo run >> "`+ffdir+`/runs"
-while [ ! -f "`+ffdir+`/go" ]; do sleep 0.01; done
-for a; do prev2=$prev; prev=$a; [ "$prev2" = "-progress" ] && progress=$a; done
-echo out_time_ms=6612000000 > "$progress"; echo encoded > "$prev"
-`)
+	fakeEncoder(t, h)
 
 	h.Plex.Handle("GET", "/playlists", 200, `{"MediaContainer":{"Metadata":[{"ratingKey":"9","title":"Other"},{"ratingKey":"77","title":"Remote 4K"}]}}`)
 	h.Plex.Handle("GET", "/playlists/77/items", 200, `{"MediaContainer":{"Metadata":[
@@ -141,7 +139,7 @@ echo out_time_ms=6612000000 > "$progress"; echo encoded > "$prev"
 	h.Jellyfin.Handle("POST", "/Library/Media/Updated", 500, "") // a failing notify must not fail the run
 	done := make(chan error, 1)
 	var rep stage.Report
-	go func() { done <- (Stage{}).Run(context.Background(), h.Env, &rep) }()
+	go func() { done <- (Stage{}).Run(t.Context(), h.Env, &rep) }() // a failed test cancels it, killing the encoder
 
 	waitFor(t, "encoder started", func() bool {
 		select {
@@ -163,8 +161,13 @@ echo out_time_ms=6612000000 > "$progress"; echo encoded > "$prev"
 	}
 	os.WriteFile(filepath.Join(ffdir, "go"), nil, 0o644)
 	h.Plex.Handle("GET", "/status/sessions", 200, `<MediaContainer size="0"></MediaContainer>`) // guest leaves
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second): // failing here, not at the binary's timeout, lets t.Context kill a stopped encoder
+		t.Fatal("encode never finished after the guest left: not resumed")
 	}
 
 	out := filepath.Join(heat, "Heat (1995) {tmdb-949} - 2160p 14Mbps.mkv")
@@ -201,6 +204,51 @@ echo out_time_ms=6612000000 > "$progress"; echo encoded > "$prev"
 	}
 	if runs, _ := os.ReadFile(filepath.Join(ffdir, "runs")); strings.Count(string(runs), "run") != 1 {
 		t.Fatalf("encoder ran %d times; a finished film must not be re-encoded", strings.Count(string(runs), "run"))
+	}
+}
+
+// Catches: an encode left running after its run is cancelled (a redeploy mid-encode): the run must neither hang on
+// it nor return while it lives.
+func TestCancelKillsTheEncoder(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	heat := filepath.Join(t.TempDir(), "Heat (1995) {tmdb-949}")
+	os.MkdirAll(heat, 0o755)
+	os.WriteFile(filepath.Join(heat, filepath.Base(heat)+".mkv"), []byte("source"), 0o644)
+	h.SetOptions(`work_dir = "` + filepath.Join(t.TempDir(), "work") + `"
+status_file = "` + filepath.Join(t.TempDir(), "STATUS.txt") + `"`)
+	ffdir := h.Env.FFmpeg.Dir
+	dv8, _ := os.ReadFile("../../probe/testdata/dv8_hevc.json")
+	os.WriteFile(filepath.Join(ffdir, "dv8.json"), dv8, 0o644)
+	h.Script(t, "ffprobe", `cat "`+ffdir+`/dv8.json"`+"\n")
+	fakeEncoder(t, h)
+	h.Plex.Handle("GET", "/playlists", 200, `{"MediaContainer":{"Metadata":[{"ratingKey":"77","title":"Remote 4K"}]}}`)
+	h.Plex.Handle("GET", "/playlists/77/items", 200, `{"MediaContainer":{"Metadata":[
+ {"type":"movie","title":"Heat","year":1995,"Media":[{"Part":[{"file":"`+heat+`/Heat (1995) {tmdb-949}.mkv"}]}]}]}}`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- (Stage{}).Run(ctx, h.Env, &stage.Report{}) }()
+	var pid int
+	waitFor(t, "encoder started", func() bool {
+		raw, _ := os.ReadFile(filepath.Join(ffdir, "pid"))
+		pid, _ = strconv.Atoi(strings.TrimSpace(string(raw)))
+		return pid > 0
+	})
+	cancel()
+	// A failing check kills the encoder itself: once its viewer count fails on the cancelled context, the stage
+	// pauses it, so the stand-in cannot notice its parent exit.
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	case <-time.After(10 * time.Second):
+		syscall.Kill(pid, syscall.SIGKILL)
+		t.Fatal("run still waiting on its encoder 10 s after it was cancelled")
+	}
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		syscall.Kill(pid, syscall.SIGKILL)
+		t.Fatalf("encoder %d outlived its cancelled run (kill -0: %v)", pid, err)
 	}
 }
 
@@ -261,6 +309,18 @@ func writeKey(t *testing.T) string {
 	path := filepath.Join(t.TempDir(), "jellyfin_key")
 	os.WriteFile(path, []byte(fake.JellyfinKey), 0o600)
 	return path
+}
+
+// fakeEncoder installs a stand-in ffmpeg that records its pid, waits for the test's go-ahead (a "go" file), then
+// writes the output and progress. It gives up once its parent, the test binary, is gone: nobody is left to give the
+// go-ahead, and the loop orphaned by a failed or killed test once spun for a day.
+func fakeEncoder(t *testing.T, h *fake.Harness) {
+	ffdir := h.Env.FFmpeg.Dir
+	h.Script(t, "ffmpeg", `echo $$ > "`+ffdir+`/pid"; echo run >> "`+ffdir+`/runs"
+while [ ! -f "`+ffdir+`/go" ]; do kill -0 $PPID 2>/dev/null || exit 1; sleep 0.01; done
+for a; do prev2=$prev; prev=$a; [ "$prev2" = "-progress" ] && progress=$a; done
+echo out_time_ms=6612000000 > "$progress"; echo encoded > "$prev"
+`)
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
