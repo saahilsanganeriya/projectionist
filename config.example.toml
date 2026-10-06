@@ -292,6 +292,7 @@ enabled            = false
 every              = "6h"
 dry_run            = true            # judge only; review posters_items, then set false to upload
 budget_usd         = 12              # all judge calls ever (the Anthropic calls before the gateway included); a hard stop
+                                     # for new calls (lost answers may pass it by in_flight x 3 worst cases, ~$0.04)
 max_tokens         = 1024            # reasoning included
 cache_dir          = "/state/posters" # thumbnails
 # One export: items.json and posters/ from export_customizations.py, and the Plex DB backup taken with them. Pointing
@@ -370,7 +371,8 @@ key_file   = "/run/secrets/ai_gateway_api_key"
 in_flight  = 8      # calls in the air across the process
 timeout    = "120s" # per attempt
 attempts   = 4      # 429, 5xx, timeouts and dropped answers are retried with jittered backoff or Retry-After
-park_after = 5      # failed calls in a row before a stage stops calling for the rest of its run (a billing refusal: at once)
+park_after = 5      # failed calls in a row before a stage stops calling for the rest of its run (a billing refusal: at
+                    # once, one alert in all, and one call an hour across the process until the gateway answers)
 
 [llm.tasks.posters]     # the movie, show and season poster judge: vision
 model     = "deepseek/deepseek-v4.1-flash" # until the bake-off (cmd/bakeoff) names the winner

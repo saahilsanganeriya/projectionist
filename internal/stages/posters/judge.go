@@ -102,8 +102,8 @@ var (
 
 // judge decides every title whose candidate set has no verdict: without a call when the rule needs none, else through
 // the AI gateway, as many at once as the client lets into the air (titles on the posters task's model, collections on
-// the collections task's). A task whose calls keep failing, or that the gateway refuses for billing, parks for the rest
-// of the run with one alert.
+// the collections task's). A task whose calls keep failing parks for the rest of the run with one alert; a billing
+// refusal parks it with one alert in all, which a later run or another stage does not raise again.
 func (r *run) judge(ctx context.Context, rows []*row) error {
 	// A call still pending an hour after it was reserved belongs to a process that died mid-call (a call takes minutes
 	// at most), or to a Message Batch from before the gateway, whose results nobody collects now: it may have been
@@ -177,7 +177,13 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 			r.alert("posters: judging %s parked for this run: %v", s.Name(), err)
 		case !billing:
 			billing = true
-			r.alert("posters: judging parked until the AI gateway accepts calls: %v", err)
+			if r.env.LLM.TellBilling(ctx) {
+				r.alert("posters: judging parked until the AI gateway accepts calls (it is tried again hourly; this alert comes "+
+					"once, for every stage that asks a model): %v", err)
+			} else {
+				r.env.Log.Warn("judging parked: the AI gateway still refuses calls for billing (alerted once)", "event",
+					"judge_billing_held", "err", err)
+			}
 		}
 	}
 	return nil

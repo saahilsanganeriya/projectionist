@@ -469,9 +469,10 @@ func TestUnknownOutcomeCounted(t *testing.T) {
 	}
 }
 
-// Catches: a gateway that refuses calls until the owner adds a card raising an alert per title (3,000 of them), the
-// refusal counted against the title as an unusable answer (two of them would leave it unjudged for good), or billed
-// against the budget; and the titles not judged once the gateway accepts calls again.
+// Catches: a gateway that refuses calls until the owner adds a card raising an alert per title (3,000 of them), or
+// again on later runs, or calling it again on each run instead of once an hour; the refusal counted against the title
+// as an unusable answer (two of them would leave it unjudged for good), or billed against the budget, or a call the
+// hold kept back recorded in the ledger; and the titles not judged once the gateway accepts calls again.
 func TestGatewayRefusesForBilling(t *testing.T) {
 	w := collectionWorld(t, "dry_run = true\n", true)
 	w.set(func() { w.billing = true })
@@ -484,6 +485,19 @@ func TestGatewayRefusesForBilling(t *testing.T) {
 		len(w.gateway.Calls()) > 2*w.h.Env.LLM.InFlight() {
 		t.Fatalf("alerts %q; %d calls sent, %d recorded, %d unusable, $%v counted; want one alert, nothing unusable or billed",
 			rep.Alerts, len(w.gateway.Calls()), calls, unusable, spent)
+	}
+	recorded := calls
+	sent := len(w.gateway.Calls())
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	rep = w.run(t)
+	w.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM posters_calls`).Scan(&calls)
+	if len(w.gateway.Calls()) != sent || len(rep.Alerts) != 0 || calls != recorded {
+		t.Fatalf("30 min later, still refused: %d more calls, %d more ledger rows, alerts %q; want none", len(w.gateway.Calls())-sent,
+			calls-recorded, rep.Alerts)
+	}
+	w.h.Now = w.h.Now.Add(time.Hour)
+	if rep := w.run(t); len(w.gateway.Calls()) != sent+1 || len(rep.Alerts) != 0 {
+		t.Fatalf("the hourly try, still refused: %d more calls, alerts %q; want one call and no alert", len(w.gateway.Calls())-sent, rep.Alerts)
 	}
 	w.set(func() { w.billing = false })
 	w.h.Now = w.h.Now.Add(6 * time.Hour)

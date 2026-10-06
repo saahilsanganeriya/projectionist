@@ -22,7 +22,8 @@
 // The key is AI_GATEWAY_API_KEY from the environment, else the file -key-file names (default: [llm] key_file, which
 // on the NAS host is root's: run with sudo); it is never printed. -fake answers every call from an in-process fake
 // gateway (llmtest), which proves the harness and spends nothing. -max-usd stops sending once what was spent plus the
-// next call's worst case would pass it.
+// next call's worst case would pass it; a title not sent is reported apart, not as an invalid answer. The client's
+// catalogue and any billing refusal live in <out>/llm.db, not in the production copy.
 package main
 
 import (
@@ -154,12 +155,16 @@ func run(cfgPath, dbPath, tonightDB, cache, out string, models, tmodels []string
 		lc.API = srv.URL + "/v1"
 	}
 	budget := &spend{max: maxUSD}
-	client := func(st llm.Store) *llm.Client {
-		c := llm.New(lc, st, now)
-		if v := os.Getenv("AI_GATEWAY_API_KEY"); v != "" || fake {
-			c.Key = func() (string, error) { return cmp.Or(v, "fake"), nil }
-		}
-		return c
+	// The client keeps its catalogue and any billing refusal in the run's own store, not in the production copy: a
+	// refusal stored there would hold a bake-off run back for up to an hour after the owner has fixed billing.
+	ls, err := store.Open(filepath.Join(out, "llm.db"))
+	if err != nil {
+		return err
+	}
+	defer ls.Close()
+	ai := llm.New(lc, ls, now)
+	if v := os.Getenv("AI_GATEWAY_API_KEY"); v != "" || fake {
+		ai.Key = func() (string, error) { return cmp.Or(v, "fake"), nil }
 	}
 	var report strings.Builder
 	fmt.Fprintf(&report, "# Bake-off %s\n\nGateway %s%s; key from %s.\n\n", now().Format(time.RFC3339), lc.API,
@@ -170,7 +175,7 @@ func run(cfgPath, dbPath, tonightDB, cache, out string, models, tmodels []string
 			return err
 		}
 		defer st.Close()
-		env := &stage.Env{Log: log.With("stage", "posters"), Store: st, Now: now, Loc: cfg.Location(), LLM: client(st),
+		env := &stage.Env{Log: log.With("stage", "posters"), Store: st, Now: now, Loc: cfg.Location(), LLM: ai,
 			Options: func(v any) error {
 				if err := cfg.StageOptions("posters", v); err != nil || cache == "" {
 					return err
@@ -188,7 +193,7 @@ func run(cfgPath, dbPath, tonightDB, cache, out string, models, tmodels []string
 			return err
 		}
 		defer st.Close()
-		env := &stage.Env{Log: log.With("stage", "tonight"), Store: st, Now: now, Loc: cfg.Location(), LLM: client(st),
+		env := &stage.Env{Log: log.With("stage", "tonight"), Store: st, Now: now, Loc: cfg.Location(), LLM: ai,
 			TMDB:    tmdb.New(tmdb.Options{ReadTokenFile: cfg.TMDB.ReadTokenFile, APIKeyFile: cfg.TMDB.APIKeyFile, CacheTTL: cfg.TMDB.CacheTTL}, st),
 			Options: func(v any) error { return cfg.StageOptions("tonight", v) }}
 		if err := bakeTonight(ctx, env, tmodels, budget, &report); err != nil {
@@ -210,12 +215,13 @@ type sampled struct {
 var textReason = regexp.MustCompile(`(?i)clutter|text-heavy|quote|credit|banner|busy|textless|tagline|billing`)
 
 // sample draws n titles with a verdict of Sonnet's, hard cases first, then movies, seasons and shows, each split
-// between the owner's picks and Plex defaults; the order is a hash of the key, so a rerun draws the same titles.
+// between the owner's picks and Plex defaults; the order is a hash of the key, so a rerun draws the same titles. An
+// owner's pick is never judged now (rule owner_pick), but the verdict keeps the scores Sonnet gave its pool.
 func sample(ctx context.Context, b *posters.Bakeoff, st *store.Store, n int) ([]sampled, error) {
 	rows, err := st.DB().QueryContext(ctx, `SELECT i.key, coalesce(o.state, '') FROM posters_items i
 		LEFT JOIN posters_owner o ON o.key = i.key
 		WHERE i.key NOT LIKE 'collection:%' AND json_extract(i.verdict, '$.model') LIKE '%sonnet%'
-		AND json_array_length(i.cands) >= 2 AND json_extract(i.verdict, '$.rule') IN ('judged', 'kept')`)
+		AND json_array_length(i.cands) >= 2 AND json_extract(i.verdict, '$.rule') IN ('judged', 'kept', 'owner_pick')`)
 	if err != nil {
 		return nil, err
 	}
@@ -337,7 +343,7 @@ func spearman(a, b []float64) float64 {
 
 type judged struct {
 	Key, Why, Error string
-	Valid           bool
+	Sent, Valid     bool // Sent: at least one attempt went to the gateway
 	Scores          map[string]float64
 	Top, SonnetTop  string
 	CostUSD         float64
@@ -365,7 +371,7 @@ func bakePosters(ctx context.Context, env *stage.Env, models []string, n int, bu
 	for _, w := range slices.Sorted(maps.Keys(why)) {
 		fmt.Fprintf(report, "- %s: %d\n", w, why[w])
 	}
-	fmt.Fprintf(report, "\n| model | valid | top-1 = Sonnet's | Spearman (mean) | top pick Sonnet scored ≤ 4 | $ per title | p50 ms | p95 ms |\n|---|---|---|---|---|---|---|---|\n")
+	fmt.Fprintf(report, "\n| model | not sent | valid (of sent) | top-1 = Sonnet's | Spearman (mean) | top pick Sonnet scored ≤ 4 | $ per title sent | p50 ms | p95 ms |\n|---|---|---|---|---|---|---|---|---|\n")
 	all := map[string][]judged{}
 	for _, m := range models {
 		s := env.LLM.Session("posters " + m)
@@ -404,7 +410,7 @@ func judge(ctx context.Context, b *posters.Bakeoff, s *llm.Session, budget *spen
 	}
 	r, err := s.Chat(ctx, req)
 	budget.settle(held, r.CostUSD)
-	j.CostUSD, j.LatencyMS = r.CostUSD, r.Took.Milliseconds()
+	j.Sent, j.CostUSD, j.LatencyMS = r.Attempts > 0, r.CostUSD, r.Took.Milliseconds()
 	if err != nil {
 		j.Error = err.Error()
 		return j
@@ -417,13 +423,18 @@ func judge(ctx context.Context, b *posters.Bakeoff, s *llm.Session, budget *spen
 	return j
 }
 
+// row is the model's line of the report. A title it was never sent (past -max-usd, or held by a billing refusal) is
+// neither an invalid answer nor a $0 title: valid answers and the cost per title count the titles sent.
 func row(model string, res []judged, titles []sampled) string {
-	var valid, agree, low int
+	var sent, valid, agree, low int
 	var rhos []float64
 	var cost float64
 	var lat []int64
 	for i, j := range res {
-		cost += j.CostUSD
+		if j.Sent {
+			sent++
+			cost += j.CostUSD
+		}
 		if !j.Valid {
 			continue
 		}
@@ -468,8 +479,8 @@ func row(model string, res []judged, titles []sampled) string {
 		}
 		return fmt.Sprint(lat[int(math.Ceil(p*float64(len(lat))))-1])
 	}
-	return fmt.Sprintf("| %s | %s | %s | %.2f (%d titles) | %s | $%.5f | %s | %s |", model, pct(valid, len(res)), pct(agree, valid), mean,
-		len(rhos), pct(low, valid), cost/float64(max(1, len(res))), q(0.5), q(0.95))
+	return fmt.Sprintf("| %s | %d | %s | %s | %.2f (%d titles) | %s | $%.5f | %s | %s |", model, len(res)-sent, pct(valid, sent),
+		pct(agree, valid), mean, len(rhos), pct(low, valid), cost/float64(max(1, sent)), q(0.5), q(0.95))
 }
 
 // contactSheet draws, for every title where the model's top pick is not one Sonnet scored highest, Sonnet's pick

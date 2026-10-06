@@ -141,7 +141,9 @@ func TestInFlightBound(t *testing.T) {
 
 // Catches: a call's cost under-counted against a budget: the gateway's own figure ignored, usage priced at a cheaper
 // model than the fallback that answered, the cheaper base price used where a region lists a dearer one, a lost
-// attempt counted as free; and the worst case (the reservation) priced below the dearest model the task may reach.
+// attempt counted as free; the worst case (the reservation) priced below the dearest model the task may reach; and a
+// cost figure in a shape the client does not know (an object, text with units: the documented answer has none) taken
+// for an unreadable answer, asked again and paid twice.
 func TestCost(t *testing.T) {
 	cheap, dear := llmtest.Model{ID: "test/cheap", In: 1, Out: 2}, llmtest.Model{ID: "test/dear", In: 10, Out: 20}
 	tasks := map[string]llm.Task{"t": {Model: "test/cheap", Fallbacks: []string{"test/dear"}}}
@@ -150,10 +152,13 @@ func TestCost(t *testing.T) {
 		answers []llmtest.Answer
 		usd     float64
 	}{
-		{"the gateway's figure", []llmtest.Answer{{Text: "x", In: 1000, Out: 100, Cost: "0.0123"}}, 0.0123},
+		{"the gateway's figure", []llmtest.Answer{{Text: "x", In: 1000, Out: 100, Meta: `{"gateway":{"cost":"$0.0123"}}`}}, 0.0123},
 		{"usage at the model's price", []llmtest.Answer{{Text: "x", In: 1000, Out: 100}}, (1000*1 + 100*2) / 1e6},
+		{"a cost in another shape", []llmtest.Answer{{Text: "x", In: 1000, Out: 100, Meta: `{"gateway":{"cost":{"usd":"9"}}}`}}, (1000*1 + 100*2) / 1e6},
+		{"a cost with units", []llmtest.Answer{{Text: "x", In: 1000, Out: 100, Meta: `{"gateway":{"cost":"9 USD"}}`}}, (1000*1 + 100*2) / 1e6},
+		{"metadata not an object", []llmtest.Answer{{Text: "x", In: 1000, Out: 100, Meta: `"routed"`}}, (1000*1 + 100*2) / 1e6},
 		{"a fallback answered", []llmtest.Answer{{Text: "x", In: 1000, Out: 100, Model: "test/dear"}}, (1000*10 + 100*20) / 1e6},
-		{"a lost attempt at the worst case", []llmtest.Answer{{Drop: true}, {Text: "x", In: 1000, Out: 100, Cost: "0.001"}}, 0.001 + (1000*10+100*20)/1e6},
+		{"a lost attempt at the worst case", []llmtest.Answer{{Drop: true}, {Text: "x", In: 1000, Out: 100, Meta: `{"gateway":{"cost":0.001}}`}}, 0.001 + (1000*10+100*20)/1e6},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -165,8 +170,8 @@ func TestCost(t *testing.T) {
 				t.Fatalf("worst case $%v, %v; want $0.012 (the dear fallback's price)", worst, err)
 			}
 			res, err := s.Chat(context.Background(), ask)
-			if err != nil || math.Abs(res.CostUSD-c.usd) > 1e-12 {
-				t.Fatalf("cost $%v, %v; want $%v", res.CostUSD, err, c.usd)
+			if err != nil || math.Abs(res.CostUSD-c.usd) > 1e-12 || len(g.Calls()) != len(c.answers) {
+				t.Fatalf("cost $%v, %v, %d calls; want $%v in %d", res.CostUSD, err, len(g.Calls()), c.usd, len(c.answers))
 			}
 			if got := g.Calls()[0].Models; len(got) != 1 || got[0] != "test/dear" {
 				t.Fatalf("fallbacks sent %v", got)
@@ -248,6 +253,7 @@ func TestSessionParks(t *testing.T) {
 		t.Fatalf("the next run's refusal: %v; want it dated from the first", s.Parked())
 	}
 	set(false, false)
+	clock = clock.Add(time.Hour) // the next try (TestBillingHold owns the hold)
 	s = c.Session("tonight")
 	if _, err := s.Chat(ctx, ask); err != nil {
 		t.Fatal(err)
@@ -255,8 +261,87 @@ func TestSessionParks(t *testing.T) {
 	set(false, true)
 	s = c.Session("tonight")
 	s.Chat(ctx, ask)
-	if !strings.Contains(s.Parked().Error(), "since 2026-10-06T05:00:00Z") {
+	if !strings.Contains(s.Parked().Error(), "since 2026-10-06T06:00:00Z") {
 		t.Fatalf("a refusal after an answered call: %v; want it dated anew", s.Parked())
+	}
+}
+
+// Catches: a gateway that refuses for billing asked by every run of every stage (tonight runs every 30 min: 48 refused
+// calls and 48 alerts a day) instead of once an hour across the process and its restarts; the hourly try sent by every
+// caller at once; the callers behind a try that was answered held back for the hour; a call the hold kept back moving
+// the next try; and the one alert raised again by a later run, a restart or another stage, or not raised for a new
+// refusal after the gateway answered.
+func TestBillingHold(t *testing.T) {
+	var mu sync.Mutex
+	refuse := true
+	g := llmtest.New(func(int, llm.Request) llmtest.Answer {
+		mu.Lock()
+		defer mu.Unlock()
+		if refuse {
+			return llmtest.Answer{Status: 403, Type: "customer_verification_required", Message: "requires a valid credit card on file"}
+		}
+		return llmtest.Answer{Text: "ok"}
+	})
+	st := &memStore{}
+	clock := time.Date(2026, 10, 5, 23, 0, 0, 0, time.UTC)
+	client := func() *llm.Client { return llmtest.Client(t, g, st, func() time.Time { return clock }, llm.Config{}) }
+	ctx := context.Background()
+	// burst sends 8 calls at once, each on its own session (another task or stage), and returns their errors.
+	burst := func(c *llm.Client) []error {
+		errs := make([]error, 8)
+		var wg sync.WaitGroup
+		for i := range errs {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, errs[i] = c.Session("posters").Chat(ctx, ask)
+			}()
+		}
+		wg.Wait()
+		return errs
+	}
+
+	c := client()
+	_, err := c.Session("tonight").Chat(ctx, ask)
+	if told, again := c.TellBilling(ctx), c.TellBilling(ctx); !errors.Is(err, llm.ErrBilling) || !told || again || len(g.Calls()) != 1 {
+		t.Fatalf("the first refusal: %v, %d calls, told %v then %v; want one call and one alert", err, len(g.Calls()), told, again)
+	}
+	clock = clock.Add(30 * time.Minute) // the next tonight run, after a restart
+	c = client()
+	s := c.Session("posters")
+	parked := s.Parked()
+	_, err = s.Chat(ctx, ask)
+	if !errors.Is(parked, llm.ErrBilling) || !errors.Is(err, llm.ErrBilling) || len(g.Calls()) != 1 || c.TellBilling(ctx) ||
+		!strings.Contains(parked.Error(), "since 2026-10-05T23:00:00Z") || !strings.Contains(parked.Error(), "tried again from 2026-10-06T00:00:00Z") {
+		t.Fatalf("30 min later: parked %v, %v, %d calls; want parked before any call, none sent, no second alert", parked, err, len(g.Calls()))
+	}
+	clock = clock.Add(31 * time.Minute) // past the hour since the refusal
+	for i, err := range burst(c) {
+		if !errors.Is(err, llm.ErrBilling) {
+			t.Fatalf("call %d of the hourly burst: %v; want a billing refusal", i, err)
+		}
+	}
+	if len(g.Calls()) != 2 || c.TellBilling(ctx) {
+		t.Fatalf("the hourly try: %d calls in all; want 2 (one try for 8 callers), no second alert", len(g.Calls()))
+	}
+	clock = clock.Add(61 * time.Minute)
+	mu.Lock()
+	refuse = false
+	mu.Unlock()
+	for i, err := range burst(c) {
+		if err != nil {
+			t.Fatalf("call %d behind an answered try: %v", i, err)
+		}
+	}
+	if len(g.Calls()) != 10 {
+		t.Fatalf("%d calls in all; want 10: the try and the 7 behind it", len(g.Calls()))
+	}
+	mu.Lock()
+	refuse = true
+	mu.Unlock()
+	c.Session("tonight").Chat(ctx, ask)
+	if len(g.Calls()) != 11 || !c.TellBilling(ctx) {
+		t.Fatalf("a new refusal after an answered call: %d calls; want it sent and told", len(g.Calls()))
 	}
 }
 

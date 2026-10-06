@@ -87,9 +87,18 @@ second client.
   minutes fails the call at once; any other answer (400, 401, 404) fails it at once;
 - a stage's run parks a task after `park_after` (5) failed calls in a row: no more calls this run, one alert;
 - a billing refusal (402; or a 403 for no card on file, `customer_verification_required`, or for a model outside the
-  free tier, "Free tier users do not have access to this model") parks the task at once with one alert per run naming since when the gateway has refused calls (kept in the store until a call
-  is answered again). It is no model failure: it bills nothing, holds nothing against a budget, and does not count
-  towards a title's unusable answers, so the next run simply asks again;
+  free tier, "Free tier users do not have access to this model") parks the task at once. It is kept in the store
+  (since when, the last refused call, whether it was told) until a call is answered again, and while it stands:
+  - one alert in all, naming since when, raised by the first stage that meets it (`TellBilling`, the stored "told"
+    pattern of the scheduler's once-only alerts); later runs, other stages and restarts only log
+    `judge_billing_held` / `tonight_billing_held`;
+  - no call is sent but one an hour (`billingRecheck`), across the process and its restarts: every other session is
+    parked before it calls (posters writes no ledger row for it), and the callers that reach the hourly try wait for
+    its answer, going on if it was answered and held if it was refused again (callers already waiting then get a $0
+    `failed` ledger row). So a refused account costs at most 24 free calls a day, and the stages resume within an
+    hour of the owner fixing billing;
+  - it is no model failure: it bills nothing, holds nothing against a budget, and does not count towards a title's
+    unusable answers;
 - an answer that cannot be read is asked once more in the same run; posters then marks the title unjudged (two
   unusable answers, as before); tonight keeps its one-retry rule. A "reason" inside "scores" is ignored, not fatal.
 
@@ -100,6 +109,18 @@ case (the input estimate, at 3 bytes a token plus each image's 28-pixel patches,
 the dearest price among the task's models) is reserved against the stage's cap: posters' `budget_usd` and
 `collection_budget_usd`, tonight's `daily_cap_usd`. An attempt sent in full whose answer was lost counts at that worst
 case even when a retry answers. `posters_calls` records the model that answered, its tokens and its cost.
+The reservation is one attempt's worst case, as specified, so a cap is hard for new calls but not for lost answers: a
+call that loses answers after sending them in full counts each lost attempt at its worst case, so the spend can pass the
+cap by at most `in_flight` × (`attempts` − 1) worst cases, and the next call is then refused. For posters on
+`deepseek/deepseek-v4.1-flash` that is 8 × 3 × $0.0016 ≈ $0.04 (a six-candidate title estimates about 1,270 input
+tokens: 387 for the prompt, 6 × 126 image patches for 252×392 thumbnails, the framing; plus all 1,024 output tokens, at
+$0.30 / $1.20 per million), and about $0.09 on the dearest bake-off model, `alibaba/qwen3.8-27b` ($0.50 / $3.00).
+tonight's pair is sized the same way and logs `tonight_over_cap` when lost answers pass it.
+
+The cost figure is read from `provider_metadata.gateway.cost` (the message's, else the answer's) when it is a number or
+a decimal string, with or without "$". The Chat Completions docs (fetched 2026-10-06) show no cost field at all, so
+usually the usage price applies; any other shape there (an object, text with units, a metadata that is not an object)
+counts as no figure, never as an unreadable answer that would be asked again and paid twice.
 
 **The bake-off** (`cmd/bakeoff`, a tool, not a test) sends each candidate model exactly what the stage would: 60 titles
 drawn from a copy of the production store with stored Sonnet verdicts (owner picks and Plex defaults; uploads are never
@@ -108,14 +129,18 @@ pool with a non-English poster, verdicts that turned on text or clutter); and to
 It reports per model: % valid answers, top-1 agreement with Sonnet (a tie with Sonnet's pick agrees), the mean Spearman
 of the scores, how often its top pick is one Sonnet scored 4 or less, cost per title, p50/p95 latency, and a contact
 sheet of its disagreements; for tonight, validity and the picks with their reasons. Its doc comment has the commands;
-`-fake` runs it on the fake gateway, and `-max-usd` (default $1) caps a live run.
+`-fake` runs it on the fake gateway, and `-max-usd` (default $1) caps a live run. A title not sent (past `-max-usd`, or
+held by a billing refusal) is counted in a "not sent" column, never as an invalid answer or a $0 title: validity and
+cost per title count the titles sent. The owner's picks are drawn with rule `owner_pick` too (fix/batch-1 stores them
+so, Sonnet's scores kept). The client keeps its catalogue and any billing refusal in `<out>/llm.db`, not in the
+production copy, so a refusal stored there cannot hold a run back after billing is fixed.
 
 **Live status: BLOCKED.** `GET /v1/models` answers (409 models, 2026-10-05). `POST /v1/chat/completions` was refused
 with HTTP 403 `customer_verification_required` ("requires a valid credit card on file", the lead's call, 2026-10-05
 16:2x PDT), and the one call made from this branch (2026-10-06T00:03:02Z, `deepseek/deepseek-v4-flash-0731`, 8 tokens)
 with HTTP 403 `no_providers_available` (`RestrictedModelsError`): "Free tier users do not have access to this model.
 Upgrade to paid credits". So the account now needs paid credits, not only a card. Both read as a billing refusal: the
-stages park on it with one alert per run. Mac `llm-gateway-box/evidence/live-call-20261006T0003Z.json`.
+stages park on it with one alert in all and try the gateway again once an hour. Mac `llm-gateway-box/evidence/live-call-20261006T0003Z.json`.
 
 ## Before the first deploy of this image
 
@@ -166,5 +191,6 @@ stages park on it with one alert per run. Mac `llm-gateway-box/evidence/live-cal
 ## Merge preview for the branches in flight (against main at 79fc925)
 
 No branch with a row above is waiting. `git merge-tree --write-tree --name-only main <branch>` lists no conflicted file for
-tweak/subs-sampled (38d5f4b) and tweak/subs-quick (909dab9, rejected). llm/gateway (f4420c7) conflicts in
-`docs/architecture.md` and in posters' `judge.go`, `posters.go` and `posters_test.go`, which fix/batch-1 also changed.
+tweak/subs-sampled (38d5f4b) and tweak/subs-quick (909dab9, rejected). llm/gateway has merged main at 58aa0ba (merge
+3ef76d6: the conflicts in `docs/architecture.md`, `docs/STAGES.md` and posters' `judge.go`, `posters.go` and
+`posters_test.go` resolved there), so it merges into main without conflicts.

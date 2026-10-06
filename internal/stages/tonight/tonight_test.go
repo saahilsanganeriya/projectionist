@@ -888,7 +888,8 @@ func TestLostAnswerStaysCounted(t *testing.T) {
 }
 
 // Catches: a gateway that refuses calls until the owner adds a card counted as spend (the day's cap used up by
-// nothing), its alert missing since when calls are refused, or the next run not asking again (the refusal is free).
+// nothing), its alert missing since when calls are refused, the alert and the call repeated every 30 minutes, or the
+// picks not made once the gateway is tried again and answers.
 func TestGatewayRefusesForBilling(t *testing.T) {
 	w := newWorld(t, "", 0)
 	refuse := true
@@ -904,11 +905,15 @@ func TestGatewayRefusesForBilling(t *testing.T) {
 		!strings.Contains(rep.Alerts[0], "refused calls since 2026-10-05T15:00:00Z") {
 		t.Fatalf("%d calls, $%v spent, alerts %q; want one free call and one dated alert", w.ai.calls(), w.state(t).Spend["2026-10-05"], rep.Alerts)
 	}
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	if rep := w.run(t); w.ai.calls() != 1 || len(rep.Alerts) != 0 {
+		t.Fatalf("30 min later, still refused: %d calls, alerts %q; want no call and no second alert", w.ai.calls(), rep.Alerts)
+	}
 	refuse = false
 	w.ai.script(answer3(389, 346, 655))
 	w.h.Now = w.h.Now.Add(30 * time.Minute)
 	if rep := w.run(t); len(rep.Alerts) != 0 || len(w.state(t).Picks) != 3 {
-		t.Fatalf("once the gateway accepts calls: alerts %q, picks %v", rep.Alerts, w.state(t).Picks)
+		t.Fatalf("an hour after the refusal, the gateway answering: alerts %q, picks %v", rep.Alerts, w.state(t).Picks)
 	}
 }
 

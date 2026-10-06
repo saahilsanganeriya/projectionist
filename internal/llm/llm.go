@@ -13,7 +13,8 @@
 //   - a Session parks after park_after (5) failed calls in a row, and at once when the gateway refuses for billing
 //     (402, or a 403 for no card on file or a model outside the free tier): a parked session makes no more calls, and
 //     the billing refusal is no model failure and bills nothing. The refusal is kept in the store until a call is
-//     answered again.
+//     answered again; meanwhile no call is sent but one an hour (billingRecheck), across the process and its restarts,
+//     and the stages raise one alert for it in all (TellBilling).
 //
 // Errors never carry the key or a request body.
 package llm
@@ -26,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"math/rand/v2"
 	"net/http"
 	"net/url"
@@ -135,13 +137,15 @@ type Client struct {
 	cat   catalogue
 
 	blockMu sync.Mutex
-	blocked *blocked // nil until read from the store
+	blocked *blocked      // nil until read from the store
+	probe   chan struct{} // held by the one call that tries a refusing gateway again
 }
 
 func New(cfg Config, st Store, now func() time.Time) *Client {
 	cfg = cfg.withDefaults()
 	return &Client{
 		cfg: cfg, store: st, now: now, HTTP: &http.Client{}, sem: make(chan struct{}, cfg.InFlight), Backoff: jittered,
+		probe: make(chan struct{}, 1),
 		Key: func() (string, error) {
 			b, err := os.ReadFile(cfg.KeyFile)
 			return strings.TrimSpace(string(b)), err
@@ -277,49 +281,52 @@ type Result struct {
 	Took        time.Duration
 }
 
-// completion is the gateway's answer; the cost sits in provider_metadata.gateway.cost, a number or a decimal string.
+// completion is the gateway's answer. Its documented shape has no cost; a figure in provider_metadata.gateway.cost
+// (the AI SDK's name for it) is used when present.
 type completion struct {
 	Model   string `json:"model"`
 	Choices []struct {
 		Message struct {
-			Content          *string  `json:"content"`
-			ProviderMetadata metadata `json:"provider_metadata"`
+			Content          *string         `json:"content"`
+			ProviderMetadata json.RawMessage `json:"provider_metadata"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
-	Usage            Usage    `json:"usage"`
-	ProviderMetadata metadata `json:"provider_metadata"`
+	Usage            Usage           `json:"usage"`
+	ProviderMetadata json.RawMessage `json:"provider_metadata"`
 }
 
-type metadata struct {
-	Gateway struct {
-		Cost *usd `json:"cost"`
-	} `json:"gateway"`
-}
-
-type usd float64
-
-func (u *usd) UnmarshalJSON(b []byte) error {
-	f, err := strconv.ParseFloat(strings.Trim(string(b), `"$`), 64)
-	*u = usd(f)
-	return err
-}
-
-// cost is the gateway's own figure for the answer, when it gives one.
+// cost is the gateway's own figure for the answer: a number, or a decimal string with or without "$". Any other shape
+// counts as no figure, never as an unreadable answer (which would be asked again and paid twice).
 func (c completion) cost() (float64, bool) {
-	for _, m := range []metadata{c.firstMeta(), c.ProviderMetadata} {
-		if m.Gateway.Cost != nil {
-			return float64(*m.Gateway.Cost), true
+	metas := []json.RawMessage{c.ProviderMetadata}
+	if len(c.Choices) > 0 {
+		metas = append([]json.RawMessage{c.Choices[0].Message.ProviderMetadata}, metas...)
+	}
+	for _, raw := range metas {
+		var m struct {
+			Gateway struct {
+				Cost any `json:"cost"`
+			} `json:"gateway"`
+		}
+		if json.Unmarshal(raw, &m) != nil {
+			continue
+		}
+		var f float64
+		var err error
+		switch v := m.Gateway.Cost.(type) {
+		case float64:
+			f = v
+		case string:
+			f, err = strconv.ParseFloat(strings.TrimPrefix(strings.TrimSpace(v), "$"), 64)
+		default:
+			continue
+		}
+		if err == nil && f >= 0 && !math.IsInf(f, 0) { // NaN fails f >= 0
+			return f, true
 		}
 	}
 	return 0, false
-}
-
-func (c completion) firstMeta() metadata {
-	if len(c.Choices) == 0 {
-		return metadata{}
-	}
-	return c.Choices[0].Message.ProviderMetadata
 }
 
 // ---- errors ----
@@ -378,9 +385,16 @@ func (s *Session) Model() string { return s.task.Model }
 // Name is the task's.
 func (s *Session) Name() string { return s.name }
 
+// Parked says why the session makes no more calls; nil while it may. A billing refusal another session met parks it
+// too, until the gateway is due to be tried again.
 func (s *Session) Parked() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.parked == nil {
+		if b := s.c.billing(context.Background()); b.held(s.c.now()) {
+			s.parked = parkedForBilling(b.Since, b.refusal())
+		}
+	}
 	return s.parked
 }
 
@@ -427,6 +441,12 @@ func (s *Session) Chat(ctx context.Context, req Request) (Result, error) {
 		s.settle(ctx, err)
 		return Result{}, err
 	}
+	release, err := s.c.admit(ctx)
+	if err != nil {
+		s.settle(ctx, err)
+		return Result{}, err
+	}
+	defer release()
 	models := s.models()
 	req.Model, req.Models = models[0], models[1:]
 	effort := req.Effort
@@ -473,7 +493,7 @@ func (s *Session) settle(ctx context.Context, err error) {
 		s.fails = 0
 	case s.parked != nil || ctx.Err() != nil:
 	case errors.Is(err, ErrBilling):
-		s.parked = fmt.Errorf("%w: the gateway has refused calls since %s: %w", ErrParked, since.Format(time.RFC3339), err)
+		s.parked = parkedForBilling(since, err)
 	default:
 		if s.fails++; s.fails >= s.c.cfg.ParkAfter {
 			s.parked = fmt.Errorf("%w after %d failed calls in a row; the last: %w", ErrParked, s.fails, err)
@@ -481,14 +501,37 @@ func (s *Session) settle(ctx context.Context, err error) {
 	}
 }
 
-// blocked is a billing refusal, kept in the store until a call is answered again.
+func parkedForBilling(since time.Time, err error) error {
+	return fmt.Errorf("%w: the gateway has refused calls since %s: %w", ErrParked, since.Format(time.RFC3339), err)
+}
+
+// billingRecheck is how often a gateway that refuses for billing is tried again: by one call, which the others wait
+// for. A refused call costs nothing; the hold keeps every run of every stage from asking (tonight runs every 30 min).
+const billingRecheck = time.Hour
+
+// blocked is a billing refusal, kept in the store until a call is answered again: since when, when a call was last
+// refused (the next try is due billingRecheck later), and whether a stage has raised its one alert.
 type blocked struct {
 	Since   time.Time `json:"since,omitzero"`
+	Tried   time.Time `json:"tried,omitzero"`
+	Told    bool      `json:"told,omitempty"`
 	Message string    `json:"message,omitempty"`
+}
+
+// held says the gateway refuses for billing and is not yet due to be tried again.
+func (b blocked) held(now time.Time) bool {
+	return !b.Since.IsZero() && now.Before(b.Tried.Add(billingRecheck))
+}
+
+// refusal is the error of a call the hold kept from being sent.
+func (b blocked) refusal() error {
+	return fmt.Errorf("%w: not sent, the gateway is tried again from %s; its last answer: %s", ErrBilling,
+		b.Tried.Add(billingRecheck).Format(time.RFC3339), b.Message)
 }
 
 const storeStage = "llm"
 
+// loadBlocked needs blockMu held.
 func (c *Client) loadBlocked(ctx context.Context) *blocked {
 	if c.blocked == nil {
 		c.blocked = &blocked{}
@@ -499,13 +542,49 @@ func (c *Client) loadBlocked(ctx context.Context) *blocked {
 	return c.blocked
 }
 
-// block records a billing refusal and returns since when the gateway has refused calls.
+func (c *Client) billing(ctx context.Context) blocked {
+	c.blockMu.Lock()
+	defer c.blockMu.Unlock()
+	return *c.loadBlocked(ctx)
+}
+
+// admit lets a call go. While the gateway refuses for billing, none goes until the next try is due, and then one at
+// a time: the first is the try, and the rest wait for its answer, going on if it was answered and held if it was
+// refused again. release ends the call's turn, after its outcome is recorded.
+func (c *Client) admit(ctx context.Context) (release func(), err error) {
+	switch b := c.billing(ctx); {
+	case b.Since.IsZero():
+		return func() {}, nil
+	case b.held(c.now()):
+		return nil, b.refusal()
+	}
+	select {
+	case c.probe <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	switch b := c.billing(ctx); {
+	case b.Since.IsZero(): // the try it waited for was answered
+		<-c.probe
+		return func() {}, nil
+	case b.held(c.now()): // and refused again
+		<-c.probe
+		return nil, b.refusal()
+	}
+	return func() { <-c.probe }, nil
+}
+
+// block records a billing refusal and returns since when the gateway has refused calls. Only a refusal the gateway
+// sent moves the next try; a call the hold kept back changes nothing.
 func (c *Client) block(ctx context.Context, err error) time.Time {
 	c.blockMu.Lock()
 	defer c.blockMu.Unlock()
 	b := c.loadBlocked(ctx)
-	if b.Since.IsZero() {
-		*b = blocked{Since: c.now(), Message: err.Error()}
+	if api := (*APIError)(nil); errors.As(err, &api) {
+		if b.Since.IsZero() {
+			b.Since = c.now()
+		}
+		b.Tried, b.Message = c.now(), err.Error()
 		c.store.PutJSON(context.WithoutCancel(ctx), storeStage, "blocked", b)
 	}
 	return b.Since
@@ -518,6 +597,20 @@ func (c *Client) unblock(ctx context.Context) {
 		*b = blocked{}
 		c.store.PutJSON(context.WithoutCancel(ctx), storeStage, "blocked", b)
 	}
+}
+
+// TellBilling is true once per billing refusal, for the stage that raises the one alert about it, and false after,
+// until a call is answered and the gateway refuses anew. The mark is kept in the store with the refusal.
+func (c *Client) TellBilling(ctx context.Context) bool {
+	c.blockMu.Lock()
+	defer c.blockMu.Unlock()
+	b := c.loadBlocked(ctx)
+	if b.Since.IsZero() || b.Told {
+		return false
+	}
+	b.Told = true
+	c.store.PutJSON(context.WithoutCancel(ctx), storeStage, "blocked", b)
+	return true
 }
 
 // ---- transport ----

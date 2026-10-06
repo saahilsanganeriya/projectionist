@@ -133,11 +133,18 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 
 	day := pickDay(env.Now(), loc, after)
 	if st.Day != day {
-		if err := pickFilms(ctx, env, rep, opt, &st, day, rss, pm, jm, save); err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
+		switch err := pickFilms(ctx, env, rep, opt, &st, day, rss, pm, jm, save); {
+		case err == nil:
+		case ctx.Err() != nil:
+			return ctx.Err()
+		case !errors.Is(err, llm.ErrBilling):
 			rep.Alert("tonight: no new picks for %s: %v", day, err)
+		case env.LLM.TellBilling(ctx):
+			rep.Alert("tonight: no new picks for %s, nor later, until the AI gateway accepts calls (it is tried again hourly; "+
+				"this alert comes once, for every stage that asks a model): %v", day, err)
+		default:
+			env.Log.Warn("no new picks: the AI gateway still refuses calls for billing (alerted once)", "event", "tonight_billing_held",
+				"day", day, "err", err)
 		}
 	}
 	if err := save(); err != nil {
@@ -428,6 +435,9 @@ func Today(ctx context.Context, env *stage.Env) (llm.Request, func(text string) 
 func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, st *state, day string, rss rssCache,
 	pm, jm idMap, save func() error) error {
 	s := env.LLM.Session("tonight")
+	if err := s.Parked(); err != nil { // a billing refusal that holds: no call would be sent
+		return err
+	}
 	pc, err := preparePick(ctx, env, opt, st, day, rss, pm, jm, s)
 	if err != nil {
 		return err
