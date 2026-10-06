@@ -981,8 +981,10 @@ func (r *run) sampledFit(ctx context.Context, t *title, pool []Candidate, reject
 				return outcome{}, false
 			}
 		}
-		fit := fitSamples(cues(txt), smp.samples)
+		lo, hi := smp.span()
+		fit := fitSamples(cues(txt), smp.samples, lo, hi)
 		attempt["reference"], attempt["ratio"], attempt["offset_ms"] = smp.label(), fit.Ratio, math.Round(fit.Offset*1000)
+		attempt["unseen_lines"] = fit.Unseen
 		attempt["window_offsets_ms"], attempt["evidence"] = rounded(fit.Offsets, 1000, 1), rounded(fit.Evidence, 10, 0.1)
 		attempt["score"], attempt["runner_up"], attempt["windows"] = math.Round(fit.Score), math.Round(fit.RunnerUp), smp.starts()
 		attempt["sample_bytes"], attempt["sample_disk_bytes"] = smp.read, smp.disk

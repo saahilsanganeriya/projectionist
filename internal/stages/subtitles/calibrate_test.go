@@ -171,6 +171,7 @@ func TestCalibrate(t *testing.T) {
 		if pt.truth == nil {
 			continue
 		}
+		lo, hi := pt.windows[0].start, pt.windows[len(pt.windows)-1].start+pt.windows[len(pt.windows)-1].dur
 		spans := cues(pt.cand)
 		tr, to, ok := truthFit(spans, pt.truth)
 		if !ok {
@@ -198,7 +199,7 @@ func TestCalibrate(t *testing.T) {
 						}
 					}
 				}
-				f := fitSamples(c, smp)
+				f := fitSamples(c, smp, lo, hi)
 				if kind == "speech" {
 					all = append(all, res{f, v.cut == 0})
 				}
@@ -225,7 +226,7 @@ func TestCalibrate(t *testing.T) {
 				if other.name == pt.name || other.cand == "" {
 					continue
 				}
-				f := fitSamples(cues(other.cand), smp)
+				f := fitSamples(cues(other.cand), smp, lo, hi)
 				if kind == "speech" {
 					all = append(all, res{f, false})
 				}

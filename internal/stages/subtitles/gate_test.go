@@ -376,7 +376,7 @@ func TestGateFit(t *testing.T) {
 	r := &run{env: h.Env, opt: Options{SampleWindows: 4, SampleLength: 90 * time.Second}, rep: &stage.Report{}, alerted: map[string]bool{}}
 	os.MkdirAll(filepath.Join(os.Getenv("GATE_OUT"), "fit"), 0o755)
 	var b strings.Builder
-	b.WriteString("id\treference\tratio\toffset_ms\twindow_offsets_ms\tevidence\trefused\tread_bytes\n")
+	b.WriteString("id\treference\tratio\toffset_ms\twindow_offsets_ms\tevidence\trefused\tread_bytes\tunseen_lines\n")
 	var smp *sampler
 	var ti *title
 	var why string
@@ -406,9 +406,10 @@ func TestGateFit(t *testing.T) {
 			continue
 		}
 		raw, _ := os.ReadFile(f[2])
-		fit := fitSamples(cues(string(raw)), smp.samples)
-		fmt.Fprintf(&b, "%s\t%s\t%.6f\t%.0f\t%v\t%v\t%s\t%d\n", f[0], smp.label(), fit.Ratio, fit.Offset*1000, rounded(fit.Offsets, 1000, 1),
-			rounded(fit.Evidence, 10, 0.1), fit.Refused, ti.disk)
+		lo, hi := smp.span()
+		fit := fitSamples(cues(string(raw)), smp.samples, lo, hi)
+		fmt.Fprintf(&b, "%s\t%s\t%.6f\t%.0f\t%v\t%v\t%s\t%d\t%d\n", f[0], smp.label(), fit.Ratio, fit.Offset*1000, rounded(fit.Offsets, 1000, 1),
+			rounded(fit.Evidence, 10, 0.1), fit.Refused, ti.disk, fit.Unseen)
 		if fit.Refused == "" {
 			gateWrite(t, filepath.Join("fit", f[0]+".srt"), retime(string(raw), fit.Ratio, fit.Offset))
 		}

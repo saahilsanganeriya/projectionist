@@ -81,7 +81,9 @@ func speechSamples(starts []float64, wins []sampleWindow) []sample {
 // Catches each guard of the sampled fit: a shift, a PAL speed-up or a 23.976/24 change not recovered (from captions or
 // from speech), another film's subtitle or another cut's written (the difference in the middle, or near either end of
 // a film or an episode, between the 3 % edge and the windows next to it), a window with too few matched lines
-// accepted, and a ratio the windows cannot tell from another (all four within six minutes) taken anyway.
+// accepted, a ratio the windows cannot tell from another (all four within six minutes) taken anyway, and a subtitle
+// written with more lines than a quiet stretch holds in the edge stretch a last window moved inward from (two windows,
+// 14 lines allowed) never read.
 func TestFitSamples(t *testing.T) {
 	const film = 3000.0
 	truth := dense(1000, 7)
@@ -115,29 +117,44 @@ func TestFitSamples(t *testing.T) {
 		fewCues = append(fewCues, c)
 	}
 	close := []sampleWindow{{1000, 90}, {1090, 90}, {1180, 90}, {1270, 90}}
+	inward := append(wins[:3:3], sampleWindow{wins[3].start - 180, 90}) // the last window moved inward twice
+	skipped, hi := inward[3].start+90, wins[3].start+wins[3].dur
+	var hushed []float64 // the truth with only 14 lines, 12 s apart, in the 180 s it skipped
+	for _, c := range truth {
+		if c < skipped || c >= hi {
+			hushed = append(hushed, c)
+		}
+	}
+	for k := range 14 {
+		hushed = append(hushed, skipped+6+12*float64(k))
+	}
+	slices.Sort(hushed)
 	type fitCase struct {
 		name          string
 		cues          []span
 		samples       []sample
 		ratio, offset float64
 		refused       string
+		layout        []sampleWindow // where the windows were laid out (wins when nil)
 	}
 	cases := []fitCase{
-		{"captions, 7.3 s late", cueSpans(truth, 1, 7.3), captionSamples(truth, wins), 1, 7.3, ""},
-		{"captions, PAL", cueSpans(truth, 25/23.976, -0.4), captionSamples(truth, wins), 25 / 23.976, -0.4, ""},
-		{"captions, 23.976 against 24", cueSpans(truth, 23.976/24, 1.2), captionSamples(truth, wins), 23.976 / 24, 1.2, ""},
-		{"captions, another film", cueSpans(dense(1000, 11), 1, 0), captionSamples(truth, wins), 0, 0, "lacks evidence"},
-		{"captions, another cut", cueSpans(truth, 1, 0), captionSamples(cut, wins), 0, 0, "window 3 lacks evidence"},
-		{"captions, a drift", cueSpans(truth, 1, 0), captionSamples(drift, wins), 0, 0, "disagree"},
-		{"captions, a thin window", cueSpans(truth, 1, 0), thin, 0, 0, "window 3 lacks evidence"},
-		{"captions, a window of five lines", cueSpans(truth, 1, 0), five, 0, 0, "window 2 lacks evidence"},
-		{"captions, ratio undecided", cueSpans(truth, 1, 0), captionSamples(truth, close), 0, 0, "another frame-rate ratio"},
-		{"speech, 3.1 s early", cueSpans(truth, 1, -3.1), speechSamples(truth, wins), 1, -3.1, ""},
-		{"speech, PAL", cueSpans(truth, 25/23.976, 0.6), speechSamples(truth, wins), 25 / 23.976, 0.6, ""},
-		{"speech, another film", cueSpans(dense(1000, 11), 1, 0), speechSamples(truth, wins), 0, 0, "lacks evidence"},
-		{"speech, a window of five lines", fewCues, speechSamples(truth, wins), 0, 0, "window 2 lacks evidence"},
-		{"speech, another cut", cueSpans(truth, 1, 0), speechSamples(cut, wins), 0, 0, "lacks evidence"},
-		{"speech, a drift", cueSpans(truth, 1, 0), speechSamples(drift, wins), 0, 0, "disagree"},
+		{"captions, 7.3 s late", cueSpans(truth, 1, 7.3), captionSamples(truth, wins), 1, 7.3, "", nil},
+		{"captions, PAL", cueSpans(truth, 25/23.976, -0.4), captionSamples(truth, wins), 25 / 23.976, -0.4, "", nil},
+		{"captions, 23.976 against 24", cueSpans(truth, 23.976/24, 1.2), captionSamples(truth, wins), 23.976 / 24, 1.2, "", nil},
+		{"captions, another film", cueSpans(dense(1000, 11), 1, 0), captionSamples(truth, wins), 0, 0, "lacks evidence", nil},
+		{"captions, another cut", cueSpans(truth, 1, 0), captionSamples(cut, wins), 0, 0, "window 3 lacks evidence", nil},
+		{"captions, a drift", cueSpans(truth, 1, 0), captionSamples(drift, wins), 0, 0, "disagree", nil},
+		{"captions, a thin window", cueSpans(truth, 1, 0), thin, 0, 0, "window 3 lacks evidence", nil},
+		{"captions, a window of five lines", cueSpans(truth, 1, 0), five, 0, 0, "window 2 lacks evidence", nil},
+		{"captions, ratio undecided", cueSpans(truth, 1, 0), captionSamples(truth, close), 0, 0, "another frame-rate ratio", nil},
+		{"speech, 3.1 s early", cueSpans(truth, 1, -3.1), speechSamples(truth, wins), 1, -3.1, "", nil},
+		{"speech, PAL", cueSpans(truth, 25/23.976, 0.6), speechSamples(truth, wins), 25 / 23.976, 0.6, "", nil},
+		{"speech, another film", cueSpans(dense(1000, 11), 1, 0), speechSamples(truth, wins), 0, 0, "lacks evidence", nil},
+		{"speech, a window of five lines", fewCues, speechSamples(truth, wins), 0, 0, "window 2 lacks evidence", nil},
+		{"speech, another cut", cueSpans(truth, 1, 0), speechSamples(cut, wins), 0, 0, "lacks evidence", nil},
+		{"speech, a drift", cueSpans(truth, 1, 0), speechSamples(drift, wins), 0, 0, "disagree", nil},
+		{"captions, the last window moved inward over 60 lines", cueSpans(truth, 1, 0), captionSamples(truth, inward), 0, 0, "lines in the edge stretches", nil},
+		{"captions, the last window moved inward over 14 lines", cueSpans(hushed, 1, 0), captionSamples(hushed, inward), 1, 0, "", nil},
 	}
 	for _, dur := range []float64{7200, 1320} { // a film and an episode: another cut 4 s longer from 8 % or from 92 %
 		w, truth := sampleWindowsFor(dur, 4, 90), dense(int(dur/3), 7)
@@ -149,12 +166,16 @@ func TestFitSamples(t *testing.T) {
 				}
 			}
 			name := fmt.Sprintf("%.0f s, another cut from %.0f %%", dur, 100*at)
-			cases = append(cases, fitCase{"captions, " + name, cueSpans(truth, 1, 0), captionSamples(jumped, w), 0, 0, refused},
-				fitCase{"speech, " + name, cueSpans(truth, 1, 0), speechSamples(jumped, w), 0, 0, refused})
+			cases = append(cases, fitCase{"captions, " + name, cueSpans(truth, 1, 0), captionSamples(jumped, w), 0, 0, refused, w},
+				fitCase{"speech, " + name, cueSpans(truth, 1, 0), speechSamples(jumped, w), 0, 0, refused, w})
 		}
 	}
 	for _, c := range cases {
-		f := fitSamples(c.cues, c.samples)
+		layout := c.layout
+		if layout == nil {
+			layout = wins
+		}
+		f := fitSamples(c.cues, c.samples, layout[0].start, layout[3].start+layout[3].dur)
 		switch {
 		case c.refused != "" && !strings.Contains(f.Refused, c.refused):
 			t.Errorf("%s: refused %q (fit %+v), want refused for %q", c.name, f.Refused, f, c.refused)

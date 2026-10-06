@@ -18,9 +18,10 @@ package subtitles
 // frames voiced) cannot judge: it is replaced by the stretch next to it on the side of the runtime's middle, at most
 // maxExtra times per title.
 //
-// What no check sees: the first and last 3 %, and a difference inside the outer half of an edge window (that window's
-// majority sets its offset). For a two-hour film that is about 4 minutes at each end, for a 22-minute episode about
-// 1.5; a quiet edge window moved inward widens it by the quiet stretch.
+// What no check sees: the first and last 3 %, and a difference inside an edge window, between the edge and the
+// difference, when the rest of the window holds more evidence (it sets the window's offset): at most 3 % plus one
+// window at each end. An edge window moved inward leaves the stretch it skipped unread; the reference found no dialogue
+// there, so a subtitle may hold at most quietLines-1 lines per skipped window in it, or it is refused.
 
 import (
 	"context"
@@ -116,18 +117,19 @@ func (s sample) quiet() bool {
 }
 
 // sampledFit is a fit to the samples: the mapping, each window's own best offset and its evidence there (matched
-// caption starts, or the z of its onset score), the scores of the chosen ratio and of the best other one, and why it
-// is refused ("" when it holds).
+// caption starts, or the z of its onset score), the scores of the chosen ratio and of the best other one, the lines it
+// maps into edge stretches no window read, and why it is refused ("" when it holds).
 type sampledFit struct {
 	Ratio, Offset   float64
 	Offsets         []float64
 	Evidence        []float64
 	Score, RunnerUp float64
+	Unseen          int
 	Refused         string
 }
 
-// fitSamples fits cue spans to samples of one kind.
-func fitSamples(spans []span, samples []sample) sampledFit {
+// fitSamples fits cue spans to samples of one kind, whose windows were laid out from lo to hi (3-97 % of the runtime).
+func fitSamples(spans []span, samples []sample, lo, hi float64) sampledFit {
 	if len(spans) < minCues || len(samples) == 0 {
 		return sampledFit{Refused: "fewer than 40 cues"}
 	}
@@ -188,10 +190,22 @@ func fitSamples(spans []span, samples []sample) sampledFit {
 			return fit
 		}
 	}
+	first, last, w := samples[0].win.start, 0.0, samples[0].win.dur
+	for _, smp := range samples {
+		first, last = min(first, smp.win.start), max(last, smp.win.start+smp.win.dur)
+	}
+	for _, c := range spans {
+		if t := fit.Ratio*c.start + fit.Offset; t >= lo && t < first || t >= last && t < hi {
+			fit.Unseen++
+		}
+	}
+	skipped := math.Round((max(0, first-lo) + max(0, hi-last)) / w)
 	if slices.Max(fit.Offsets)-slices.Min(fit.Offsets) > agreeSpread {
 		fit.Refused = "the windows disagree on the offset"
 	} else if fit.Score < minMargin*fit.RunnerUp {
 		fit.Refused = "another frame-rate ratio fits almost as well"
+	} else if float64(fit.Unseen) > skipped*(quietLines-1) {
+		fit.Refused = fmt.Sprintf("%d lines in the edge stretches no window read", fit.Unseen)
 	}
 	return fit
 }
@@ -365,6 +379,12 @@ func (r *run) newSampler(t *title) (*sampler, string) {
 	}
 	s.audio = info.Audio[0]
 	return s, ""
+}
+
+// span is where the windows were laid out: from the first window's start to the last one's end (3-97 % of the runtime).
+func (s *sampler) span() (float64, float64) {
+	last := s.windows[len(s.windows)-1]
+	return s.windows[0].start, last.start + last.dur
 }
 
 // readAll reads every window, then for each that holds no dialogue the stretch next to it instead, at most maxExtra
