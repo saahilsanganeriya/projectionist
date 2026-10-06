@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -27,6 +28,7 @@ type Config struct {
 	Stages map[string]toml.Primitive `toml:"stages"`
 
 	md       toml.MetaData
+	mdMu     sync.Mutex // toml.MetaData is not safe for concurrent decodes; stages decode their options as they start
 	location *time.Location
 }
 
@@ -106,7 +108,10 @@ func (c *Config) Schedule(name string) (Schedule, error) {
 	if !ok {
 		return Schedule{}, nil
 	}
-	if err := c.md.PrimitiveDecode(prim, &s); err != nil {
+	c.mdMu.Lock()
+	err := c.md.PrimitiveDecode(prim, &s)
+	c.mdMu.Unlock()
+	if err != nil {
 		return s, fmt.Errorf("stages.%s: %w", name, err)
 	}
 	if s.Enabled && s.Every <= 0 {
@@ -124,7 +129,10 @@ func (c *Config) StageOptions(name string, v any) error {
 	if !ok {
 		return nil
 	}
-	if err := c.md.PrimitiveDecode(prim, v); err != nil {
+	c.mdMu.Lock()
+	err := c.md.PrimitiveDecode(prim, v)
+	c.mdMu.Unlock()
+	if err != nil {
 		return fmt.Errorf("stages.%s: %w", name, err)
 	}
 	return nil
