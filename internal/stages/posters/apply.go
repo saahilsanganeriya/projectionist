@@ -330,7 +330,8 @@ func (r *run) upload(ctx context.Context, sink string, target sinkItem, img []by
 // prepare is the full-size image as a JPEG (a director's poster composed from its photo), carrying the stage's EXIF
 // mark when marked. Plex lists every upload alike, and its export keeps an upload's bytes, so the mark is how a later
 // export tells the stage's uploads from the owner's (importOwners). The owner's own upload therefore goes back
-// unmarked; a kept pick or Plex default is marked, or the next export would read it as his upload.
+// unmarked; a kept pick or Plex default is marked, or the next export would read it as his upload. A set poster's
+// mark starts with its artist's credit and still ends with the mark, which is what carriesMark looks for.
 func (r *run) prepare(ctx context.Context, u string, marked bool) ([]byte, error) {
 	spec, composed := strings.CutPrefix(u, composePrefix)
 	var box string
@@ -357,6 +358,9 @@ func (r *run) prepare(ctx context.Context, u string, marked bool) ([]byte, error
 	}
 	if !marked {
 		return b, nil
+	}
+	if credit := r.credits[u]; credit != "" {
+		return mark(b, credit+" | "+r.opt.Mark)
 	}
 	return mark(b, r.opt.Mark)
 }

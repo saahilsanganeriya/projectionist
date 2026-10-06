@@ -174,7 +174,7 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 			if it.Title.Kind.collection() {
 				continue
 			}
-			if v := redecide(it.Cands, *old); v.Choice != old.Choice || v.Rule != old.Rule {
+			if v := redecide(it.Cands, *old, r.bonusIndex(it)); v.Choice != old.Choice || v.Rule != old.Rule {
 				v.At = r.env.Now()
 				if err := r.saveVerdict(ctx, it, v); err != nil {
 					return err
@@ -266,16 +266,23 @@ func shortcut(cands []Candidate) (Verdict, bool) {
 
 // decide applies the owner's policy to the judge's scores (by candidate index): his upload and pick stay (shortcut),
 // and Plex's own default poster yields only to a candidate scored at least 2 points higher (1 is within the judge's
-// noise); on a tie the earlier candidate (the owner's, then the better-voted) stays. With a bar (a director's
-// director_min_score), a pool whose best score is below it has no choice (-1): the pool already holds every source,
-// so no other source is left to fall back to.
-func decide(cands []Candidate, scores map[int]float64, bar float64) (int, string) {
+// noise); on a tie the earlier candidate (the owner's, then the better-voted) stays. The bonus candidate (a worn
+// set's poster; -1 for none) counts 1 point more against the other remote candidates, never against Plex's default.
+// With a bar (a director's director_min_score), a pool whose best score is below it has no choice (-1): the pool
+// already holds every source, so no other source is left to fall back to.
+func decide(cands []Candidate, scores map[int]float64, bar float64, bonus int) (int, string) {
 	if v, ok := shortcut(cands); ok {
 		return 0, v.Rule
 	}
+	score := func(i int) float64 {
+		if i == bonus {
+			return scores[i] + 1
+		}
+		return scores[i]
+	}
 	best := -1
 	for i := range cands {
-		if s, ok := scores[i]; ok && (best < 0 || s > scores[best]) {
+		if _, ok := scores[i]; ok && (best < 0 || score(i) > score(best)) {
 			best = i
 		}
 	}
@@ -286,7 +293,14 @@ func decide(cands []Candidate, scores map[int]float64, bar float64) (int, string
 		return 0, "unjudged"
 	}
 	if cands[0].Source == srcOwner {
-		if own, ok := scores[0]; !ok || scores[best] < own+2 {
+		own, ok := scores[0]
+		best = -1
+		for i := 1; i < len(cands); i++ {
+			if s, scored := scores[i]; ok && scored && s >= own+2 && (best < 0 || score(i) > score(best)) {
+				best = i
+			}
+		}
+		if best < 0 {
 			return 0, "kept"
 		}
 	}
@@ -294,15 +308,15 @@ func decide(cands []Candidate, scores map[int]float64, bar float64) (int, string
 }
 
 // redecide is v, a verdict on this same title's pool (not a collection's: no bar), under today's policy: decide again
-// from its stored scores.
-func redecide(cands []Candidate, v Verdict) Verdict {
+// from its stored scores, with the bonus on candidate bonus (-1: none).
+func redecide(cands []Candidate, v Verdict, bonus int) Verdict {
 	byIndex := map[int]float64{}
 	for i, c := range cands {
 		if s, ok := v.Scores[c.URL]; ok {
 			byIndex[i] = s
 		}
 	}
-	i, rule := decide(cands, byIndex, 0)
+	i, rule := decide(cands, byIndex, 0, bonus)
 	v.Choice, v.Rule = cands[i].URL, rule
 	return v
 }
@@ -545,7 +559,7 @@ func (r *run) record(ctx context.Context, it *row, model, text string, callID in
 	if it.Title.Kind == director {
 		bar = r.opt.DirectorMinScore
 	}
-	choice, rule := decide(it.Cands, byIndex, bar)
+	choice, rule := decide(it.Cands, byIndex, bar, r.bonusIndex(it))
 	source := "none"
 	if v.Rule = rule; choice >= 0 {
 		v.Choice, source = it.Cands[choice].URL, it.Cands[choice].Source

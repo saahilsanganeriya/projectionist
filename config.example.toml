@@ -379,6 +379,14 @@ criterion = true
 archive_dir = "/volume1/PlexMediaServer/poster-archive"
 # commons_contact = ""           # a URL or e-mail for Wikimedia's User-Agent policy: 200 requests a minute instead
                                  # of 10 (unset, Wikimedia requests go 6.5 s apart; about 10 per director)
+# Poster sets, with collections on: every TMDB collection a franchise shelf holds (the approved ones and the owner's
+# own) wears one MediUX set, so its films look alike. Candidates: the English sets with a poster for every film on disk
+# whose poster the owner did not upload or pick; the collections judge scores up to 5 per collection, one call each.
+# A film's judge gives its set's poster +1 over the other remote candidates (Plex's default still needs a raw 2-point
+# lead); a set fewer than half of whose films take it is dropped. The approved collection also gets the set's
+# collection poster as a candidate; the owner's never. MediUX is read anonymously, one page every 2 s, each kept a week.
+mediux        = "https://mediux.pro"            # "" turns poster sets off
+mediux_assets = "https://api.mediux.pro/assets" # images; full size only for a worn set's posters
 
 # Letterboxd lists as Plex collections and Jellyfin BoxSets: the canon plus the owner's own public lists, owned films
 # in list order, "On the NAS: N of M · seen S · <url>" summaries, generated posters, Plex Home rows for `home`.

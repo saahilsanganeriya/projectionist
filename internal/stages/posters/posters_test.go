@@ -1019,29 +1019,42 @@ func TestBudget(t *testing.T) {
 
 // Catches: the owner's pick or upload replaced, however much better a candidate scores; Plex's default replaced by a
 // candidate only 1 point better (within the judge's noise), or kept against one 2 better; and a tie that drops the
-// owner's poster.
+// owner's poster. With a worn set's poster (the bonus candidate): its +1 counting against Plex's default (which needs
+// a raw 2-point lead) or against the owner's upload or pick, lifting it over a remote candidate it does not reach, or
+// missing when it should lift it.
 func TestDecide(t *testing.T) {
 	pick := []Candidate{{Source: srcOwner, Owner: ownerPick}, {Source: srcTMDB}, {Source: srcTMDB}}
 	upload := []Candidate{{Source: srcOwner, Owner: ownerUpload}, {Source: srcTMDB}}
 	def := []Candidate{{Source: srcOwner, Owner: ownerDefault}, {Source: srcTMDB}}
 	remote := []Candidate{{Source: srcTMDB}, {Source: srcFanart}}
+	setDef := []Candidate{{Source: srcOwner, Owner: ownerDefault}, {Source: srcMediUX}, {Source: srcTMDB}}
+	setPick := []Candidate{{Source: srcOwner, Owner: ownerPick}, {Source: srcMediUX}}
+	setRemote := []Candidate{{Source: srcMediUX}, {Source: srcTMDB}}
 	cases := []struct {
 		name   string
 		cands  []Candidate
 		scores map[int]float64
+		bonus  int
 		want   int
 		rule   string
 	}{
-		{"pick beaten by 4", pick, map[int]float64{0: 5, 1: 9, 2: 7}, 0, "owner_pick"},
-		{"upload beaten by 4", upload, map[int]float64{0: 5, 1: 9}, 0, "upload"},
-		{"default beaten by 1", def, map[int]float64{0: 7, 1: 8}, 0, "kept"},
-		{"default beaten by 2", def, map[int]float64{0: 6, 1: 8}, 1, "judged"},
-		{"default unscored", def, map[int]float64{1: 9}, 0, "kept"},
-		{"default tied", def, map[int]float64{0: 8, 1: 8}, 0, "kept"},
-		{"no owner: tie keeps the better voted", remote, map[int]float64{0: 7, 1: 7}, 0, "judged"},
+		{"pick beaten by 4", pick, map[int]float64{0: 5, 1: 9, 2: 7}, -1, 0, "owner_pick"},
+		{"upload beaten by 4", upload, map[int]float64{0: 5, 1: 9}, -1, 0, "upload"},
+		{"default beaten by 1", def, map[int]float64{0: 7, 1: 8}, -1, 0, "kept"},
+		{"default beaten by 2", def, map[int]float64{0: 6, 1: 8}, -1, 1, "judged"},
+		{"default unscored", def, map[int]float64{1: 9}, -1, 0, "kept"},
+		{"default tied", def, map[int]float64{0: 8, 1: 8}, -1, 0, "kept"},
+		{"no owner: tie keeps the better voted", remote, map[int]float64{0: 7, 1: 7}, -1, 0, "judged"},
+		{"set +1 is no lead over the default", setDef, map[int]float64{0: 6, 1: 7, 2: 5}, 1, 0, "kept"},
+		{"set short of the default's 2 points, another clears them", setDef, map[int]float64{0: 5, 1: 6.5, 2: 7}, 1, 2, "judged"},
+		{"set +1 over a remote that also clears the default", setDef, map[int]float64{0: 5, 1: 7, 2: 7.5}, 1, 1, "judged"},
+		{"set never replaces a pick", setPick, map[int]float64{0: 3, 1: 10}, 1, 0, "owner_pick"},
+		{"set +1 over a better remote", setRemote, map[int]float64{0: 6.5, 1: 7}, 0, 0, "judged"},
+		{"set +1 short of a remote 2 better", setRemote, map[int]float64{0: 6, 1: 8}, 0, 1, "judged"},
+		{"no bonus: set below the remote", setRemote, map[int]float64{0: 6.5, 1: 7}, -1, 1, "judged"},
 	}
 	for _, c := range cases {
-		if got, rule := decide(c.cands, c.scores, 0); got != c.want || rule != c.rule {
+		if got, rule := decide(c.cands, c.scores, 0, c.bonus); got != c.want || rule != c.rule {
 			t.Errorf("%s: chose %d (%s), want %d (%s)", c.name, got, rule, c.want, c.rule)
 		}
 	}
