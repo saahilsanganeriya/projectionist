@@ -1113,12 +1113,12 @@ func TestRunSampledQueueOnlyAtNight(t *testing.T) {
 		if want := time.Date(2026, 10, 5, 8, 0, 0, 0, time.UTC); !wake.Equal(want) { // 01:00 PDT
 			t.Errorf("sampled mode at 23:00 with Show queued asked to wake at %v, want %v", wake, want)
 		}
-		late := aligned(time.Date(2026, 10, 5, 13, 50, 0, 0, time.UTC), time.Date(2026, 10, 5, 19, 0, 0, 0, time.UTC)) // 06:50, a guest until noon
+		late := aligned(time.Date(2026, 10, 5, 13, 40, 0, 0, time.UTC), time.Date(2026, 10, 5, 19, 0, 0, 0, time.UTC)) // 06:40, a guest until noon
 		mu.Lock()
 		ended := now
 		mu.Unlock()
 		if closed := time.Date(2026, 10, 5, 14, 0, 0, 0, time.UTC); ended.Before(closed) || ended.After(closed.Add(10*time.Minute)) {
-			t.Errorf("sampled mode at 06:50 with a guest watching until noon ended the run at %v; want within a poll (10 min) after the window closed at %v", ended, closed)
+			t.Errorf("sampled mode at 06:40 with a guest watching until noon ended the run at %v; want within a poll (10 min) after the window closed at %v", ended, closed)
 		}
 		spent := make([]time.Time, 20)
 		for i := range spent {
