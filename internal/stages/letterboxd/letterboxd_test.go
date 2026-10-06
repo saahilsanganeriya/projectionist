@@ -1121,6 +1121,17 @@ func TestSecondPersonsDiary(t *testing.T) {
 	}
 }
 
+// Catches a person's feed left unread, with an alert on each run, while the owner's first backfill (his export's film
+// pages) spends the run's max_fetches: every member's feed and grid pages come before anyone's film lookups.
+func TestPeoplesPagesComeBeforeHisBackfill(t *testing.T) {
+	w := newWorld(t)
+	w.lb.serve("/zaurelia/rss/", herFeed(herItem("1540000001", "okja", "Okja", 2017, 387426, w.h.Now, "2026-10-04", "4.5")))
+	rep := w.run(t, "max_fetches = 5\n"+people) // his feed, two watchlist pages and his films page, then hers
+	if rep.Counts["roger.rss_entries"] != 1 || len(rep.Alerts) != 0 || rep.Counts["budget_spent"] == 0 {
+		t.Errorf("alerts %v (counts %v); want her feed read and his backfill cut short", rep.Alerts, rep.Counts)
+	}
+}
+
 // Catches a people entry that would share state with the owner or another person, or has no feed to read.
 func TestPeopleNeedTheirOwnPersonAndAUser(t *testing.T) {
 	for _, tc := range []struct{ name, people string }{
@@ -1180,7 +1191,7 @@ func TestEachMembersOwnPlexWatchlist(t *testing.T) {
 	}
 	step("first run", 0, "his m18,m565,show565; hers m18,m387426,m565,m999; Aaron's m387426,m718032", 1)
 
-	w.lb.serve("/zaurelia/watchlist/", watchlistPage(okja, prime)) // she takes The Ring and What Happened Was off it, adds Primetime,
+	w.lb.serve("/zaurelia/watchlist/", watchlistPage(okja, prime))     // she takes The Ring and What Happened Was off it, adds Primetime,
 	w.pt.set(rogerToken, "m18", "m999", "m387426", "m565", "m999001") // which she also puts on her Plex watchlist by hand
 	hits := w.lb.hits["/zaurelia/watchlist/"]
 	step("an hour later", time.Hour, "his m18,m565,show565; hers m18,m387426,m565,m999,m999001; Aaron's m387426,m718032", 1)

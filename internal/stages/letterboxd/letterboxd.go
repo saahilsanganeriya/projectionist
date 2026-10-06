@@ -279,13 +279,21 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 		ua: opt.UserAgent, pace: pace, budget: opt.MaxFetches,
 	}
 	until := env.Now().Add(opt.RunBudget)
-	var sums []string
-	for _, m := range members {
+	// Every member's feed and grid pages come before anyone's film lookups: the owner's first backfill (his export,
+	// about 1,000 films) spent a whole run's max_fetches before either person's feed was read (NAS, 2026-10-06).
+	runs := make([]*run, len(members))
+	for i, m := range members {
 		ns := name
 		if m.who != "" {
 			ns += ":" + m.who
 		}
-		r := &run{env: env, opt: m.opt, who: m.who, ns: ns, db: db, until: until, sleep: sleep, rep: rep, fails: map[int]bool{}, fetch: fetch}
+		runs[i] = &run{env: env, opt: m.opt, who: m.who, ns: ns, db: db, until: until, sleep: sleep, rep: rep, fails: map[int]bool{}, fetch: fetch}
+		if err := runs[i].ingest(ctx); err != nil {
+			return err
+		}
+	}
+	var sums []string
+	for _, r := range runs {
 		sum, err := r.sync(ctx)
 		if err != nil {
 			return err
@@ -299,7 +307,7 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	return nil
 }
 
-// sync is one member's part of a run; it returns the member's summary.
+// sync is one member's part of a run after every member's ingest; it returns the member's summary.
 func (r *run) sync(ctx context.Context) (string, error) {
 	env, opt := r.env, r.opt
 	// From when entries become events with history false: the member's first run (the owner's: this stage's deploy).
@@ -311,9 +319,6 @@ func (r *run) sync(ctx context.Context) (string, error) {
 		if err := env.Store.PutJSON(ctx, r.ns, "events_since", since); err != nil {
 			return "", err
 		}
-	}
-	if err := r.ingest(ctx); err != nil {
-		return "", err
 	}
 	var feed feedCache
 	if _, err := env.Store.GetJSON(ctx, r.ns, "rss", &feed); err != nil {
