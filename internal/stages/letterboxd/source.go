@@ -270,10 +270,10 @@ type export struct {
 	Watchlist []exportRow
 }
 
-var exportName = regexp.MustCompile(`^letterboxd-.+-(\d{4}-\d{2}-\d{2}-\d{2}-\d{2})-utc$`)
+var exportName = regexp.MustCompile(`^letterboxd-(.+)-(\d{4}-\d{2}-\d{2}-\d{2}-\d{2})-utc$`)
 
 // readExport loads the newest export folder under dir (its name carries the date); ok is false when there is none.
-func readExport(dir string) (ex export, ok bool, err error) {
+func readExport(dir, user string) (ex export, ok bool, err error) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return export{}, false, nil
@@ -283,7 +283,8 @@ func readExport(dir string) (ex export, ok bool, err error) {
 	}
 	var names []string
 	for _, e := range entries {
-		if e.IsDir() && exportName.MatchString(e.Name()) {
+		// Only this member's: a person's export beside the owner's must never be read as his.
+		if m := exportName.FindStringSubmatch(e.Name()); e.IsDir() && m != nil && strings.EqualFold(m[1], user) {
 			names = append(names, e.Name())
 		}
 	}
@@ -293,7 +294,7 @@ func readExport(dir string) (ex export, ok bool, err error) {
 	sort.Strings(names) // ISO dates in the name: the last is the newest
 	name := names[len(names)-1]
 	ex.Dir = filepath.Join(dir, name)
-	if ex.At, err = time.Parse("2006-01-02-15-04", exportName.FindStringSubmatch(name)[1]); err != nil {
+	if ex.At, err = time.Parse("2006-01-02-15-04", exportName.FindStringSubmatch(name)[2]); err != nil {
 		return export{}, false, err
 	}
 	for file, dst := range map[string]*[]exportRow{"watched.csv": &ex.Watched, "diary.csv": &ex.Diary, "ratings.csv": &ex.Ratings, "watchlist.csv": &ex.Watchlist} {

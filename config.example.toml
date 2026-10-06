@@ -129,6 +129,12 @@ collection     = "Watchlist"              # "" = no Watchlist collection
 plex_watchlist = false                    # also mirror onto his plex.tv watchlist (his Plex friends can see it)
 run_budget     = "25m"                    # no Plex/Jellyfin/plex.tv call starts later than this into a run; keep it under every
 dry_run        = false                    # count events and collection writes only
+# More members, each synced after him on the same max_fetches: their diary becomes watch events for person (a name in
+# jfsync's users). user is their Letterboxd username. Optional: history (false, as his), export_dir ("" = none; a folder
+# of their own, since tonight reads every export in his), collection ("" = none: the Watchlist collections, the
+# missing-films file and the plex.tv watchlist stay his) and jellyfin_user (whose played flags their collection follows;
+# default person). Their Plex collection ignores Plex views (the server token's are his) and is never put on his Home.
+# people = [{ person = "roger", user = "<her Letterboxd username>" }]
 
 # Small 4K copies of the films listed as "Remote 4K" (Plex playlist, Jellyfin playlist or Jellyfin collection);
 # replaces scripts/remote4k.py (DSM task 9).

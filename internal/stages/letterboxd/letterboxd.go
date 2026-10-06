@@ -1,5 +1,6 @@
 // Package letterboxd records the owner's Letterboxd diary in projectionist's watch record, and keeps his watchlist
-// as a "Watchlist" collection in Plex (promoted to his Home) and Jellyfin.
+// as a "Watchlist" collection in Plex (promoted to his Home) and Jellyfin. Each of people (see Person) is synced the
+// same way after him, with their own state, under their own person in the record.
 //
 //	feed (every run) ───┐                              ┌─► watch_events ──► jfsync ──► Plex, Jellyfin watch state
 //	export (on the NAS) ┼─► letterboxd_* ─► TMDB join ─┤   (logged viewings, ratings)
@@ -33,6 +34,7 @@
 package letterboxd
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -77,6 +79,44 @@ type Options struct {
 
 	RunBudget time.Duration `toml:"run_budget"` // no app call starts later than this into a run; keep it under "every"
 	DryRun    bool          `toml:"dry_run"`    // count events and writes, record and write nothing (nor the missing file)
+
+	People []Person `toml:"people"` // more members, synced after the owner (the keys above) on the same fetch budget
+}
+
+// Person is one more Letterboxd member whose diary becomes watch events for Person, a name in jfsync's users. The
+// owner's missing-films file and plex.tv watchlist stay his; a Watchlist collection is theirs only when they name one.
+type Person struct {
+	Person       string `toml:"person"`
+	User         string `toml:"user"`          // their Letterboxd username
+	ExportDir    string `toml:"export_dir"`    // "" = none; a folder of their own (tonight reads every export in the owner's)
+	History      bool   `toml:"history"`       // as the owner's history
+	Collection   string `toml:"collection"`    // "" = none
+	JellyfinUser string `toml:"jellyfin_user"` // whose played flags their collection follows; "" = Person
+}
+
+// member is the owner or one person, as one run sees them. who is "" for the owner, whose state keeps the names it
+// had before people existed; a person's kv keys, diary rows, collection rows, counts and alerts carry their name.
+type member struct {
+	opt Options
+	who string
+}
+
+func (o Options) members() ([]member, error) {
+	out := []member{{opt: o}}
+	persons := map[string]bool{o.Person: true}
+	for _, p := range o.People {
+		if p.Person == "" || p.User == "" || persons[p.Person] {
+			return nil, fmt.Errorf("letterboxd people: each entry needs a user and a person of its own (person %q, user %q)", p.Person, p.User)
+		}
+		persons[p.Person] = true
+		m := o
+		m.People = nil
+		m.Person, m.User, m.ExportDir, m.History, m.Collection = p.Person, p.User, p.ExportDir, p.History, p.Collection
+		m.JellyfinUser = cmp.Or(p.JellyfinUser, p.Person)
+		m.MissingFile, m.PlexWatchlist = "", false
+		out = append(out, member{opt: m, who: p.Person})
+	}
+	return out, nil
 }
 
 func defaults() Options {
@@ -106,7 +146,7 @@ CREATE TABLE IF NOT EXISTS letterboxd_lid (lid TEXT PRIMARY KEY, slug TEXT NOT N
 CREATE TABLE IF NOT EXISTS letterboxd_film (slug TEXT PRIMARY KEY, tmdb INTEGER NOT NULL, kind TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS letterboxd_entry (id TEXT PRIMARY KEY, slug TEXT NOT NULL, tmdb INTEGER NOT NULL,
   title TEXT NOT NULL, year INTEGER NOT NULL, watched TEXT NOT NULL, rating INTEGER NOT NULL, logged_at TEXT NOT NULL,
-  rated_at TEXT NOT NULL);
+  rated_at TEXT NOT NULL, scope TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS letterboxd_seen (slug TEXT PRIMARY KEY, rating INTEGER NOT NULL, seen_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS letterboxd_sink (app TEXT NOT NULL, tmdb INTEGER NOT NULL, item TEXT NOT NULL,
   plays INTEGER NOT NULL, played INTEGER NOT NULL, rating INTEGER NOT NULL, last TEXT NOT NULL, member INTEGER NOT NULL,
@@ -133,6 +173,7 @@ DELETE FROM letterboxd_entry WHERE id GLOB 'letterboxd-*';
 var addedColumns = []struct{ table, column, def, fill string }{
 	{"letterboxd_sink", "played", "INTEGER NOT NULL DEFAULT 0", "UPDATE letterboxd_sink SET played = (app = 'plex' AND plays > 0)"},
 	{"letterboxd_entry", "rated_at", "TEXT NOT NULL DEFAULT ''", "UPDATE letterboxd_entry SET rated_at = logged_at"},
+	{"letterboxd_entry", "scope", "TEXT NOT NULL DEFAULT ''", ""}, // the member (see member.who); rows before it are the owner's
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
@@ -170,6 +211,8 @@ func (Stage) Name() string { return name }
 type run struct {
 	env   *stage.Env
 	opt   Options
+	who   string // member.who
+	ns    string // the member's kv namespace
 	db    *sql.DB
 	fetch *fetcher
 	until time.Time // run start + run_budget
@@ -183,14 +226,36 @@ func (r *run) count(kind string, n int) {
 	if n == 0 {
 		return
 	}
+	if r.who != "" {
+		kind = r.who + "." + kind
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.rep.Count(kind, n)
 }
 
+func (r *run) alert(format string, args ...any) {
+	if r.who != "" {
+		format = r.who + ": " + format
+	}
+	r.rep.Alert(format, args...)
+}
+
+// sinkKey is an app's key in letterboxd_sink and letterboxd_retry.
+func (r *run) sinkKey(app string) string {
+	if r.who != "" {
+		return r.who + "/" + app
+	}
+	return app
+}
+
 func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	opt := defaults()
 	if err := env.Options(&opt); err != nil {
+		return err
+	}
+	members, err := opt.members()
+	if err != nil {
 		return err
 	}
 	db := env.Store.DB()
@@ -206,16 +271,6 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if err := watch.Open(ctx, db); err != nil {
 		return err
 	}
-	// From when entries become events with history false: this stage's first run (its deploy).
-	var since time.Time
-	if found, err := env.Store.GetJSON(ctx, name, "events_since", &since); err != nil {
-		return err
-	} else if !found {
-		since = env.Now()
-		if err := env.Store.PutJSON(ctx, name, "events_since", since); err != nil {
-			return err
-		}
-	}
 	sleep, pace := s.sleep, s.pace
 	if sleep == nil {
 		sleep = realSleep
@@ -223,51 +278,87 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if pace == nil {
 		pace = lbpace.Shared
 	}
-	r := &run{env: env, opt: opt, db: db, until: env.Now().Add(opt.RunBudget), sleep: sleep, rep: rep, fails: map[string]map[int]bool{}, fetch: &fetcher{
+	fetch := &fetcher{
 		http: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		}},
 		ua: opt.UserAgent, pace: pace, budget: opt.MaxFetches,
-	}}
+	}
+	until := env.Now().Add(opt.RunBudget)
+	var sums []string
+	for _, m := range members {
+		ns := name
+		if m.who != "" {
+			ns += ":" + m.who
+		}
+		r := &run{env: env, opt: m.opt, who: m.who, ns: ns, db: db, until: until, sleep: sleep, rep: rep, fails: map[string]map[int]bool{}, fetch: fetch}
+		sum, err := r.sync(ctx)
+		if err != nil {
+			return err
+		}
+		sums = append(sums, sum)
+	}
+	if fetch.fetches > 0 {
+		rep.Count("letterboxd_fetches", fetch.fetches)
+	}
+	rep.Summary = strings.Join(sums, "; ")
+	return nil
+}
 
+// sync is one member's part of a run; it returns the member's summary.
+func (r *run) sync(ctx context.Context) (string, error) {
+	env, opt := r.env, r.opt
+	// From when entries become events with history false: the member's first run (the owner's: this stage's deploy).
+	var since time.Time
+	if found, err := env.Store.GetJSON(ctx, r.ns, "events_since", &since); err != nil {
+		return "", err
+	} else if !found {
+		since = env.Now()
+		if err := env.Store.PutJSON(ctx, r.ns, "events_since", since); err != nil {
+			return "", err
+		}
+	}
 	if err := r.ingest(ctx); err != nil {
-		return err
+		return "", err
 	}
 	var feed feedCache
-	if _, err := env.Store.GetJSON(ctx, name, "rss", &feed); err != nil {
-		return err
+	if _, err := env.Store.GetJSON(ctx, r.ns, "rss", &feed); err != nil {
+		return "", err
 	}
 	if env.Now().Sub(feed.ReadAt) > feedStale {
-		rep.Alert("Letterboxd feed unread since %s: new diary entries are not reaching Plex or Jellyfin", feed.ReadAt.Format(time.RFC3339))
+		r.alert("Letterboxd feed unread since %s: new diary entries are not reaching Plex or Jellyfin", feed.ReadAt.Format(time.RFC3339))
 	}
 	f, err := r.loadFacts(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	learned, err := r.resolve(ctx, f)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if learned {
 		if f, err = r.loadFacts(ctx); err != nil {
-			return err
+			return "", err
 		}
 	}
 	wants, missing, unresolved, other := f.wants()
-	r.count("letterboxd_fetches", r.fetch.fetches)
 	r.count("unresolved", unresolved)
 	r.count("not_a_movie", other)
 	r.count("missing_films", len(missing))
 	if err := r.writeMissing(missing); err != nil {
 		env.Log.Warn("missing-films file not written", "event", "missing_file_error", "err", err)
 	}
-	if err := r.record(ctx, f.events(opt.Person, env.Loc, opt.History, since)); err != nil {
-		return err
+	events, err := r.record(ctx, f.events(opt.Person, env.Loc, opt.History, since))
+	if err != nil {
+		return "", err
 	}
-
+	apps := []func(context.Context, []want) error{r.syncPlex, r.syncJellyfin, r.syncPlexTV}
+	if r.who != "" && opt.Collection == "" { // a person's apps are read only for their collection
+		apps = nil
+	}
 	var wg sync.WaitGroup
 	var storeFailure error
-	for _, syncApp := range []func(context.Context, []want) error{r.syncPlex, r.syncJellyfin, r.syncPlexTV} {
+	for _, syncApp := range apps {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -280,20 +371,20 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 				r.mu.Unlock()
 			default:
 				// An app being slow or down never fails the run: its writes stay in the diff for the next run.
-				env.Log.Warn("sink skipped this run", "event", "sink_error", "err", err)
+				env.Log.Warn("sink skipped this run", "event", "sink_error", "person", opt.Person, "err", err)
 				r.count("sink_errors", 1)
 			}
 		}()
 	}
 	wg.Wait()
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return "", ctx.Err()
 	}
 	if storeFailure != nil {
-		return storeFailure
+		return "", storeFailure
 	}
 	if err := r.recordFails(ctx, wants); err != nil {
-		return err
+		return "", err
 	}
 	inLib, watched := 0, 0
 	for _, w := range wants {
@@ -304,18 +395,20 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 			}
 		}
 	}
-	mode := "applied"
-	if opt.DryRun {
-		mode = "dry run"
+	head := "applied"
+	switch {
+	case r.who != "":
+		head = r.who
+	case opt.DryRun:
+		head = "dry run"
 	}
-	rep.Summary = fmt.Sprintf("%s: %d new diary events, %d Letterboxd films in the library (%d watched), %d unresolved, %d watchlist films not on the NAS",
-		mode, rep.Counts["events.logged"]+rep.Counts["events.rated"], inLib, watched, unresolved, len(missing))
-	return nil
+	return fmt.Sprintf("%s: %d new diary events, %d Letterboxd films in the library (%d watched), %d unresolved, %d watchlist films not on the NAS",
+		head, events, inLib, watched, unresolved, len(missing)), nil
 }
 
 // record appends to the watch record the events it lacks: a Logged event once per viewing (a date he corrects later
-// is not sent again), a Rated event once per rating and time. A dry run counts them.
-func (r *run) record(ctx context.Context, events []watch.Event) error {
+// is not sent again), a Rated event once per rating and time, and returns how many. A dry run counts them.
+func (r *run) record(ctx context.Context, events []watch.Event) (int, error) {
 	key := func(kind watch.Kind, ref string, at time.Time, rating *float64) string {
 		if kind == watch.Logged {
 			return "logged " + ref
@@ -337,7 +430,7 @@ func (r *run) record(ctx context.Context, events []watch.Event) error {
 		return err
 	}, name, r.opt.Person)
 	if err != nil {
-		return storeErr{err}
+		return 0, storeErr{err}
 	}
 	var fresh []watch.Event
 	for _, e := range events {
@@ -348,26 +441,26 @@ func (r *run) record(ctx context.Context, events []watch.Event) error {
 	}
 	for _, e := range fresh {
 		r.count("events."+string(e.Kind), 1)
-		r.env.Log.Info("diary event", "event", "watch_event_planned", "kind", e.Kind, "item", e.Item, "ref", e.Ref,
+		r.env.Log.Info("diary event", "event", "watch_event_planned", "person", e.Person, "kind", e.Kind, "item", e.Item, "ref", e.Ref,
 			"at", e.At.Format(time.RFC3339), "plays", e.Plays, "dry_run", r.opt.DryRun)
 	}
 	if r.opt.DryRun || len(fresh) == 0 {
-		return nil
+		return len(fresh), nil
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return storeErr{err}
+		return 0, storeErr{err}
 	}
 	defer tx.Rollback()
 	for _, e := range fresh {
 		if err := watch.Add(ctx, tx, e); err != nil {
-			return storeErr{err}
+			return 0, storeErr{err}
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return storeErr{err}
+		return 0, storeErr{err}
 	}
-	return nil
+	return len(fresh), nil
 }
 
 // ---- ingest: feed, grid crawls ----
@@ -394,12 +487,12 @@ const failingAlert = 72 * time.Hour
 // (1 h doubling to 24 h). Budget exhaustion, challenges and failures end the job quietly; it resumes next run.
 func (r *run) guarded(ctx context.Context, kind string, job func() error) error {
 	var b backoff
-	if _, err := r.env.Store.GetJSON(ctx, name, "backoff."+kind, &b); err != nil {
+	if _, err := r.env.Store.GetJSON(ctx, r.ns, "backoff."+kind, &b); err != nil {
 		return err
 	}
 	defer func() {
 		if f, ok := failing[kind]; ok && !b.Since.IsZero() && r.env.Now().Sub(b.Since) >= failingAlert {
-			r.rep.Alert("Letterboxd %s failing since %s (latest: %s): %s", f.pages, b.Since.Format(time.RFC3339), b.Err, f.news)
+			r.alert("Letterboxd %s failing since %s (latest: %s): %s", f.pages, b.Since.Format(time.RFC3339), b.Err, f.news)
 		}
 	}()
 	if r.env.Now().Before(b.Until) {
@@ -426,13 +519,13 @@ func (r *run) guarded(ctx context.Context, kind string, job func() error) error 
 		return nil
 	default:
 		b = backoff{}
-		return r.env.Store.PutJSON(ctx, name, "backoff."+kind, b)
+		return r.env.Store.PutJSON(ctx, r.ns, "backoff."+kind, b)
 	}
 	if b.Since.IsZero() {
 		b.Since = r.env.Now()
 	}
 	b.Err = err.Error()
-	return r.env.Store.PutJSON(ctx, name, "backoff."+kind, b)
+	return r.env.Store.PutJSON(ctx, r.ns, "backoff."+kind, b)
 }
 
 // storeErr marks a local SQLite failure, which (unlike any network trouble) fails the run.
@@ -449,8 +542,14 @@ func (r *run) ingest(ctx context.Context) error {
 	if err := r.guarded(ctx, "rss", func() error { return r.readFeed(ctx) }); err != nil {
 		return err
 	}
+	if r.who != "" && r.opt.Collection == "" { // a person's watchlist serves only their collection
+		return nil
+	}
 	if err := r.guarded(ctx, "watchlist", func() error { return r.crawl(ctx, "watchlist") }); err != nil {
 		return err
+	}
+	if r.who != "" { // letterboxd_seen is the owner's; a film a person marks watched leaves their Letterboxd watchlist
+		return nil
 	}
 	return r.guarded(ctx, "films", func() error { return r.crawl(ctx, "films") })
 }
@@ -467,7 +566,7 @@ const feedStale = 48 * time.Hour
 
 func (r *run) readFeed(ctx context.Context) error {
 	var c feedCache
-	if _, err := r.env.Store.GetJSON(ctx, name, "rss", &c); err != nil {
+	if _, err := r.env.Store.GetJSON(ctx, r.ns, "rss", &c); err != nil {
 		return storeErr{err}
 	}
 	hdr := map[string]string{"Accept": "application/rss+xml"}
@@ -484,7 +583,7 @@ func (r *run) readFeed(ctx context.Context) error {
 	c.ReadAt = r.env.Now()
 	if p.status == http.StatusNotModified {
 		r.count("rss_not_modified", 1)
-		return r.env.Store.PutJSON(ctx, name, "rss", c)
+		return r.env.Store.PutJSON(ctx, r.ns, "rss", c)
 	}
 	entries, err := parseRSS(p.body)
 	if err != nil {
@@ -497,11 +596,11 @@ func (r *run) readFeed(ctx context.Context) error {
 		if e.Slug == "" {
 			continue
 		}
-		res, err := r.db.ExecContext(ctx, `INSERT INTO letterboxd_entry(id, slug, tmdb, title, year, watched, rating, logged_at, rated_at)
-			VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8) ON CONFLICT(id) DO UPDATE SET watched=excluded.watched, rating=excluded.rating,
+		res, err := r.db.ExecContext(ctx, `INSERT INTO letterboxd_entry(id, slug, tmdb, title, year, watched, rating, logged_at, rated_at, scope)
+			VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?10) ON CONFLICT(id) DO UPDATE SET watched=excluded.watched, rating=excluded.rating,
 			rated_at=CASE WHEN rating != excluded.rating THEN ?9 ELSE rated_at END
 			WHERE watched != excluded.watched OR rating != excluded.rating`,
-			e.ID, e.Slug, e.TMDB, e.Title, e.Year, e.Watched, e.Rating, e.LoggedAt.Format(store.TimeFormat), now)
+			e.ID, e.Slug, e.TMDB, e.Title, e.Year, e.Watched, e.Rating, e.LoggedAt.Format(store.TimeFormat), now, r.who)
 		if err != nil {
 			return storeErr{err}
 		}
@@ -517,7 +616,7 @@ func (r *run) readFeed(ctx context.Context) error {
 	if err := r.retract(ctx, entries); err != nil {
 		return err
 	}
-	return r.env.Store.PutJSON(ctx, name, "rss", feedCache{ETag: p.header.Get("ETag"), LastModified: p.header.Get("Last-Modified"), ReadAt: c.ReadAt})
+	return r.env.Store.PutJSON(ctx, r.ns, "rss", feedCache{ETag: p.header.Get("ETag"), LastModified: p.header.Get("Last-Modified"), ReadAt: c.ReadAt})
 }
 
 // retract drops the stored diary entries he has deleted on Letterboxd. The feed holds his latest 50 entries in the
@@ -537,14 +636,14 @@ func (r *run) retract(ctx context.Context, entries []rssEntry) error {
 		}
 	}
 	var gone []rssEntry
-	err := query(ctx, r.db, `SELECT id, title, watched FROM letterboxd_entry WHERE logged_at > ?`, func(rows *sql.Rows) error {
+	err := query(ctx, r.db, `SELECT id, title, watched FROM letterboxd_entry WHERE logged_at > ? AND scope = ?`, func(rows *sql.Rows) error {
 		var e rssEntry
 		err := rows.Scan(&e.ID, &e.Title, &e.Watched)
 		if !inFeed[e.ID] {
 			gone = append(gone, e)
 		}
 		return err
-	}, oldest.Format(store.TimeFormat))
+	}, oldest.Format(store.TimeFormat), r.who)
 	if err != nil {
 		return storeErr{err}
 	}
@@ -566,7 +665,7 @@ func (r *run) retract(ctx context.Context, entries []rssEntry) error {
 		}
 	}
 	if len(names) > 0 {
-		r.rep.Alert("Letterboxd diary entries deleted: %s. Their plays stay in the watch record, so Plex and Jellyfin keep them: mark the film unplayed in Jellyfin to undo one (marking it unplayed in Plex never reaches the record)",
+		r.alert("Letterboxd diary entries deleted: %s. Their plays stay in the watch record, so Plex and Jellyfin keep them: mark the film unplayed in Jellyfin to undo one (marking it unplayed in Plex never reaches the record)",
 			strings.Join(names, ", "))
 	}
 	return nil
@@ -593,7 +692,7 @@ type crawlState struct {
 func (r *run) crawl(ctx context.Context, kind string) error {
 	key := "crawl." + kind
 	var c crawlState
-	if _, err := r.env.Store.GetJSON(ctx, name, key, &c); err != nil {
+	if _, err := r.env.Store.GetJSON(ctx, r.ns, key, &c); err != nil {
 		return storeErr{err}
 	}
 	now := r.env.Now()
@@ -629,13 +728,13 @@ func (r *run) crawl(ctx context.Context, kind string) error {
 			r.env.Log.Warn("letterboxd refuses the deeper films pages; this crawl ends here until tomorrow", "event", "letterboxd_films_partial",
 				"pages", c.Next-1, "err", err)
 			r.count("films_partial", 1)
-			if err := r.env.Store.PutJSON(ctx, name, key, crawlState{Done: now}); err != nil {
+			if err := r.env.Store.PutJSON(ctx, r.ns, key, crawlState{Done: now}); err != nil {
 				return storeErr{err}
 			}
 			return nil
 		}
 		if err != nil {
-			if perr := r.env.Store.PutJSON(ctx, name, key, c); perr != nil {
+			if perr := r.env.Store.PutJSON(ctx, r.ns, key, c); perr != nil {
 				return storeErr{perr}
 			}
 			return err
@@ -650,13 +749,13 @@ func (r *run) crawl(ctx context.Context, kind string) error {
 		c.Next++
 		if !hasNext {
 			if kind == "watchlist" {
-				if err := r.env.Store.PutJSON(ctx, name, "watchlist", watchlistSnapshot{At: c.Started, Films: c.Films}); err != nil {
+				if err := r.env.Store.PutJSON(ctx, r.ns, "watchlist", watchlistSnapshot{At: c.Started, Films: c.Films}); err != nil {
 					return storeErr{err}
 				}
 			}
 			c = crawlState{Done: r.env.Now()}
 		}
-		if err := r.env.Store.PutJSON(ctx, name, key, c); err != nil {
+		if err := r.env.Store.PutJSON(ctx, r.ns, key, c); err != nil {
 			return storeErr{err}
 		}
 		if c.Next == 0 {
@@ -710,7 +809,7 @@ func (r *run) resolve(ctx context.Context, f facts) (learned bool, err error) {
 		return false, nil
 	}
 	bad := map[string]unreadable{} // "lid:<code>" or "slug:<slug>" →
-	if _, err := r.env.Store.GetJSON(ctx, name, "unreadable", &bad); err != nil {
+	if _, err := r.env.Store.GetJSON(ctx, r.ns, "unreadable", &bad); err != nil {
 		return false, err
 	}
 	for key := range bad { // a film no longer needed (taken off the watchlist) is forgotten
@@ -785,7 +884,7 @@ func (r *run) resolve(ctx context.Context, f facts) (learned bool, err error) {
 		}
 		return nil
 	})
-	if perr := r.env.Store.PutJSON(ctx, name, "unreadable", bad); err == nil {
+	if perr := r.env.Store.PutJSON(ctx, r.ns, "unreadable", bad); err == nil {
 		err = perr
 	}
 	var stuck []string
@@ -795,7 +894,7 @@ func (r *run) resolve(ctx context.Context, f facts) (learned bool, err error) {
 		}
 	}
 	if len(stuck) > 0 {
-		r.rep.Alert("Letterboxd pages unreadable for %s or more, so these films are not matched to TMDB: %s", failingAlert, strings.Join(stuck, ", "))
+		r.alert("Letterboxd pages unreadable for %s or more, so these films are not matched to TMDB: %s", failingAlert, strings.Join(stuck, ", "))
 	}
 	return learned, err
 }
@@ -828,7 +927,7 @@ func (r *run) filmPage(ctx context.Context, slug string) (int, string, error) {
 
 func (r *run) loadFacts(ctx context.Context) (facts, error) {
 	f := facts{seen: map[string]bool{}, lidSlug: map[string]string{}, films: map[string]filmFacts{}}
-	ex, ok, err := readExport(r.opt.ExportDir)
+	ex, ok, err := readExport(r.opt.ExportDir, r.opt.User)
 	if err != nil {
 		return f, err
 	}
@@ -836,7 +935,7 @@ func (r *run) loadFacts(ctx context.Context) (facts, error) {
 		f.ex = &ex
 	}
 	var wl watchlistSnapshot
-	found, err := r.env.Store.GetJSON(ctx, name, "watchlist", &wl)
+	found, err := r.env.Store.GetJSON(ctx, r.ns, "watchlist", &wl)
 	if err != nil {
 		return f, err
 	}
@@ -861,7 +960,7 @@ func (r *run) loadFacts(ctx context.Context) (facts, error) {
 			return err
 		})
 	}
-	if err == nil {
+	if err == nil && r.who == "" { // the films grid is read for the owner only (see ingest)
 		err = query(ctx, r.db, `SELECT slug FROM letterboxd_seen`, func(rows *sql.Rows) error {
 			var slug string
 			err := rows.Scan(&slug)
@@ -870,7 +969,7 @@ func (r *run) loadFacts(ctx context.Context) (facts, error) {
 		})
 	}
 	if err == nil {
-		err = query(ctx, r.db, `SELECT id, slug, tmdb, title, year, watched, rating, logged_at, rated_at FROM letterboxd_entry ORDER BY id`, func(rows *sql.Rows) error {
+		err = query(ctx, r.db, `SELECT id, slug, tmdb, title, year, watched, rating, logged_at, rated_at FROM letterboxd_entry WHERE scope = ? ORDER BY id`, func(rows *sql.Rows) error {
 			var e rssEntry
 			var logged, rated string
 			if err := rows.Scan(&e.ID, &e.Slug, &e.TMDB, &e.Title, &e.Year, &e.Watched, &e.Rating, &logged, &rated); err != nil {
@@ -882,7 +981,7 @@ func (r *run) loadFacts(ctx context.Context) (facts, error) {
 			}
 			f.entries = append(f.entries, e)
 			return err
-		})
+		}, r.who)
 	}
 	return f, err
 }
