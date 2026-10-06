@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -449,11 +450,12 @@ func (failing) RoundTrip(*http.Request) (*http.Response, error) {
 }
 
 // Catches a task table that sets only some keys (its fallbacks, say) sending an empty model, or the tonight task
-// losing its reasoning, because the table replaced the default wholesale.
+// losing its reasoning or its fallback, because the table replaced the default wholesale.
 func TestPartialTaskKeepsItsDefaults(t *testing.T) {
 	c := llm.New(llm.Config{Tasks: map[string]llm.Task{"posters": {Fallbacks: []string{"google/gemma-4-31b-it"}}, "tonight": {Model: "m/x"}}}, nil, time.Now)
-	if p, n := c.Task("posters"), c.Task("tonight"); p.Model != llm.VisionModel || p.Reasoning != "off" || len(p.Fallbacks) != 1 ||
-		n.Model != "m/x" || n.Reasoning != "low" || c.Task("collections").Model != llm.VisionModel {
+	if p, n := c.Task("posters"), c.Task("tonight"); p.Model != llm.VisionModel || p.Reasoning != "none" || len(p.Fallbacks) != 1 ||
+		n.Model != "m/x" || n.Reasoning != "off" || !slices.Equal(n.Fallbacks, []string{llm.FallbackModel}) ||
+		c.Task("collections").Model != llm.VisionModel {
 		t.Fatalf("posters %+v, tonight %+v, collections %+v", p, n, c.Task("collections"))
 	}
 }

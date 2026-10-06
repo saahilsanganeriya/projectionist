@@ -702,9 +702,9 @@ func TestRunAcrossDays(t *testing.T) {
 		t.Fatalf("run 1 spent $%.5f, over the $0.15 cap", spent)
 	}
 	first := w.ai.gw.Calls()[0]
-	if first.Model != "deepseek/deepseek-v4-flash-0731" || w.ai.effort(0) != "low" || first.ResponseFormat == nil ||
+	if first.Model != "deepseek/deepseek-v4.1-flash" || w.ai.effort(0) != "none" || first.ResponseFormat == nil ||
 		!first.ResponseFormat.JSONSchema.Strict || !strings.Contains(string(first.ResponseFormat.JSONSchema.Schema), `"required":["id","title","mood","liked","reason"]`) {
-		t.Fatalf("model %s, effort %q, response format %+v; want the tonight task's model at low effort, held to the picks schema",
+		t.Fatalf("model %s, effort %q, response format %+v; want the tonight task's model with no reasoning, held to the picks schema",
 			first.Model, w.ai.effort(0), first.ResponseFormat)
 	}
 	if system := first.Messages[0]; system.Role != "system" || !strings.Contains(system.Content[0].Text, "5★: Licorice Pizza (2021)") {
@@ -753,7 +753,7 @@ func TestRunAcrossDays(t *testing.T) {
 	if !slices.Contains(w.jf.tags, "projectionist") {
 		t.Fatalf("jellyfin box tags = %q", w.jf.tags)
 	}
-	if !strings.Contains(w.logs.String(), "event=tonight_ai_call attempt=2 model=deepseek/deepseek-v4-flash-0731") ||
+	if !strings.Contains(w.logs.String(), "event=tonight_ai_call attempt=2 model=deepseek/deepseek-v4.1-flash") ||
 		!strings.Contains(w.logs.String(), "output_tokens=422 finish=stop") {
 		t.Fatalf("no token/cost log for the call and its retry:\n%s", w.logs)
 	}
@@ -982,6 +982,7 @@ func TestCutOffAnswerRetriesWithLeastReasoning(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			w := newWorld(t, "", 0)
+			w.ai = newAIFake(t, w.h, map[string]llm.Task{"tonight": {Reasoning: "low"}}) // the default already reasons least
 			w.ai.script("CUT:"+c.cut, answer3(389, 346, 655))
 			w.run(t)
 			if w.ai.calls() != 2 {

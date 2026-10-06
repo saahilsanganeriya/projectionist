@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -815,7 +816,7 @@ func TestNewerOwnerExport(t *testing.T) {
 func TestJudgeTasks(t *testing.T) {
 	w := newWorld(t, "dry_run = true\n")
 	w.h.Env.LLM = llmtest.Client(t, w.gateway, w.h.Env.Store, w.h.Env.Now, llm.Config{Tasks: map[string]llm.Task{
-		"posters": {Model: "google/gemma-4-31b-it", Fallbacks: []string{"zai/glm-5.3-flash"}}}})
+		"posters": {Model: "google/gemma-4-31b-it", Fallbacks: []string{"zai/glm-5.3-flash"}, Reasoning: "off"}}})
 	reply := w.gateway.Reply
 	var held []float64
 	w.gateway.Reply = func(n int, req llm.Request) llmtest.Answer {
@@ -852,7 +853,7 @@ func TestJudgeTasks(t *testing.T) {
 }
 
 // Catches: the example config switching paid judging on at deploy (a table without enabled = false is enabled), and
-// its [llm] table not decoding to the gateway, the key file compose mounts, and each task's model.
+// its [llm] table not decoding to the gateway, the key file compose mounts, and each task's defaults.
 func TestExampleConfig(t *testing.T) {
 	cfg, err := config.Load("../../../config.example.toml")
 	if err != nil {
@@ -860,8 +861,8 @@ func TestExampleConfig(t *testing.T) {
 	}
 	sched, err := cfg.Schedule(name)
 	c := llm.New(cfg.LLM, nil, time.Now)
-	if err != nil || sched.Enabled || cfg.LLM.KeyFile != "/run/secrets/ai_gateway_api_key" || c.Task("tonight").Model != "deepseek/deepseek-v4-flash-0731" ||
-		c.Task("posters").Model != llm.VisionModel || c.Task("collections").Model != llm.VisionModel || c.InFlight() != 8 {
+	if err != nil || sched.Enabled || cfg.LLM.KeyFile != "/run/secrets/ai_gateway_api_key" || !reflect.DeepEqual(cfg.LLM.Tasks, llm.Defaults().Tasks) ||
+		c.InFlight() != 8 {
 		t.Fatalf("posters enabled=%v (%v); llm %+v", sched.Enabled, err, cfg.LLM)
 	}
 }

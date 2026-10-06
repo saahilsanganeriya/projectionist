@@ -38,6 +38,9 @@ var Catalogue = []Model{
 	{ID: "alibaba/qwen3.8-27b", In: 0.50, Out: 3.00, Vision: true, Efforts: []string{"none", "low", "medium", "xhigh"}},
 	{ID: "deepseek/deepseek-v4-flash-vision-exp", In: 0.2156, Out: 0.6468, Vision: true, Toggle: true, Efforts: []string{"none", "low", "medium", "high"}},
 	{ID: "anthropic/claude-sonnet-5.5", In: 2.2, Out: 11, Vision: true, Efforts: []string{"low", "medium", "high", "xhigh", "max"}},
+	{ID: "alibaba/qwen3-vl-instruct", In: 0.40, Out: 1.60, Vision: true},
+	{ID: "alibaba/qwen3.7-flash", In: 0.03, Out: 0.13, Vision: true, Toggle: true,
+		Efforts: []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}},
 }
 
 // Answer is the fake's reply to one call.

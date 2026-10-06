@@ -235,8 +235,8 @@ legacy_quota  = "/volume1/PlexMediaServer/subtitle-downloads" # subfetch2.py's q
 # Reconciles every 30 min: a pick he has since watched leaves the row at once.
 # daily_cap_usd is a hard cap: the call and its one retry are sized together before the first is sent, each at its
 # worst (the input estimated at 3 bytes a token and all of max_tokens as output, at the dearest price the gateway
-# lists for the tonight task's models), and the candidate list is cut until the pair fits. At DeepSeek V4 Flash 0731's
-# price a day costs well under a cent, so the cap only binds on a dear model.
+# lists for the tonight task's models), and the candidate list is cut until the pair fits. At DeepSeek V4.1 Flash's
+# price a day costs about a cent (the bake-off: $0.005-0.011), so the cap only binds on a dear model.
 [stages.tonight]
 every           = "30m"                          # the model is [llm.tasks.tonight]'s
 max_tokens      = 4000                           # reasoning + the JSON; a cut-off answer is retried with the least reasoning
@@ -284,15 +284,15 @@ quiet         = ["missing_english_subs"]       # grows with every download until
 # Candidates: the owner's poster (from a Plex DB backup and the export taken with it), TMDB and fanart.tv (the shared
 # clients). Judge: one vision call per title through the AI gateway, on [llm.tasks.posters]'s model (collections on
 # [llm.tasks.collections]'s), as many at once as [llm] in_flight allows. Off until enabled: even with dry_run, judging
-# spends. The live bake-off (docs/STAGES.md, 2026-10-06) measured $0.00013 a title on deepseek-v4.1-flash and $0.00020
-# on zai/glm-5.3-flash: the 3,023-title backlog is about $0.40-0.60. Each call holds its worst case (about $0.003 on
-# deepseek-v4.1-flash: all of max_tokens at the dearest provider's price) against budget_usd until it settles.
+# spends. The bake-off (docs/STAGES.md, 2026-10-06) measured $0.00047 a title on qwen3-vl-instruct ($0.00004 on its
+# fallback qwen3.7-flash): the 3,023-title backlog is about $1.40. Each call holds its worst case (about $0.002 on
+# qwen3-vl-instruct: all of max_tokens at the dearest provider's price) against budget_usd until it settles.
 [stages.posters]
 enabled            = false
 every              = "6h"
 dry_run            = true            # judge only; review posters_items, then set false to upload
 budget_usd         = 12              # all judge calls ever (the Anthropic calls before the gateway included); a hard stop
-                                     # for new calls (lost answers may pass it by in_flight x 3 worst cases, ~$0.07)
+                                     # for new calls (lost answers may pass it by in_flight x 3 worst cases, ~$0.05)
 max_tokens         = 1024            # reasoning included
 cache_dir          = "/state/posters" # thumbnails
 # One export: items.json and posters/ from export_customizations.py, and the Plex DB backup taken with them. Pointing
@@ -374,17 +374,19 @@ attempts   = 4      # 429, 5xx, timeouts and dropped answers are retried with ji
 park_after = 5      # failed calls in a row before a stage stops calling for the rest of its run (a billing refusal: at
                     # once, one alert in all, and one call an hour across the process until the gateway answers)
 
+# The models are the bake-off's picks (docs/STAGES.md, 2026-10-06). The vision tasks send effort "none" rather than
+# "off": "off" reads the first model's controls, qwen3-vl-instruct has none, and qwen3.7-flash would then reason.
 [llm.tasks.posters]     # the movie, show and season poster judge: vision
-model     = "deepseek/deepseek-v4.1-flash" # until the bake-off (cmd/bakeoff) names the winner
-fallbacks = []
-reasoning = "off"
+model     = "alibaba/qwen3-vl-instruct"
+fallbacks = ["alibaba/qwen3.7-flash"]
+reasoning = "none"
 
 [llm.tasks.collections] # the franchise and director collection judges: vision
-model     = "deepseek/deepseek-v4.1-flash"
-fallbacks = []
-reasoning = "off"
+model     = "alibaba/qwen3-vl-instruct"
+fallbacks = ["alibaba/qwen3.7-flash"]
+reasoning = "none"
 
 [llm.tasks.tonight]     # the daily picks: text
-model     = "deepseek/deepseek-v4-flash-0731"
-fallbacks = []
-reasoning = "low"
+model     = "deepseek/deepseek-v4.1-flash"
+fallbacks = ["alibaba/qwen3.7-flash"]
+reasoning = "off"

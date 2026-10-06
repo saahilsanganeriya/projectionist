@@ -61,18 +61,22 @@ type Task struct {
 	Reasoning string   `toml:"reasoning"`
 }
 
-// VisionModel judges the posters and the collections until the bake-off (cmd/bakeoff) names the winner.
-const VisionModel = "deepseek/deepseek-v4.1-flash"
+// The bake-off's picks (2026-10-06): the posters and collections judge, and the cheap fallback for every task.
+const (
+	VisionModel   = "alibaba/qwen3-vl-instruct"
+	FallbackModel = "alibaba/qwen3.7-flash"
+)
 
-// Defaults is the configuration a missing [llm] key takes.
+// Defaults is the configuration a missing [llm] key takes. The vision tasks send effort "none": "off" reads the
+// first model's controls, and qwen3-vl-instruct has none, so the fallback would reason.
 func Defaults() Config {
 	return Config{
 		API: "https://ai-gateway.vercel.sh/v1", KeyFile: "/run/secrets/ai_gateway_api_key",
 		InFlight: 8, Timeout: 120 * time.Second, Attempts: 4, ParkAfter: 5,
 		Tasks: map[string]Task{
-			"posters":     {Model: VisionModel, Reasoning: "off"},
-			"collections": {Model: VisionModel, Reasoning: "off"},
-			"tonight":     {Model: "deepseek/deepseek-v4-flash-0731", Reasoning: "low"},
+			"posters":     {Model: VisionModel, Fallbacks: []string{FallbackModel}, Reasoning: "none"},
+			"collections": {Model: VisionModel, Fallbacks: []string{FallbackModel}, Reasoning: "none"},
+			"tonight":     {Model: "deepseek/deepseek-v4.1-flash", Fallbacks: []string{FallbackModel}, Reasoning: "off"},
 		},
 	}
 }
@@ -106,6 +110,9 @@ func (c Config) withDefaults() Config {
 		def := tasks[name]
 		if t.Model == "" {
 			t.Model = def.Model
+		}
+		if t.Fallbacks == nil { // absent; "fallbacks = []" is none
+			t.Fallbacks = def.Fallbacks
 		}
 		if t.Reasoning == "" {
 			t.Reasoning = def.Reasoning
