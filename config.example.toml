@@ -284,15 +284,15 @@ quiet         = ["missing_english_subs"]       # grows with every download until
 # Candidates: the owner's poster (from a Plex DB backup and the export taken with it), TMDB and fanart.tv (the shared
 # clients). Judge: one vision call per title through the AI gateway, on [llm.tasks.posters]'s model (collections on
 # [llm.tasks.collections]'s), as many at once as [llm] in_flight allows. Off until enabled: even with dry_run, judging
-# spends. A title takes about 1,000 input and 100 output tokens with reasoning off: the 3,023-title backlog is about
-# $1.30 at deepseek-v4.1-flash's dearest listed price ($0.30 / $1.20 per million); cmd/bakeoff measures each model.
-# Each call holds its worst case (about $0.0015 there) against budget_usd until it settles.
+# spends. The live bake-off (docs/STAGES.md, 2026-10-06) measured $0.00013 a title on deepseek-v4.1-flash and $0.00020
+# on zai/glm-5.3-flash: the 3,023-title backlog is about $0.40-0.60. Each call holds its worst case (about $0.003 on
+# deepseek-v4.1-flash: all of max_tokens at the dearest provider's price) against budget_usd until it settles.
 [stages.posters]
 enabled            = false
 every              = "6h"
 dry_run            = true            # judge only; review posters_items, then set false to upload
 budget_usd         = 12              # all judge calls ever (the Anthropic calls before the gateway included); a hard stop
-                                     # for new calls (lost answers may pass it by in_flight x 3 worst cases, ~$0.04)
+                                     # for new calls (lost answers may pass it by in_flight x 3 worst cases, ~$0.07)
 max_tokens         = 1024            # reasoning included
 cache_dir          = "/state/posters" # thumbnails
 # One export: items.json and posters/ from export_customizations.py, and the Plex DB backup taken with them. Pointing
