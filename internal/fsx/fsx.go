@@ -1,5 +1,6 @@
 // Package fsx holds the file operations every stage shares: renames that cannot overwrite, copy-on-write clones,
-// and directory fsync (a rename is durable only once its directories are synced: do it once per unit, not per op).
+// directory fsync (a rename is durable only once its directories are synced: do it once per unit, not per op), and
+// Background, which runs heavy file work at the lowest CPU and I/O priority.
 package fsx
 
 import (

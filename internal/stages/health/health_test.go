@@ -19,6 +19,7 @@ import (
 	"projectionist/internal/fake"
 	"projectionist/internal/jellyfin"
 	"projectionist/internal/stage"
+	"projectionist/internal/stages/appbackup"
 )
 
 // Catches: a restart before K failures, a restart a refused key or a stopped container cannot cure, a restart of a
@@ -465,4 +466,72 @@ func serveUnix(t *testing.T, h http.Handler) string {
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close(); os.RemoveAll(dir) })
 	return sock
+}
+
+// Catches: a volume2 missing from the container, or a folder on another filesystem (the host's NVMe not mounted)
+// passing; this container's read-only bind taken for a read-only filesystem, and a filesystem remounted read-only
+// missed; an escaped mount point not matched; a hidden earlier mount read instead of the one on top; the fullness
+// threshold missed; and a stray top-level entry not named.
+func TestCheckVolume(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	dir := filepath.Join(t.TempDir(), "volume 2")
+	for _, e := range []string{"PlexAppData", "@eaDir", "stray"} {
+		os.MkdirAll(filepath.Join(dir, e), 0o755)
+	}
+	esc := strings.ReplaceAll(dir, " ", `\040`)
+	line := func(root, mountOpts, superOpts string) string {
+		return fmt.Sprintf("199 17 248:3 %s %s %s master:1 - ext4 /dev/mapper/cachedev_1 %s\n", root, esc, mountOpts, superOpts)
+	}
+	cases := []struct {
+		name, mountinfo string
+		maxUsed         float64
+		allow           []string
+		want            []string // one substring per expected alert, in order
+	}{
+		{"healthy behind a read-only bind", line("/", "ro,relatime", "rw,data=ordered"), 101, []string{"PlexAppData", "@eaDir", "stray"}, nil},
+		{"not in this container", "1 0 8:1 / / rw - ext4 /dev/md0 rw\n", 101, nil, []string{"not mounted in this container"}},
+		{"a folder of the system partition", line("/volume2", "ro", "rw"), 101, nil, []string{"not mounted on the host: it is the folder /volume2"}},
+		{"filesystem remounted read-only", line("/", "rw", "ro,errors=remount-ro"), 101, []string{"PlexAppData", "@eaDir", "stray"}, []string{"read-only"}},
+		{"the mount on top wins", line("/volume2", "ro", "rw") + line("/", "ro", "rw"), 101, []string{"PlexAppData", "@eaDir", "stray"}, nil},
+		{"full", line("/", "ro", "rw"), 0, []string{"PlexAppData", "@eaDir", "stray"}, []string{"full (alert at 0%)"}},
+		{"stray entry", line("/", "ro", "rw"), 101, []string{"PlexAppData", "@eaDir"}, []string{"holds stray, outside volume2_allow"}},
+	}
+	for _, c := range cases {
+		mountinfo := filepath.Join(t.TempDir(), "mountinfo")
+		os.WriteFile(mountinfo, []byte(c.mountinfo), 0o600)
+		var rep stage.Report
+		checkVolume(h.Env, mountinfo, dir, c.maxUsed, c.allow, &rep)
+		ok := len(rep.Alerts) == len(c.want)
+		for i := 0; ok && i < len(c.want); i++ {
+			ok = strings.Contains(rep.Alerts[i], c.want[i])
+		}
+		if !ok {
+			t.Errorf("%s: alerts %q, want %q", c.name, rep.Alerts, c.want)
+		}
+	}
+}
+
+// Catches: an app-data backup that stopped finishing passing silently once older than backup_max_age, an alert
+// while it is just inside the limit, and an alert before the first backup ever finished.
+func TestBackupAge(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	h.SetOptions("fail_threshold = 99\ndocker_socket = \"/nonexistent.sock\"\nqbittorrent_url = \"http://127.0.0.1:1\"\nbackup_max_age = \"36h\"\n")
+	alerts := func() string {
+		var rep stage.Report
+		if err := (Stage{}).Run(context.Background(), h.Env, &rep); err != nil {
+			t.Fatal(err)
+		}
+		return strings.Join(rep.Alerts, " | ")
+	}
+	if got := alerts(); got != "" {
+		t.Fatalf("before any backup: %q", got)
+	}
+	h.Env.Store.PutJSON(context.Background(), "appbackup", "last", appbackup.Last{Day: "2026-10-03", At: h.Now.Add(-36 * time.Hour)})
+	if got := alerts(); got != "" {
+		t.Fatalf("36 h old: %q", got)
+	}
+	h.Now = h.Now.Add(time.Minute)
+	if got := alerts(); !strings.Contains(got, "newest app-data backup (2026-10-03) finished 36h1m0s ago") {
+		t.Fatalf("36 h 1 min old: %q", got)
+	}
 }

@@ -8,7 +8,7 @@
 // (same size and mtime under a new path) keeps its facts. Heavy work (the whole-file packet scan, the hole probe
 // and decode samples) comes after every note is in place, so a 45-minute scan never holds back a new file's note.
 // Probes and heavy work run only while nobody but the owner is watching, at nice 19 and the lowest best-effort I/O
-// priority (see background). A video that moves mid-run gets no note, verdict or alert under its old name.
+// priority (see fsx.Background). A video that moves mid-run gets no note, verdict or alert under its old name.
 //
 // Facts other stages can query:
 //
@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"projectionist/internal/fsx"
 	"projectionist/internal/library"
 	"projectionist/internal/probe"
 	"projectionist/internal/stage"
@@ -323,7 +324,7 @@ func (r *run) one(ctx context.Context, v video, row *fileRow) error {
 		}
 		r.probes--
 		r.rep.Count("probed", 1)
-		background(func() { info, err = r.env.Probe.Probe(ctx, v.path) })
+		fsx.Background(func() { info, err = r.env.Probe.Probe(ctx, v.path) })
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -488,7 +489,7 @@ func (r *run) heavy(ctx context.Context, fn func(context.Context) error) (done b
 			}
 		}
 	}()
-	background(func() { err = fn(hctx) })
+	fsx.Background(func() { err = fn(hctx) })
 	switch {
 	case ctx.Err() != nil:
 		return false, ctx.Err()
