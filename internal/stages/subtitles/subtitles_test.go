@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -778,7 +779,8 @@ func (f *fixture) verdict(rel, status string) map[string]any {
 // rate), and OpenSubtitles never searched for a title a cheaper provider served (it is last, whatever the list's
 // order); an OpenSubtitles hash match labelled with the film is written reading only the hash's 2 x 64 KiB (the whole
 // 4 KiB file twice here). Also a hash match labelled with another film, or a release match the note says cannot fit
-// (8 % short), written instead of queued untouched; OpenSubtitles' other candidates queued beside a cheaper provider's;
+// (8 % short), written instead of queued untouched; OpenSubtitles' other candidates not queued after a cheaper
+// provider's;
 // a release match that failed cheapCheck dropped from the alignment, tested cheaply again, or downloaded again by it;
 // and a title whose note names an embedded English text track probed or opened.
 func TestRunReleaseMatchedReadsNoVideo(t *testing.T) {
@@ -826,15 +828,97 @@ func TestRunReleaseMatchedReadsNoVideo(t *testing.T) {
 			}
 			continue
 		}
-		// Show's NTb subtitle failed cheapCheck: its pool holds Gestdown's two, not OpenSubtitles' episode match (Gestdown
-		// has candidates), and an alignment later tries NTb's first, without testing it cheaply again.
+		// Show's NTb subtitle failed cheapCheck: its pool holds Gestdown's two, then OpenSubtitles' episode match, and an
+		// alignment later tries NTb's first, without testing it cheaply again.
 		f.options(`providers = ["opensubtitles", "gestdown"]` + "\nalign_per_day = 20")
 		f.run(t)
 		var cheap int
 		f.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM events WHERE item=? AND status='rejected_cheap'`, f.path(show)).Scan(&cheap)
-		if f.verdict(show, "queued")["detail"] != "2 candidate(s)" || f.verdict(show, "retimed")["id"] != "gestdown:n" || cheap != 1 || gestdown("/dl/n") != 1 {
-			t.Errorf("%s: Show queued with %v, aligned %v, tested cheaply %d times, NTb's downloaded %d times; want Gestdown's 2, NTb's aligned, once, once",
+		if f.verdict(show, "queued")["detail"] != "3 candidate(s)" || f.verdict(show, "retimed")["id"] != "gestdown:n" || cheap != 1 || gestdown("/dl/n") != 1 {
+			t.Errorf("%s: Show queued with %v, aligned %v, tested cheaply %d times, NTb's downloaded %d times; want 3, NTb's aligned, once, once",
 				c.why, f.verdict(show, "queued")["detail"], f.verdict(show, "retimed")["id"], cheap, gestdown("/dl/n"))
+		}
+	}
+}
+
+// Catches the queue stopping at the first provider that had candidates: Show's five Gestdown subtitles are another
+// film's, so it must try Gestdown's first maxTries, then fall through to OpenSubtitles, there trying the Blu-ray
+// subtitle (the file's source; rank alone puts the more popular WEB one first) before the WEB one. And, while
+// OpenSubtitles' day's downloads are spent (its download refused mid-queue, or its search skipped from the start) or
+// Gestdown fails mid-queue (5xx: parked), a title nothing else aligned refused instead of waiting in the queue for it.
+func TestRunQueueFallsThrough(t *testing.T) {
+	for _, c := range []string{"falls through", "quota spent at its download", "quota spent before its search", "Gestdown down at its download"} {
+		down := c == "Gestdown down at its download" // and OpenSubtitles has nothing for Show
+		f := newFixture(t)
+		os.Remove(filepath.Join(f.h.Env.FFmpeg.Dir, "realign.srt")) // alass keeps each candidate's timing
+		f.h.TMDB.Handle("GET", "/tv/1", 200, `{"id":1,"external_ids":{"tvdb_id":81189,"imdb_id":"tt0000001"}}`)
+		gd, gdCalls := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+			switch {
+			case r.URL.Path == "/shows/external/tvdb/81189":
+				w.Write([]byte(`{"shows":[{"id":"s"}]}`))
+			case r.URL.Path == "/subtitles/get/s/1/1/English":
+				var list []string
+				for i := range maxTries + 1 {
+					list = append(list, fmt.Sprintf(`{"subtitleId":"%d","version":"WEB","completed":true,"downloadUri":"/dl/%d","language":"English"}`, i, i))
+				}
+				w.Write([]byte(`{"matchingSubtitles":[` + strings.Join(list, ",") + `],"episode":{"season":1,"number":1}}`))
+			case strings.HasPrefix(r.URL.Path, "/dl/") && down:
+				w.WriteHeader(503)
+			case strings.HasPrefix(r.URL.Path, "/dl/"):
+				w.Write([]byte(srt(otherTimes(), 0)))
+			}
+		})
+		var quota atomic.Bool
+		quota.Store(c == "quota spent at its download")
+		var opensubs *httptest.Server
+		opensubs, osCalls := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+			cand := func(id, release string, downloads int) string {
+				return fmt.Sprintf(`{"IDSubtitleFile":"%s","SubFormat":"srt","MovieReleaseName":"%s","SubDownloadsCnt":"%d","SeriesSeason":"1",`+
+					`"SeriesEpisode":"1","SubDownloadLink":"%s/dl/%s.gz"}`, id, release, downloads, opensubs.URL, id)
+			}
+			switch {
+			case strings.Contains(r.URL.Path, "imdbid-0000001") && !down:
+				w.Write([]byte(`[` + cand("web", "Show.S01E01.1080p.WEB-DL", 9999) + `,` + cand("bluray", "Show.S01E01.1080p.Blu-ray", 1) + `]`))
+			case strings.HasPrefix(r.URL.Path, "/dl/") && quota.Load():
+				w.WriteHeader(429)
+			case strings.HasPrefix(r.URL.Path, "/dl/"):
+				w.Write(gz(srt(f.ts, 1)))
+			default:
+				w.Write([]byte("[]"))
+			}
+		})
+		f.st.gestdownAPI, f.st.openSubtitles = gd.URL, opensubs.URL+"/search/"
+		f.options(`providers = ["opensubtitles", "gestdown"]`)
+		f.note(show, "Show.S01E01.1080p.BluRay.x264-GRP.mkv", "none", "0h 50m")
+		if c == "quota spent before its search" {
+			f.h.Env.Store.PutJSON(context.Background(), name, "opensubtitles_quota", quotaState{ResumeAfter: f.h.Now.Add(24 * time.Hour)})
+		}
+		f.run(t)
+		var tried []int
+		for i := range maxTries + 1 {
+			tried = append(tried, gdCalls(fmt.Sprintf("/dl/%d", i)))
+		}
+		if c != "falls through" {
+			var refused int
+			f.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM events WHERE item=? AND status='no_aligned_candidate'`, f.path(show)).Scan(&refused)
+			if f.outcomes()[f.path(show)] != "queued" || f.queued()[0] != f.path(show) || refused != 0 {
+				t.Errorf("%s: Show %q, queue %v, %d refusals; want it waiting in the queue", c, f.outcomes()[f.path(show)], f.queued(), refused)
+			}
+			if down {
+				continue
+			}
+			quota.Store(false)
+			f.h.Now = f.h.Now.Add(25 * time.Hour)
+			f.run(t)
+		}
+		blu := 1
+		if c == "quota spent at its download" {
+			blu = 2 // the refused download, then the one that came back
+		}
+		if o := f.outcomes()[f.path(show)]; o != "kept" || f.sidecar(t, show) != stripAds(srt(f.ts, 1)) || !slices.Equal(tried, []int{1, 1, 1, 1, 0}) ||
+			osCalls("/dl/bluray.gz") != blu || osCalls("/dl/web.gz") != 0 {
+			t.Errorf("%s: Show %q; Gestdown's downloaded %v; OpenSubtitles' Blu-ray %d, WEB %d; want written from the Blu-ray, "+
+				"Gestdown's first %d once each, Blu-ray %d, WEB never", c, o, tried, osCalls("/dl/bluray.gz"), osCalls("/dl/web.gz"), maxTries, blu)
 		}
 	}
 }
@@ -1096,12 +1180,12 @@ func TestRunModeOptions(t *testing.T) {
 }
 
 // Catches sampled mode spending OpenSubtitles' downloads (180 a day, 8 minutes apart) before the queue on anything but
-// its hash match: beside Gestdown's candidates its episode match is neither tried nor queued, and for a title only it
-// has candidates for (Ran, a film; Show once Gestdown is not listed) they are queued untried, so the capped queue alone
-// spends them. Ran's, 2.5 s late, would pass the cheap check.
+// its hash match: beside Gestdown's candidates its episode match is not tried (it is queued after them), and for a
+// title only it has candidates for (Ran, a film; Show once Gestdown is not listed) they are queued untried, so the
+// capped queue alone spends them. Ran's, 2.5 s late, would pass the cheap check.
 func TestRunSampledSparesOpenSubtitles(t *testing.T) {
 	for _, c := range []struct{ providers, length, want string }{
-		{`["opensubtitles", "gestdown"]`, "0h 50m", "2 candidate(s)"}, // Gestdown's two fail the cheap check
+		{`["opensubtitles", "gestdown"]`, "0h 50m", "3 candidate(s)"}, // Gestdown's two fail the cheap check
 		{`["opensubtitles"]`, "0h 45m", "1 candidate(s)"},
 	} {
 		f := newFixture(t)
