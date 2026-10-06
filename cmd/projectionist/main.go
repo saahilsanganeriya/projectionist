@@ -20,6 +20,7 @@ import (
 	"projectionist/internal/config"
 	"projectionist/internal/fanart"
 	"projectionist/internal/jellyfin"
+	"projectionist/internal/llm"
 	"projectionist/internal/obs"
 	"projectionist/internal/plex"
 	"projectionist/internal/probe"
@@ -91,6 +92,7 @@ func run(cfgPath, only string) int {
 	// One TMDB client for every stage, so its rate limit holds for the whole process.
 	tm := tmdb.New(tmdb.Options{ReadTokenFile: cfg.TMDB.ReadTokenFile, APIKeyFile: cfg.TMDB.APIKeyFile, CacheTTL: cfg.TMDB.CacheTTL}, st)
 	fa := fanart.New(fanart.Options{APIKeyFile: cfg.Fanart.APIKeyFile, CacheTTL: cfg.Fanart.CacheTTL}, st)
+	ai := llm.New(cfg.LLM, st, func() time.Time { return time.Now().UTC() })
 	owners := map[string]bool{}
 	for _, o := range cfg.Owners {
 		owners[o] = true
@@ -102,7 +104,7 @@ func run(cfgPath, only string) int {
 		Now: func() time.Time { return time.Now().UTC() },
 		NewEnv: func(s stage.Stage, l *slog.Logger) *stage.Env {
 			return &stage.Env{
-				Log: l, Store: st, Plex: px, Jellyfin: jf, Probe: prober, TMDB: tm, Fanart: fa, LLM: cfg.LLM.Policy, FFmpeg: cfg.FFmpeg, Metrics: metrics,
+				Log: l, Store: st, Plex: px, Jellyfin: jf, Probe: prober, TMDB: tm, Fanart: fa, LLM: ai, FFmpeg: cfg.FFmpeg, Metrics: metrics,
 				Viewers: &viewers.Gate{Plex: px, Jellyfin: jf, Owners: owners, Poll: 30 * time.Second, Log: l},
 				Now:     func() time.Time { return time.Now().UTC() },
 				Loc:     cfg.Location(),

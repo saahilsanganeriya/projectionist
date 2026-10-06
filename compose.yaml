@@ -64,7 +64,7 @@ services:
       - { type: bind, source: /volume2/jellyfin/config/data, target: /volume2/jellyfin/config/data, bind: { create_host_path: false } }
       - { type: bind, source: /volume2/projectionist/state, target: /volume2/projectionist/state, bind: { create_host_path: false } } # = /state
       - /volume1/PlexMediaServer/nvme-backup:/volume1/PlexMediaServer/nvme-backup # appbackup's nightly versions
-    secrets: [jellyfin_key, tmdb_read_token, tmdb_api_key, fanart_api_key, anthropic_api_key] # /run/secrets/<name>, read-only
+    secrets: [jellyfin_key, tmdb_read_token, tmdb_api_key, fanart_api_key, ai_gateway_api_key] # /run/secrets/<name>, read-only
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
@@ -78,5 +78,5 @@ secrets:
     file: /volume1/docker/projectionist/secrets/tmdb_api_key
   fanart_api_key:
     file: /volume1/docker/projectionist/secrets/fanart_api_key
-  anthropic_api_key: # the owner's personal Anthropic key
-    file: /volume1/docker/projectionist/secrets/anthropic_api_key
+  ai_gateway_api_key: # the owner's Vercel AI Gateway key: every model call ([llm] key_file)
+    file: /volume1/docker/projectionist/secrets/ai_gateway_api_key

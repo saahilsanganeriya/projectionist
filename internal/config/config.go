@@ -12,17 +12,17 @@ import (
 )
 
 type Config struct {
-	Listen   string   `toml:"listen"`   // host network: keep it on 127.0.0.1 or the LAN address
-	StateDB  string   `toml:"state_db"` // SQLite file; must sit on a local disk (btrfs volume), never SMB/NFS
-	Timezone string   `toml:"timezone"` // only for stage windows; logs and the DB are always UTC
-	Owners   []string `toml:"owners"`   // Plex/Jellyfin account names whose viewing never pauses a job
-	Log      Log      `toml:"log"`
-	Plex     Plex     `toml:"plex"`
-	Jellyfin Jellyfin `toml:"jellyfin"`
-	FFmpeg   FFmpeg   `toml:"ffmpeg"`
-	TMDB     TMDB     `toml:"tmdb"`
-	Fanart   Fanart   `toml:"fanart"`
-	LLM      LLM      `toml:"llm"`
+	Listen   string     `toml:"listen"`   // host network: keep it on 127.0.0.1 or the LAN address
+	StateDB  string     `toml:"state_db"` // SQLite file; must sit on a local disk (btrfs volume), never SMB/NFS
+	Timezone string     `toml:"timezone"` // only for stage windows; logs and the DB are always UTC
+	Owners   []string   `toml:"owners"`   // Plex/Jellyfin account names whose viewing never pauses a job
+	Log      Log        `toml:"log"`
+	Plex     Plex       `toml:"plex"`
+	Jellyfin Jellyfin   `toml:"jellyfin"`
+	FFmpeg   FFmpeg     `toml:"ffmpeg"`
+	TMDB     TMDB       `toml:"tmdb"`
+	Fanart   Fanart     `toml:"fanart"`
+	LLM      llm.Config `toml:"llm"` // the AI gateway and each task's model; unset keys take llm.Defaults
 
 	Stages map[string]toml.Primitive `toml:"stages"`
 
@@ -57,11 +57,6 @@ type TMDB struct {
 type Fanart struct {
 	APIKeyFile string        `toml:"api_key_file"`
 	CacheTTL   time.Duration `toml:"cache_ttl"`
-}
-
-// LLM is which Claude model the stages that call one use, by date ([[llm.policy]]); none = llm.DefaultPolicy.
-type LLM struct {
-	Policy llm.Policy `toml:"policy"`
 }
 
 type FFmpeg struct {

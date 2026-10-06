@@ -1,15 +1,15 @@
 //go:build gate
 
-// The pilot gate harness, not a test: runs the stage in dry-run against real TMDB, fanart.tv and Anthropic for the
-// 12 pilot titles mirrored into $POSTERS_GATE_DIR, then compares every pick with the Python pilot's.
+// The pilot gate harness, not a test: runs the stage in dry-run against real TMDB, fanart.tv and the AI gateway for
+// the 12 pilot titles mirrored into $POSTERS_GATE_DIR, then compares every pick with the Python pilot's.
 //
-//	(GATE_TMDB=$(security …) GATE_FANART=$(security …) GATE_ANTHROPIC=$(security …) \
+//	(GATE_TMDB=$(security …) GATE_FANART=$(security …) GATE_AI_GATEWAY=$(…) \
 //	 POSTERS_GATE_DIR=… go test -tags gate -run TestPilotGate -v ./internal/stages/posters)
 //
-// Secrets come only from the GATE_* variables the command sets for its own process (never an ambient
-// ANTHROPIC_API_KEY). The Anthropic key reaches the stage through Stage.Secret; the shared TMDB and fanart.tv
-// clients read files, so those two are written 0600 into the test's temp dir, which is removed when it ends. The
-// judge follows the default policy; POSTERS_GATE_MODEL (an id or "family:latest") replaces it.
+// Secrets come only from the GATE_* variables the command sets for its own process. The gateway key reaches the
+// client through its Key func; the shared TMDB and fanart.tv clients read files, so those two are written 0600 into
+// the test's temp dir, which is removed when it ends. The judge is the posters task's default model;
+// POSTERS_GATE_MODEL (a gateway model id) replaces it.
 package posters
 
 import (
@@ -73,18 +73,11 @@ budget_usd = 0.10
 	}
 	env.TMDB = tmdb.New(tmdb.Options{ReadTokenFile: secretFile("tmdb_read_token", "GATE_TMDB")}, st)
 	env.Fanart = fanart.New(fanart.Options{APIKeyFile: secretFile("fanart_api_key", "GATE_FANART")}, st)
-	if m := os.Getenv("POSTERS_GATE_MODEL"); m != "" {
-		env.LLM = llm.Policy{{Model: m}}
-	}
-	s := Stage{Secret: func(n string) (string, error) {
-		if v := os.Getenv("GATE_ANTHROPIC"); n == "anthropic_api_key" && v != "" {
-			return v, nil
-		}
-		return "", os.ErrNotExist
-	}}
+	env.LLM = llm.New(llm.Config{Tasks: map[string]llm.Task{"posters": {Model: os.Getenv("POSTERS_GATE_MODEL")}}}, st, env.Now)
+	env.LLM.Key = func() (string, error) { return os.Getenv("GATE_AI_GATEWAY"), nil }
 	var rep stage.Report
 	started := time.Now().UTC().Format(store.TimeFormat)
-	err = s.Run(context.Background(), env, &rep)
+	err = Stage{}.Run(context.Background(), env, &rep)
 	t.Logf("run: err=%v alerts=%v counts=%v summary=%q", err, rep.Alerts, rep.Counts, rep.Summary)
 
 	var pilot []struct {
@@ -148,8 +141,8 @@ budget_usd = 0.10
 	st.DB().QueryRow(`SELECT coalesce(sum(reserved_usd), 0) FROM posters_calls`).Scan(&held)
 	t.Logf("this run: model %s, %d calls, %d input + %d output tokens, $%.5f (still held: $%.5f)", model, calls, in, out, cost, held)
 	if calls > 0 {
-		t.Logf("per judged title: %.0f input + %.0f output tokens, $%.6f now, $%.6f in a batch", float64(in)/float64(calls),
-			float64(out)/float64(calls), cost/float64(calls), cost/float64(calls)/2)
+		t.Logf("per judged title: %.0f input + %.0f output tokens, $%.6f", float64(in)/float64(calls), float64(out)/float64(calls),
+			cost/float64(calls))
 	}
 }
 

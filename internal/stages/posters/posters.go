@@ -8,15 +8,14 @@
 //	owner       per export: which poster Plex showed at a Plex DB backup and whether the owner uploaded or picked it
 //	candidates  the owner's poster + TMDB's (every language, from env.TMDB) + fanart.tv's (env.Fanart), filtered to
 //	            English, textless or the title's own language, best voted first, near-duplicates dropped by dHash
-//	judge       one vision call per title on the owner's Anthropic key, the model chosen by the dated policy
-//	            (env.LLM), under a hard budget; a backlog goes through the Message Batches API at half price. The
-//	            owner's UPLOAD and PICK are never replaced, Plex's DEFAULT only by a candidate scored at least 2 points
-//	            higher; a pool judged before is decided again from its stored scores when these rules change
+//	judge       one vision call per title through the AI gateway (env.LLM: the posters task's model, the collections
+//	            task's for a collection), as many at once as the client allows, under a hard budget. The owner's
+//	            UPLOAD and PICK are never replaced, Plex's DEFAULT only by a candidate scored at least 2 points higher;
+//	            a pool judged before is decided again from its stored scores when these rules change
 //	apply       an outbox per app (Plex, Jellyfin are sinks), retried with backoff; Plex's lock is its own step
 //
-// While anyone but the owner watches, the heavy steps wait for a later run: downloads and resizes, batch uploads and
-// poster uploads. The gate is asked before each title's download, each batch upload and each title's uploads (at
-// most once a minute). Collecting a finished batch's results (a small download) goes on.
+// While anyone but the owner watches, the heavy steps wait for a later run: downloads and resizes, judging and poster
+// uploads. The gate is asked before each title's download, its judge call and its uploads (at most once a minute).
 package posters
 
 import (
@@ -26,15 +25,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"projectionist/internal/fanart"
-	"projectionist/internal/llm"
 	"projectionist/internal/stage"
 	"projectionist/internal/store"
 	"projectionist/internal/tmdb"
@@ -48,23 +44,18 @@ type Options struct {
 	Only             []string      `toml:"only"`    // title keys ("movie:tmdb-422", "season:tmdb-1400:2", "collection:scary movie") to limit a run to
 	DryRun           bool          `toml:"dry_run"` // titles: candidates and judge only, no poster uploaded
 	CacheDir         string        `toml:"cache_dir"`
-	SecretsDir       string        `toml:"secrets_dir"`     // anthropic_api_key (TMDB and fanart.tv are the shared clients')
 	OwnerItems       string        `toml:"owner_items"`     // customizations/items.json: ratingKey, guid, external ids per item
 	OwnerPosters     string        `toml:"owner_posters"`   // customizations/posters/<kind>/<ratingKey>.jpg
 	OwnerBackupDB    string        `toml:"owner_backup_db"` // the Plex DB .backup taken with that export
-	MaxTokens        int           `toml:"max_tokens"`      // thinking included
+	MaxTokens        int           `toml:"max_tokens"`      // reasoning included
 	BudgetUSD        float64       `toml:"budget_usd"`      // every judge call ever, not per run
-	BatchMin         int           `toml:"batch_min"`       // this many titles to judge or more go through Message Batches
-	BatchSize        int           `toml:"batch_size"`
 	FetchWorkers     int           `toml:"fetch_workers"`
-	JudgeWorkers     int           `toml:"judge_workers"`
 	ApplyWorkers     int           `toml:"apply_workers"`
 	PlexMovieSection int           `toml:"plex_movie_section"`
 	PlexTVSection    int           `toml:"plex_tv_section"`
 	SinkIndexEvery   time.Duration `toml:"sink_index_every"` // how often each app's item list is fetched
 	SinkAlertAfter   time.Duration `toml:"sink_alert_after"` // an app whose listing fails this long raises an alert
 	Mark             string        `toml:"mark"`             // EXIF ImageDescription on the images the stage chose
-	AnthropicAPI     string        `toml:"anthropic_api"`
 	TMDBImages       string        `toml:"tmdb_images"`
 	// Collections: both files set (the collections stage's) turn them on.
 	CollectionsOwner    string  `toml:"collections_owner_file"`    // the owner's collections: never given a poster here
@@ -82,23 +73,18 @@ func defaults() Options {
 		MoviesRoot:       "/volume1/media/Movies",
 		TVRoot:           "/volume1/media/TV",
 		CacheDir:         "/state/posters",
-		SecretsDir:       "/run/secrets",
 		OwnerItems:       backups + "/customizations/items.json",
 		OwnerPosters:     backups + "/customizations/posters",
 		OwnerBackupDB:    backups + "/pre-rename-20261005T0328Z/com.plexapp.plugins.library.db",
 		MaxTokens:        1024,
 		BudgetUSD:        12,
-		BatchMin:         25,
-		BatchSize:        200,
 		FetchWorkers:     3,
-		JudgeWorkers:     4,
 		ApplyWorkers:     2,
 		PlexMovieSection: 4,
 		PlexTVSection:    2,
 		SinkIndexEvery:   24 * time.Hour,
 		SinkAlertAfter:   72 * time.Hour,
 		Mark:             "poster-curator 2026-10",
-		AnthropicAPI:     "https://api.anthropic.com",
 		TMDBImages:       "https://image.tmdb.org/t/p",
 
 		CollectionDryRun:    true,
@@ -129,8 +115,8 @@ CREATE TABLE IF NOT EXISTS posters_calls (
   item          TEXT NOT NULL,
   of            TEXT NOT NULL, -- the candidate set judged
   model         TEXT NOT NULL,
-  mode          TEXT NOT NULL, -- sync | batch
-  batch_id      TEXT NOT NULL,
+  mode          TEXT NOT NULL, -- gateway (sync | batch: Anthropic's API, before the gateway)
+  batch_id      TEXT NOT NULL, -- an Anthropic Message Batch's
   state         TEXT NOT NULL, -- pending | done | failed (no answer) | unusable (an answer with no scores)
   input_tokens  INTEGER NOT NULL,
   output_tokens INTEGER NOT NULL,
@@ -153,9 +139,7 @@ CREATE TABLE IF NOT EXISTS posters_sinks (
 );`
 
 // Stage needs no state between runs: everything lives in the store.
-type Stage struct {
-	Secret func(name string) (string, error) // nil = read <secrets_dir>/<name> on every use
-}
+type Stage struct{}
 
 func (Stage) Name() string { return name }
 
@@ -179,7 +163,6 @@ type run struct {
 	env    *stage.Env
 	opt    Options
 	http   *http.Client // image downloads
-	llm    *llm.Client
 	owners map[string]ownerPoster
 
 	mu            sync.Mutex
@@ -224,7 +207,7 @@ func (r *run) alert(format string, args ...any) {
 	r.rep.Alert(format, args...)
 }
 
-func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
+func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	opt := defaults()
 	if err := env.Options(&opt); err != nil {
 		return err
@@ -233,18 +216,7 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return err
 	}
-	secret := s.Secret
-	if secret == nil {
-		secret = func(n string) (string, error) {
-			b, err := os.ReadFile(filepath.Join(opt.SecretsDir, n))
-			return strings.TrimSpace(string(b)), err
-		}
-	}
-	r := &run{env: env, opt: opt, http: &http.Client{Timeout: 2 * time.Minute}, rep: rep, budgetAlerted: map[bool]bool{},
-		// 10 minutes, the Anthropic SDKs' default: a batch upload of ~30 MB needs it on a slow uplink.
-		llm: &llm.Client{API: opt.AnthropicAPI, HTTP: &http.Client{Timeout: 10 * time.Minute},
-			Key: func() (string, error) { return secret("anthropic_api_key") }},
-	}
+	r := &run{env: env, opt: opt, http: &http.Client{Timeout: 2 * time.Minute}, rep: rep, budgetAlerted: map[bool]bool{}}
 
 	// An export (items.json, its posters and the Plex DB backup taken with it) is imported once; pointing the
 	// options at a newer export merges it in (importOwners says how).

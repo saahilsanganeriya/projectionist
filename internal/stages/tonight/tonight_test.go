@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,6 +24,8 @@ import (
 
 	"projectionist/internal/fake"
 	"projectionist/internal/lbpace"
+	"projectionist/internal/llm"
+	"projectionist/internal/llm/llmtest"
 	"projectionist/internal/stage"
 )
 
@@ -212,9 +213,6 @@ func newWorld(t *testing.T, options string, fillers int) *world {
 	}
 	write(t, filepath.Join(movies, "Some.Film.2020.1080p.WEB", "a.mkv"), "") // outside the naming scheme: ignored
 
-	secrets := t.TempDir()
-	write(t, filepath.Join(secrets, "anthropic_api_key"), "sk-test-SECRET-key\n")
-
 	thumb := &bytes.Buffer{}
 	if err := jpeg.Encode(thumb, image.NewRGBA(image.Rect(0, 0, 34, 51)), nil); err != nil {
 		t.Fatal(err)
@@ -240,18 +238,16 @@ func newWorld(t *testing.T, options string, fillers int) *world {
 	}))
 	t.Cleanup(ext.Close)
 
-	w.ai = newAIFake(t)
+	w.ai = newAIFake(t, w.h, nil)
 	w.plex = newPlexFake(w.h.Plex)
 	w.jf = newJFFake(w.h.Jellyfin)
 	w.h.SetOptions(fmt.Sprintf(`
 picks = 3
-api_base = %q
-api_key_file = %q
 movies_dir = %q
 letterboxd_dir = "testdata/export"
 letterboxd_rss = %q
 image_base = %q
-`, w.ai.srv.URL, filepath.Join(secrets, "anthropic_api_key"), movies, ext.URL+"/saahilsan/rss/", ext.URL+"/img") + options)
+`, movies, ext.URL+"/saahilsan/rss/", ext.URL+"/img") + options)
 	return w
 }
 
@@ -291,142 +287,54 @@ func (w *world) state(t *testing.T) state {
 	return st
 }
 
-// ---- fake Anthropic: GET /v1/models, POST /v1/messages/count_tokens, POST /v1/messages ----
+// ---- the fake AI gateway ----
 
-// The fake's token counts are the gate run's real sizes (claude-sonnet-5-5, 2026-10-05): an 18,357-token cached
-// taste block, a 40-token tail, and 91 tokens per candidate line (190 lines took 17,240).
-const (
-	cachedPrefix = 18357
-	fixedTail    = 40
-	lineTokens   = 91
-	outputTokens = 422
-)
+// pricey is a tonight task on a model at $20 per million tokens either way, where the daily cap binds on the test
+// library's small prompt; at DeepSeek's prices a day costs a few tenths of a cent.
+var pricey = map[string]llm.Task{"tonight": {Model: "test/pricey"}}
 
-var candidateLine = regexp.MustCompile(`(?m)^\d+ \| `)
+const outputTokens = 422
 
 type aiFake struct {
-	srv *httptest.Server
-	mu  sync.Mutex
-	// answers is the picks JSON each /v1/messages call returns, in order. "CUT:" = cut off at max_tokens (with nothing
-	// after it, thinking took them all and there is no text block); "MAX:" = a whole answer billed all of max_tokens.
-	answers   []string
-	requests  []map[string]any // /v1/messages bodies
-	keys      []string
-	drop      bool // /v1/messages hangs up after reading the request, as a lost answer does
-	missRetry bool // a retry is billed as a cache miss (a write), as when the 5-minute entry is gone
+	gw *llmtest.Gateway
+	mu sync.Mutex
+	// answers is the picks JSON each call returns, in order. "CUT:" = cut off at max_tokens (with nothing after it,
+	// reasoning took them all and there is no text); "MAX:" = a whole answer billed all of max_tokens.
+	answers []string
+	drop    bool // the gateway hangs up after reading the request, as a lost answer does
 }
 
-type aiBody struct {
-	MaxTokens *int `json:"max_tokens"`
-	Messages  []struct {
-		Content []struct {
-			Type string  `json:"type"`
-			Text *string `json:"text"`
-		} `json:"content"`
-	} `json:"messages"`
-}
-
-// refusal is the real API's answer to a text block without text, as count_tokens gave it on 2026-10-05; "" = valid.
-func (b aiBody) refusal() string {
-	for i, m := range b.Messages {
-		for j, c := range m.Content {
-			switch {
-			case c.Type == "text" && c.Text == nil:
-				return fmt.Sprintf("messages.%d.content.%d.text.text: Field required", i, j)
-			case c.Type == "text" && strings.TrimSpace(*c.Text) == "":
-				return "messages: text content blocks must be non-empty"
-			}
-		}
-	}
-	return ""
-}
-
-// tokens counts a request as the real API sized the gate's: prefix, tail, candidate lines, then any other text.
-func (b aiBody) tokens() int {
-	n := cachedPrefix + fixedTail
-	for _, m := range b.Messages {
-		for _, c := range m.Content {
-			if lines := len(candidateLine.FindAllString(*c.Text, -1)); lines > 0 {
-				n += lineTokens * lines
-			} else {
-				n += len(*c.Text) / 4
-			}
-		}
-	}
-	return n
-}
-
-func newAIFake(t *testing.T) *aiFake {
+// newAIFake bills a request's input at 4 bytes a token, under the stage's estimate of 3, as real tokenizers do on his
+// prompt.
+func newAIFake(t *testing.T, h *fake.Harness, tasks map[string]llm.Task) *aiFake {
 	a := &aiFake{}
-	a.srv = httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+	a.gw = llmtest.New(func(_ int, req llm.Request) llmtest.Answer {
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		a.keys = append(a.keys, r.Header.Get("X-Api-Key"))
-		raw, _ := io.ReadAll(r.Body)
-		var b aiBody
-		json.Unmarshal(raw, &b)
-		rw.Header().Set("Content-Type", "application/json")
-		if msg := b.refusal(); msg != "" && strings.HasPrefix(r.URL.Path, "/v1/messages") {
-			rw.WriteHeader(400)
-			fmt.Fprintf(rw, `{"type":"error","error":{"type":"invalid_request_error","message":%q}}`, msg)
-			return
+		if a.drop {
+			return llmtest.Answer{Drop: true}
 		}
-		switch r.URL.Path {
-		case "/v1/models":
-			io.WriteString(rw, `{"data":[
-				{"type":"model","id":"claude-sonnet-5","created_at":"2026-04-01T00:00:00Z","capabilities":{"effort":{"supported":true,"low":{"supported":true}}}},
-				{"type":"model","id":"claude-haiku-4-5","created_at":"2025-10-01T00:00:00Z","capabilities":{"effort":{"supported":false,"low":{"supported":false}}}},
-				{"type":"model","id":"claude-sonnet-5-5","created_at":"2026-09-01T00:00:00Z","capabilities":{"effort":{"supported":true,"low":{"supported":true}}}}],
-				"has_more":false}`)
-		case "/v1/messages/count_tokens":
-			if b.MaxTokens != nil { // as the real endpoint answers
-				rw.WriteHeader(400)
-				io.WriteString(rw, `{"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: Extra inputs are not permitted"}}`)
-				return
-			}
-			fmt.Fprintf(rw, `{"input_tokens":%d}`, b.tokens())
-		case "/v1/messages":
-			var body map[string]any
-			json.Unmarshal(raw, &body)
-			a.requests = append(a.requests, body)
-			if a.drop {
-				conn, _, _ := rw.(http.Hijacker).Hijack()
-				conn.Close()
-				return
-			}
-			if len(a.answers) == 0 {
-				http.Error(rw, `{"type":"error","error":{"type":"invalid_request_error","message":"unscripted call"}}`, 400)
-				return
-			}
-			answer, stop, out := a.answers[0], "end_turn", outputTokens
-			a.answers = a.answers[1:]
-			if cut, ok := strings.CutPrefix(answer, "CUT:"); ok {
-				answer, stop, out = cut, "max_tokens", *b.MaxTokens
-			}
-			if whole, ok := strings.CutPrefix(answer, "MAX:"); ok {
-				answer, out = whole, *b.MaxTokens
-			}
-			content := `{"type":"thinking","thinking":"","signature":"c2ln"}`
-			if answer != "" {
-				text, _ := json.Marshal(answer)
-				content += fmt.Sprintf(`,{"type":"text","text":%s}`, text)
-			}
-			blocks := 0 // a first call sends one text block; a retry adds the problems, with or without the answer
-			for _, m := range b.Messages {
-				blocks += len(m.Content)
-			}
-			cache := "cache_creation_input_tokens" // the first call writes the taste block, a retry reads it
-			if blocks > 1 && !a.missRetry {
-				cache = "cache_read_input_tokens"
-			}
-			fmt.Fprintf(rw, `{"id":"msg_%d","type":"message","role":"assistant","model":"claude-sonnet-5-5",
-				"content":[%s],"stop_reason":%q,"usage":{"input_tokens":%d,%q:%d,"output_tokens":%d}}`,
-				len(a.requests), content, stop, b.tokens()-cachedPrefix, cache, cachedPrefix, out)
-		default:
-			http.NotFound(rw, r)
+		if len(a.answers) == 0 {
+			return llmtest.Answer{Status: 400, Type: "invalid_request_error", Message: "unscripted call"}
 		}
-	}))
-	t.Cleanup(a.srv.Close)
+		in := 0
+		for _, m := range req.Messages {
+			for _, p := range m.Content {
+				in += len(p.Text) / 4
+			}
+		}
+		answer, finish, out := a.answers[0], "stop", outputTokens
+		a.answers = a.answers[1:]
+		if cut, ok := strings.CutPrefix(answer, "CUT:"); ok {
+			answer, finish, out = cut, "length", req.MaxTokens
+		}
+		if whole, ok := strings.CutPrefix(answer, "MAX:"); ok {
+			answer, out = whole, req.MaxTokens
+		}
+		return llmtest.Answer{Text: answer, Finish: finish, In: in, Out: out}
+	})
+	a.gw.Models = append(a.gw.Models, llmtest.Model{ID: "test/pricey", In: 20, Out: 20})
+	h.Env.LLM = llmtest.Client(t, a.gw, h.Env.Store, func() time.Time { return h.Env.Now() }, llm.Config{Tasks: tasks})
 	return a
 }
 
@@ -436,19 +344,20 @@ func (a *aiFake) script(answers ...string) {
 	a.answers = append(a.answers, answers...)
 }
 
-func (a *aiFake) calls() int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return len(a.requests)
+func (a *aiFake) calls() int { return len(a.gw.Calls()) }
+
+// messages is call i's conversation as sent.
+func (a *aiFake) messages(i int) string {
+	raw, _ := json.Marshal(a.gw.Calls()[i].Messages)
+	return string(raw)
 }
 
-// effort is what request i asked for in output_config.effort ("" = none).
+// effort is what call i asked for in reasoning.effort ("" = none).
 func (a *aiFake) effort(i int) string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	oc, _ := a.requests[i]["output_config"].(map[string]any)
-	e, _ := oc["effort"].(string)
-	return e
+	if r := a.gw.Calls()[i].Reasoning; r != nil {
+		return r.Effort
+	}
+	return ""
 }
 
 func answer3(ids ...int) string {
@@ -772,9 +681,9 @@ func (j *jfFake) members() []string {
 	return slices.Sorted(slices.Values(j.box))
 }
 
-// Catches, across four runs at the gate's real token sizes: a watched film offered (export, feed, Plex, Jellyfin);
-// a pick outside the unseen set kept instead of retried; the taste block sent uncached or to an unresolved alias; a
-// second AI call on the same day; a watched pick left in the
+// Catches, across four runs: a watched film offered (export, feed, Plex, Jellyfin); a pick outside the unseen set
+// kept instead of retried; the taste block missing from the system message, the call sent to another task's model,
+// without the tonight task's reasoning or without the picks schema; a second AI call on the same day; a watched pick left in the
 // row (in Plex's cached Home hub too), or a poster uploaded for its removal; yesterday's picks repeated or kept; the row shown on a friend's Home or the Recommended tab, or left
 // there by an earlier build; his own "Tonight" collection or BoxSet adopted and edited; the key reaching a log; an RSS
 // read that skips the process-wide Letterboxd limiter (lbpace.Shared, at most one request per 2 s across stages).
@@ -792,25 +701,26 @@ func TestRunAcrossDays(t *testing.T) {
 	if spent := w.state(t).Spend["2026-10-05"]; spent > 0.15 {
 		t.Fatalf("run 1 spent $%.5f, over the $0.15 cap", spent)
 	}
-	first := w.ai.requests[0]
-	if first["model"] != "claude-sonnet-5-5" {
-		t.Fatalf("model = %v, want the newest Sonnet", first["model"])
+	first := w.ai.gw.Calls()[0]
+	if first.Model != "deepseek/deepseek-v4.1-flash" || w.ai.effort(0) != "none" || first.ResponseFormat == nil ||
+		!first.ResponseFormat.JSONSchema.Strict || !strings.Contains(string(first.ResponseFormat.JSONSchema.Schema), `"required":["id","title","mood","liked","reason"]`) {
+		t.Fatalf("model %s, effort %q, response format %+v; want the tonight task's model with no reasoning, held to the picks schema",
+			first.Model, w.ai.effort(0), first.ResponseFormat)
 	}
-	system, _ := json.Marshal(first["system"])
-	if !strings.Contains(string(system), `"cache_control":{"type":"ephemeral"}`) || !strings.Contains(string(system), "5★: Licorice Pizza (2021)") {
-		t.Fatalf("system blocks lack the cached taste profile: %s", system)
+	if system := first.Messages[0]; system.Role != "system" || !strings.Contains(system.Content[0].Text, "5★: Licorice Pizza (2021)") {
+		t.Fatalf("the system message lacks the taste profile: %+v", system)
 	}
-	userText, _ := json.Marshal(first["messages"])
+	userText := w.ai.messages(0)
 	for _, f := range films { // a line carries TMDB's facts, the director from the credits included
-		listed := strings.Contains(string(userText), fmt.Sprintf(`\n%d | %s | %d | %s | Drama | US | %d | en | First sentence.`,
+		listed := strings.Contains(userText, fmt.Sprintf(`\n%d | %s | %d | %s | Drama | US | %d | en | First sentence.`,
 			f.tmdb, f.title, f.year, f.director, f.runtime))
 		if unseen := f.tmdb != 559907 && slices.Index(films, f) < 7; listed != unseen {
 			t.Errorf("%s listed=%v, want %v", f.title, listed, unseen)
 		}
 	}
-	retry, _ := json.Marshal(w.ai.requests[1]["messages"])
-	if !strings.Contains(string(retry), `id 559907 (\"t559907\") is not in the UNSEEN list`) || strings.Contains(string(retry), "thinking") {
-		t.Fatalf("retry does not name the violation, or replays a thinking block: %s", retry)
+	if retry := w.ai.messages(1); !strings.Contains(retry, `id 559907 (\"t559907\") is not in the UNSEEN list`) ||
+		!strings.Contains(retry, `{"role":"assistant","content":"{\"picks\"`) {
+		t.Fatalf("retry does not send the answer back and name the violation: %s", retry)
 	}
 	st := w.state(t)
 	if st.Day != "2026-10-05" || !slices.Equal(tmdbIDs(st.Picks), []int{389, 346, 655}) {
@@ -843,9 +753,9 @@ func TestRunAcrossDays(t *testing.T) {
 	if !slices.Contains(w.jf.tags, "projectionist") {
 		t.Fatalf("jellyfin box tags = %q", w.jf.tags)
 	}
-	if !strings.Contains(w.logs.String(), "event=tonight_ai_call") || !strings.Contains(w.logs.String(), "cache_write_tokens=18357") ||
-		!strings.Contains(w.logs.String(), "cache_read_tokens=18357") {
-		t.Fatalf("no token/cost log for the call and its cached retry:\n%s", w.logs)
+	if !strings.Contains(w.logs.String(), "event=tonight_ai_call attempt=2 model=deepseek/deepseek-v4.1-flash") ||
+		!strings.Contains(w.logs.String(), "output_tokens=422 finish=stop") {
+		t.Fatalf("no token/cost log for the call and its retry:\n%s", w.logs)
 	}
 
 	// 30 min later: nothing new to do, except to take the row off the Recommended tab, where an earlier build put it.
@@ -899,8 +809,7 @@ func TestRunAcrossDays(t *testing.T) {
 	if !slices.Equal(tmdbIDs(w.state(t).Picks), []int{1398, 949, 18148}) {
 		t.Fatalf("run 4 picks = %v", tmdbIDs(w.state(t).Picks))
 	}
-	again, _ := json.Marshal(w.ai.requests[2]["messages"])
-	if strings.Contains(string(again), `\n389 | 12 Angry Men`) || !strings.Contains(string(again), `\n843 | In the Mood for Love`) {
+	if again := w.ai.messages(2); strings.Contains(again, `\n389 | 12 Angry Men`) || !strings.Contains(again, `\n843 | In the Mood for Love`) {
 		t.Fatalf("run 4 candidates repeat yesterday's picks: %s", again)
 	}
 	if got := w.plex.members(); !slices.Equal(got, []string{rk(949), rk(1398), rk(18148)}) || len(w.plex.posters) != 2 {
@@ -909,34 +818,34 @@ func TestRunAcrossDays(t *testing.T) {
 	if got := w.plex.homeRow(); !slices.Equal(got, []string{rk(949), rk(1398), rk(18148)}) {
 		t.Fatalf("run 4: his Home row lists %v: Plex's cached hub was not refreshed after the members changed", got)
 	}
-	for _, k := range w.ai.keys {
-		if k != "sk-test-SECRET-key" {
-			t.Fatalf("API key header = %q", k)
+	for _, k := range w.ai.gw.Keys() {
+		if k != "Bearer test-SECRET-gateway-key" {
+			t.Fatalf("Authorization header = %q", k)
 		}
 	}
 	if strings.Contains(w.logs.String(), "SECRET") {
-		t.Fatal("the API key reached the log")
+		t.Fatal("the gateway key reached the log")
 	}
 	if w.lbHits != 4 || !slices.Equal(w.lbWaits, []time.Duration{2 * time.Second, 4 * time.Second, 6 * time.Second}) {
 		t.Fatalf("letterboxd requests = %d (want one per run), limiter waits %v (want each queued behind the last)", w.lbHits, w.lbWaits)
 	}
 }
 
-// Catches the daily cap being soft. Row 1 is a $0.16958 day: sizing that prices the retry's prefix at the cache-read
-// rate sends all ~190 candidates, and a retry that misses the cache then bills a second write, taking the pair past
-// $0.15. Row 2: a call sent although even an empty list's pair would not fit.
+// Catches the daily cap being soft, on a model priced so that it binds. Row 1: the 190 candidates' pair (the call
+// and its retry, each at its worst) does not fit $0.15, so the list must be cut until it does; the retry then fits
+// too. Row 2: a call sent although even an empty list's pair would not fit.
 func TestDailyCapIsHard(t *testing.T) {
 	for _, c := range []struct {
 		name  string
 		cap   string
 		calls int
 	}{
-		{"a cache-missing retry still fits", "0.15", 2},
-		{"no room for the pair: no call", "0.11", 0},
+		{"the list is cut until the pair fits", "0.15", 2},
+		{"no room for the pair: no call", "0.07", 0},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			w := newWorld(t, "daily_cap_usd = "+c.cap+"\n", 190)
-			w.ai.missRetry = true
+			w := newWorld(t, "max_tokens = 1000\ndaily_cap_usd = "+c.cap+"\n", 190)
+			w.ai = newAIFake(t, w.h, pricey)
 			w.ai.script(answer3(559907, 389, 346), answer3(389, 346, 655)) // the first offers a film he has seen
 			rep := w.run(t)
 			spent := w.state(t).Spend["2026-10-05"]
@@ -949,32 +858,62 @@ func TestDailyCapIsHard(t *testing.T) {
 				}
 				return
 			}
-			userText, _ := json.Marshal(w.ai.requests[0]["messages"])
-			shown := strings.Count(string(userText), `\n70`) // filler lines: "\n700000 | Filler 0 | ..."
-			if shown == 0 || shown >= 190 || !strings.Contains(w.logs.String(), "cache_write_tokens=18357 cache_read_tokens=0 output_tokens=422 stop=end_turn") {
-				t.Fatalf("%d filler candidates shown (want the list cut below 190), or the retry was not billed as a miss\n%s", shown, w.logs)
+			shown := strings.Count(w.ai.messages(0), `\n70`) // filler lines: "\n700000 | Filler 0 | ..."
+			if shown == 0 || shown >= 190 {
+				t.Fatalf("%d filler candidates shown; want the list cut below 190\n%s", shown, w.logs)
 			}
 		})
 	}
 }
 
-// Catches: a call whose answer was lost after it may have run (a dropped connection) being sent again by the
-// client or counted as $0, either of which lets one day bill several calls past the cap.
+// Catches: an attempt whose answer was lost after it may have run (a dropped connection) counted as $0, which lets
+// the client's retries bill a day several calls past the cap; and a later run that day calling again past it.
 func TestLostAnswerStaysCounted(t *testing.T) {
-	w := newWorld(t, "", 0)
+	w := newWorld(t, "max_tokens = 1000\n", 0)
+	w.ai = newAIFake(t, w.h, pricey)
 	w.ai.mu.Lock()
 	w.ai.drop = true
 	w.ai.mu.Unlock()
 	rep := w.run(t)
-	reserved := w.state(t).Spend["2026-10-05"]
-	if w.ai.calls() != 1 || reserved < 0.05 || len(rep.Alerts) != 1 || !strings.Contains(w.logs.String(), "event=tonight_ai_unknown_outcome") {
-		t.Fatalf("run 1: %d AI calls, $%.5f counted, alerts %q\n%s", w.ai.calls(), reserved, rep.Alerts, w.logs)
+	counted := w.state(t).Spend["2026-10-05"]
+	if w.ai.calls() != 4 || counted < 4*1000*20e-6 || len(rep.Alerts) != 1 || !strings.Contains(w.logs.String(), "event=tonight_ai_unknown_outcome") {
+		t.Fatalf("run 1: %d attempts, $%.5f counted, alerts %q; want 4 attempts each counted at its worst\n%s", w.ai.calls(), counted, rep.Alerts, w.logs)
 	}
 	w.h.Now = w.h.Now.Add(30 * time.Minute)
 	rep = w.run(t)
-	if w.ai.calls() != 1 || w.state(t).Spend["2026-10-05"] != reserved || len(rep.Alerts) != 1 ||
+	if w.ai.calls() != 4 || w.state(t).Spend["2026-10-05"] != counted || len(rep.Alerts) != 1 ||
 		!strings.Contains(rep.Alerts[0], "exceed the daily AI budget") {
-		t.Fatalf("run 2: %d AI calls, $%.5f counted, alerts %q", w.ai.calls(), w.state(t).Spend["2026-10-05"], rep.Alerts)
+		t.Fatalf("run 2: %d attempts, $%.5f counted, alerts %q", w.ai.calls(), w.state(t).Spend["2026-10-05"], rep.Alerts)
+	}
+}
+
+// Catches: a gateway that refuses calls until the owner adds a card counted as spend (the day's cap used up by
+// nothing), its alert missing since when calls are refused, the alert and the call repeated every 30 minutes, or the
+// picks not made once the gateway is tried again and answers.
+func TestGatewayRefusesForBilling(t *testing.T) {
+	w := newWorld(t, "", 0)
+	refuse := true
+	reply := w.ai.gw.Reply
+	w.ai.gw.Reply = func(n int, req llm.Request) llmtest.Answer {
+		if refuse {
+			return llmtest.Answer{Status: 403, Type: "customer_verification_required", Message: "requires a valid credit card on file"}
+		}
+		return reply(n, req)
+	}
+	rep := w.run(t)
+	if w.ai.calls() != 1 || w.state(t).Spend["2026-10-05"] != 0 || len(rep.Alerts) != 1 ||
+		!strings.Contains(rep.Alerts[0], "refused calls since 2026-10-05T15:00:00Z") {
+		t.Fatalf("%d calls, $%v spent, alerts %q; want one free call and one dated alert", w.ai.calls(), w.state(t).Spend["2026-10-05"], rep.Alerts)
+	}
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	if rep := w.run(t); w.ai.calls() != 1 || len(rep.Alerts) != 0 {
+		t.Fatalf("30 min later, still refused: %d calls, alerts %q; want no call and no second alert", w.ai.calls(), rep.Alerts)
+	}
+	refuse = false
+	w.ai.script(answer3(389, 346, 655))
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	if rep := w.run(t); len(rep.Alerts) != 0 || len(w.state(t).Picks) != 3 {
+		t.Fatalf("an hour after the refusal, the gateway answering: alerts %q, picks %v", rep.Alerts, w.state(t).Picks)
 	}
 }
 
@@ -1032,45 +971,26 @@ func TestCreateNeverDuplicates(t *testing.T) {
 	}
 }
 
-// Catches the owner's dated model policy being ignored (a fixed model), a resolved Sonnet cached past the switch to
-// Haiku, and effort sent to Haiku 4.5, which answers 400 to output_config.effort: the first day on Haiku would have
-// no picks. The switch instant itself is llm.TestPolicy's.
-func TestModelFollowsDatedPolicy(t *testing.T) {
-	w := newWorld(t, "", 0)
-	w.ai.script(answer3(389, 346, 655), answer3(1398, 949, 18148))
-	for i, c := range []struct {
-		utc, model, effort string
-	}{
-		{"2026-11-05T07:59:59Z", "claude-sonnet-5-5", "medium"}, // 23:59:59 PST on the 4th, a second before the switch
-		{"2026-11-05T13:00:00Z", "claude-haiku-4-5", ""},        // 05:00 PST: the next day's pick, after it
-	} {
-		w.h.Now, _ = time.Parse(time.RFC3339, c.utc)
-		w.run(t)
-		if w.ai.calls() != i+1 || w.ai.requests[i]["model"] != c.model || w.ai.effort(i) != c.effort {
-			t.Fatalf("%s: call %d model %v effort %q; want %s, %q\n%s", c.utc, w.ai.calls(), w.ai.requests[min(i, w.ai.calls()-1)]["model"],
-				w.ai.effort(min(i, w.ai.calls()-1)), c.model, c.effort, w.logs)
-		}
-	}
-}
-
-// Catches an answer cut off at max_tokens (thinking shares them with the JSON) costing the day its picks: the retry
-// must say why and think less, or it is cut off the same way. In row 2 thinking took every token, so there is no
-// text to send back, and a retry carrying an empty text block is refused (by count_tokens first), leaving the day
-// with no picks.
-func TestCutOffAnswerRetriesAtLowEffort(t *testing.T) {
+// Catches an answer cut off at max_tokens (reasoning shares them with the JSON) costing the day its picks: the retry
+// must say why and reason less, or it is cut off the same way. In row 2 reasoning took every token, so there is no
+// text to send back, and a retry with an empty assistant turn is refused by some providers, leaving the day with no
+// picks.
+func TestCutOffAnswerRetriesWithLeastReasoning(t *testing.T) {
 	for _, c := range []struct{ name, cut string }{
 		{"cut inside the JSON", `{"picks":[{"id":389,"title":"12 Angry Men","mood":"tense","liked":"Rope","reason":"Like Rope, it`},
 		{"cut inside thinking: no text", ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			w := newWorld(t, "", 0)
+			w.ai = newAIFake(t, w.h, map[string]llm.Task{"tonight": {Reasoning: "low"}}) // the default already reasons least
 			w.ai.script("CUT:"+c.cut, answer3(389, 346, 655))
 			w.run(t)
 			if w.ai.calls() != 2 {
 				t.Fatalf("%d AI call(s), want the cut answer and a retry\n%s", w.ai.calls(), w.logs)
 			}
-			retry, _ := json.Marshal(w.ai.requests[1]["messages"])
-			if w.ai.effort(0) != "medium" || w.ai.effort(1) != "low" || !strings.Contains(string(retry), "cut off at the length limit") {
+			retry := w.ai.messages(1)
+			if w.ai.effort(0) != "low" || w.ai.effort(1) != "none" || !strings.Contains(retry, "cut off at the length limit") ||
+				strings.Contains(retry, `"content":""`) {
 				t.Fatalf("efforts %q then %q; retry %s", w.ai.effort(0), w.ai.effort(1), retry)
 			}
 			if got := tmdbIDs(w.state(t).Picks); !slices.Equal(got, []int{389, 346, 655}) {
@@ -1085,8 +1005,8 @@ func TestCutOffAnswerRetriesAtLowEffort(t *testing.T) {
 // films outside the list, each with a long title, runs far past that, and only the check before the retry holds the
 // cap (with the fake billing 422 output tokens the check was never reached).
 func TestRetryThatNoLongerFitsIsNotSent(t *testing.T) {
-	w := newWorld(t, "", 190)
-	w.ai.missRetry = true
+	w := newWorld(t, "max_tokens = 1000\n", 190)
+	w.ai = newAIFake(t, w.h, pricey)
 	var picks []string
 	for i := range 60 {
 		picks = append(picks, fmt.Sprintf(`{"id":%d,"title":"%s","mood":"m","liked":"l","reason":"r"}`, 900000+i, strings.Repeat("Long Title ", 10)))

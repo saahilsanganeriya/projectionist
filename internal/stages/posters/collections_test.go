@@ -20,6 +20,8 @@ import (
 	"time"
 
 	"projectionist/internal/fake"
+	"projectionist/internal/llm"
+	"projectionist/internal/llm/llmtest"
 )
 
 func init() { WikimediaPace = func(bool) time.Duration { return 0 } }
@@ -284,21 +286,20 @@ func TestComposeFramesTheDirector(t *testing.T) {
 	}
 }
 
-// Catches: a spent title budget ending a Message Batch submission at the first refused title, so the collections queued
-// behind every title are never batched (within a batch, and in the batches after one the titles filled).
-func TestBatchReachesCollectionsPastSpentTitles(t *testing.T) {
-	for _, size := range []int{2, 3} {
-		w := collectionWorld(t, fmt.Sprintf("dry_run = true\nbatch_min = 1\nbatch_size = %d\n", size), true)
-		db := w.h.Env.Store.DB()
-		db.Exec(schema)
-		db.Exec(`INSERT INTO posters_calls(at, item, of, model, mode, batch_id, state, input_tokens, output_tokens, reserved_usd,
-			cost_usd, llm_ms, error) VALUES (?, 'movie:tmdb-9', 'x', 'claude-sonnet-5-5', 'sync', '', 'done', 0, 0, 0, 11.999, 0, '')`, stamp(w.h.Now))
-		w.run(t)
-		var batched int
-		db.QueryRow(`SELECT count(*) FROM posters_calls WHERE item LIKE 'collection:%' AND state='pending' AND batch_id != ''`).Scan(&batched)
-		if len(w.batches) != 1 || batched != 1 {
-			t.Errorf("batch_size %d: %d batches, %d collection requests batched; want Scary Movie batched past the refused titles", size, len(w.batches), batched)
-		}
+// Catches collections judged on the posters task's model, or titles on the collections task's: each task's model is
+// configured on its own.
+func TestCollectionsJudgeOnTheirTask(t *testing.T) {
+	w := collectionWorld(t, "dry_run = true\n", true)
+	w.h.Env.LLM = llmtest.Client(t, w.gateway, w.h.Env.Store, w.h.Env.Now, llm.Config{Tasks: map[string]llm.Task{
+		"posters": {Model: "google/gemma-4-31b-it"}, "collections": {Model: "zai/glm-5.3-flash"}}})
+	w.run(t)
+	asked := map[string][]string{}
+	for _, c := range w.gateway.Calls() {
+		collection := c.Messages[0].Content[0].Text != systemPrompt
+		asked[c.Model] = append(asked[c.Model], fmt.Sprint(collection))
+	}
+	if g, z := asked["google/gemma-4-31b-it"], asked["zai/glm-5.3-flash"]; len(g) == 0 || len(z) == 0 || slices.Contains(g, "true") || slices.Contains(z, "false") {
+		t.Fatalf("collection calls by model: %v; want titles on gemma and collections on glm only", asked)
 	}
 }
 
