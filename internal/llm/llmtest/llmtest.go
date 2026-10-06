@@ -29,7 +29,8 @@ type Model struct {
 	Toggle  bool
 }
 
-// Catalogue is the gateway's real list (2026-10-05) for the models the defaults and the bake-off name.
+// Catalogue is the gateway's real list (2026-10-05; luna and opus 2026-10-06, US prices) for the models the defaults and
+// the bake-offs name.
 var Catalogue = []Model{
 	{ID: "deepseek/deepseek-v4-flash-0731", In: 0.13, Out: 0.26, Toggle: true, Efforts: []string{"none", "low", "medium", "high"}},
 	{ID: "deepseek/deepseek-v4.1-flash", In: 0.30, Out: 1.20, Vision: true, Toggle: true, Efforts: []string{"none", "low", "high", "max"}},
@@ -39,6 +40,8 @@ var Catalogue = []Model{
 	{ID: "deepseek/deepseek-v4-flash-vision-exp", In: 0.2156, Out: 0.6468, Vision: true, Toggle: true, Efforts: []string{"none", "low", "medium", "high"}},
 	{ID: "anthropic/claude-sonnet-5.5", In: 2.2, Out: 11, Vision: true, Efforts: []string{"low", "medium", "high", "xhigh", "max"}},
 	{ID: "alibaba/qwen3-vl-instruct", In: 0.40, Out: 1.60, Vision: true},
+	{ID: "openai/gpt-5.6-luna", In: 0.22, Out: 1.32, Vision: true, Toggle: true, Efforts: []string{"none", "low", "medium", "high", "xhigh", "max"}},
+	{ID: "anthropic/claude-opus-5.5", In: 4.4, Out: 22, Vision: true, Efforts: []string{"low", "medium", "high", "xhigh", "max"}},
 	{ID: "alibaba/qwen3.7-flash", In: 0.03, Out: 0.13, Vision: true, Toggle: true,
 		Efforts: []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}},
 }
@@ -49,6 +52,7 @@ type Answer struct {
 	Finish  string // "" = "stop"
 	In, Out int    // usage
 	Meta    string // the message's provider_metadata, raw JSON; "" = none
+	Billed  float64 // usage.cost, what the gateway billed; 0 = none
 	Model   string // the model that answered; "" = the request's
 
 	Status        int // an error answer when set
@@ -163,10 +167,14 @@ func (g *Gateway) write(w http.ResponseWriter, r *http.Request, req llm.Request,
 	if a.Meta != "" {
 		msg["provider_metadata"] = json.RawMessage(a.Meta)
 	}
+	usage := map[string]any{"prompt_tokens": a.In, "completion_tokens": a.Out, "total_tokens": a.In + a.Out}
+	if a.Billed != 0 {
+		usage["cost"] = a.Billed
+	}
 	json.NewEncoder(w).Encode(map[string]any{
 		"id": "gen_fake", "object": "chat.completion", "model": model,
 		"choices": []any{map[string]any{"index": 0, "message": msg, "finish_reason": finish}},
-		"usage":   map[string]int{"prompt_tokens": a.In, "completion_tokens": a.Out, "total_tokens": a.In + a.Out},
+		"usage":   usage,
 	})
 }
 

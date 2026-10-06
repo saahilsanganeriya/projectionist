@@ -322,13 +322,14 @@ settle        = "15m"                          # a file or folder changed more r
 probe_workers = 2                              # ffprobes on cache misses, only while no guest is watching
 quiet         = ["missing_english_subs"]       # grows with every download until the subtitles stage catches up
 
-# The most artistic poster for every movie, show and season, on Jellyfin and Plex; replaces posters/posters.py.
+# The poster the owner would choose for every movie, show and season, on Jellyfin and Plex; replaces posters/posters.py.
 # Candidates: the owner's poster (from a Plex DB backup and the export taken with it), TMDB and fanart.tv (the shared
 # clients). Judge: one vision call per title through the AI gateway, on [llm.tasks.posters]'s model (collections on
-# [llm.tasks.collections]'s), as many at once as [llm] in_flight allows. Off until enabled: even with dry_run, judging
-# spends. The bake-off (docs/STAGES.md, 2026-10-06) measured $0.00047 a title on qwen3-vl-instruct ($0.00004 on its
-# fallback qwen3.7-flash): the 3,023-title backlog is about $1.40. Each call holds its worst case (about $0.002 on
-# qwen3-vl-instruct: all of max_tokens at the dearest provider's price) against budget_usd until it settles.
+# [llm.tasks.collections]'s), as many at once as [llm] in_flight allows, to his taste: illustrated, artistic fan art
+# over mainstream key art, creative over plain, the title the only text. Off until enabled: even with dry_run, judging
+# spends. Verdicts judged under the prompts before the owner's taste are judged again once (the backfill: run it on
+# anthropic/claude-opus-5.5, about $0.0054 a title, then set the tasks back; docs/STAGES.md). Each call holds its worst
+# case (all of max_tokens at the dearest provider's price) against budget_usd until it settles.
 [stages.posters]
 enabled            = false
 every              = "6h"
@@ -359,6 +360,13 @@ collections_approved_file = "/config/collections.approved.json"
 collection_dry_run        = true # judge only; review posters_items (keys "collection:<name>"), then set false to upload
 collection_budget_usd     = 5    # all collection judge calls ever; a hard stop, apart from budget_usd
 director_min_score        = 4    # a director's best photo needs this judge score (1-10), else no poster and an alert
+# The owner's own posters for other films, shown to the judge before every title's and franchise's candidates as his
+# taste (his uploads or picks, by title key; any other key fails the run). The gateway caches them for Claude models,
+# so on Opus they add about $0.0004 a call. These 8 span his styles (the owner's-taste test, docs/STAGES.md):
+# I Vitelloni, The Empire Strikes Back, Mission: Impossible - Fallout, Casino Royale (2006), Days of Heaven,
+# Bottle Rocket, Call Me by Your Name, Dunkirk.
+taste_references = ["movie:tmdb-12548", "movie:tmdb-1891", "movie:tmdb-353081", "movie:tmdb-36557", "movie:tmdb-16642",
+                    "movie:tmdb-13685", "movie:tmdb-398818", "movie:tmdb-374720"]
 # commons_contact = ""           # a URL or e-mail for Wikimedia's User-Agent policy: 200 requests a minute instead
                                  # of 10 (unset, Wikimedia requests go 6.5 s apart; about 10 per director)
 
@@ -416,16 +424,18 @@ attempts   = 4      # 429, 5xx, timeouts and dropped answers are retried with ji
 park_after = 5      # failed calls in a row before a stage stops calling for the rest of its run (a billing refusal: at
                     # once, one alert in all, and one call an hour across the process until the gateway answers)
 
-# The models are the bake-off's picks (docs/STAGES.md, 2026-10-06). The vision tasks send effort "none" rather than
-# "off": "off" reads the first model's controls, qwen3-vl-instruct has none, and qwen3.7-flash would then reason.
+# The models are the bake-offs' picks (docs/STAGES.md, 2026-10-06): the vision judges the cheap model nearest Opus at
+# choosing the poster the owner picked. The vision tasks send effort "none" rather than "off": "off" reads only the
+# first model's controls. For the one-time backfill, set both vision tasks to model = "anthropic/claude-opus-5.5" with
+# fallbacks = [] (a fallback would judge the backfill cheaply, for good), then back to these.
 [llm.tasks.posters]     # the movie, show and season poster judge: vision
-model     = "alibaba/qwen3-vl-instruct"
-fallbacks = ["alibaba/qwen3.7-flash"]
+model     = "openai/gpt-5.6-luna"
+fallbacks = ["alibaba/qwen3-vl-instruct"]
 reasoning = "none"
 
 [llm.tasks.collections] # the franchise and director collection judges: vision
-model     = "alibaba/qwen3-vl-instruct"
-fallbacks = ["alibaba/qwen3.7-flash"]
+model     = "openai/gpt-5.6-luna"
+fallbacks = ["alibaba/qwen3-vl-instruct"]
 reasoning = "none"
 
 [llm.tasks.tonight]     # the daily picks: text

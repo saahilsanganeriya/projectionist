@@ -61,21 +61,23 @@ type Task struct {
 	Reasoning string   `toml:"reasoning"`
 }
 
-// The bake-off's picks (2026-10-06): the posters and collections judge, and the cheap fallback for every task.
+// The bake-offs' picks: the posters and collections judge and its fallback (the owner's-taste test, 2026-10-06: the
+// cheap models nearest Opus at choosing the poster he picked), and tonight's cheap fallback.
 const (
-	VisionModel   = "alibaba/qwen3-vl-instruct"
-	FallbackModel = "alibaba/qwen3.7-flash"
+	VisionModel    = "openai/gpt-5.6-luna"
+	VisionFallback = "alibaba/qwen3-vl-instruct"
+	FallbackModel  = "alibaba/qwen3.7-flash"
 )
 
-// Defaults is the configuration a missing [llm] key takes. The vision tasks send effort "none": "off" reads the
-// first model's controls, and qwen3-vl-instruct has none, so the fallback would reason.
+// Defaults is the configuration a missing [llm] key takes. The vision tasks send effort "none" rather than "off":
+// "off" reads only the first model's controls, and a fallback may read effort differently.
 func Defaults() Config {
 	return Config{
 		API: "https://ai-gateway.vercel.sh/v1", KeyFile: "/run/secrets/ai_gateway_api_key",
 		InFlight: 8, Timeout: 120 * time.Second, Attempts: 4, ParkAfter: 5,
 		Tasks: map[string]Task{
-			"posters":     {Model: VisionModel, Fallbacks: []string{FallbackModel}, Reasoning: "none"},
-			"collections": {Model: VisionModel, Fallbacks: []string{FallbackModel}, Reasoning: "none"},
+			"posters":     {Model: VisionModel, Fallbacks: []string{VisionFallback}, Reasoning: "none"},
+			"collections": {Model: VisionModel, Fallbacks: []string{VisionFallback}, Reasoning: "none"},
 			"tonight":     {Model: "deepseek/deepseek-v4.1-flash", Fallbacks: []string{FallbackModel}, Reasoning: "off"},
 		},
 	}
@@ -213,15 +215,26 @@ func JSONAnswer(name string, schema json.RawMessage) *ResponseFormat {
 type Message struct {
 	Role    string `json:"role"` // system | user | assistant
 	Content []Part `json:"content"`
+	// CacheControl marks the end of a prefix the provider caches (Anthropic's explicit caching, passed through by the
+	// gateway): a later call that starts with the same bytes reads it at a tenth of the input price.
+	CacheControl *CacheControl `json:"cache_control,omitempty"`
 }
+
+type CacheControl struct {
+	Type string `json:"type"` // ephemeral: five minutes from its last read
+}
+
+// Ephemeral is the one cache Anthropic offers through the gateway's Chat Completions API.
+var Ephemeral = &CacheControl{Type: "ephemeral"}
 
 // MarshalJSON sends a message of one text part as a plain string, the form every provider takes.
 func (m Message) MarshalJSON() ([]byte, error) {
 	if len(m.Content) == 1 && m.Content[0].Type == "text" {
 		return json.Marshal(struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
-		}{m.Role, m.Content[0].Text})
+			Role         string        `json:"role"`
+			Content      string        `json:"content"`
+			CacheControl *CacheControl `json:"cache_control,omitempty"`
+		}{m.Role, m.Content[0].Text, m.CacheControl})
 	}
 	type plain Message
 	return json.Marshal(plain(m))
@@ -230,13 +243,14 @@ func (m Message) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON reads both forms of a message's content.
 func (m *Message) UnmarshalJSON(b []byte) error {
 	var raw struct {
-		Role    string          `json:"role"`
-		Content json.RawMessage `json:"content"`
+		Role         string          `json:"role"`
+		Content      json.RawMessage `json:"content"`
+		CacheControl *CacheControl   `json:"cache_control"`
 	}
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return err
 	}
-	m.Role, m.Content = raw.Role, nil
+	m.Role, m.Content, m.CacheControl = raw.Role, nil, raw.CacheControl
 	var text string
 	if json.Unmarshal(raw.Content, &text) == nil {
 		m.Content = []Part{Text(text)}
@@ -288,8 +302,9 @@ type Result struct {
 	Took        time.Duration
 }
 
-// completion is the gateway's answer. Its documented shape has no cost; a figure in provider_metadata.gateway.cost
-// (the AI SDK's name for it) is used when present.
+// completion is the gateway's answer. Its documented shape has no cost; the figure it bills (usage.cost, which
+// prices cached input at the cache's rate) is used when present, else one in provider_metadata.gateway.cost (the AI
+// SDK's name for it).
 type completion struct {
 	Model   string `json:"model"`
 	Choices []struct {
@@ -299,13 +314,17 @@ type completion struct {
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
-	Usage            Usage           `json:"usage"`
+	Usage struct {
+		Usage
+		Cost any `json:"cost"`
+	} `json:"usage"`
 	ProviderMetadata json.RawMessage `json:"provider_metadata"`
 }
 
 // cost is the gateway's own figure for the answer: a number, or a decimal string with or without "$". Any other shape
 // counts as no figure, never as an unreadable answer (which would be asked again and paid twice).
 func (c completion) cost() (float64, bool) {
+	figures := []any{c.Usage.Cost}
 	metas := []json.RawMessage{c.ProviderMetadata}
 	if len(c.Choices) > 0 {
 		metas = append([]json.RawMessage{c.Choices[0].Message.ProviderMetadata}, metas...)
@@ -316,12 +335,14 @@ func (c completion) cost() (float64, bool) {
 				Cost any `json:"cost"`
 			} `json:"gateway"`
 		}
-		if json.Unmarshal(raw, &m) != nil {
-			continue
+		if json.Unmarshal(raw, &m) == nil {
+			figures = append(figures, m.Gateway.Cost)
 		}
+	}
+	for _, figure := range figures {
 		var f float64
 		var err error
-		switch v := m.Gateway.Cost.(type) {
+		switch v := figure.(type) {
 		case float64:
 			f = v
 		case string:
@@ -639,7 +660,7 @@ func (c *Client) do(ctx context.Context, req Request) (Result, completion, error
 			res.MaybeBilled++
 		}
 		if a.err == nil {
-			res.Model, res.Usage, res.Took = comp.Model, comp.Usage, time.Since(start)
+			res.Model, res.Usage, res.Took = comp.Model, comp.Usage.Usage, time.Since(start)
 			if res.Model == "" {
 				res.Model = req.Model
 			}

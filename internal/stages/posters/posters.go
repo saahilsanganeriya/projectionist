@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"projectionist/internal/fanart"
+	"projectionist/internal/llm"
 	"projectionist/internal/stage"
 	"projectionist/internal/store"
 	"projectionist/internal/tmdb"
@@ -65,6 +66,9 @@ type Options struct {
 	DirectorMinScore    float64 `toml:"director_min_score"`        // a director's photo needs this judge score or no poster
 	CommonsAPI          string  `toml:"commons_api"`
 	CommonsContact      string  `toml:"commons_contact"` // a URL or e-mail for the User-Agent: Wikimedia then allows 20× the rate
+	// The owner's own posters for other films (title keys of his uploads and picks), shown to the judge of every title
+	// and franchise as his taste; none = the prompt alone.
+	TasteReferences []string `toml:"taste_references"`
 }
 
 func defaults() Options {
@@ -158,6 +162,12 @@ const (
 	emptyAlert    = 3 * 24 * time.Hour // a title or collection empty this long raises an alert
 )
 
+// refs is the message of the owner's taste references (nil: none) and an upper estimate of its tokens.
+type refs struct {
+	message *llm.Message
+	tokens  int
+}
+
 // run carries one Run's clients and counters; the steps fan out, so shared state is guarded.
 type run struct {
 	env    *stage.Env
@@ -174,6 +184,7 @@ type run struct {
 	gateBusy bool
 
 	collections map[string]bool // this run's collections (keys): only their outbox rows are sent
+	refs        refs            // the owner's taste references, set before judging fans out
 	ownerKeys   map[string]bool // the owner's collections' Plex ratingKeys: never a target
 
 	wikiMu    sync.Mutex // requests to Wikimedia go one at a time, WikimediaPace apart (wikimediaTurn)
@@ -437,6 +448,7 @@ func (r *run) saveCandidates(ctx context.Context, it *row) error {
 }
 
 func (r *run) saveVerdict(ctx context.Context, it *row, v Verdict) error {
+	v.Prompt = promptVersion(it.Title.Kind)
 	it.Verdict = &v
 	enc, _ := json.Marshal(v)
 	_, err := r.env.Store.DB().ExecContext(context.WithoutCancel(ctx), `UPDATE posters_items SET verdict=?, updated_at=? WHERE key=?`,
