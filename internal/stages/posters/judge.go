@@ -169,21 +169,17 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 		}
 		r.judgeNow(ctx, s, it)
 	})
-	billing := false
 	for _, s := range []*llm.Session{titles, collections} {
 		switch err := s.Parked(); {
 		case err == nil:
 		case !errors.Is(err, llm.ErrBilling):
 			r.alert("posters: judging %s parked for this run: %v", s.Name(), err)
-		case !billing:
-			billing = true
-			if r.env.LLM.TellBilling(ctx) {
-				r.alert("posters: judging parked until the AI gateway accepts calls (it is tried again hourly; this alert comes "+
-					"once, for every stage that asks a model): %v", err)
-			} else {
-				r.env.Log.Warn("judging parked: the AI gateway still refuses calls for billing (alerted once)", "event",
-					"judge_billing_held", "err", err)
-			}
+		case r.env.LLM.TellBilling(ctx): // true once per refusal, whichever stage or session meets it first
+			r.alert("posters: judging parked until the AI gateway accepts calls (it is tried again hourly; this alert comes "+
+				"once, for every stage that asks a model): %v", err)
+		default:
+			r.env.Log.Warn("judging parked: the AI gateway still refuses calls for billing (alerted once)", "event",
+				"judge_billing_held", "task", s.Name(), "err", err)
 		}
 	}
 	return nil

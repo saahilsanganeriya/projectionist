@@ -23,8 +23,9 @@ func (p Price) Cost(inputTokens, outputTokens int) float64 {
 	return float64(inputTokens)*p.In + float64(outputTokens)*p.Out
 }
 
-// ModelInfo is what a call needs to know of a model. Its price is the dearest the catalogue lists for it (a region,
-// a tier, the fast lane): which provider serves a call is the gateway's choice, so a budget assumes the dearest.
+// ModelInfo is what a call needs to know of a model. Its price is the dearest the gateway may bill for it: the model
+// list's (a region, a tier, the fast lane) or a provider's at its peak (providerPrices). Which provider serves a call
+// is the gateway's choice, so a budget assumes the dearest.
 type ModelInfo struct {
 	ID string `json:"id"`
 	Price
@@ -55,8 +56,9 @@ type catalogue struct {
 
 const catalogueAge = 24 * time.Hour
 
-// Model is id's catalogue entry. The catalogue is fetched once a day and kept in the store; while the gateway does
-// not answer, the last copy stands. An id the copy lacks refetches it, at most hourly.
+// Model is id's catalogue entry. The catalogue (the model list, and the providers' prices of every model a task
+// names) is fetched once a day and kept in the store; while the gateway does not answer, the last copy stands. An id
+// the copy lacks refetches it, at most hourly.
 func (c *Client) Model(ctx context.Context, id string) (ModelInfo, error) {
 	c.catMu.Lock()
 	defer c.catMu.Unlock()
@@ -71,6 +73,9 @@ func (c *Client) Model(ctx context.Context, id string) (ModelInfo, error) {
 		return m, c.missing(id, ok)
 	}
 	fresh, err := c.fetchCatalogue(ctx)
+	if err == nil {
+		err = c.providerPrices(ctx, fresh, id)
+	}
 	if err != nil {
 		if c.cat.Models == nil {
 			return ModelInfo{}, fmt.Errorf("gateway models: %w", err)
@@ -92,14 +97,15 @@ func (c *Client) missing(id string, ok bool) error {
 	return fmt.Errorf("model %q is not in the gateway's catalogue (%s)", id, c.cat.At.Format(time.RFC3339))
 }
 
-func (c *Client) fetchCatalogue(ctx context.Context) (map[string]ModelInfo, error) {
+// get is a GET of the gateway's path, its body read whole.
+func (c *Client) get(ctx context.Context, path string) ([]byte, error) {
 	key, err := c.Key()
 	if err != nil {
 		return nil, fmt.Errorf("gateway key: %w", err)
 	}
 	actx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(actx, http.MethodGet, c.cfg.API+"/models", nil)
+	req, err := http.NewRequestWithContext(actx, http.MethodGet, c.cfg.API+path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -115,6 +121,14 @@ func (c *Client) fetchCatalogue(ctx context.Context) (map[string]ModelInfo, erro
 	}
 	if resp.StatusCode/100 != 2 {
 		return nil, apiError(resp.StatusCode, raw)
+	}
+	return raw, nil
+}
+
+func (c *Client) fetchCatalogue(ctx context.Context) (map[string]ModelInfo, error) {
+	raw, err := c.get(ctx, "/models")
+	if err != nil {
+		return nil, err
 	}
 	var list struct {
 		Data []struct {
@@ -148,6 +162,54 @@ func (c *Client) fetchCatalogue(ctx context.Context) (map[string]ModelInfo, erro
 		out[d.ID] = m
 	}
 	return out, nil
+}
+
+// providerPrices raises the price of every model a task names (and the one asked for) to the dearest any of its providers lists, at
+// its peak: the model list's price can be far below what a call is billed. A call to deepseek-v4-flash-0731 at
+// 2026-10-06T01:12Z was billed $0.44 / $1.32 per million tokens, its provider alibaba's $0.22 / $0.66 doubled in its
+// peak window (00:00-14:00 UTC), where the model list says $0.13 / $0.26.
+func (c *Client) providerPrices(ctx context.Context, models map[string]ModelInfo, asked string) error {
+	ids := map[string]bool{asked: true}
+	for _, t := range c.cfg.Tasks {
+		ids[t.Model] = true
+		for _, f := range t.Fallbacks {
+			ids[f] = true
+		}
+	}
+	for id := range ids {
+		m, ok := models[id]
+		if !ok {
+			continue
+		}
+		raw, err := c.get(ctx, "/models/"+id+"/endpoints")
+		if err != nil {
+			return fmt.Errorf("providers of %s: %w", id, err)
+		}
+		var list struct {
+			Data struct {
+				Endpoints []struct {
+					Pricing struct {
+						Prompt     string `json:"prompt"`
+						Completion string `json:"completion"`
+						Peak       struct {
+							Multiplier float64 `json:"multiplier"`
+						} `json:"peak_pricing"`
+					} `json:"pricing"`
+				} `json:"endpoints"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(raw, &list); err != nil {
+			return fmt.Errorf("providers of %s: %w", id, err)
+		}
+		for _, e := range list.Data.Endpoints {
+			peak := max(e.Pricing.Peak.Multiplier, 1)
+			in, _ := strconv.ParseFloat(strings.TrimPrefix(e.Pricing.Prompt, "$"), 64)
+			out, _ := strconv.ParseFloat(strings.TrimPrefix(e.Pricing.Completion, "$"), 64)
+			m.In, m.Out = max(m.In, in*peak), max(m.Out, out*peak)
+		}
+		models[id] = m
+	}
+	return nil
 }
 
 // dearest raises p to every input and output price in a pricing object: the base one, each region's, the fast

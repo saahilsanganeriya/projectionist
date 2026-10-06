@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -141,7 +142,8 @@ func TestInFlightBound(t *testing.T) {
 
 // Catches: a call's cost under-counted against a budget: the gateway's own figure ignored, usage priced at a cheaper
 // model than the fallback that answered, the cheaper base price used where a region lists a dearer one, a lost
-// attempt counted as free; the worst case (the reservation) priced below the dearest model the task may reach; and a
+// attempt counted as free; the worst case (the reservation) priced below the dearest model the task may reach, or below
+// what a provider bills at its peak (twice the model list's price, live); and a
 // cost figure in a shape the client does not know (an object, text with units: the documented answer has none) taken
 // for an unreadable answer, asked again and paid twice.
 func TestCost(t *testing.T) {
@@ -178,18 +180,29 @@ func TestCost(t *testing.T) {
 			}
 		})
 	}
-	t.Run("the dearest listed price", func(t *testing.T) {
-		// The catalogue's real entry: the US region charges more than the base price.
-		raw := `{"data":[{"id":"deepseek/deepseek-v4-flash-0731","type":"language","pricing":{"input":"0.000000076","output":"0.000000153",
+	t.Run("the dearest price billed", func(t *testing.T) {
+		// The real entries' shapes: in the model list the US region charges more than the base price; among the
+		// providers, alibaba doubles its price in its peak window (the price a live call was billed, 2026-10-06T01:12Z).
+		list := `{"data":[{"id":"deepseek/deepseek-v4-flash-0731","type":"language","pricing":{"input":"0.000000076","output":"0.000000153",
 			"input_cache_read":"0.000000014","varies_by_provider":true,"regional":{"us":{"input":"0.00000013","output":"0.00000026"}},
 			"output_tiers":[{"cost":"$0.0000003","min":0}]}}]}`
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte(raw)) }))
+		providers := `{"data":{"id":"deepseek/deepseek-v4-flash-0731","endpoints":[
+			{"provider_name":"alibaba","pricing":{"prompt":"0.00000005","completion":"0.0000002","request":"0",
+				"peak_pricing":{"multiplier":2,"windows":[{"start_minute_utc":0,"end_minute_utc":840}]}}},
+			{"provider_name":"runware","pricing":{"prompt":"0.000000076","completion":"0.000000153","request":"0"}}]}}`
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasSuffix(r.URL.Path, "/endpoints") {
+				w.Write([]byte(providers))
+				return
+			}
+			w.Write([]byte(list))
+		}))
 		defer srv.Close()
 		c := llm.New(llm.Config{API: srv.URL + "/v1"}, &memStore{}, time.Now)
 		c.Key = func() (string, error) { return "k", nil }
 		m, err := c.Model(context.Background(), "deepseek/deepseek-v4-flash-0731")
-		if err != nil || m.In != 0.00000013 || m.Out != 0.0000003 {
-			t.Fatalf("%+v, %v; want the US input price and the tier's output price", m, err)
+		if err != nil || m.In != 0.00000013 || math.Abs(m.Out-0.0000004) > 1e-18 {
+			t.Fatalf("%+v, %v; want the US input price and alibaba's output price at its peak", m, err)
 		}
 	})
 }
@@ -268,81 +281,90 @@ func TestSessionParks(t *testing.T) {
 
 // Catches: a gateway that refuses for billing asked by every run of every stage (tonight runs every 30 min: 48 refused
 // calls and 48 alerts a day) instead of once an hour across the process and its restarts; the hourly try sent by every
-// caller at once; the callers behind a try that was answered held back for the hour; a call the hold kept back moving
-// the next try; and the one alert raised again by a later run, a restart or another stage, or not raised for a new
-// refusal after the gateway answered.
+// caller at once; the callers queued behind a try that was answered held back for the hour; those behind a refused try
+// moving the next try or burying the gateway's answer under their own "not sent"; and the one alert raised again by a
+// later run, a restart or another stage, or not raised for a new refusal after the gateway answered. On the fake clock,
+// with the try's answer held until the other callers queue behind it.
 func TestBillingHold(t *testing.T) {
-	var mu sync.Mutex
-	refuse := true
-	g := llmtest.New(func(int, llm.Request) llmtest.Answer {
-		mu.Lock()
-		defer mu.Unlock()
-		if refuse {
-			return llmtest.Answer{Status: 403, Type: "customer_verification_required", Message: "requires a valid credit card on file"}
+	synctest.Test(t, func(t *testing.T) {
+		var mu sync.Mutex
+		refuse, gate := true, chan struct{}(nil)
+		g := llmtest.New(func(int, llm.Request) llmtest.Answer {
+			mu.Lock()
+			r, wait := refuse, gate
+			mu.Unlock()
+			if wait != nil {
+				<-wait
+			}
+			if r {
+				return llmtest.Answer{Status: 403, Type: "customer_verification_required", Message: "requires a valid credit card on file"}
+			}
+			return llmtest.Answer{Text: "ok"}
+		})
+		set := func(r bool, w chan struct{}) { mu.Lock(); refuse, gate = r, w; mu.Unlock() }
+		st := &memStore{}
+		ctx := context.Background()
+		// burst sends 8 calls, each on its own session (another task or stage); the first to reach the gateway gets
+		// its answer only once the other 7 are queued.
+		burst := func(c *llm.Client) []error {
+			wait := make(chan struct{})
+			set(refuse, wait)
+			errs := make([]error, 8)
+			var wg sync.WaitGroup
+			for i := range errs {
+				wg.Go(func() { _, errs[i] = c.Session("posters").Chat(ctx, ask) })
+			}
+			synctest.Wait()
+			close(wait)
+			wg.Wait()
+			set(refuse, nil)
+			return errs
 		}
-		return llmtest.Answer{Text: "ok"}
-	})
-	st := &memStore{}
-	clock := time.Date(2026, 10, 5, 23, 0, 0, 0, time.UTC)
-	client := func() *llm.Client { return llmtest.Client(t, g, st, func() time.Time { return clock }, llm.Config{}) }
-	ctx := context.Background()
-	// burst sends 8 calls at once, each on its own session (another task or stage), and returns their errors.
-	burst := func(c *llm.Client) []error {
-		errs := make([]error, 8)
-		var wg sync.WaitGroup
-		for i := range errs {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				_, errs[i] = c.Session("posters").Chat(ctx, ask)
-			}()
-		}
-		wg.Wait()
-		return errs
-	}
 
-	c := client()
-	_, err := c.Session("tonight").Chat(ctx, ask)
-	if told, again := c.TellBilling(ctx), c.TellBilling(ctx); !errors.Is(err, llm.ErrBilling) || !told || again || len(g.Calls()) != 1 {
-		t.Fatalf("the first refusal: %v, %d calls, told %v then %v; want one call and one alert", err, len(g.Calls()), told, again)
-	}
-	clock = clock.Add(30 * time.Minute) // the next tonight run, after a restart
-	c = client()
-	s := c.Session("posters")
-	parked := s.Parked()
-	_, err = s.Chat(ctx, ask)
-	if !errors.Is(parked, llm.ErrBilling) || !errors.Is(err, llm.ErrBilling) || len(g.Calls()) != 1 || c.TellBilling(ctx) ||
-		!strings.Contains(parked.Error(), "since 2026-10-05T23:00:00Z") || !strings.Contains(parked.Error(), "tried again from 2026-10-06T00:00:00Z") {
-		t.Fatalf("30 min later: parked %v, %v, %d calls; want parked before any call, none sent, no second alert", parked, err, len(g.Calls()))
-	}
-	clock = clock.Add(31 * time.Minute) // past the hour since the refusal
-	for i, err := range burst(c) {
-		if !errors.Is(err, llm.ErrBilling) {
-			t.Fatalf("call %d of the hourly burst: %v; want a billing refusal", i, err)
+		start := time.Now()
+		c := onClock(g, st, nil)
+		_, err := c.Session("tonight").Chat(ctx, ask)
+		if told, again := c.TellBilling(ctx), c.TellBilling(ctx); !errors.Is(err, llm.ErrBilling) || !told || again || len(g.Calls()) != 1 {
+			t.Fatalf("the first refusal: %v, %d calls, told %v then %v; want one call and one alert", err, len(g.Calls()), told, again)
 		}
-	}
-	if len(g.Calls()) != 2 || c.TellBilling(ctx) {
-		t.Fatalf("the hourly try: %d calls in all; want 2 (one try for 8 callers), no second alert", len(g.Calls()))
-	}
-	clock = clock.Add(61 * time.Minute)
-	mu.Lock()
-	refuse = false
-	mu.Unlock()
-	for i, err := range burst(c) {
-		if err != nil {
-			t.Fatalf("call %d behind an answered try: %v", i, err)
+		time.Sleep(30 * time.Minute) // the next tonight run, after a restart
+		c = onClock(g, st, nil)
+		s := c.Session("posters")
+		parked := s.Parked()
+		_, err = s.Chat(ctx, ask)
+		if !errors.Is(parked, llm.ErrBilling) || !errors.Is(err, llm.ErrBilling) || len(g.Calls()) != 1 || c.TellBilling(ctx) ||
+			!strings.Contains(parked.Error(), "since "+start.Format(time.RFC3339)) ||
+			!strings.Contains(parked.Error(), "tried again from "+start.Add(time.Hour).Format(time.RFC3339)) {
+			t.Fatalf("30 min later: parked %v, %v, %d calls; want parked before any call, none sent, no second alert", parked, err, len(g.Calls()))
 		}
-	}
-	if len(g.Calls()) != 10 {
-		t.Fatalf("%d calls in all; want 10: the try and the 7 behind it", len(g.Calls()))
-	}
-	mu.Lock()
-	refuse = true
-	mu.Unlock()
-	c.Session("tonight").Chat(ctx, ask)
-	if len(g.Calls()) != 11 || !c.TellBilling(ctx) {
-		t.Fatalf("a new refusal after an answered call: %d calls; want it sent and told", len(g.Calls()))
-	}
+		time.Sleep(31 * time.Minute) // past the hour since the refusal
+		for i, err := range burst(c) {
+			if !errors.Is(err, llm.ErrBilling) {
+				t.Fatalf("call %d of the hourly burst: %v; want a billing refusal", i, err)
+			}
+		}
+		parked = c.Session("tonight").Parked()
+		if len(g.Calls()) != 2 || c.TellBilling(ctx) || strings.Count(fmt.Sprint(parked), "its last answer") != 1 ||
+			!strings.Contains(fmt.Sprint(parked), "tried again from "+time.Now().Add(time.Hour).Format(time.RFC3339)) {
+			t.Fatalf("the hourly try: %d calls in all, then %v; want 2 (one try for 8 callers), no second alert, the next try an "+
+				"hour after it and the gateway's own answer", len(g.Calls()), parked)
+		}
+		time.Sleep(61 * time.Minute)
+		set(false, nil)
+		for i, err := range burst(c) {
+			if err != nil {
+				t.Fatalf("call %d behind an answered try: %v", i, err)
+			}
+		}
+		if len(g.Calls()) != 10 {
+			t.Fatalf("%d calls in all; want 10: the try and the 7 behind it", len(g.Calls()))
+		}
+		set(true, nil)
+		c.Session("tonight").Chat(ctx, ask)
+		if len(g.Calls()) != 11 || !c.TellBilling(ctx) {
+			t.Fatalf("a new refusal after an answered call: %d calls; want it sent and told", len(g.Calls()))
+		}
+	})
 }
 
 // Catches: a judge that reasons (paid output, and minutes per call) because "off" was sent in a form the model does

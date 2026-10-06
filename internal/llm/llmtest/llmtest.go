@@ -1,6 +1,6 @@
 // Package llmtest is a fake Vercel AI Gateway, for the tests and for the bake-off harness's dry run (cmd/bakeoff
-// -fake): GET /v1/models lists its catalogue in the gateway's shape, and POST /v1/chat/completions hands each request
-// to a script.
+// -fake): GET /v1/models lists its catalogue in the gateway's shape, GET /v1/models/<id>/endpoints one provider at the
+// model's price, and POST /v1/chat/completions hands each request to a script.
 package llmtest
 
 import (
@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -92,13 +93,23 @@ func (g *Gateway) Listed() int {
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	switch r.URL.Path {
-	case "/v1/models":
+	switch p := r.URL.Path; {
+	case p == "/v1/models":
 		g.mu.Lock()
 		g.listed++
 		g.mu.Unlock()
 		json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": catalogueJSON(g.Models)})
-	case "/v1/chat/completions":
+	case strings.HasPrefix(p, "/v1/models/") && strings.HasSuffix(p, "/endpoints"): // a model's providers
+		id := strings.TrimSuffix(strings.TrimPrefix(p, "/v1/models/"), "/endpoints")
+		for _, m := range g.Models {
+			if m.ID == id {
+				json.NewEncoder(w).Encode(map[string]any{"data": map[string]any{"id": id, "endpoints": []any{map[string]any{
+					"provider_name": "fake", "pricing": map[string]any{"prompt": perToken(m.In), "completion": perToken(m.Out)}}}}})
+				return
+			}
+		}
+		http.NotFound(w, r)
+	case p == "/v1/chat/completions":
 		var req llm.Request
 		raw, err := io.ReadAll(r.Body)
 		if err == nil {
@@ -156,8 +167,9 @@ func (g *Gateway) write(w http.ResponseWriter, r *http.Request, req llm.Request,
 	})
 }
 
+func perToken(usdPerM float64) string { return strconv.FormatFloat(usdPerM/1e6, 'f', -1, 64) }
+
 func catalogueJSON(models []Model) []any {
-	perToken := func(usdPerM float64) string { return strconv.FormatFloat(usdPerM/1e6, 'f', -1, 64) }
 	var out []any
 	for _, m := range models {
 		input := []string{"text"}
