@@ -28,7 +28,6 @@ func (p Price) Cost(inputTokens, outputTokens int) float64 {
 type ModelInfo struct {
 	ID string `json:"id"`
 	Price
-	Vision  bool     `json:"vision,omitempty"`
 	Efforts []string `json:"efforts,omitempty"` // reasoning efforts it takes, as listed (least first)
 	Toggle  bool     `json:"toggle,omitempty"`  // reasoning can be switched off
 }
@@ -119,11 +118,8 @@ func (c *Client) fetchCatalogue(ctx context.Context) (map[string]ModelInfo, erro
 	}
 	var list struct {
 		Data []struct {
-			ID         string `json:"id"`
-			Type       string `json:"type"`
-			Modalities struct {
-				Input []string `json:"input"`
-			} `json:"modalities"`
+			ID               string `json:"id"`
+			Type             string `json:"type"`
 			ReasoningOptions []struct {
 				Type   string   `json:"type"`
 				Values []string `json:"values"`
@@ -139,7 +135,7 @@ func (c *Client) fetchCatalogue(ctx context.Context) (map[string]ModelInfo, erro
 		if d.Type != "language" {
 			continue
 		}
-		m := ModelInfo{ID: d.ID, Vision: slices.Contains(d.Modalities.Input, "image")}
+		m := ModelInfo{ID: d.ID}
 		dearest(d.Pricing, &m.Price)
 		for _, o := range d.ReasoningOptions {
 			switch o.Type {
