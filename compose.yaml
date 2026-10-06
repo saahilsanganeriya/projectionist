@@ -53,7 +53,7 @@ services:
       # The owner's unzipped Letterboxd export: lists' export_dir (a missing or empty folder is an alert on every run),
       # the letterboxd stage's export_dir and tonight's letterboxd_dir (for those two, a missing folder is no export).
       - /volume1/docker/projectionist/data/letterboxd:/volume1/docker/projectionist/data/letterboxd:ro
-    secrets: [jellyfin_key, tmdb_read_token, tmdb_api_key, fanart_api_key, anthropic_api_key] # /run/secrets/<name>, read-only
+    secrets: [jellyfin_key, tmdb_read_token, tmdb_api_key, fanart_api_key, ai_gateway_api_key] # /run/secrets/<name>, read-only
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
@@ -67,5 +67,5 @@ secrets:
     file: /volume1/docker/projectionist/secrets/tmdb_api_key
   fanart_api_key:
     file: /volume1/docker/projectionist/secrets/fanart_api_key
-  anthropic_api_key: # the owner's personal Anthropic key
-    file: /volume1/docker/projectionist/secrets/anthropic_api_key
+  ai_gateway_api_key: # the owner's Vercel AI Gateway key: every model call ([llm] key_file)
+    file: /volume1/docker/projectionist/secrets/ai_gateway_api_key

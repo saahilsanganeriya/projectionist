@@ -1,103 +1,44 @@
 package tonight
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 
 	"projectionist/internal/llm"
-	"projectionist/internal/stage"
 )
 
-// ---- the pick call: the dated model policy, the daily cap, one answer (+ one retry) ----
+// ---- the pick call: the tonight task's model, the daily cap, one answer (+ one retry) ----
 
 // errOverBudget refuses a call when it and its one retry, at their worst, would take the day's spend past the cap.
 var errOverBudget = errors.New("tonight: the call would exceed the daily AI budget")
 
 // retryExtra is what sizing allows for the violations a retry appends, in tokens. A longer list (many invalid picks
-// with long titles) is caught by the cap check made on the counted retry before it is sent.
+// with long titles) is caught by the cap check made on the retry before it is sent.
 const retryExtra = 300
 
-// bound is the most a request can cost once sent. Its one cache breakpoint ends the system prompt, so up to prefix
-// tokens may be billed as a cache write: a retry meant to read them pays the write again when the cache misses (it
-// lives 5 minutes, and a model that renders effort ahead of the system prompt misses it at another effort; Sonnet 5.5
-// read it at effort "low" on 2026-10-05). Later tokens are plain input; all of max_tokens is output. Counts get 2% slack, because count_tokens is an estimate that "might differ by a small amount".
-func bound(p llm.Price, total, prefix, maxTokens int) float64 {
-	slack := func(n int) int { return n + n/50 }
-	return p.Cost(llm.Usage{CacheCreationInputTokens: slack(prefix), InputTokens: slack(total - prefix), OutputTokens: maxTokens}, false)
+// pickRequest is one pick conversation, constrained to the picks schema, with an upper estimate of its input.
+func pickRequest(opt Options, taste string, msgs []llm.Message) llm.Request {
+	return estimated(llm.Request{MaxTokens: opt.MaxTokens, ResponseFormat: llm.JSONAnswer("picks", picksSchema),
+		Messages: append([]llm.Message{llm.System(instructions + "\n\n" + taste)}, msgs...)})
 }
 
-// newAI reads the key file on every request; the key never reaches a log or an error.
-func newAI(base, keyFile string, timeout time.Duration) *llm.Client {
-	if base == "" {
-		base = "https://api.anthropic.com"
-	}
-	return &llm.Client{API: base, HTTP: &http.Client{Timeout: timeout}, Key: func() (string, error) {
-		raw, err := os.ReadFile(keyFile)
-		return string(raw), err
-	}}
-}
-
-// resolved is the model a policy alias named on the last lookup.
-type resolved struct {
-	Alias string `json:"alias,omitempty"`
-	llm.Model
-	At time.Time `json:"at,omitzero"`
-}
-
-// resolveModel is the dated policy's choice now (env.LLM). A "family:latest" alias resolves once a day, and at once
-// when the policy moves to another alias; the last answer stands while the Models API is down.
-func resolveModel(ctx context.Context, env *stage.Env, a *llm.Client, r *resolved) (llm.Model, error) {
-	alias, err := env.LLM.Model(env.Now())
-	if err != nil {
-		return llm.Model{}, err
-	}
-	family, ok := strings.CutSuffix(alias, ":latest")
-	if !ok {
-		return llm.Model{ID: alias}, nil
-	}
-	if r.Alias == alias && env.Now().Sub(r.At) < 24*time.Hour {
-		return r.Model, nil
-	}
-	m, err := a.Latest(ctx, family)
-	if err != nil {
-		if r.Alias != alias {
-			return llm.Model{}, err
+// estimated sets req's input estimate from its messages, as they stand.
+func estimated(req llm.Request) llm.Request {
+	req.InputTokens = 0
+	for _, m := range req.Messages {
+		req.InputTokens += 4 // the role and the framing
+		for _, p := range m.Content {
+			req.InputTokens += llm.EstimateTokens(p.Text)
 		}
-		env.Log.Warn("model list failed; keeping the last answer", "event", "tonight_model_error", "model", r.ID, "err", err)
-		return r.Model, nil
 	}
-	*r = resolved{Alias: alias, Model: m, At: env.Now()}
-	env.Log.Info("model resolved", "event", "tonight_model", "alias", alias, "model", m.ID, "low_effort", m.LowEffort)
-	return m, nil
+	return req
 }
 
-// pickRequest is one pick conversation. The taste block is the stable prefix and carries the cache breakpoint.
-// Effort goes only to a model that accepts it (Haiku 4.5 answers 400 to any effort).
-func pickRequest(m llm.Model, opt Options, taste string, msgs []llm.Message) llm.CachedRequest {
-	oc := &llm.OutputConfig{Format: &llm.Format{Type: "json_schema", Schema: picksSchema}}
-	if m.LowEffort {
-		oc.Effort = opt.Effort
-	}
-	return llm.CachedRequest{
-		Model: m.ID, MaxTokens: opt.MaxTokens, Messages: msgs, OutputConfig: oc,
-		System: []llm.SystemBlock{
-			{Type: "text", Text: instructions},
-			{Type: "text", Text: taste, CacheControl: &llm.CacheControl{Type: "ephemeral"}},
-		},
-	}
-}
-
-func userMessage(text string) llm.Message {
-	return llm.Message{Role: "user", Content: []llm.Block{llm.Text(text)}}
-}
+func userMessage(text string) llm.Message { return llm.User(llm.Text(text)) }
 
 // ---- prompt ----
 

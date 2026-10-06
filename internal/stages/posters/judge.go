@@ -9,9 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"maps"
 	"math/rand/v2"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
 
@@ -100,21 +100,17 @@ var (
 	errBudgetHeld = errors.New("posters: judge budget held by calls in flight")
 )
 
-// judge decides every title whose candidate set has no verdict: without a call when the rule needs none, through
-// the Message Batches API for a backlog, and through the normal API for a few new arrivals.
+// judge decides every title whose candidate set has no verdict: without a call when the rule needs none, else through
+// the AI gateway, as many at once as the client lets into the air (titles on the posters task's model, collections on
+// the collections task's). A task whose calls keep failing parks for the rest of the run with one alert; a billing
+// refusal parks it with one alert in all, which a later run or another stage does not raise again.
 func (r *run) judge(ctx context.Context, rows []*row) error {
-	byKey := map[string]*row{}
-	for _, it := range rows {
-		byKey[it.Title.Key] = it
-	}
-	// A call still pending an hour after it was reserved, with no batch, belongs to a process that died mid-call
-	// (calls take minutes): it may have been billed, so its worst case stays counted and its title is free again.
+	// A call still pending an hour after it was reserved belongs to a process that died mid-call (a call takes minutes
+	// at most), or to a Message Batch from before the gateway, whose results nobody collects now: it may have been
+	// billed, so its worst case stays counted and its title is free again.
 	if _, err := r.env.Store.DB().ExecContext(ctx, `UPDATE posters_calls SET state='failed', cost_usd=cost_usd+reserved_usd,
-		reserved_usd=0, error='interrupted; counted at its worst case' WHERE state='pending' AND batch_id='' AND at < ?`,
+		reserved_usd=0, error='interrupted; counted at its worst case' WHERE state='pending' AND at < ?`,
 		stamp(r.env.Now().Add(-time.Hour))); err != nil {
-		return err
-	}
-	if err := r.collectBatches(ctx, byKey); err != nil {
 		return err
 	}
 	inFlight, unusable, err := r.callState(ctx)
@@ -150,11 +146,7 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 		}
 		v, decided := shortcut(it.Cands)
 		if !decided && unusable[it.Title.Key+" "+of] >= 2 { // two paid-for answers that said nothing: stop paying
-			v, decided = Verdict{Choice: it.Cands[0].URL, Rule: "unjudged"}, true
-			if it.Title.Kind == director { // a photo no judge scored cannot clear the bar
-				v.Choice = ""
-			}
-			r.alert("posters: %s got two unusable judge answers; it keeps its first candidate (%s), a director none", it.Title.Key, it.Cands[0].Source)
+			v, decided = r.unjudged(it), true
 		}
 		if decided {
 			v.Of, v.At = of, r.env.Now()
@@ -169,23 +161,48 @@ func (r *run) judge(ctx context.Context, rows []*row) error {
 	if len(todo) == 0 {
 		return nil
 	}
-	if r.guestsWatching(ctx) {
-		r.count("judge_deferred", len(todo))
-		return nil
+	titles, collections := r.env.LLM.Session("posters"), r.env.LLM.Session("collections")
+	session := func(it *row) *llm.Session {
+		if it.Title.Kind.collection() {
+			return collections
+		}
+		return titles
 	}
-	model, err := r.model(ctx)
-	if err != nil {
-		return err
+	// A model the catalogue does not list, or no catalogue to price by, fails every call before it is sent, where no
+	// session counts it towards parking: like any fault every title shares, it stops the run.
+	for _, s := range []*llm.Session{titles, collections} {
+		if slices.ContainsFunc(todo, func(it *row) bool { return session(it) == s }) {
+			if _, err := s.Price(ctx); err != nil {
+				return err
+			}
+		}
 	}
-	if p := llm.PriceOf(model.ID); p.Assumed {
-		r.env.Log.Warn("model missing from the price table; budgeting at a conservative price", "event", "price_assumed",
-			"model", model.ID, "usd_per_mtok_in", p.Input, "usd_per_mtok_out", p.Output)
+	parallel(ctx, r.env.LLM.InFlight(), todo, func(it *row) { r.judgeNow(ctx, session(it), it) })
+	for _, s := range []*llm.Session{titles, collections} {
+		switch err := s.Parked(); {
+		case err == nil:
+		case !errors.Is(err, llm.ErrBilling):
+			r.alert("posters: judging %s parked for this run: %v", s.Name(), err)
+		case r.env.LLM.TellBilling(ctx): // true once per refusal, whichever stage or session meets it first
+			r.alert("posters: judging parked until the AI gateway accepts calls (it is tried again hourly; this alert comes "+
+				"once, for every stage that asks a model): %v", err)
+		default:
+			r.env.Log.Warn("judging parked: the AI gateway still refuses calls for billing (alerted once)", "event",
+				"judge_billing_held", "task", s.Name(), "err", err)
+		}
 	}
-	if len(todo) >= r.opt.BatchMin {
-		return r.submitBatches(ctx, model, todo)
-	}
-	parallel(ctx, r.opt.JudgeWorkers, todo, func(it *row) { r.judgeNow(ctx, model, it) })
 	return nil
+}
+
+// unjudged is the verdict on a pool after two unusable judge answers: it keeps its first candidate, a director none
+// (a photo no judge scored cannot clear the bar).
+func (r *run) unjudged(it *row) Verdict {
+	v := Verdict{Choice: it.Cands[0].URL, Rule: "unjudged"}
+	if it.Title.Kind == director {
+		v.Choice = ""
+	}
+	r.alert("posters: %s got two unusable judge answers; it keeps its first candidate (%s), a director none", it.Title.Key, it.Cands[0].Source)
+	return v
 }
 
 // shortcut is the verdict that needs no judge: the owner's upload and his pick stay (his picks are often deliberate
@@ -258,9 +275,9 @@ func order(key string, n int) []int {
 	return idx
 }
 
-// request builds one title's judge call and an upper bound on its input tokens. A model with adaptive thinking runs it
-// at low effort: scoring six thumbnails needs little, and thinking counts towards max_tokens.
-func (r *run) request(ctx context.Context, model llm.Model, it *row) (llm.Request, int, error) {
+// request builds one title's judge call, with an upper estimate of its input tokens: text at 3 bytes a token, and
+// each image as 28-pixel patches, the most any of the gateway's vision models spends on one.
+func (r *run) request(ctx context.Context, it *row) (llm.Request, error) {
 	t := it.Title
 	system := systemPrompt
 	what := map[kind]string{movie: "MOVIE", show: "TV SHOW", season: "TV SEASON"}[t.Kind]
@@ -272,71 +289,107 @@ func (r *run) request(ctx context.Context, model llm.Model, it *row) (llm.Reques
 		system, head = directorPrompt, fmt.Sprintf("DIRECTOR COLLECTION: %s, director of %s. %d candidate photos follow.",
 			t.Name, r.films(ctx, t), len(it.Cands))
 	}
-	content := []llm.Block{llm.Text(head)}
-	tokens := (len(system)+len(head)+40)/3 + 100 // text at ≤3 chars a token, plus the message framing
+	content := []llm.Part{llm.Text(head)}
+	tokens := llm.EstimateTokens(system) + llm.EstimateTokens(head) + 100 // the message framing
 	for li, ci := range order(t.Key, len(it.Cands)) {
 		c := it.Cands[ci]
 		thumb, err := r.thumb(ctx, c)
 		if err != nil {
-			return llm.Request{}, 0, err
+			return llm.Request{}, err
 		}
 		label := letters[li:li+1] + ":"
 		if c.Caption != "" {
 			label += " " + c.Caption
 		}
 		content = append(content, llm.Text(label), llm.JPEG(thumb))
-		tokens += len(label)/3 + 1 + ((c.W+27)/28)*((c.H+27)/28)
+		tokens += llm.EstimateTokens(label) + ((c.W+27)/28)*((c.H+27)/28)
 	}
 	content = append(content, llm.Text("Score every candidate."))
-	req := llm.Request{Model: model.ID, MaxTokens: r.opt.MaxTokens, System: system,
-		Messages: []llm.Message{{Role: "user", Content: content}}}
-	if model.LowEffort {
-		req.OutputConfig = &llm.EffortConfig{Effort: "low"}
+	return llm.Request{MaxTokens: r.opt.MaxTokens, InputTokens: tokens, ResponseFormat: answerFormat(t.Kind, len(it.Cands)),
+		Messages: []llm.Message{llm.System(system), llm.User(content...)}}, nil
+}
+
+// answerFormat is the JSON schema of the answer the prompt asks for, over the letters this pool uses; a model that
+// does not hold to it is still read by parseAnswer.
+func answerFormat(k kind, n int) *llm.ResponseFormat {
+	object := func(props map[string]any) map[string]any {
+		required := slices.Sorted(maps.Keys(props))
+		return map[string]any{"type": "object", "additionalProperties": false, "required": required, "properties": props}
 	}
-	return req, tokens, nil
+	used := strings.Split(letters[:n], "")
+	scores, boxes := map[string]any{}, map[string]any{}
+	for _, l := range used {
+		scores[l] = map[string]any{"type": "number"}
+		boxes[l] = map[string]any{"type": "array", "items": map[string]any{"type": "number"}}
+	}
+	props := map[string]any{"scores": object(scores), "reason": map[string]any{"type": "string"}}
+	if k == director {
+		props["on_set"] = map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": used}}
+		props["box"] = object(boxes)
+	}
+	schema, _ := json.Marshal(object(props))
+	return llm.JSONAnswer("poster_scores", schema)
 }
 
-func (r *run) reservation(model string, inputTokens int, batch bool) float64 {
-	return llm.PriceOf(model).Cost(llm.Usage{InputTokens: inputTokens, OutputTokens: r.opt.MaxTokens}, batch)
-}
-
-// judgeNow judges one title through the normal API.
-func (r *run) judgeNow(ctx context.Context, model llm.Model, it *row) {
-	req, tokens, err := r.request(ctx, model, it)
+// judgeNow judges one title: one call, and one more when the answer cannot be read; a second unreadable answer leaves
+// the title unjudged. Each call holds its worst case against the budget until it settles. While a guest watches, the
+// title waits for a later run: a call uploads its thumbnails.
+func (r *run) judgeNow(ctx context.Context, s *llm.Session, it *row) {
+	switch {
+	case s.Parked() != nil:
+		r.count("judge_parked", 1)
+		return
+	case r.guestsWatching(ctx):
+		r.count("judge_deferred", 1)
+		return
+	}
+	req, err := r.request(ctx, it)
 	if err != nil {
 		r.env.Log.Warn("judge request", "event", "judge_failed", "item", it.Title.Key, "err", err)
 		r.count("judge_failed", 1)
 		return
 	}
-	held := r.reservation(model.ID, tokens, false)
-	id, err := r.reserve(ctx, it.Title.Key, setID(it.Cands), model.ID, "sync", held)
-	if err != nil {
-		r.budgetHit(it.Title.Key, err)
-		return
+	for range 2 {
+		held, err := s.WorstCase(ctx, req)
+		if err != nil {
+			r.env.Log.Warn("judge price", "event", "judge_failed", "item", it.Title.Key, "err", err)
+			r.count("judge_failed", 1)
+			return
+		}
+		id, err := r.reserve(ctx, it.Title.Key, setID(it.Cands), s.Model(), held)
+		if err != nil {
+			r.budgetHit(it.Title.Key, err)
+			return
+		}
+		res, err := s.Chat(ctx, req)
+		r.finishCall(ctx, id, res, err)
+		if err != nil {
+			if !errors.Is(err, llm.ErrParked) {
+				r.env.Log.Warn("judge call", "event", "judge_failed", "item", it.Title.Key, "err", err)
+			}
+			r.count("judge_failed", 1)
+			return
+		}
+		if r.record(ctx, it, res.Model, res.Text, id) {
+			return
+		}
 	}
-	start := time.Now()
-	resp, err := r.llm.Messages(ctx, req)
-	cost := llm.PriceOf(model.ID).Cost(resp.Usage, false)
-	if errors.Is(err, llm.ErrUnknownOutcome) {
-		cost = held
+	v := r.unjudged(it)
+	v.Of, v.At = setID(it.Cands), r.env.Now()
+	if err := r.saveVerdict(ctx, it, v); err != nil {
+		r.env.Log.Error("save verdict", "event", "store_error", "item", it.Title.Key, "err", err)
 	}
-	r.finishCall(ctx, id, resp.Usage, cost, time.Since(start), err)
-	if err != nil {
-		r.env.Log.Warn("judge call", "event", "judge_failed", "item", it.Title.Key, "err", err)
-		r.count("judge_failed", 1)
-		return
-	}
-	r.record(ctx, it, model.ID, resp.Text(), id)
 }
 
-// record turns an answer into the title's verdict; an unusable answer marks its (billed) call unusable.
-func (r *run) record(ctx context.Context, it *row, model, text string, callID int64) {
+// record turns an answer into the title's verdict and says whether it could; an unusable answer marks its (billed)
+// call unusable.
+func (r *run) record(ctx context.Context, it *row, model, text string, callID int64) bool {
 	a, err := parseAnswer(text)
 	if err != nil {
-		r.env.Log.Warn("unusable judge answer", "event", "judge_failed", "item", it.Title.Key, "err", err)
-		r.count("judge_failed", 1)
+		r.env.Log.Warn("unusable judge answer", "event", "judge_unusable", "item", it.Title.Key, "err", err)
+		r.count("judge_unusable", 1)
 		r.closeCall(ctx, callID, "unusable", err.Error(), false)
-		return
+		return false
 	}
 	byIndex := map[int]float64{}
 	v := Verdict{Reason: a.Reason, Model: model, Of: setID(it.Cands), At: r.env.Now(), Scores: map[string]float64{}}
@@ -366,10 +419,11 @@ func (r *run) record(ctx context.Context, it *row, model, text string, callID in
 	}
 	if err := r.saveVerdict(ctx, it, v); err != nil {
 		r.env.Log.Error("save verdict", "event", "store_error", "item", it.Title.Key, "err", err)
-		return
+		return true
 	}
 	r.count("judged", 1)
-	r.env.Log.Info("judged", "event", "title_judged", "item", it.Title.Key, "rule", rule, "choice", source, "score", byIndex[choice])
+	r.env.Log.Info("judged", "event", "title_judged", "item", it.Title.Key, "model", model, "rule", rule, "choice", source, "score", byIndex[choice])
+	return true
 }
 
 // noPoster alerts the director collections whose verdict chose nothing: no photo cleared director_min_score, or no
@@ -458,143 +512,12 @@ func clip(s string) string {
 	return s
 }
 
-// ---- batches ----
-
-// submitBatches sends the backlog as Message Batches of at most BatchSize requests, each request reserved against
-// the budget first; results are collected by a later run. Each batch upload (~30 MB of the uplink) waits while a
-// guest watches.
-func (r *run) submitBatches(ctx context.Context, model llm.Model, todo []*row) error {
-	for start := 0; start < len(todo) && ctx.Err() == nil; start += r.opt.BatchSize {
-		if r.guestsWatching(ctx) {
-			r.count("judge_deferred", len(todo)-start)
-			return nil
-		}
-		chunk := todo[start:min(start+r.opt.BatchSize, len(todo))]
-		var reqs []llm.BatchRequest
-		var ids []int64
-		for _, it := range chunk {
-			req, tokens, err := r.request(ctx, model, it)
-			if err != nil {
-				r.env.Log.Warn("judge request", "event", "judge_failed", "item", it.Title.Key, "err", err)
-				continue
-			}
-			id, err := r.reserve(ctx, it.Title.Key, setID(it.Cands), model.ID, "batch", r.reservation(model.ID, tokens, true))
-			if err != nil { // a spent title budget must not hold back the collections behind the titles: their budget is their own
-				r.budgetHit(it.Title.Key, err)
-				continue
-			}
-			reqs, ids = append(reqs, llm.BatchRequest{CustomID: "c" + strconv.FormatInt(id, 10), Params: req}), append(ids, id)
-		}
-		if len(reqs) == 0 {
-			continue
-		}
-		b, err := r.llm.CreateBatch(ctx, reqs)
-		if err != nil {
-			// An unknown outcome may be a batch that exists and will be billed: its worst case stays counted.
-			unknown := errors.Is(err, llm.ErrUnknownOutcome)
-			for _, id := range ids {
-				r.closeCall(ctx, id, "failed", err.Error(), unknown)
-			}
-			r.alert("posters: Message Batch submission failed (worst case still counted: %v): %v", unknown, err)
-			return nil
-		}
-		if err := r.setBatch(ctx, ids, b.ID); err != nil {
-			return err
-		}
-		r.count("batch_requests", len(reqs))
-		r.env.Log.Info("batch submitted", "event", "batch_submitted", "batch", b.ID, "requests", len(reqs), "model", model.ID)
-	}
-	return nil
-}
-
-// collectBatches records the results of every batch that has ended since the last run.
-func (r *run) collectBatches(ctx context.Context, byKey map[string]*row) error {
-	db := r.env.Store.DB()
-	var batches []string
-	rows, err := db.QueryContext(ctx, `SELECT DISTINCT batch_id FROM posters_calls WHERE state='pending' AND batch_id != ''`)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return err
-		}
-		batches = append(batches, id)
-	}
-	rows.Close()
-	for _, id := range batches {
-		b, err := r.llm.Batch(ctx, id)
-		if err != nil {
-			r.env.Log.Warn("batch poll", "event", "batch_poll_failed", "batch", id, "err", err)
-			continue
-		}
-		if b.ProcessingStatus != "ended" {
-			r.count("batch_pending", 1)
-			continue
-		}
-		err = r.llm.BatchResults(ctx, id, func(res llm.BatchResult) error {
-			callID, _ := strconv.ParseInt(strings.TrimPrefix(res.CustomID, "c"), 10, 64)
-			var item, of, model string
-			if err := db.QueryRowContext(ctx, `SELECT item, of, model FROM posters_calls WHERE id=? AND batch_id=?`, callID, id).
-				Scan(&item, &of, &model); err != nil {
-				return fmt.Errorf("batch %s result %s: %w", id, res.CustomID, err)
-			}
-			if res.Result.Type != "succeeded" { // not billed
-				r.closeCall(ctx, callID, "failed", res.Result.Type+" "+string(res.Result.Error), false)
-				return nil
-			}
-			msg := res.Result.Message
-			r.finishCall(ctx, callID, msg.Usage, llm.PriceOf(model).Cost(msg.Usage, true), 0, nil)
-			it, err := r.lookup(ctx, byKey, item)
-			if err != nil {
-				return err
-			}
-			if it != nil && setID(it.Cands) == of { // else the pool changed meanwhile and this answer is stale
-				r.record(ctx, it, model, msg.Text(), callID)
-			}
-			return nil
-		})
-		if err != nil {
-			r.env.Log.Warn("batch results", "event", "batch_poll_failed", "batch", id, "err", err)
-			continue
-		}
-		if _, err := db.ExecContext(ctx, `UPDATE posters_calls SET state='failed', reserved_usd=0, error='no result'
-			WHERE state='pending' AND batch_id=?`, id); err != nil {
-			return err
-		}
-		r.env.Log.Info("batch collected", "event", "batch_collected", "batch", id)
-	}
-	return nil
-}
-
-// lookup finds a title among this run's rows, or in the store when this run was limited to other titles.
-func (r *run) lookup(ctx context.Context, byKey map[string]*row, key string) (*row, error) {
-	if it, ok := byKey[key]; ok {
-		return it, nil
-	}
-	var title, cands sql.NullString
-	err := r.env.Store.DB().QueryRowContext(ctx, `SELECT title, cands FROM posters_items WHERE key=?`, key).Scan(&title, &cands)
-	if errors.Is(err, sql.ErrNoRows) || err == nil && !cands.Valid {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	it := &row{}
-	if err := json.Unmarshal([]byte(title.String), &it.Title); err != nil {
-		return nil, err
-	}
-	return it, json.Unmarshal([]byte(cands.String), &it.Cands)
-}
-
 // ---- the call ledger and the budget ----
 
 // reserve records a call before it is made, holding its worst-case cost against the budget until it finishes. When
-// only what calls in flight hold fills the budget, it is errBudgetHeld: they settle below what they hold (a batch
-// request at about a third), and the title is judged on a later run.
-func (r *run) reserve(ctx context.Context, item, of, model, mode string, usd float64) (int64, error) {
+// only what calls in flight hold fills the budget, it is errBudgetHeld: they settle below what they hold, and the
+// title is judged on a later run.
+func (r *run) reserve(ctx context.Context, item, of, model string, usd float64) (int64, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	collection, budget, what := strings.HasPrefix(item, collectionPrefix), r.opt.BudgetUSD, "titles"
@@ -614,27 +537,29 @@ func (r *run) reserve(ctx context.Context, item, of, model, mode string, usd flo
 	}
 	res, err := r.env.Store.DB().ExecContext(context.WithoutCancel(ctx), `INSERT INTO posters_calls(at, item, of, model, mode,
 		batch_id, state, input_tokens, output_tokens, reserved_usd, cost_usd, llm_ms, error)
-		VALUES (?, ?, ?, ?, ?, '', 'pending', 0, 0, ?, 0, 0, '')`, stamp(r.env.Now()), item, of, model, mode, usd)
+		VALUES (?, ?, ?, ?, 'gateway', '', 'pending', 0, 0, ?, 0, 0, '')`, stamp(r.env.Now()), item, of, model, usd)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
 
-// finishCall settles a call at its real cost (an error answer is not billed).
-func (r *run) finishCall(ctx context.Context, id int64, u llm.Usage, usd float64, took time.Duration, callErr error) {
+// finishCall settles a call at what it cost: the answer, and any attempt whose answer was lost at its worst case. A
+// refusal (a 4xx, the gateway's billing) costs nothing. The model is the one that answered (a fallback, maybe).
+func (r *run) finishCall(ctx context.Context, id int64, res llm.Result, callErr error) {
 	state, msg := "done", ""
 	if callErr != nil {
-		state, msg = "failed", callErr.Error()
+		state, msg = "failed", clip(callErr.Error())
 	}
-	_, err := r.env.Store.DB().ExecContext(context.WithoutCancel(ctx), `UPDATE posters_calls SET state=?, input_tokens=?,
-		output_tokens=?, reserved_usd=0, cost_usd=?, llm_ms=?, error=? WHERE id=?`,
-		state, u.InputTokens, u.OutputTokens, usd, took.Milliseconds(), msg, id)
+	_, err := r.env.Store.DB().ExecContext(context.WithoutCancel(ctx), `UPDATE posters_calls SET state=?,
+		model=coalesce(nullif(?, ''), model), input_tokens=?, output_tokens=?, reserved_usd=0, cost_usd=?, llm_ms=?, error=?
+		WHERE id=?`, state, res.Model, res.Usage.PromptTokens, res.Usage.CompletionTokens, res.CostUSD, res.Took.Milliseconds(), msg, id)
 	if err != nil {
 		r.env.Log.Error("call ledger", "event", "store_error", "err", err)
 	}
-	r.env.Log.Info("llm call", "event", "llm_call", "call", id, "input_tokens", u.InputTokens, "output_tokens", u.OutputTokens,
-		"cost_usd", usd, "duration_ms", took.Milliseconds(), "err", callErr)
+	r.env.Log.Info("llm call", "event", "llm_call", "call", id, "model", res.Model, "attempts", res.Attempts,
+		"input_tokens", res.Usage.PromptTokens, "output_tokens", res.Usage.CompletionTokens, "cost_usd", res.CostUSD,
+		"maybe_billed", res.MaybeBilled, "duration_ms", res.Took.Milliseconds(), "err", callErr)
 }
 
 // closeCall ends a call that gave no usable answer: "failed" was not billed, or (keepWorstCase) may have been and
@@ -647,23 +572,9 @@ func (r *run) closeCall(ctx context.Context, id int64, state, msg string, keepWo
 	}
 }
 
-func (r *run) setBatch(ctx context.Context, ids []int64, batch string) error {
-	tx, err := r.env.Store.DB().BeginTx(context.WithoutCancel(ctx), nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, id := range ids {
-		if _, err := tx.Exec(`UPDATE posters_calls SET batch_id=? WHERE id=?`, batch, id); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
 // callState is, per "item of", whether a call is in flight and how many billed answers were unusable. Failures that
-// were never answered (outages, expired batches) do not count: the title is simply asked again on a later run. Nor do
-// the answers the parser misread before it ignored a "reason" inside "scores": they had scores.
+// were never answered (outages, billing refusals) do not count: the title is simply asked again on a later run. Nor
+// do the answers the parser misread before it ignored a "reason" inside "scores": they had scores.
 func (r *run) callState(ctx context.Context) (map[string]bool, map[string]int, error) {
 	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT item, of, state FROM posters_calls WHERE state = 'pending'
 		OR state = 'unusable' AND error NOT LIKE 'json: cannot unmarshal string into Go struct field .scores of type float64%'`)
@@ -710,43 +621,4 @@ func (r *run) budgetHit(item string, err error) {
 		return
 	}
 	r.rep.Alert("%v; the rest waits until the budget is raised", err)
-}
-
-// model is the dated policy's choice at this run (env.LLM); a "family:latest" alias resolves once a day, keeping the
-// last answer if the Models API is down.
-func (r *run) model(ctx context.Context) (llm.Model, error) {
-	alias, err := r.env.LLM.Model(r.env.Now())
-	if err != nil {
-		return llm.Model{}, err
-	}
-	family, ok := strings.CutSuffix(alias, ":latest")
-	if !ok {
-		return llm.Model{ID: alias}, nil
-	}
-	var cached struct {
-		Alias string
-		Model llm.Model
-		At    time.Time
-	}
-	found, err := r.env.Store.GetJSON(ctx, name, "judge_model", &cached)
-	if err != nil {
-		return llm.Model{}, err
-	}
-	found = found && cached.Alias == alias
-	if found && r.env.Now().Sub(cached.At) < 24*time.Hour {
-		return cached.Model, nil
-	}
-	m, err := r.llm.Latest(ctx, family)
-	if err != nil {
-		if found {
-			r.env.Log.Warn("model list failed; keeping the last answer", "event", "model_resolve_failed", "model", cached.Model.ID, "err", err)
-			return cached.Model, nil
-		}
-		return llm.Model{}, err
-	}
-	if m != cached.Model {
-		r.env.Log.Info("model resolved", "event", "model_resolved", "alias", alias, "model", m.ID, "low_effort", m.LowEffort)
-	}
-	cached.Alias, cached.Model, cached.At = alias, m, r.env.Now()
-	return m, r.env.Store.PutJSON(ctx, name, "judge_model", cached)
 }
