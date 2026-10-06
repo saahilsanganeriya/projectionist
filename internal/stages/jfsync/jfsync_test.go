@@ -385,6 +385,25 @@ func TestJellyfinRecreatedItemIsWritten(t *testing.T) {
 	}
 }
 
+// Catches: the Jellyfin listing left to collapse collections. Jellyfin then answers each movie in a collection with
+// the collection, whose path is outside the library, so every watched film on a shelf stayed pending and was never
+// written (2026-10-06: 394 films, 490 person-items, all in Plex's listing and in Jellyfin).
+func TestJellyfinListsMoviesInCollections(t *testing.T) {
+	h, w, _, _ := newHarness(t)
+	h.Jellyfin.HandleFunc("GET", "/Items", func(rw http.ResponseWriter, r *http.Request) {
+		item := `{"Id":"d1","Path":"` + dune + `"}`
+		if r.URL.Query().Get("collapseBoxSetItems") != "false" { // Jellyfin's default for a movie query
+			item = `{"Id":"s1","Path":"/config/data/collections/Dune [boxset]"}`
+		}
+		rw.Write([]byte(`{"Items":[` + item + `]}`))
+	})
+	run(t, h)
+	want := `/UserItems/d1/UserData?userId=u1 {"LastPlayedDate":"2024-08-09T00:00:00Z","PlayCount":1,"PlaybackPositionTicks":0,"Played":true}`
+	if got := strings.Join(w.since(0), "\n"); !strings.Contains(got, want) {
+		t.Fatalf("Dune, in a Jellyfin collection, not written:\n%s", got)
+	}
+}
+
 // Catches: a webhook entry of another shape read as no entry, so the POST adding ours, which replaces the whole list,
 // would drop the owner's other hooks every day; a document of another kind read as an empty list; and the real empty
 // list (plex.tv's answer on 2026-10-05) refused.
