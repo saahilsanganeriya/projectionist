@@ -372,7 +372,9 @@ func TestRunProviderTrouble(t *testing.T) {
 
 	both := newFixture(t) // OpenSubtitles waits out its quota while OpenSubtitles.com refuses a bad key
 	both.h.Env.Store.PutJSON(context.Background(), name, "opensubtitles_quota", quotaState{ResumeAfter: both.h.Now.Add(time.Hour)})
-	os.WriteFile(filepath.Join(both.dir, "opensubtitles_api_key"), []byte("bad\n"), 0o600)
+	for _, secret := range []string{"opensubtitles_api_key", "opensubtitles_username", "opensubtitles_password"} {
+		os.WriteFile(filepath.Join(both.dir, secret), []byte("bad\n"), 0o600)
+	}
 	both.st.openSubtitlesCom = refuses.URL
 	both.options(`providers = ["opensubtitles", "opensubtitles-com"]`)
 	if both.run(t); len(both.outcomes()) != 0 {
@@ -416,14 +418,14 @@ func TestRunProviderTrouble(t *testing.T) {
 	}
 }
 
-// subdlOnly is the fixture with Subdl its one provider, answering status (and Retry-After when set) while failing, else
-// no subtitles; searches counts its searches.
-func subdlOnly(t *testing.T, status int, retryAfter string) (f *fixture, failing *atomic.Bool, searches func() int) {
+// limitedOnly is the fixture with one provider keyed by <provider>_api_key (subdl or subsource), answering status
+// (and Retry-After when set) while failing, else no subtitles; searches counts its searches.
+func limitedOnly(t *testing.T, provider string, status int, retryAfter string) (f *fixture, failing *atomic.Bool, searches func() int) {
 	f, failing = newFixture(t), &atomic.Bool{}
 	failing.Store(true)
 	srv, calls := counter(t, func(w http.ResponseWriter, _ *http.Request, _ int) {
 		if !failing.Load() {
-			w.Write([]byte(`{"subtitles":[]}`))
+			w.Write([]byte(`{"subtitles":[],"data":[]}`))
 			return
 		}
 		if retryAfter != "" {
@@ -431,42 +433,82 @@ func subdlOnly(t *testing.T, status int, retryAfter string) (f *fixture, failing
 		}
 		w.WriteHeader(status)
 	})
-	f.st.subdlAPI, f.st.subdlDL = srv.URL+"/api", srv.URL
-	os.WriteFile(filepath.Join(f.dir, "subdl_api_key"), []byte("key\n"), 0o600)
-	f.options(`providers = ["subdl"]`)
-	return f, failing, func() int { return calls("/api") }
+	f.st.subdlAPI, f.st.subdlDL, f.st.subsourceAPI = srv.URL+"/api", srv.URL, srv.URL
+	os.WriteFile(filepath.Join(f.dir, provider+"_api_key"), []byte("key\n"), 0o600)
+	f.options(`providers = ["` + provider + `"]`)
+	return f, failing, func() int { return calls("/api") + calls("/movies/search") }
 }
 
-// Catches Subdl's daily limit (HTTP 429; the free plan allows 2,000 searches and 300 downloads a day) taken for an
-// outage: an alert on every run (it held /health at 503 all day), Subdl searched again for each title, a title
-// recorded without Subdl's answer, or the wait forgotten by the next run instead of kept until Retry-After, else the
-// next 00:00 UTC.
-func TestRunSubdlQuotaWaitsForTheReset(t *testing.T) {
-	for retryAfter, reset := range map[string]time.Time{
-		"":     time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC), // the fixture's clock starts at 2026-10-05 06:00 UTC
-		"7200": time.Date(2026, 10, 5, 8, 0, 0, 0, time.UTC),
-	} {
-		f, failing, searches := subdlOnly(t, 429, retryAfter)
-		if rep := f.run(t); len(rep.Alerts) != 0 || searches() != 1 || len(f.outcomes()) != 0 {
-			t.Errorf("Retry-After %q: alerts %q, %d searches, recorded %v; want none, 1, nothing", retryAfter, rep.Alerts, searches(), f.outcomes())
-		}
-		failing.Store(false)
-		f.h.Now = reset.Add(-time.Second)
-		if rep := f.run(t); len(rep.Alerts) != 0 || searches() != 1 {
-			t.Errorf("Retry-After %q, a second before the reset: alerts %q, %d searches; want none, still 1", retryAfter, rep.Alerts, searches())
-		}
-		f.h.Now = reset
-		if f.run(t); searches() == 1 {
-			t.Errorf("Retry-After %q: Subdl not searched at the reset", retryAfter)
+// Catches a daily limit (HTTP 429: Subdl's free plan allows 2,000 searches and 300 downloads a day, SubSource 7,200
+// requests) taken for an outage: an alert on every run (Subdl's held /health at 503 all day), the provider searched
+// again for each title, a title recorded without its answer, or the wait forgotten by the next run instead of kept
+// until Retry-After, else the next 00:00 UTC.
+func TestRunDailyLimitWaitsForTheReset(t *testing.T) {
+	for _, provider := range []string{"subdl", "subsource"} {
+		for retryAfter, reset := range map[string]time.Time{
+			"":     time.Date(2026, 10, 6, 0, 0, 0, 0, time.UTC), // the fixture's clock starts at 2026-10-05 06:00 UTC
+			"7200": time.Date(2026, 10, 5, 8, 0, 0, 0, time.UTC),
+		} {
+			f, failing, searches := limitedOnly(t, provider, 429, retryAfter)
+			if rep := f.run(t); len(rep.Alerts) != 0 || searches() != 1 || len(f.outcomes()) != 0 {
+				t.Errorf("%s, Retry-After %q: alerts %q, %d searches, recorded %v; want none, 1, nothing", provider, retryAfter, rep.Alerts, searches(), f.outcomes())
+			}
+			failing.Store(false)
+			f.h.Now = reset.Add(-time.Second)
+			if rep := f.run(t); len(rep.Alerts) != 0 || searches() != 1 {
+				t.Errorf("%s, Retry-After %q, a second before the reset: alerts %q, %d searches; want none, still 1", provider, retryAfter, rep.Alerts, searches())
+			}
+			f.h.Now = reset
+			if f.run(t); searches() == 1 {
+				t.Errorf("%s, Retry-After %q: not searched at the reset", provider, retryAfter)
+			}
 		}
 	}
 }
 
 // Catches a Subdl outage (a 5xx past every retry) logged as a spent quota: it still raises an alert.
 func TestRunSubdlOutageAlerts(t *testing.T) {
-	f, _, _ := subdlOnly(t, 503, "")
+	f, _, _ := limitedOnly(t, "subdl", 503, "")
 	if rep := f.run(t); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "subdl unavailable") {
 		t.Errorf("Subdl answering 503: alerts %q; want one naming subdl", rep.Alerts)
+	}
+}
+
+// Catches a keyed provider listed without its secrets (SubSource's key; OpenSubtitles.com's key, username and
+// password) sending a request, raising an alert, or holding back the titles the others serve.
+func TestRunSkipsProvidersWithoutSecrets(t *testing.T) {
+	f := newFixture(t)
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { hits.Add(1); w.WriteHeader(500) }))
+	t.Cleanup(srv.Close)
+	f.st.subsourceAPI, f.st.openSubtitlesCom = srv.URL, srv.URL
+	for _, secret := range []string{"opensubtitles_api_key", "opensubtitles_username"} { // no password
+		os.WriteFile(filepath.Join(f.dir, secret), []byte("x\n"), 0o600)
+	}
+	f.options(`providers = ["subsource", "opensubtitles", "opensubtitles-com"]`)
+	if rep := f.run(t); len(rep.Alerts) != 0 || hits.Load() != 0 || f.outcomes()[f.path(clerks)] != "retimed" {
+		t.Errorf("alerts %q, %d requests to the keyed providers, recorded %v; want none, none, Clerks aligned", rep.Alerts, hits.Load(), f.outcomes())
+	}
+}
+
+// Catches a run that logged in to OpenSubtitles.com ending without logging out, as the API's best practices ask.
+func TestRunOpenSubtitlesComSession(t *testing.T) {
+	f := newFixture(t)
+	srv, calls := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+		switch r.URL.Path {
+		case "/api/v1/login":
+			w.Write([]byte(`{"token":"tok","base_url":"` + r.Host + `"}`))
+		default:
+			w.Write([]byte(`{"data":[]}`))
+		}
+	})
+	f.st.openSubtitlesCom = srv.URL + "/api/v1"
+	for _, secret := range []string{"opensubtitles_api_key", "opensubtitles_username", "opensubtitles_password"} {
+		os.WriteFile(filepath.Join(f.dir, secret), []byte("x\n"), 0o600)
+	}
+	f.options(`providers = ["opensubtitles-com"]`)
+	if rep := f.run(t); len(rep.Alerts) != 0 || calls("/api/v1/login") == 0 || calls("/api/v1/logout") != 1 {
+		t.Errorf("alerts %q, %d logins, %d logouts; want none, a login, 1 logout", rep.Alerts, calls("/api/v1/login"), calls("/api/v1/logout"))
 	}
 }
 

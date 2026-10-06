@@ -68,6 +68,9 @@ services:
       - { type: bind, source: /volume2/projectionist/state, target: /volume2/projectionist/state, bind: { create_host_path: false } } # = /state
       - /volume1/PlexMediaServer/nvme-backup:/volume1/PlexMediaServer/nvme-backup # appbackup's nightly versions
     secrets: [jellyfin_key, tmdb_read_token, tmdb_api_key, fanart_api_key, ai_gateway_api_key] # /run/secrets/<name>, read-only
+    # Optional, for subtitles' keyed providers (one without its files is skipped): append subsource_api_key, or
+    # opensubtitles_api_key, opensubtitles_username and opensubtitles_password, and uncomment their entries below. A
+    # listed secret whose file is missing stops the container from starting.
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }
@@ -83,3 +86,11 @@ secrets:
     file: /volume1/docker/projectionist/secrets/fanart_api_key
   ai_gateway_api_key: # the owner's Vercel AI Gateway key: every model call whose task names no API of its own ([llm] key_file)
     file: /volume1/docker/projectionist/secrets/ai_gateway_api_key
+  # subsource_api_key: # subtitles: SubSource, a free key (subsource.net, My Profile)
+  #   file: /volume1/docker/projectionist/secrets/subsource_api_key
+  # opensubtitles_api_key: # subtitles: OpenSubtitles.com, a free consumer key (opensubtitles.com/en/consumers)
+  #   file: /volume1/docker/projectionist/secrets/opensubtitles_api_key
+  # opensubtitles_username: # the free opensubtitles.com user it logs in as (20 downloads a day)
+  #   file: /volume1/docker/projectionist/secrets/opensubtitles_username
+  # opensubtitles_password:
+  #   file: /volume1/docker/projectionist/secrets/opensubtitles_password

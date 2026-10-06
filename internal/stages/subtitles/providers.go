@@ -1,13 +1,15 @@
 package subtitles
 
 // Subtitle providers, called directly (never through Plex): the OpenSubtitles legacy REST API, Gestdown (Addic7ed's
-// TV subtitles) and SITEC Subtitles (movies), none of which needs a key, and OpenSubtitles.com and Subdl, each only when
-// its API key file exists. Ranking, the file hash, the release name, the ad stripping and the legacy API's download
-// quota are ports of subfetch2.py v8. Every request goes through its provider's pacer: requests a gap apart (1 s;
-// 2 s for Gestdown and SITEC; 8 min for legacy downloads), exponential backoff on 429/5xx/network errors, and parking
+// TV subtitles) and SITEC Subtitles (movies), none of which needs a key; SubSource (the Subscene archive) and Subdl,
+// each only when its API key file exists; and OpenSubtitles.com, only when its API key and a free user's username and
+// password files exist. Ranking, the file hash, the release name, the ad stripping and the legacy API's download quota
+// are ports of subfetch2.py v8. Every request goes through its provider's pacer: requests a gap apart (1 s; 2 s for
+// Gestdown, SITEC and SubSource; 8 min for legacy downloads), exponential backoff on 429/5xx/network errors, and parking
 // for the rest of the run once the provider keeps failing, refuses a search or spends its download quota, so the
-// titles that need it wait for the next run. The legacy API's quota and Subdl's daily limit (its 429, answered at once)
-// park it until they reset, a time the store keeps, so later runs wait too.
+// titles that need it wait for the next run. The legacy API's quota, Subdl's and SubSource's daily limits (a 429,
+// answered at once) and OpenSubtitles.com's day of downloads park the provider until they reset, a time the store
+// keeps, so later runs wait too.
 
 import (
 	"archive/zip"
@@ -63,6 +65,9 @@ type Candidate struct {
 	unusable        bool // not SRT, foreign parts only or marked bad: counted by the search logic, never tried
 	link            string
 	provider        Provider
+	// OpenSubtitles' id of the subtitle, the same through both its APIs (the legacy IDSubtitle, .com's
+	// legacy_subtitle_id): a subtitle both find is one candidate.
+	openSubtitlesID string
 }
 
 type Provider interface {
@@ -172,14 +177,18 @@ func stripAds(txt string) string {
 }
 
 // order ranks candidates best first (ties keep search order, as subfetch2.py's stable sort does) and drops unusable
-// ones and repeats.
+// ones and repeats, an OpenSubtitles subtitle found through both its APIs included.
 func order(cands []Candidate, release string) []Candidate {
 	sort.SliceStable(cands, func(i, j int) bool { return rank(cands[i], release) > rank(cands[j], release) })
 	seen := map[string]bool{}
 	out := cands[:0]
 	for _, c := range cands {
-		if !c.unusable && !seen[c.key()] {
-			seen[c.key()] = true
+		k := c.key()
+		if c.openSubtitlesID != "" {
+			k = "opensubtitles:" + c.openSubtitlesID
+		}
+		if !c.unusable && !seen[k] {
+			seen[k] = true
 			out = append(out, c)
 		}
 	}
@@ -230,6 +239,31 @@ func (p *pacer) resumeAt(t time.Time) {
 	if p.now().Before(t) {
 		p.pause(t, quotaErr("quota wait in force", t))
 	}
+}
+
+// spend parks the provider, its quota spent, until `until`, and keeps the wait so later runs wait too; it returns the
+// refusal (a quota: routine, logged without an alert).
+func (p *pacer) spend(reason string, until time.Time, keep func(quotaState)) error {
+	err := quotaErr(reason, until)
+	p.pause(until, err)
+	keep(quotaState{ResumeAfter: until})
+	return fmt.Errorf("%w: %w", errParked, err)
+}
+
+// limited spends the quota after a 429 (with quota429 set: answered at once, never retried) until its Retry-After,
+// else until fallback.
+func (p *pacer) limited(h http.Header, fallback time.Time, keep func(quotaState)) error {
+	until := fallback
+	if d := retryAfter(h); d > 0 {
+		until = p.now().Add(d)
+	}
+	return p.spend("answered HTTP 429", until, keep)
+}
+
+// nextDay is the 00:00 UTC after t: when a daily limit whose reset the docs do not state is assumed to reset.
+func nextDay(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day()+1, 0, 0, 0, 0, time.UTC)
 }
 
 // out is why the provider is parked, nil when it is not; p.mu must be held.
@@ -353,6 +387,7 @@ func (f *flexString) UnmarshalJSON(b []byte) error {
 
 type legacyResult struct {
 	MatchedBy           flexString
+	IDSubtitle          flexString
 	IDSubtitleFile      flexString
 	SubFileName         flexString
 	MovieReleaseName    flexString
@@ -466,7 +501,7 @@ func (o *legacy) search(ctx context.Context, q Query, source string, params ...s
 			Source: source, ID: string(r.IDSubtitleFile), Release: string(r.MovieReleaseName), FileName: string(r.SubFileName),
 			HashMatch: r.MatchedBy == "moviehash", HearingImpaired: r.SubHearingImpaired == "1", Downloads: downloads,
 			Rating: rating, FPS: fps, Encoding: string(r.SubEncoding), Season: string(r.SeriesSeason), Episode: string(r.SeriesEpisode),
-			link: string(r.SubDownloadLink), provider: o,
+			link: string(r.SubDownloadLink), provider: o, openSubtitlesID: string(r.IDSubtitle),
 			unusable: r.SubFormat != "srt" || r.SubSumCD != "" && r.SubSumCD != "1" || r.SubForeignPartsOnly == "1" || r.SubBad == "1",
 			ours:     imdb != 0 && imdb == q.IMDb, // an episode's own test replaces this in Search
 		})
@@ -566,21 +601,37 @@ func pyQuote(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(url.QueryEscape(s), "+", "%20"), "%2F", "/")
 }
 
-// ---- OpenSubtitles.com REST (needs an API key) ----
+// ---- OpenSubtitles.com REST (a consumer's API key and a free user's login) ----
 
+// A login answers a token and the host every later request goes to (base_url). Logins are limited (1 a second, 30 an
+// hour), so a run logs in once, on first need, logs in again only when a request answers 401 (the token expired),
+// and once a request after that fresh login is refused too, gives up for the run; it logs out at its end, as the
+// API's best practices ask. A free user downloads 20 subtitles a day: each download answers how many remain and when
+// the count resets, and a download past it answers 406.
 type dotCom struct {
-	base      string // .../api/v1
-	keyFile   string
-	userAgent string
+	base      string // https://api.opensubtitles.com/api/v1: the login's; later requests go to the host it answers
+	secrets   string // secrets_dir: opensubtitles_api_key, opensubtitles_username, opensubtitles_password
+	userAgent string // the consumer's registered name and a version
 	hc        *http.Client
-	pace      *pacer
+	pace      *pacer           // quota429
+	keep      func(quotaState) // saves the wait for the next day of downloads, so the next run waits too
+	mu        sync.Mutex       // guards api and token, and runs one login at a time
+	api       string           // base on the host the login answered
+	token     string           // "" until the first login
 }
 
 func (o *dotCom) Name() string  { return "opensubtitles-com" }
 func (o *dotCom) pacer() *pacer { return o.pace }
 
-func (o *dotCom) call(ctx context.Context, method, path string, payload any, out any) error {
-	key, err := os.ReadFile(o.keyFile)
+func (o *dotCom) secret(name string) (string, error) {
+	b, err := os.ReadFile(filepath.Join(o.secrets, name))
+	return strings.TrimSpace(string(b)), err
+}
+
+// send is one request to link with the key and, once logged in, the token; out (when set) decodes the answer. A 429
+// (5 requests a second) parks the provider until its Retry-After, else for a minute.
+func (o *dotCom) send(ctx context.Context, method, link, token string, payload, out any) error {
+	key, err := o.secret("opensubtitles_api_key")
 	if err != nil {
 		return err
 	}
@@ -591,19 +642,85 @@ func (o *dotCom) call(ctx context.Context, method, path string, payload any, out
 		}
 	}
 	raw, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) {
-		r, err := http.NewRequest(method, o.base+path, bytes.NewReader(body))
+		r, err := http.NewRequest(method, link, bytes.NewReader(body))
 		if err == nil {
-			r.Header.Set("Api-Key", strings.TrimSpace(string(key)))
+			r.Header.Set("Api-Key", key)
 			r.Header.Set("User-Agent", o.userAgent)
 			r.Header.Set("Accept", "application/json")
 			r.Header.Set("Content-Type", "application/json")
+			if token != "" {
+				r.Header.Set("Authorization", "Bearer "+token)
+			}
 		}
 		return r, err
 	})
-	if err != nil {
+	var se *statusError
+	if errors.As(err, &se) && se.code == http.StatusTooManyRequests {
+		return o.pace.limited(se.header, o.pace.now().Add(time.Minute), o.keep)
+	}
+	if err != nil || out == nil {
 		return err
 	}
 	return json.Unmarshal(raw, out)
+}
+
+// session is the current login: a new one when there is none yet or the request with token `stale` answered 401.
+func (o *dotCom) session(ctx context.Context, stale string) (api, token string, err error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.token != "" && o.token != stale {
+		return o.api, o.token, nil
+	}
+	user, err := o.secret("opensubtitles_username")
+	if err != nil {
+		return "", "", err
+	}
+	pass, err := o.secret("opensubtitles_password")
+	if err != nil {
+		return "", "", err
+	}
+	var res struct {
+		Token   string `json:"token"`
+		BaseURL string `json:"base_url"`
+	}
+	if err := o.send(ctx, http.MethodPost, o.base+"/login", "", map[string]string{"username": user, "password": pass}, &res); err != nil {
+		return "", "", fmt.Errorf("opensubtitles-com login: %w", err)
+	}
+	u, err := url.Parse(o.base)
+	if err != nil {
+		return "", "", err
+	}
+	if res.BaseURL != "" {
+		u.Host = res.BaseURL
+	}
+	o.api, o.token = u.String(), res.Token
+	return o.api, o.token, nil
+}
+
+// call sends a request on the session, logging in again, once, when its token has expired.
+func (o *dotCom) call(ctx context.Context, method, path string, payload, out any) error {
+	api, token, err := o.session(ctx, "")
+	if err != nil {
+		return err
+	}
+	err = o.send(ctx, method, api+path, token, payload, out)
+	if se := (*statusError)(nil); errors.As(err, &se) && se.code == http.StatusUnauthorized {
+		if api, token, err = o.session(ctx, token); err != nil {
+			return err
+		}
+		err = o.send(ctx, method, api+path, token, payload, out)
+	}
+	return err
+}
+
+// logout ends the run's session, if it opened one; a failed logout costs nothing, as the token expires on its own.
+func (o *dotCom) logout(ctx context.Context) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.token != "" {
+		o.send(ctx, http.MethodDelete, o.api+"/logout", o.token, nil, nil)
+		o.token = ""
+	}
 }
 
 // Search asks once with everything known; the API flags file-hash matches itself.
@@ -614,6 +731,10 @@ func (o *dotCom) Search(ctx context.Context, q Query) ([]Candidate, error) {
 		v.Set("parent_imdb_id", strconv.Itoa(q.IMDb))
 	case q.IMDb != 0:
 		v.Set("imdb_id", strconv.Itoa(q.IMDb))
+	case q.Show && q.TMDB != "":
+		v.Set("parent_tmdb_id", q.TMDB)
+	case q.TMDB != "":
+		v.Set("tmdb_id", q.TMDB)
 	case q.Show:
 		v.Set("query", pyLower(q.Name))
 	}
@@ -633,6 +754,7 @@ func (o *dotCom) Search(ctx context.Context, q Query) ([]Candidate, error) {
 				AITranslated      bool    `json:"ai_translated"`
 				FPS               float64 `json:"fps"`
 				MoviehashMatch    bool    `json:"moviehash_match"`
+				LegacyID          int     `json:"legacy_subtitle_id"`
 				Files             []struct {
 					FileID   int    `json:"file_id"`
 					FileName string `json:"file_name"`
@@ -658,8 +780,11 @@ func (o *dotCom) Search(ctx context.Context, q Query) ([]Candidate, error) {
 			HashMatch: a.MoviehashMatch, HearingImpaired: a.HearingImpaired, Downloads: a.DownloadCount, Rating: a.Ratings, provider: o,
 			FPS: a.FPS, Season: strconv.Itoa(a.Feature.Season), Episode: strconv.Itoa(a.Feature.Episode),
 		}
-		// searched by the film's IMDb id, or labelled with the episode
-		c.ours = !q.Show && q.IMDb != 0 || q.Show && c.Season == strconv.Itoa(q.Season) && c.Episode == strconv.Itoa(q.Episode)
+		if a.LegacyID != 0 {
+			c.openSubtitlesID = strconv.Itoa(a.LegacyID)
+		}
+		// searched by the film's id, or labelled with the episode
+		c.ours = !q.Show && (q.IMDb != 0 || q.TMDB != "") || q.Show && c.Season == strconv.Itoa(q.Season) && c.Episode == strconv.Itoa(q.Episode)
 		if !q.Show || c.HashMatch || c.ours {
 			out = append(out, c)
 		}
@@ -667,22 +792,35 @@ func (o *dotCom) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	return out, nil
 }
 
-// Download asks for a link (this is what the daily quota counts; 406 means it is spent), then fetches the file.
+// Download asks for a link (what the day's quota counts), then fetches the file. When the answer leaves no download,
+// or refuses this one (406), the provider waits for the reset the API names, else for a day.
 func (o *dotCom) Download(ctx context.Context, c Candidate) (string, error) {
 	var link struct {
-		Link string `json:"link"`
+		Link      string `json:"link"`
+		Remaining int    `json:"remaining"`
+		Reset     string `json:"reset_time_utc"`
+	}
+	spent := func() error {
+		until, err := time.Parse(time.RFC3339, link.Reset)
+		if err != nil {
+			until = o.pace.now().Add(24 * time.Hour)
+		}
+		return o.pace.spend("no downloads left today", until, o.keep)
 	}
 	id, _ := strconv.Atoi(c.ID)
 	err := o.call(ctx, http.MethodPost, "/download", map[string]any{"file_id": id, "sub_format": "srt"}, &link)
 	var se *statusError
-	if errors.As(err, &se) && se.code == 406 {
-		o.pace.park(errQuota)
-		return "", fmt.Errorf("%w: %w", errParked, errQuota)
+	if errors.As(err, &se) && se.code == http.StatusNotAcceptable {
+		json.Unmarshal(se.body, &link)
+		return "", spent()
 	}
 	if err != nil {
 		return "", err
 	}
 	raw, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) { return http.NewRequest(http.MethodGet, link.Link, nil) })
+	if link.Remaining <= 0 {
+		spent() // after the fetch, which this download's link still allows
+	}
 	if err != nil {
 		return "", err
 	}
@@ -706,19 +844,10 @@ func (o *subdl) pacer() *pacer { return o.pace }
 // run and later ones, until Retry-After, else the next 00:00 UTC (assumed: the docs state a daily limit, not its reset).
 func (o *subdl) get(ctx context.Context, link string) ([]byte, error) {
 	body, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) { return http.NewRequest(http.MethodGet, link, nil) })
-	var se *statusError
-	if !errors.As(err, &se) || se.code != http.StatusTooManyRequests {
-		return body, err
+	if se := (*statusError)(nil); errors.As(err, &se) && se.code == http.StatusTooManyRequests {
+		return nil, o.pace.limited(se.header, nextDay(o.pace.now()), o.keep)
 	}
-	now := o.pace.now().UTC()
-	until := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
-	if d := retryAfter(se.header); d > 0 {
-		until = now.Add(d)
-	}
-	err = quotaErr("answered HTTP 429", until)
-	o.pace.pause(until, err)
-	o.keep(quotaState{ResumeAfter: until})
-	return nil, fmt.Errorf("%w: %w", errParked, err)
+	return body, err
 }
 
 // Search asks by TMDB id (else IMDb id, else the show's name); an episode's results must name that episode.
@@ -1008,6 +1137,147 @@ func (o *sitec) Download(ctx context.Context, c Candidate) (string, error) {
 	if !bytes.HasPrefix(body, []byte("PK")) {
 		o.pace.park(errors.New("sitec answered a challenge page instead of the zip"))
 		return "", o.pace.parkedErr()
+	}
+	return zipSRT(body)
+}
+
+// ---- SubSource: the Subscene archive (api.subsource.net, needs an API key) ----
+
+// subsourcePages bounds the list requests per film or season: at most this many pages of 100 English subtitles.
+const subsourcePages = 5
+
+type subsource struct {
+	base    string // https://api.subsource.net/api/v1
+	keyFile string
+	hc      *http.Client
+	pace    *pacer           // 2 s apart: under the key's 60 requests a minute and 1,800 an hour; quota429
+	keep    func(quotaState) // saves the wait for the daily limit, so the next run waits too
+}
+
+func (o *subsource) Name() string  { return "subsource" }
+func (o *subsource) pacer() *pacer { return o.pace }
+
+// get fetches path. A 429 is the key's daily limit (7,200 requests), not an outage: SubSource waits, this run and
+// later ones, until Retry-After, else the next 00:00 UTC (the docs state the limit, not its reset).
+func (o *subsource) get(ctx context.Context, path string) ([]byte, error) {
+	key, err := os.ReadFile(o.keyFile)
+	if err != nil {
+		return nil, err
+	}
+	body, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) {
+		r, err := http.NewRequest(http.MethodGet, o.base+path, nil)
+		if err == nil {
+			r.Header.Set("X-API-Key", strings.TrimSpace(string(key)))
+			r.Header.Set("User-Agent", userAgent)
+		}
+		return r, err
+	})
+	if se := (*statusError)(nil); errors.As(err, &se) && se.code == http.StatusTooManyRequests {
+		return nil, o.pace.limited(se.header, nextDay(o.pace.now()), o.keep)
+	}
+	return body, err
+}
+
+// getJSON decodes a 2xx answer into v; a 404 is no results.
+func (o *subsource) getJSON(ctx context.Context, path string, v any) error {
+	body, err := o.get(ctx, path)
+	if se := (*statusError)(nil); errors.As(err, &se) && se.code == http.StatusNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(body, v); err != nil {
+		return fmt.Errorf("subsource %s: %w", path, err)
+	}
+	return nil
+}
+
+// Search finds the film by its IMDb id, or the show's season by the show's IMDb id, else by its name keeping the
+// show TMDB names (the API searches by no TMDB id), then lists its English subtitles. A season's list holds every
+// episode's, so an episode keeps those whose release names name it.
+func (o *subsource) Search(ctx context.Context, q Query) ([]Candidate, error) {
+	v := url.Values{"searchType": {"imdb"}, "imdb": {fmt.Sprintf("tt%07d", q.IMDb)}, "type": {"movie"}}
+	switch {
+	case q.IMDb != 0:
+	case q.Show && q.TMDB != "":
+		v = url.Values{"searchType": {"text"}, "q": {q.Name}}
+	default:
+		return nil, nil
+	}
+	if q.Show {
+		v.Set("type", "series")
+		v.Set("season", strconv.Itoa(q.Season))
+	}
+	var found struct {
+		Data []struct {
+			MovieID int        `json:"movieId"`
+			TMDB    flexString `json:"tmdbId"`
+		} `json:"data"`
+	}
+	if err := o.getJSON(ctx, "/movies/search?"+v.Encode(), &found); err != nil {
+		return nil, err
+	}
+	var out []Candidate
+	for _, m := range found.Data {
+		if q.IMDb != 0 || string(m.TMDB) == q.TMDB {
+			more, err := o.list(ctx, q, m.MovieID)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, more...)
+		}
+	}
+	return out, nil
+}
+
+// list is the English subtitles SubSource holds for one film or season, as this title's candidates.
+func (o *subsource) list(ctx context.Context, q Query, movieID int) ([]Candidate, error) {
+	var out []Candidate
+	for page := 1; page <= subsourcePages; page++ {
+		var res struct {
+			Data []struct {
+				ID              int        `json:"subtitleId"`
+				ReleaseInfo     []string   `json:"releaseInfo"`
+				Files           int        `json:"files"`
+				HearingImpaired bool       `json:"hearingImpaired"`
+				ForeignParts    bool       `json:"foreignParts"`
+				Framerate       flexString `json:"framerate"`
+				Downloads       int        `json:"downloads"`
+			} `json:"data"`
+			Pagination struct {
+				Pages int `json:"pages"`
+			} `json:"pagination"`
+		}
+		v := url.Values{"movieId": {strconv.Itoa(movieID)}, "language": {"english"}, "limit": {"100"}, "page": {strconv.Itoa(page)}}
+		if err := o.getJSON(ctx, "/subtitles?"+v.Encode(), &res); err != nil {
+			return nil, err
+		}
+		for _, s := range res.Data {
+			release := strings.Join(s.ReleaseInfo, ", ")
+			if s.Files > 1 || s.ForeignParts || q.Show && parseRelease(release).sxe != sxe(q.Season, q.Episode) {
+				continue // not one sidecar (a season pack, a multi-CD set), foreign parts only, or another episode's
+			}
+			fps, _ := strconv.ParseFloat(string(s.Framerate), 64)
+			c := Candidate{Source: "subsource", ID: strconv.Itoa(s.ID), Release: release, HearingImpaired: s.HearingImpaired,
+				Downloads: s.Downloads, FPS: fps, provider: o, ours: true} // the film's, or naming this episode
+			if q.Show {
+				c.Season, c.Episode = strconv.Itoa(q.Season), strconv.Itoa(q.Episode)
+			}
+			out = append(out, c)
+		}
+		if page >= res.Pagination.Pages {
+			break
+		}
+	}
+	return out, nil
+}
+
+// Download fetches the subtitle's zip and returns its one SRT.
+func (o *subsource) Download(ctx context.Context, c Candidate) (string, error) {
+	body, err := o.get(ctx, "/subtitles/"+c.ID+"/download")
+	if err != nil {
+		return "", err
 	}
 	return zipSRT(body)
 }

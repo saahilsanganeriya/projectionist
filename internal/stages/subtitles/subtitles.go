@@ -5,7 +5,8 @@
 // fitted to the video's captions or speech.
 //
 //	embedded English text track       -> skipped: the players show it, so nothing is fetched and nothing read
-//	else candidates from the providers (Gestdown, SITEC, Subdl with a key; OpenSubtitles legacy and .com searched last),
+//	else candidates from the providers (Gestdown, SubSource with a key, SITEC, Subdl with a key; OpenSubtitles legacy
+//	and .com, with a key and a user's login, searched last; one subtitle both OpenSubtitles APIs find is one candidate),
 //	by tier across providers: 1 made for this file (release-matched), 2 of its source (BluRay for BluRay, WEB from
 //	the same service) at its frame rate, 3 the rest (a commentary's or another language's file too); within a tier
 //	the free providers first, in the providers' order; skipping any already rejected for this file, and per title the
@@ -41,9 +42,9 @@
 // (and of those, from the disk); a title that got no subtitle is tried again after retry_after, then after 2, 4 and 8
 // times it, and a queued title is searched again on the same schedule. A title is recorded only once TMDB and every
 // provider it needs answered (and alass ran, where it is needed); else it is deferred, not recorded, and an alert names
-// the cause (a spent quota, OpenSubtitles' downloads or Subdl's daily limit, is routine and only logged, and waits for
-// its reset across runs). Each run also refreshes sub_stats.py's TSV over the whole library. Jellyfin hears of each
-// new sidecar through a queue kept in the store; Plex watches the disk.
+// the cause (a spent quota, OpenSubtitles' downloads, OpenSubtitles.com's, or Subdl's or SubSource's daily limit, is
+// routine and only logged, and waits for its reset across runs). Each run also refreshes sub_stats.py's TSV over the
+// whole library. Jellyfin hears of each new sidecar through a queue kept in the store; Plex watches the disk.
 package subtitles
 
 import (
@@ -97,7 +98,9 @@ type Options struct {
 	MaxTitles  int           `toml:"max_titles"` // per run; 0 = every due title
 	SecretsDir string        `toml:"secrets_dir"`
 	Alass      string        `toml:"alass"`
-	Providers  []string      `toml:"providers"` // opensubtitles-com and subdl also need opensubtitles_api_key, subdl_api_key in secrets_dir
+	// subsource and subdl also need subsource_api_key, subdl_api_key in secrets_dir; opensubtitles-com needs
+	// opensubtitles_api_key, opensubtitles_username and opensubtitles_password. A provider without them is skipped.
+	Providers []string `toml:"providers"`
 	// subfetch2.py's OUT folder: its quota.csv and downloads.csv seed the OpenSubtitles quota once, at cutover.
 	LegacyQuota string `toml:"legacy_quota"`
 	AlignPerDay int    `toml:"align_per_day"` // queued titles aligned in any 24 h; each reads its video once or twice
@@ -121,7 +124,7 @@ func defaults() Options {
 		Workers:       3,
 		SecretsDir:    "/run/secrets",
 		Alass:         "/usr/local/bin/alass",
-		Providers:     []string{"gestdown", "sitec", "subdl", "opensubtitles", "opensubtitles-com"},
+		Providers:     []string{"gestdown", "subsource", "sitec", "subdl", "opensubtitles", "opensubtitles-com"},
 		LegacyQuota:   "/volume1/PlexMediaServer/subtitle-downloads",
 		AlignPerDay:   20,
 		Mode:          "sampled",
@@ -136,8 +139,8 @@ func defaults() Options {
 
 // Stage's fields are test hooks; the zero value talks to the real services.
 type Stage struct {
-	openSubtitles, openSubtitlesCom, subdlAPI, subdlDL, gestdownAPI, sitecSite string
-	sleep                                                                     func(context.Context, time.Duration) error
+	openSubtitles, openSubtitlesCom, subdlAPI, subdlDL, gestdownAPI, sitecSite, subsourceAPI string
+	sleep                                                                                   func(context.Context, time.Duration) error
 }
 
 func (Stage) Name() string { return name }
@@ -262,6 +265,11 @@ feed:
 	close(queue)
 	wg.Wait()
 	err = r.workQueue(ctx, titles)
+	for _, p := range r.providers {
+		if o, ok := p.(*dotCom); ok {
+			o.logout(ctx)
+		}
+	}
 	r.tellJellyfin(ctx, "", true)
 	r.summarise(ctx, len(titles), len(due))
 	rep.Wake = r.wake(ctx)
@@ -301,6 +309,13 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 			}
 		}
 	}
+	resume := func(p *pacer, storeKey string) (func(quotaState), error) { // a provider whose 429 is a quota that outlives the run
+		var st quotaState
+		_, err := env.Store.GetJSON(ctx, name, storeKey, &st)
+		p.quota429 = true
+		p.resumeAt(st.ResumeAfter)
+		return keeper(storeKey), err
+	}
 	for _, p := range opt.Providers {
 		switch p {
 		case "opensubtitles":
@@ -321,20 +336,32 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 			}
 			r.providers = append(r.providers, l)
 		case "opensubtitles-com":
-			if k := key("opensubtitles_api_key"); fileExists(k) {
-				r.providers = append(r.providers, &dotCom{base: or(s.openSubtitlesCom, "https://api.opensubtitles.com/api/v1"), keyFile: k,
-					userAgent: userAgent, hc: hc, pace: newPacer(time.Second)})
+			if fileExists(key("opensubtitles_api_key")) && fileExists(key("opensubtitles_username")) && fileExists(key("opensubtitles_password")) {
+				o := &dotCom{base: or(s.openSubtitlesCom, "https://api.opensubtitles.com/api/v1"), secrets: opt.SecretsDir,
+					userAgent: userAgent, hc: hc, pace: newPacer(time.Second)}
+				var err error
+				if o.keep, err = resume(o.pace, "opensubtitles_com_quota"); err != nil {
+					return nil, err
+				}
+				r.providers = append(r.providers, o)
 			}
 		case "subdl":
 			if k := key("subdl_api_key"); fileExists(k) {
 				o := &subdl{api: or(s.subdlAPI, "https://api.subdl.com/api/v1/subtitles"), dl: or(s.subdlDL, "https://dl.subdl.com"),
-					keyFile: k, hc: hc, pace: newPacer(time.Second), keep: keeper("subdl_quota")}
-				o.pace.quota429 = true
-				var st quotaState
-				if _, err := env.Store.GetJSON(ctx, name, "subdl_quota", &st); err != nil {
+					keyFile: k, hc: hc, pace: newPacer(time.Second)}
+				var err error
+				if o.keep, err = resume(o.pace, "subdl_quota"); err != nil {
 					return nil, err
 				}
-				o.pace.resumeAt(st.ResumeAfter)
+				r.providers = append(r.providers, o)
+			}
+		case "subsource":
+			if k := key("subsource_api_key"); fileExists(k) {
+				o := &subsource{base: or(s.subsourceAPI, "https://api.subsource.net/api/v1"), keyFile: k, hc: hc, pace: newPacer(2 * time.Second)}
+				var err error
+				if o.keep, err = resume(o.pace, "subsource_quota"); err != nil {
+					return nil, err
+				}
 				r.providers = append(r.providers, o)
 			}
 		case "gestdown": // free community services: half the rate
