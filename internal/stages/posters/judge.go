@@ -398,7 +398,7 @@ func (r *run) noPoster(rows []*row) {
 
 // judgeAnswer is what the judge said, by letter; OnSet and Box come with a director's photos only.
 type judgeAnswer struct {
-	Scores map[string]float64   `json:"scores"`
+	Scores letterScores         `json:"scores"`
 	Reason string               `json:"reason"`
 	OnSet  []string             `json:"on_set"`
 	Box    map[string][]float64 `json:"box"`
@@ -438,6 +438,25 @@ func parseAnswer(text string) (judgeAnswer, error) {
 		return judgeAnswer{}, fmt.Errorf("no scores in %q", clip(text))
 	}
 	return out, nil
+}
+
+// letterScores is the answer's "scores" object without the keys whose value is not a number: 25 of the first 2,818
+// answers put their "reason" in there too.
+type letterScores map[string]float64
+
+func (s *letterScores) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*s = letterScores{}
+	for k, v := range raw {
+		var f float64
+		if json.Unmarshal(v, &f) == nil {
+			(*s)[k] = f
+		}
+	}
+	return nil
 }
 
 func clip(s string) string {
