@@ -150,6 +150,11 @@ func (c *Client) Do(ctx context.Context, method, path string) error {
 	return err
 }
 
+// Get returns the answer's bytes, e.g. the poster Plex shows for an item: GET /library/metadata/<id>/thumb.
+func (c *Client) Get(ctx context.Context, path string) ([]byte, error) {
+	return c.do(ctx, http.MethodGet, path, "")
+}
+
 // Send is Do with a request body, e.g. a poster's bytes for POST /library/metadata/<id>/posters.
 func (c *Client) Send(ctx context.Context, method, path, contentType string, body []byte) error {
 	_, err := c.owner(ctx, method, c.base+path, "", contentType, body)

@@ -50,6 +50,8 @@ services:
       - /volume1/PlexMediaServer/subtitle-downloads:/volume1/PlexMediaServer/subtitle-downloads:ro
       # posters: the owner's poster exports and the Plex DB backups they are matched with, read when they change.
       - /volume1/PlexMediaServer/backups:/volume1/PlexMediaServer/backups:ro
+      # posters: every candidate a title was judged on and its chosen poster, at full size (archive_dir), on the HDD.
+      - /volume1/PlexMediaServer/poster-archive:/volume1/PlexMediaServer/poster-archive
       # The unzipped Letterboxd exports: lists' export_dir (a missing or empty folder is an alert on every run), the
       # letterboxd stage's and tonight's people export_dir (for those two, a missing folder is no export; each person
       # reads only the letterboxd-<user>-* folders named for them).
