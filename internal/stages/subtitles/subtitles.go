@@ -1055,27 +1055,25 @@ func (r *run) download(ctx context.Context, c Candidate) (string, error) {
 
 // rejected are the candidates (provider:id) rejected for this very file before, by the furthest route that refused
 // them: "aligned" (an alignment or its length check: never tried again), "sampled" (the sampled fit), "idx" (the .idx
-// fit), "cheap" (cheapCheck). Each route skips what it or a later one refused; the queue tries all but "aligned".
+// fit), "cheap" (cheapCheck). Each route skips what it or a later one refused; the queue tries all but "aligned". So a
+// candidate's refusals come in route order, and its latest is its furthest.
 func (r *run) rejected(ctx context.Context, path, key string) (map[string]string, error) {
 	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT json_extract(fields, '$.id'), status FROM events WHERE stage=? AND item=?
 		AND status IN ('rejected_misaligned', 'rejected_length', 'rejected_sampled', 'rejected_idx', 'rejected_cheap')
-		AND json_extract(fields, '$.file')=?`, name, path, key)
+		AND json_extract(fields, '$.file')=? ORDER BY id`, name, path, key)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	route := map[string]string{"rejected_misaligned": "aligned", "rejected_length": "aligned", "rejected_sampled": "sampled",
 		"rejected_idx": "idx", "rejected_cheap": "cheap"}
-	order := []string{"", "cheap", "idx", "sampled", "aligned"}
 	out := map[string]string{}
 	for rows.Next() {
 		var id, status string
 		if err := rows.Scan(&id, &status); err != nil {
 			return nil, err
 		}
-		if slices.Index(order, route[status]) > slices.Index(order, out[id]) {
-			out[id] = route[status]
-		}
+		out[id] = route[status]
 	}
 	return out, rows.Err()
 }

@@ -364,6 +364,7 @@ func TestGateSync(t *testing.T) {
 }
 
 // TestGateFit runs the sampled fit on a given candidate: the reads and the fit exactly as the stage's route c does them.
+// Consecutive lines for one video share its reads, as the stage's candidates for one title do.
 func TestGateFit(t *testing.T) {
 	lines := gateLines(t, "GATE_FIT")
 	h := fake.NewEnv(t, nil)
@@ -376,21 +377,32 @@ func TestGateFit(t *testing.T) {
 	os.MkdirAll(filepath.Join(os.Getenv("GATE_OUT"), "fit"), 0o755)
 	var b strings.Builder
 	b.WriteString("id\treference\tratio\toffset_ms\twindow_offsets_ms\tevidence\trefused\tread_bytes\n")
+	var smp *sampler
+	var ti *title
+	var why string
 	for _, line := range lines {
 		f := strings.Split(line, "\t")
-		info, err := prober.Probe(context.Background(), f[1])
-		if err != nil {
-			t.Errorf("%s: %v", f[0], err)
-			continue
+		if ti == nil || ti.path != f[1] {
+			info, err := prober.Probe(context.Background(), f[1])
+			if err != nil {
+				t.Errorf("%s: %v", f[0], err)
+				ti = nil
+				continue
+			}
+			ti = &title{path: f[1], info: info}
+			if smp, why = r.newSampler(ti); smp != nil {
+				why, err = smp.readAll(context.Background())
+				if err != nil {
+					why += err.Error()
+				}
+			}
 		}
-		ti := &title{path: f[1], info: info}
-		smp, why := r.newSampler(ti)
 		if smp == nil {
 			fmt.Fprintf(&b, "%s\t\t\t\t\t\t%s\t0\n", f[0], why)
 			continue
 		}
-		if why, err = smp.readAll(context.Background()); err != nil || why != "" {
-			fmt.Fprintf(&b, "%s\t%s\t\t\t\t\t%s %v\t%d\n", f[0], smp.label(), why, err, ti.disk)
+		if why != "" {
+			fmt.Fprintf(&b, "%s\t%s\t\t\t\t\t%s\t%d\n", f[0], smp.label(), why, ti.disk)
 			continue
 		}
 		raw, _ := os.ReadFile(f[2])
