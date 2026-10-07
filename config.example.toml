@@ -261,6 +261,13 @@ sample_length  = "90s"                 # each; a window without dialogue is repl
 legacy_quota  = "/volume1/PlexMediaServer/subtitle-downloads" # subfetch2.py's quota files, read once while the store has none
 align_remote_lanes = 0                 # titles leased at once to align workers on another machine (projectionist align-worker
                                        # over SSH to listen), while one called in the last minute; 0 = off
+verify_per_run = 300                   # sampled mode: videos a run whose English .srt sidecars no record shows verified are
+                                       # fitted to their windows: kept; retimed under the same name (the old file archived);
+                                       # archived when they cannot fit (the video is searched anew); or queued, behind every
+                                       # title lacking a subtitle, for a full alignment of their own; 0 = off
+archive_dir = "/volume1/PlexMediaServer/_archive/subtitles" # where a replaced or refused sidecar moves, its library path
+                                       # mirrored (Movies/..., TV/...), never overwritten; it must exist (bind-mount it
+                                       # read-write), else the verify pass waits, with an alert
 # undo_logs = [...]                    # rename logs for original names a note lacks; default: the details stage's list
 # output_dir = "/volume1/PlexMediaServer/projectionist-test/subtitles/out" # test runs: write sidecars here instead
 

@@ -54,6 +54,7 @@ type fixture struct {
 	hashText string // that subtitle (default: another film's timing)
 	ranHash  string
 	mode     string // the stage's mode; the tests of the routes careful mode shares run careful mode
+	verify   int    // verify_per_run: 0, the verify pass off, but in the tests of it
 }
 
 func (f *fixture) path(rel string) string { return filepath.Join(f.lib, rel) }
@@ -99,6 +100,7 @@ func newFixture(t *testing.T) *fixture {
 		os.WriteFile(f.path(rel), bytes.Repeat([]byte{byte(i + 1)}, 4096), 0o644)
 	}
 	os.WriteFile(strings.TrimSuffix(f.path(dune), ".mkv")+".en.srt", []byte("theirs"), 0o644)
+	os.MkdirAll(filepath.Join(f.dir, "archive"), 0o755)
 	f.ranHash, _, _ = openSubtitlesHash(f.path(ran))
 
 	ff := f.h.Env.FFmpeg.Dir
@@ -177,6 +179,8 @@ legacy_quota = "` + f.dir + `"
 alass = "` + filepath.Join(f.h.Env.FFmpeg.Dir, "alass") + `"
 workers = 1
 mode = "` + f.mode + `"
+verify_per_run = ` + strconv.Itoa(f.verify) + `
+archive_dir = "` + filepath.Join(f.dir, "archive") + `"
 ` + extra)
 }
 
