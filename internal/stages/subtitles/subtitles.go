@@ -1190,9 +1190,11 @@ func (r *run) workQueue(ctx context.Context, lacking []*title) error {
 	defer r.remote.drain(ctx, r)
 	for _, p := range queued {
 		t := byPath[p]
-		if t == nil { // it has an English sidecar now, or it moved (its new path queues anew)
-			if _, err := db.ExecContext(ctx, `DELETE FROM subtitles_queue WHERE path=?`, p); err != nil {
-				return err
+		if t == nil { // outside this run's roots, or no longer lacking a sidecar
+			if r.settled(p) {
+				if _, err := db.ExecContext(ctx, `DELETE FROM subtitles_queue WHERE path=?`, p); err != nil {
+					return err
+				}
 			}
 			continue
 		}
@@ -1230,6 +1232,30 @@ func (r *run) workQueue(ctx context.Context, lacking []*title) error {
 		}
 	}
 	return nil
+}
+
+// settled tells whether a queued video under this run's roots needs no alignment now: it is gone (moved: its new path
+// queues anew) or has an English sidecar. One outside the roots is left to a run that walks them.
+func (r *run) settled(p string) bool {
+	i := slices.IndexFunc(r.opt.Roots, func(root string) bool { return strings.HasPrefix(p, strings.TrimSuffix(root, "/")+"/") })
+	if i < 0 {
+		return false
+	}
+	if _, err := os.Stat(p); errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	dirs := []string{filepath.Dir(p)}
+	if r.opt.OutputDir != "" { // a test run's own sidecars count too, as in scan
+		dirs = append(dirs, r.mirror(r.opt.Roots[i], dirs[0]))
+	}
+	var names []string
+	for _, d := range dirs {
+		es, _ := os.ReadDir(d)
+		for _, e := range es {
+			names = append(names, e.Name())
+		}
+	}
+	return hasEnglishSidecar(strings.TrimSuffix(filepath.Base(p), filepath.Ext(p)), names)
 }
 
 // finish writes an alignment's accepted subtitle and records the outcome, for an alignment here or a worker's.
