@@ -25,6 +25,8 @@ type sinkState struct {
 	Pending      *pendingCreate `json:"pending,omitempty"`   // a create sent whose answer has not named the collection
 	PosterOf     string         `json:"poster_of,omitempty"` // the day of the last uploaded poster
 	HubStale     bool           `json:"hub_stale,omitempty"` // Plex: members edited since the Home hub was last refreshed
+	Synced       []string       `json:"synced,omitempty"`    // own playlist: the items last written, so unchanged picks cost no call
+	Skip         string         `json:"skip,omitempty"`      // own playlist: why it is not written for them, alerted once
 	Fails        int            `json:"fails,omitempty"`
 	RetryAt      time.Time      `json:"retry_at,omitzero"`
 	FailingSince time.Time      `json:"failing_since,omitzero"`
@@ -291,6 +293,13 @@ func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarg
 	}
 	id := c.RatingKey
 	s.ID, s.Pending = id, nil
+	if c.Title != t.Title { // renamed in place (2026-10-06: "Tonight" became "Tonight · Household"), never made anew
+		if err := px.Do(ctx, "PUT", fmt.Sprintf("/library/sections/%d/all?type=18&id=%s&title.value=%s&title.locked=1",
+			t.Section, id, url.QueryEscape(t.Title))); err != nil {
+			return err
+		}
+		log.Info("collection renamed", "event", "plex_write", "action", "rename", "id", id, "from", c.Title, "to", t.Title)
+	}
 	if !c.owned() { // labelled right after the create, so a run that lost its state still knows the collection
 		q := fmt.Sprintf("/library/sections/%d/all?type=18&id=%s&label.locked=1", t.Section, id)
 		for i, l := range append(c.labels(), marker) {
@@ -377,7 +386,7 @@ func (c plexColl) owned() bool {
 	return slices.ContainsFunc(c.labels(), func(l string) bool { return strings.EqualFold(l, marker) })
 }
 
-// rememberedPlexCollection is the collection this stage made, if it is still a collection with our title. A
+// rememberedPlexCollection is the collection this stage made, if it is still a collection, whatever its title. A
 // deleted one answers 404; the title search after it surfaces a real outage.
 func rememberedPlexCollection(ctx context.Context, px *plex.Client, t plexTarget, id string) (plexColl, bool) {
 	var mc struct {
@@ -387,7 +396,7 @@ func rememberedPlexCollection(ctx context.Context, px *plex.Client, t plexTarget
 		return plexColl{}, false
 	}
 	c := mc.Metadata[0]
-	return c, c.Type == "collection" && c.Title == t.Title
+	return c, c.Type == "collection"
 }
 
 // plexCollections lists the section's collections with our title, labels included.
@@ -602,15 +611,16 @@ func syncJellyfin(ctx context.Context, log *slog.Logger, jf *jellyfin.Client, ti
 	}
 	tags, _ := item["Tags"].([]any)
 	tagged := slices.Contains(tags, any(marker))
-	if text := summary(picks); item["Overview"] != text || !tagged {
-		item["Overview"] = text
+	if text := summary(picks); item["Overview"] != text || !tagged || item["Name"] != title {
+		renamed := item["Name"] != title
+		item["Overview"], item["Name"] = text, title
 		if !tagged {
 			item["Tags"] = append(tags, marker)
 		}
 		if err := jf.PostJSON(ctx, "/Items/"+id, item, nil); err != nil {
 			return err
 		}
-		log.Info("collection overview set", "event", "jellyfin_write", "action", "overview", "id", id, "tag_added", !tagged)
+		log.Info("collection overview set", "event", "jellyfin_write", "action", "overview", "id", id, "tag_added", !tagged, "renamed", renamed)
 	}
 	if s.PosterOf != day && len(picks) > 0 { // the same poster as Plex's
 		img, err := poster()
@@ -627,8 +637,8 @@ func syncJellyfin(ctx context.Context, log *slog.Logger, jf *jellyfin.Client, ti
 	return nil
 }
 
-// findBoxSet returns the BoxSet this stage made (the remembered one if it still is a BoxSet with our title, else one
-// with our title and our tag); when there is none, the ids of the untagged BoxSets with our title.
+// findBoxSet returns the BoxSet this stage made (the remembered one if it still is a BoxSet, whatever its title, else
+// one with our title and our tag); when there is none, the ids of the untagged BoxSets with our title.
 func findBoxSet(ctx context.Context, jf *jellyfin.Client, title, remembered string) (id string, titled []string, err error) {
 	var res jfItems
 	if remembered != "" {
@@ -636,7 +646,7 @@ func findBoxSet(ctx context.Context, jf *jellyfin.Client, title, remembered stri
 			return "", nil, err
 		}
 		for _, it := range res.Items {
-			if it.ID == remembered && it.Type == "BoxSet" && it.Name == title {
+			if it.ID == remembered && it.Type == "BoxSet" {
 				return it.ID, nil, nil
 			}
 		}

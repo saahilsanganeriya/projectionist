@@ -24,9 +24,13 @@ var errOverBudget = errors.New("tonight: the call would exceed the daily AI budg
 const retryExtra = 300
 
 // pickRequest is one pick conversation, constrained to the picks schema, with an upper estimate of its input.
-func pickRequest(opt Options, taste string, msgs []llm.Message) llm.Request {
+func pickRequest(opt Options, viewers int, taste string, msgs []llm.Message) llm.Request {
+	opening := together
+	if viewers == 1 {
+		opening = alone
+	}
 	return estimated(llm.Request{MaxTokens: opt.MaxTokens, ResponseFormat: llm.JSONAnswer("picks", picksSchema),
-		Messages: append([]llm.Message{llm.System(instructions + "\n\n" + taste)}, msgs...)})
+		Messages: append([]llm.Message{llm.System(opening + "\n\n" + instructions + "\n\n" + taste)}, msgs...)})
 }
 
 // estimated sets req's input estimate from its messages, as they stand.
@@ -47,10 +51,11 @@ func userMessage(text string) llm.Message { return llm.User(llm.Text(text)) }
 
 // The mood and liked fields hold the bookkeeping the model otherwise wrote into the reason (2026-10-05: "...of
 // Moonlight.Quiet and slow.Hmm."); the reason is then only the sentence everyone reads. The row is shared, so the
-// reason speaks of films, never of a viewer, a rating or a review.
-const instructions = `You choose what a household watches together tonight, from films they own that none of them has seen.
-
-Each viewer logs and rates films on Letterboxd. Their ratings and reviews follow, one block per viewer; they are the
+// reason speaks of films, never of a viewer, a rating or a review; a person's own playlist keeps the same rules.
+const (
+	together     = "You choose what a household watches together tonight, from films they own that none of them has seen."
+	alone        = "You choose what one viewer watches tonight, from films they own that they have not seen."
+	instructions = `Each viewer logs and rates films on Letterboxd. Their ratings and reviews follow, one block per viewer; they are the
 only evidence of each viewer's taste.
 
 Rules:
@@ -64,6 +69,7 @@ Rules:
   "liked" film or its director and says, in your own words, what tonight's film shares with it. Never mention a
   viewer, a rating or a review, and never quote a review. No spoilers, no notes, no checks.
 - Answer with JSON only, in the given schema.`
+)
 
 var picksSchema = json.RawMessage(`{"type":"object","additionalProperties":false,"required":["picks"],
 "properties":{"picks":{"type":"array","items":{"type":"object","additionalProperties":false,

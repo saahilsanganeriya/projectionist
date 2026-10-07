@@ -23,6 +23,7 @@ type Client struct {
 	base      string
 	prefsPath string
 	http      *http.Client
+	as        string // another account's server token (As); "" = the server owner's, from Preferences.xml
 }
 
 // New reads the token from prefsPath on every request, so a re-sign-in never needs a restart.
@@ -33,7 +34,13 @@ func New(baseURL, prefsPath string, timeout time.Duration) *Client {
 // WithTimeout is a copy of c whose requests each get timeout instead: for a stage whose slow calls hold up no one but
 // itself, while the viewer gate and the other stages keep the short process-wide bound.
 func (c *Client) WithTimeout(timeout time.Duration) *Client {
-	return &Client{base: c.base, prefsPath: c.prefsPath, http: &http.Client{Timeout: timeout}}
+	return &Client{base: c.base, prefsPath: c.prefsPath, http: &http.Client{Timeout: timeout}, as: c.as}
+}
+
+// As is a copy of c whose requests carry another account's token for this server, e.g. a Plex Home user's, to write
+// that user's own playlists.
+func (c *Client) As(token string) *Client {
+	return &Client{base: c.base, prefsPath: c.prefsPath, http: c.http, as: token}
 }
 
 // ReadPrefs returns the attributes of Preferences.xml's root element. It never touches the API.
@@ -63,6 +70,9 @@ func ReadPrefs(path string) (map[string]string, error) {
 func (c *Client) Prefs() (map[string]string, error) { return ReadPrefs(c.prefsPath) }
 
 func (c *Client) token() (string, error) {
+	if c.as != "" {
+		return c.as, nil
+	}
 	prefs, err := ReadPrefs(c.prefsPath)
 	if err != nil {
 		return "", err
@@ -101,7 +111,7 @@ func (c *Client) do(ctx context.Context, method, path, accept string) ([]byte, e
 	return c.owner(ctx, method, c.base+path, accept, "", nil)
 }
 
-// owner sends as the server owner, whose token Preferences.xml holds.
+// owner sends as the server owner, whose token Preferences.xml holds, or as the account As named.
 func (c *Client) owner(ctx context.Context, method, rawURL, accept, contentType string, body []byte) ([]byte, error) {
 	tok, err := c.token()
 	if err != nil {

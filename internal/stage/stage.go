@@ -51,6 +51,9 @@ type Env struct {
 	Loc      *time.Location   // config timezone: only for text the owner reads (status files)
 	// Options decodes this stage's own keys from its [stages.<name>] table into v (call it at the top of Run).
 	Options func(v any) error
+	// PeerOptions decodes another stage's keys, for a mapping that stage owns (tonight reads jfsync's users). An absent
+	// table, or a nil PeerOptions (a one-off tool), leaves v as it was.
+	PeerOptions func(stage string, v any) error
 	// Trigger asks the scheduler to run the named stage soon (inside its window); repeated triggers coalesce into
 	// one run. False when that stage is not scheduled (disabled, or a one-off `projectionist run`).
 	Trigger func(stage string) bool

@@ -105,11 +105,12 @@ func run(cfgPath, only string) int {
 		NewEnv: func(s stage.Stage, l *slog.Logger) *stage.Env {
 			return &stage.Env{
 				Log: l, Store: st, Plex: px, Jellyfin: jf, Probe: prober, TMDB: tm, Fanart: fa, LLM: ai, FFmpeg: cfg.FFmpeg, Metrics: metrics,
-				Viewers: &viewers.Gate{Plex: px, Jellyfin: jf, Owners: owners, Poll: 30 * time.Second, Log: l},
-				Now:     func() time.Time { return time.Now().UTC() },
-				Loc:     cfg.Location(),
-				Options: func(v any) error { return cfg.StageOptions(s.Name(), v) },
-				Trigger: func(name string) bool { return sched != nil && sched.Trigger(name) },
+				Viewers:     &viewers.Gate{Plex: px, Jellyfin: jf, Owners: owners, Poll: 30 * time.Second, Log: l},
+				Now:         func() time.Time { return time.Now().UTC() },
+				Loc:         cfg.Location(),
+				Options:     func(v any) error { return cfg.StageOptions(s.Name(), v) },
+				PeerOptions: cfg.StageOptions,
+				Trigger:     func(name string) bool { return sched != nil && sched.Trigger(name) },
 			}
 		},
 	}

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +21,7 @@ import (
 const (
 	PlexToken       = "test-plex-token"
 	PlexFriendToken = "test-plex-friend-token" // a shared user's token: fake Plex takes it for watch-state writes only
+	PlexUserToken   = "test-plex-user-"        // + a name: a Plex Home user's server token, taken for their playlists only
 	JellyfinKey     = "test-jellyfin-key"
 	TMDBToken       = "test-tmdb-token"
 	FanartKey       = "test-fanart-key"
@@ -94,7 +96,8 @@ var friendPaths = map[string]bool{"/:/scrobble": true, "/:/unscrobble": true, "/
 func Plex(t testing.TB, prefs map[string]string) (*Server, *plex.Client, string) {
 	s := newServer(t, func(r *http.Request) bool {
 		tok := r.Header.Get("X-Plex-Token")
-		return tok == PlexToken || (tok == PlexFriendToken && friendPaths[r.URL.Path])
+		return tok == PlexToken || (tok == PlexFriendToken && friendPaths[r.URL.Path]) ||
+			(strings.HasPrefix(tok, PlexUserToken) && strings.HasPrefix(r.URL.Path, "/playlists"))
 	})
 	path := filepath.Join(t.TempDir(), "Preferences.xml")
 	WritePrefs(t, path, prefs)

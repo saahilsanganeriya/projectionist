@@ -1,25 +1,34 @@
-// Package tonight fills a household "Tonight" row, first of the Movies rows on the Plex Home of everyone the library
-// is shared with: five films from the library that no one in the household (people) has seen, picked once a day by
-// one model call that reads each person's Letterboxd ratings and reviews, each with a one-line reason tied to a film
-// one of them rated highly. Nothing personal reaches the row: the model sees the people only as "viewer A, B, ..."; a
-// reason that names no film a viewer rated 4★ or more, or quotes a review, is retried and then dropped.
+// Package tonight fills a household "Tonight · Household" row, first of the Movies rows on the Plex Home of everyone
+// the library is shared with: five films from the library that no one in the household (people) has seen, picked once a
+// day by one model call that reads each person's Letterboxd ratings and reviews, each with a one-line reason tied to a
+// film one of them rated highly. Nothing personal reaches the row: the model sees the people only as "viewer A, B, ...";
+// a reason that names no film a viewer rated 4★ or more, or quotes a review, is retried and then dropped. The same picks
+// fill a BoxSet of that name in Jellyfin.
+//
+// Each person also gets a private "Tonight" playlist (playlist; "" = none) of five films they alone have not seen, from
+// one more call a day that reads their history alone, under the same rules. In Plex it is in their own account on this
+// server: the owner's with the server's sign-in, anyone else's through a switch to their Plex Home user (plex_user, as
+// the letterboxd stage names it). In Jellyfin it is owned by their user (jfsync's users name it) and made private.
+// Someone it cannot write for (no such Home user, one behind a PIN, no Jellyfin user) is skipped, with one alert.
 //
 // Every 30 min the stage reconciles: a pick anyone in the household has since watched (a Letterboxd feed, the watch
-// record, or the owner's Plex and Jellyfin) leaves the row at once. Once per day, after pick_after, it re-picks. The
-// same picks fill a "Tonight" BoxSet in Jellyfin.
+// record, or the owner's Plex and Jellyfin) leaves the row at once, and a pick a person has watched leaves their own
+// playlist. Once per day, after pick_after, it re-picks: the household's call first, then each person's, all inside
+// one daily cap, and each playlist then holds only the day's picks.
 //
 //	per person: export | feed + films page (cached) ─┐
-//	watch record (jfsync: Plex, Jellyfin plays)     ├─► unseen by all ─► 1 AI call/day (+1 retry, ≤ daily_cap_usd) ─► picks
-//	library folders {tmdb-N} + TMDB facts (cached)  ─┘                                                               │
-//	                                           Plex collection + Home row ◄─────────────────────────────────────────┤ queued, retried,
-//	                                           Jellyfin BoxSet           ◄─────────────────────────────────────────┘ never fail the run
+//	watch record (jfsync: Plex, Jellyfin plays)      ├─► unseen by all ─► AI call ─► household: Plex collection + Home row, BoxSet
+//	library folders {tmdb-N} + TMDB facts (cached)  ─┤
+//	                                                 └─► unseen by one ─► AI call ─► that person: own Plex and Jellyfin playlists
+//	(once a day each, +1 retry; all calls ≤ daily_cap_usd; writes retried with backoff, never failing the run)
 //
 // A person whose feed has not answered for feedStale does not stop the picks: they are made from the others (and
 // whatever of that person is cached), and the day's picks raise one alert naming them. The model is the tonight
 // task's ([llm.tasks.tonight], env.LLM), through the AI gateway.
 //
-// The stage never writes watched state, never touches Continue Watching / On Deck, and never deletes anything of
-// anyone's: it edits only the collection it owns.
+// The stage never writes watched state, never touches Continue Watching / On Deck, and never edits or deletes anything
+// of anyone's: it edits only the collection and the playlists it made (a playlist with our title that it did not make
+// is never written to).
 package tonight
 
 import (
@@ -34,26 +43,31 @@ import (
 
 	"projectionist/internal/llm"
 	"projectionist/internal/stage"
+	"projectionist/internal/stages/jfsync"
 	"projectionist/internal/stages/letterboxd"
 )
 
 const name = "tonight"
 
 type Options struct {
-	MaxTokens     int     `toml:"max_tokens"` // reasoning included
-	DailyCapUSD   float64 `toml:"daily_cap_usd"`
+	MaxTokens     int     `toml:"max_tokens"`    // reasoning included
+	DailyCapUSD   float64 `toml:"daily_cap_usd"` // every call of the day together: the household's and each person's
 	Picks         int     `toml:"picks"`
 	PickAfter     string  `toml:"pick_after"`     // HH:MM in the config timezone: a new day's picks after this
 	MaxCandidates int     `toml:"max_candidates"` // unseen films shown to the model, best-ranked first
 	Section       int     `toml:"section"`
-	Collection    string  `toml:"collection"`
+	Collection    string  `toml:"collection"` // the household's Plex collection and Jellyfin BoxSet
+	Playlist      string  `toml:"playlist"`   // each person's own playlist in Plex and Jellyfin; "" = none
 	MoviesDir     string  `toml:"movies_dir"`
 	ImageBase     string  `toml:"image_base"`
 	JellyfinUser  string  `toml:"jellyfin_user"` // the owner's account, whose played flags count
 	// People is the household, in the letterboxd stage's shape: person is their name in jfsync's users (the watch
-	// record), user their Letterboxd username, export_dir a folder holding their own letterboxd-<user>-* export (""
-	// = none: their feed and films page instead). Its other keys mean nothing here. Unset: the owner alone.
+	// record; jfsync's jellyfin for that name owns their Jellyfin playlist), user their Letterboxd username, export_dir a
+	// folder holding their own letterboxd-<user>-* export ("" = none: their feed and films page instead), plex_user
+	// their Plex Home user, as the letterboxd stage names it (the Home admin's is the server's own sign-in). history
+	// means nothing here. Unset: the owner alone.
 	People         []letterboxd.Person `toml:"people"`
+	PlexTVURL      string              `toml:"plex_tv"`
 	LetterboxdURL  string              `toml:"letterboxd_url"`
 	SinkTimeout    time.Duration       `toml:"sink_timeout"`     // per sink per run; what is left over waits for the next run
 	PlexMapTimeout time.Duration       `toml:"plex_map_timeout"` // the once-a-day Movies listing; minutes during a scan
@@ -63,7 +77,8 @@ type Options struct {
 func defaults() Options {
 	return Options{
 		MaxTokens: 4000, DailyCapUSD: 0.15, Picks: 5, PickAfter: "05:00", MaxCandidates: 400,
-		Section: 4, Collection: "Tonight", MoviesDir: "/volume1/media/Movies", LetterboxdURL: "https://letterboxd.com",
+		Section: 4, Collection: "Tonight · Household", Playlist: "Tonight", MoviesDir: "/volume1/media/Movies",
+		PlexTVURL: "https://clients.plex.tv", LetterboxdURL: "https://letterboxd.com",
 		ImageBase: "https://image.tmdb.org/t/p", JellyfinUser: "saahil",
 		SinkTimeout: 3 * time.Minute, PlexMapTimeout: 10 * time.Minute, MapEvery: 24 * time.Hour,
 	}
@@ -71,7 +86,8 @@ func defaults() Options {
 
 // owner is the household when people is unset. Not a default in Options: TOML decodes a shorter people list into the
 // default's backing array, so a configured entry would keep the owner's export_dir.
-var owner = letterboxd.Person{Person: "saahil", User: "saahilsan", ExportDir: "/volume1/docker/projectionist/data/letterboxd"}
+var owner = letterboxd.Person{Person: "saahil", User: "saahilsan", PlexUser: "saahilsanganeriya",
+	ExportDir: "/volume1/docker/projectionist/data/letterboxd"}
 
 // options decodes the stage's keys and checks them; after is pick_after as an offset from local midnight.
 func options(env *stage.Env) (opt Options, after time.Duration, err error) {
@@ -103,13 +119,41 @@ type pick struct {
 	PosterPath string `json:"poster_path,omitempty"`
 }
 
+// shelf is one day's picks: the household's, or one person's own.
+type shelf struct {
+	Day    string         `json:"day,omitempty"` // the local day the picks are for
+	Picks  []pick         `json:"picks"`         // still unwatched, in the model's order
+	Recent map[int]string `json:"recent"`        // tmdb → day picked; kept 14 days so the picks rotate
+}
+
 type state struct {
-	Day      string             `json:"day,omitempty"` // the local day the picks are for
-	Picks    []pick             `json:"picks"`         // still unwatched, in the model's order
-	Recent   map[int]string     `json:"recent"`        // tmdb → day picked; kept 14 days so the picks rotate
-	Spend    map[string]float64 `json:"spend"`         // local day → USD, including reservations for calls in flight
+	shelf                       // the household's
+	Spend    map[string]float64 `json:"spend"` // local day → USD, every call's, including reservations for calls in flight
 	Plex     sinkState          `json:"plex"`
 	Jellyfin sinkState          `json:"jellyfin"`
+	Persons  map[string]*own    `json:"persons,omitempty"` // person → their own picks and playlists
+}
+
+// own is one person's own picks and the private playlists that hold them.
+type own struct {
+	shelf
+	Plex     sinkState `json:"plex"`
+	Jellyfin sinkState `json:"jellyfin"`
+}
+
+func (st *state) person(name string) *own {
+	if st.Persons == nil {
+		st.Persons = map[string]*own{}
+	}
+	o := st.Persons[name]
+	if o == nil {
+		o = &own{}
+		st.Persons[name] = o
+	}
+	if o.Recent == nil {
+		o.Recent = map[int]string{}
+	}
+	return o
 }
 
 // pickDay is the day whose picks should be showing: before pick_after the row still shows the previous day's.
@@ -130,9 +174,17 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if loc == nil {
 		loc = time.UTC
 	}
-	st := state{Recent: map[int]string{}, Spend: map[string]float64{}}
+	st := state{shelf: shelf{Recent: map[int]string{}}, Spend: map[string]float64{}}
 	if _, err := env.Store.GetJSON(ctx, name, "state", &st); err != nil {
 		return err
+	}
+	var jfs struct {
+		Users []jfsync.User `toml:"users"` // whose jellyfin owns each person's Jellyfin playlist
+	}
+	if opt.Playlist != "" && env.PeerOptions != nil {
+		if err := env.PeerOptions("jfsync", &jfs); err != nil {
+			return err
+		}
 	}
 	var pm, jm idMap
 	if _, err := env.Store.GetJSON(ctx, name, "plexmap", &pm); err != nil {
@@ -157,22 +209,45 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 			return plexMap(c, env.Plex, opt.Section)
 		})
 	}
-	reconcile(ctx, env, rep, opt, &st, members, pm, jm)
-
+	// The household's shelf, then each person's own, which only their own history decides. The item maps carry the
+	// owner's play flags (read with the server's sign-in and jellyfin_user), so they count for the household and for
+	// the person whose jfsync Jellyfin user is jellyfin_user.
+	shelves := []viewing{{sh: &st.shelf, members: members, pm: pm, jm: jm}}
+	if opt.Playlist != "" {
+		for _, m := range members {
+			v := viewing{who: m.who.Person, sh: &st.person(m.who.Person).shelf, members: []member{m}}
+			if i := slices.IndexFunc(jfs.Users, func(u jfsync.User) bool { return u.Name == v.who }); i >= 0 &&
+				strings.EqualFold(jfs.Users[i].Jellyfin, opt.JellyfinUser) {
+				v.pm, v.jm = pm, jm
+			}
+			shelves = append(shelves, v)
+		}
+	}
+	for _, v := range shelves {
+		reconcile(ctx, env, rep, opt, v)
+	}
+	// The household's call first: under a cap that binds (a dear model), the shared row gets its picks before anyone's own.
 	day := pickDay(env.Now(), loc, after)
-	if st.Day != day {
-		switch err := pickFilms(ctx, env, rep, opt, &st, day, members, pm, jm, save); {
+	for _, v := range shelves {
+		if v.sh.Day == day {
+			continue
+		}
+		forWhom := ""
+		if v.who != "" {
+			forWhom = " for " + v.who + "'s own playlist"
+		}
+		switch err := pickFilms(ctx, env, rep, opt, &st, v, day, save); {
 		case err == nil:
 		case ctx.Err() != nil:
 			return ctx.Err()
 		case !errors.Is(err, llm.ErrBilling):
-			rep.Alert("tonight: no new picks for %s: %v", day, err)
+			rep.Alert("tonight: no new picks for %s%s: %v", day, forWhom, err)
 		case env.LLM.Session("tonight").TellBilling(ctx):
-			rep.Alert("tonight: no new picks for %s, nor later, until the AI gateway accepts calls (it is tried again hourly; "+
-				"this alert comes once, for every stage that asks a model): %v", day, err)
+			rep.Alert("tonight: no new picks for %s%s, nor later, until the AI gateway accepts calls (it is tried again hourly; "+
+				"this alert comes once, for every stage that asks a model): %v", day, forWhom, err)
 		default:
 			env.Log.Warn("no new picks: the AI gateway still refuses calls for billing (alerted once)", "event", "tonight_billing_held",
-				"day", day, "err", err)
+				"day", day, "for", v.label(), "err", err)
 		}
 	}
 	if err := save(); err != nil {
@@ -207,6 +282,20 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		t := plexTarget{Section: opt.Section, Title: opt.Collection, Machine: prefs["ProcessedMachineIdentifier"]}
 		return syncPlex(sctx, env.Log, env.Plex, t, pm, &st.Plex, st.Day, st.Picks, poster, save)
 	})
+	if opt.Playlist != "" {
+		home := &plexHome{env: env, base: opt.PlexTVURL}
+		jfUsers := &jellyfinUsers{jf: env.Jellyfin, mapped: jfs.Users}
+		for _, m := range members {
+			p, o := m.who, st.person(m.who.Person)
+			runSink(ctx, env, rep, opt, p.Person+".jellyfin", &o.Jellyfin, func(sctx context.Context) error {
+				return syncOwnJellyfin(sctx, env.Log, rep, jfUsers, opt.Playlist, p.Person, jm, &o.Jellyfin, o.Picks, save)
+			})
+			runSink(ctx, env, rep, opt, p.Person+".plex", &o.Plex, func(sctx context.Context) error {
+				return syncOwnPlex(sctx, env.Log, rep, home, opt.Playlist, p, pm, &o.Plex, o.Picks, save)
+			})
+			rep.Count(p.Person+".picks", len(o.Picks))
+		}
+	}
 	if err := save(); err != nil {
 		return err
 	}
@@ -292,21 +381,36 @@ func runSink(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options
 	}
 }
 
-// reconcile drops the picks anyone in the household has watched since they were picked. Each source is one small,
+// viewing is whom a shelf is for: the household (who "") or one person, with the item maps whose play flags count.
+type viewing struct {
+	who     string
+	sh      *shelf
+	members []member
+	pm, jm  idMap
+}
+
+func (v viewing) label() string {
+	if v.who == "" {
+		return "household"
+	}
+	return v.who
+}
+
+// reconcile drops the picks any of the shelf's viewers has watched since they were picked. Each source is one small,
 // bounded read; a source that does not answer is skipped until the next run.
-func reconcile(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, st *state, members []member, pm, jm idMap) {
-	if len(st.Picks) == 0 {
+func reconcile(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, v viewing) {
+	if len(v.sh.Picks) == 0 {
 		return
 	}
 	watched := map[int]string{}
-	for _, m := range members {
+	for _, m := range v.members {
 		for _, e := range m.cache.Entries {
 			if e.TMDB > 0 {
 				watched[e.TMDB] = "letterboxd:" + m.who.Person
 			}
 		}
 	}
-	if record, err := recordWatched(ctx, env.Store.DB(), members); err != nil {
+	if record, err := recordWatched(ctx, env.Store.DB(), v.members); err != nil {
 		env.Log.Warn("watch record check failed", "event", "watch_record_error", "err", err)
 	} else {
 		for id, who := range record {
@@ -329,24 +433,28 @@ func reconcile(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 		}
 	}
 	read("plex", func(c context.Context) (map[int]bool, error) {
-		return plexWatched(c, env.Plex, opt.Section, pm, st.Picks)
+		return plexWatched(c, env.Plex, opt.Section, v.pm, v.sh.Picks)
 	})
-	read("jellyfin", func(c context.Context) (map[int]bool, error) { return jellyfinWatched(c, env.Jellyfin, jm, st.Picks) })
-	kept := st.Picks[:0]
-	for _, p := range st.Picks {
+	read("jellyfin", func(c context.Context) (map[int]bool, error) {
+		return jellyfinWatched(c, env.Jellyfin, v.jm, v.sh.Picks)
+	})
+	kept := v.sh.Picks[:0]
+	for _, p := range v.sh.Picks {
 		source := watched[p.TMDB]
 		if source == "" {
 			kept = append(kept, p)
 			continue
 		}
 		item := fmt.Sprintf("%s (%d)", p.Title, p.Year)
-		env.Log.Info("pick watched; leaving the row", "event", "tonight_pick_watched", "item", item, "tmdb", p.TMDB, "source", source)
-		if err := env.Store.AddEvent(ctx, env.Now(), name, item, "watched", map[string]any{"tmdb": p.TMDB, "source": source, "day": st.Day}); err != nil {
+		env.Log.Info("pick watched; leaving the row", "event", "tonight_pick_watched", "for", v.label(), "item", item, "tmdb", p.TMDB,
+			"source", source)
+		if err := env.Store.AddEvent(ctx, env.Now(), name, item, "watched", map[string]any{"tmdb": p.TMDB, "source": source,
+			"day": v.sh.Day, "for": v.label()}); err != nil {
 			env.Log.Error("history write failed", "event", "store_error", "err", err)
 		}
 		rep.Count("watched", 1)
 	}
-	st.Picks = kept
+	v.sh.Picks = kept
 }
 
 // pickCall is the day's call as sized, and what its answer is checked against.
@@ -359,11 +467,10 @@ type pickCall struct {
 	exports map[string]int // export rows read per person
 }
 
-// preparePick reads everyone's history and the library, ranks the films no one in the household has seen, and sizes
-// the day's call: the candidate list is cut until the call AND its one retry, each at its worst (bound), fit what is
-// left of the day's cap.
-func preparePick(ctx context.Context, env *stage.Env, opt Options, st *state, day string, members []member, pm, jm idMap,
-	s *llm.Session) (pickCall, error) {
+// preparePick reads the viewers' history and the library, ranks the films none of them has seen, and sizes the call:
+// the candidate list is cut until the call AND its one retry, each at its worst (bound), fit left.
+func preparePick(ctx context.Context, env *stage.Env, opt Options, v viewing, day string, left float64, s *llm.Session) (pickCall, error) {
+	members := v.members
 	lib, err := scanLibrary(opt.MoviesDir)
 	if err != nil {
 		return pickCall{}, err
@@ -376,7 +483,7 @@ func preparePick(ctx context.Context, env *stage.Env, opt Options, st *state, da
 	if err != nil {
 		return pickCall{}, fmt.Errorf("watch record: %w", err)
 	}
-	env.Log.Info("library facts", "event", "tonight_library", "films", len(lib), "tmdb_fetched", fetched, "tmdb_failed", failed,
+	env.Log.Info("library facts", "event", "tonight_library", "for", v.label(), "films", len(lib), "tmdb_fetched", fetched, "tmdb_failed", failed,
 		"watch_record_films", len(record))
 
 	w := newWatched()
@@ -407,20 +514,20 @@ func preparePick(ctx context.Context, env *stage.Env, opt Options, st *state, da
 	for id, who := range record {
 		w.IDs[id] = "watch record: " + who
 	}
-	for _, m := range []idMap{pm, jm} {
+	for _, m := range []idMap{v.pm, v.jm} {
 		for id := range m.Watched {
 			w.IDs[id] = "server"
 		}
 	}
 	if len(loved) == 0 {
-		return pickCall{}, errors.New("no one in the household has a film rated 4 stars or more for a reason to draw on")
+		return pickCall{}, errors.New("no viewer has a film rated 4 stars or more for a reason to draw on")
 	}
-	for id, at := range st.Recent {
+	for id, at := range v.sh.Recent {
 		if at < daysBefore(day, 14) {
-			delete(st.Recent, id)
+			delete(v.sh.Recent, id)
 		}
 	}
-	cands := rankCandidates(lib, w, all, st.Recent, day)
+	cands := rankCandidates(lib, w, all, v.sh.Recent, day)
 	if len(cands) < opt.Picks {
 		return pickCall{}, fmt.Errorf("only %d unseen films", len(cands))
 	}
@@ -433,13 +540,12 @@ func preparePick(ctx context.Context, env *stage.Env, opt Options, st *state, da
 	// max_tokens as output. The cost grows linearly with the candidate lines, so one rescale nearly always lands.
 	taste := strings.Join(tastes, "\n\n")
 	request := func(n int) llm.Request {
-		return pickRequest(opt, taste, []llm.Message{userMessage(prompt(day, cands[:n], opt.Picks))})
+		return pickRequest(opt, len(tastes), taste, []llm.Message{userMessage(prompt(day, cands[:n], opt.Picks))})
 	}
 	fixed := request(0).InputTokens
 	pair := func(total int) float64 {
 		return p.Cost(total, opt.MaxTokens) + p.Cost(total+opt.MaxTokens+retryExtra, opt.MaxTokens)
 	}
-	left := opt.DailyCapUSD - st.Spend[day]
 	n := min(opt.MaxCandidates, len(cands))
 	var req llm.Request
 	for i := 0; ; i++ {
@@ -458,7 +564,7 @@ func preparePick(ctx context.Context, env *stage.Env, opt Options, st *state, da
 	for _, c := range cands[:n] {
 		unseen[c.TMDB] = c
 	}
-	env.Log.Info("ai call sized", "event", "tonight_ai_sized", "model", s.Model(), "viewers", len(tastes), "candidates", n,
+	env.Log.Info("ai call sized", "event", "tonight_ai_sized", "for", v.label(), "model", s.Model(), "viewers", len(tastes), "candidates", n,
 		"unseen", len(cands), "estimated_input_tokens", req.InputTokens, "pair_bound_usd", fmt.Sprintf("%.5f", pair(req.InputTokens)),
 		"left_usd", fmt.Sprintf("%.5f", left))
 	return pickCall{req: req, unseen: unseen, loved: loved, quotes: newQuoteGuard(reviews), n: n, exports: exports}, nil
@@ -472,7 +578,7 @@ func Today(ctx context.Context, env *stage.Env) (llm.Request, func(text string) 
 	if err != nil {
 		return llm.Request{}, nil, err
 	}
-	st := state{Recent: map[int]string{}, Spend: map[string]float64{}}
+	st := state{shelf: shelf{Recent: map[int]string{}}}
 	var pm, jm idMap
 	for key, v := range map[string]any{"state": &st, "plexmap": &pm, "jfmap": &jm} {
 		if _, err := env.Store.GetJSON(ctx, name, key, v); err != nil {
@@ -488,8 +594,8 @@ func Today(ctx context.Context, env *stage.Env) (llm.Request, func(text string) 
 		loc = time.UTC
 	}
 	day := pickDay(env.Now(), loc, after)
-	st.Spend[day] = 0 // the bake-off sizes the call as a fresh day's
-	pc, err := preparePick(ctx, env, opt, &st, day, members, pm, jm, env.LLM.Session("tonight"))
+	household := viewing{sh: &st.shelf, members: members, pm: pm, jm: jm}
+	pc, err := preparePick(ctx, env, opt, household, day, opt.DailyCapUSD, env.LLM.Session("tonight")) // sized as a fresh day's
 	if err != nil {
 		return llm.Request{}, nil, err
 	}
@@ -502,16 +608,17 @@ func Today(ctx context.Context, env *stage.Env) (llm.Request, func(text string) 
 	}, nil
 }
 
-// pickFilms makes the day's one AI call, plus at most one retry, inside the daily cap. Both are sized before the
-// first is sent, at their worst, so the pair can never pass the cap; each call's worst case is reserved before it is
-// sent and settled to what it cost after (an attempt whose answer was lost stays counted at its worst case).
-func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, st *state, day string, members []member,
-	pm, jm idMap, save func() error) error {
+// pickFilms makes one shelf's AI call for the day, plus at most one retry, inside the daily cap that every call of the
+// day shares. Both are sized before the first is sent, at their worst, so the pair can never pass what is left of the
+// cap; each call's worst case is reserved before it is sent and settled to what it cost after (an attempt whose answer
+// was lost stays counted at its worst case).
+func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, st *state, v viewing, day string,
+	save func() error) error {
 	s := env.LLM.Session("tonight")
 	if err := s.Parked(); err != nil { // a billing refusal that holds: no call would be sent
 		return err
 	}
-	pc, err := preparePick(ctx, env, opt, st, day, members, pm, jm, s)
+	pc, err := preparePick(ctx, env, opt, v, day, opt.DailyCapUSD-st.Spend[day], s)
 	if err != nil {
 		return err
 	}
@@ -537,7 +644,7 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 		if err != nil {
 			return llm.Result{}, err
 		}
-		env.Log.Info("ai call", "event", "tonight_ai_call", "attempt", attempt, "model", r.Model, "candidates", pc.n,
+		env.Log.Info("ai call", "event", "tonight_ai_call", "for", v.label(), "attempt", attempt, "model", r.Model, "candidates", pc.n,
 			"input_tokens", r.Usage.PromptTokens, "output_tokens", r.Usage.CompletionTokens, "finish", r.Finish,
 			"cost_usd", fmt.Sprintf("%.5f", r.CostUSD), "bound_usd", fmt.Sprintf("%.5f", reserve),
 			"spent_today_usd", fmt.Sprintf("%.5f", st.Spend[day]), "duration_ms", r.Took.Milliseconds())
@@ -593,10 +700,10 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 		env.Log.Warn("a reason carried a glued note or a stray bracket; cut", "event", "tonight_reason_glued", "reason", g)
 	}
 	rep.Count("reasons_glued", len(glued))
-	st.Day, st.Picks = day, picks
+	v.sh.Day, v.sh.Picks = day, picks
 	for _, pk := range picks {
-		st.Recent[pk.TMDB] = day
-		env.Log.Info("picked", "event", "tonight_pick", "day", day, "item", fmt.Sprintf("%s (%d)", pk.Title, pk.Year),
+		v.sh.Recent[pk.TMDB] = day
+		env.Log.Info("picked", "event", "tonight_pick", "for", v.label(), "day", day, "item", fmt.Sprintf("%s (%d)", pk.Title, pk.Year),
 			"tmdb", pk.TMDB, "mood", pk.Mood, "liked", pk.Liked, "reason", pk.Reason)
 	}
 	for d := range st.Spend {
@@ -607,8 +714,8 @@ func pickFilms(ctx context.Context, env *stage.Env, rep *stage.Report, opt Optio
 	if len(picks) == 0 {
 		return errors.New("the model returned no valid picks")
 	}
-	// Once a day, with the picks: a later run that day makes none, and a day without picks has its own alert.
-	if out := outdated(members, pc.exports, env.Now()); len(out) > 0 {
+	// Once a day, with the household's picks: a later run that day makes none, and a day without picks has its own alert.
+	if out := outdated(v.members, pc.exports, env.Now()); v.who == "" && len(out) > 0 {
 		rep.Alert("tonight: the picks for %s were made without fresh Letterboxd data for %s", day, strings.Join(out, "; "))
 	}
 	return nil

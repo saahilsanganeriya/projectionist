@@ -194,6 +194,7 @@ func rk(id int) string   { return strconv.Itoa(100000 + id) }
 func jfID(id int) string { return fmt.Sprintf("jf%d", id) }
 
 type world struct {
+	base    string // the options every run carries; options() adds a test's own
 	h       *fake.Harness
 	logs    *bytes.Buffer
 	ai      *aiFake
@@ -349,16 +350,26 @@ func newWorld(t *testing.T, options string, fillers int) *world {
 	w.ai = newAIFake(t, w.h, nil)
 	w.plex = newPlexFake(w.h.Plex)
 	w.jf = newJFFake(w.h.Jellyfin)
-	if !strings.Contains(options, "people") { // the owner alone, with his export
-		options += `people = [{ person = "saahil", user = "saahilsan", export_dir = "testdata/export" }]` + "\n"
-	}
-	w.h.SetOptions(fmt.Sprintf(`
+	w.base = fmt.Sprintf(`
 picks = 3
 movies_dir = %q
 letterboxd_url = %q
 image_base = %q
-`, movies, ext.URL, ext.URL+"/img") + options)
+`, movies, ext.URL, ext.URL+"/img")
+	w.options(options)
 	return w
+}
+
+// options sets what the next runs read: the world's base, then text. Unless text names them, the household is the owner
+// alone with his export, and no one gets a playlist of their own.
+func (w *world) options(text string) {
+	if !strings.Contains(text, "people") {
+		text += `people = [{ person = "saahil", user = "saahilsan", export_dir = "testdata/export" }]` + "\n"
+	}
+	if !strings.Contains(w.base+text, "playlist") {
+		text += "playlist = \"\"\n"
+	}
+	w.h.SetOptions(w.base + text)
 }
 
 // record adds one event to the watch record, as jfsync does for a play (Finished) or a rating (Rated).
@@ -503,6 +514,7 @@ type plexFake struct {
 	mu      sync.Mutex
 	viewed  map[string]bool // ratingKey → played
 	coll    []string        // the collection's members; nil until created
+	title   string          // the collection's title
 	summary string
 	labeled bool
 	hubs    []plexHub
@@ -571,7 +583,7 @@ func newPlexFake(srv *fake.Server) *plexFake {
 	srv.HandleFunc("POST", "/library/collections", func(rw http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		p.coll = members(r)
+		p.coll, p.title = members(r), r.URL.Query().Get("title")
 		if p.onCreate != nil {
 			p.onCreate()
 		}
@@ -582,8 +594,8 @@ func newPlexFake(srv *fake.Server) *plexFake {
 		}
 		mc(rw, map[string]any{"Metadata": []map[string]string{{"ratingKey": "900"}}})
 	})
-	// 777 is his own collection named "Tonight", with no label: no route writes to it, so a write fails the sink.
-	his := map[string]any{"ratingKey": "777", "index": 77700, "type": "collection", "title": "Tonight", "summary": "his"}
+	// 777 is his own collection with our title, with no label: no route writes to it, so a write fails the sink.
+	his := map[string]any{"ratingKey": "777", "index": 77700, "type": "collection", "title": defaults().Collection, "summary": "his"}
 	srv.HandleFunc("GET", "/library/metadata/777", func(rw http.ResponseWriter, _ *http.Request) {
 		mc(rw, map[string]any{"Metadata": []any{his}})
 	})
@@ -591,7 +603,7 @@ func newPlexFake(srv *fake.Server) *plexFake {
 		if p.coll == nil {
 			return nil
 		}
-		c := map[string]any{"ratingKey": "900", "index": 90000, "type": "collection", "title": "Tonight", "summary": p.summary}
+		c := map[string]any{"ratingKey": "900", "index": 90000, "type": "collection", "title": p.title, "summary": p.summary}
 		if p.labeled { // Plex answers the tag title-cased, whatever case it was sent in
 			c["Label"] = []map[string]string{{"tag": "Projectionist"}}
 		}
@@ -636,6 +648,9 @@ func newPlexFake(srv *fake.Server) *plexFake {
 		if q := r.URL.Query(); q.Get("type") == "18" && q.Get("id") == "900" {
 			if q.Has("summary.value") {
 				p.summary = q.Get("summary.value")
+			}
+			if q.Has("title.value") {
+				p.title = q.Get("title.value")
 			}
 			if q.Has("label[0].tag.tag") {
 				p.labeled = q.Get("label[0].tag.tag") == "projectionist"
@@ -712,7 +727,9 @@ func (p *plexFake) homeRow() []string {
 
 type jfFake struct {
 	mu         sync.Mutex
-	box        []string // nil until created
+	playlists  func(q map[string][]string) ([]map[string]any, bool) // answers a playlist query first, when set
+	box        []string                                             // nil until created
+	name       string
 	overview   string
 	tags       []string
 	images     int
@@ -731,14 +748,20 @@ func newJFFake(srv *fake.Server) *jfFake {
 		j.mu.Lock()
 		defer j.mu.Unlock()
 		q := r.URL.Query()
+		if j.playlists != nil {
+			if out, ok := j.playlists(q); ok {
+				json.NewEncoder(rw).Encode(map[string]any{"Items": out})
+				return
+			}
+		}
 		var out []map[string]any
 		switch {
 		case q.Get("IncludeItemTypes") == "BoxSet", q.Get("Ids") == "box1":
-			if q.Get("Ids") == "" { // box9 is his own "Tonight", untagged; no route writes to it
-				out = append(out, map[string]any{"Id": "box9", "Name": "Tonight", "Type": "BoxSet"})
+			if q.Get("Ids") == "" { // box9 is his own, with our title, untagged; no route writes to it
+				out = append(out, map[string]any{"Id": "box9", "Name": defaults().Collection, "Type": "BoxSet"})
 			}
 			if j.box != nil {
-				out = append(out, map[string]any{"Id": "box1", "Name": "Tonight", "Type": "BoxSet", "Tags": j.tags})
+				out = append(out, map[string]any{"Id": "box1", "Name": j.name, "Type": "BoxSet", "Tags": j.tags})
 			}
 		case q.Get("ParentId") == "box1":
 			for _, id := range j.box {
@@ -757,7 +780,7 @@ func newJFFake(srv *fake.Server) *jfFake {
 	srv.HandleFunc("POST", "/Collections", func(rw http.ResponseWriter, r *http.Request) {
 		j.mu.Lock()
 		defer j.mu.Unlock()
-		j.box = strings.Split(r.URL.Query().Get("Ids"), ",")
+		j.box, j.name = strings.Split(r.URL.Query().Get("Ids"), ","), r.URL.Query().Get("Name")
 		if j.onCreate != nil {
 			j.onCreate()
 		}
@@ -782,17 +805,17 @@ func newJFFake(srv *fake.Server) *jfFake {
 	srv.HandleFunc("GET", "/Items/box1", func(rw http.ResponseWriter, _ *http.Request) {
 		j.mu.Lock()
 		defer j.mu.Unlock()
-		json.NewEncoder(rw).Encode(map[string]any{"Id": "box1", "Name": "Tonight", "Overview": j.overview, "Tags": j.tags})
+		json.NewEncoder(rw).Encode(map[string]any{"Id": "box1", "Name": j.name, "Overview": j.overview, "Tags": j.tags})
 	})
 	srv.HandleFunc("POST", "/Items/box1", func(rw http.ResponseWriter, r *http.Request) {
 		j.mu.Lock()
 		defer j.mu.Unlock()
 		var body struct {
-			Overview string
-			Tags     []string
+			Name, Overview string
+			Tags           []string
 		}
 		json.NewDecoder(r.Body).Decode(&body)
-		j.overview, j.tags = body.Overview, body.Tags
+		j.name, j.overview, j.tags = body.Name, body.Overview, body.Tags
 	})
 	srv.HandleFunc("POST", "/Items/box1/Images/Primary", func(rw http.ResponseWriter, r *http.Request) {
 		j.mu.Lock()
@@ -901,7 +924,7 @@ func TestRunAcrossDays(t *testing.T) {
 	if !slices.Contains(w.jf.tags, "projectionist") {
 		t.Fatalf("jellyfin box tags = %q", w.jf.tags)
 	}
-	if !strings.Contains(w.logs.String(), "event=tonight_ai_call attempt=2 model=deepseek/deepseek-v4.1-flash") ||
+	if !strings.Contains(w.logs.String(), "event=tonight_ai_call for=household attempt=2 model=deepseek/deepseek-v4.1-flash") ||
 		!strings.Contains(w.logs.String(), "output_tokens=422 finish=stop") {
 		t.Fatalf("no token/cost log for the call and its retry:\n%s", w.logs)
 	}
