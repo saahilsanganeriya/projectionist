@@ -308,15 +308,19 @@ max_candidates  = 400                            # unseen films shown, best-rank
 movies_dir      = "/volume1/media/Movies"
 section         = 4
 collection      = "Tonight · Household"
-playlist        = "Tonight"                      # each person's own; "" = none
-plex_tv         = "https://clients.plex.tv"      # the Plex Home's users and switches, and each user's servers
+playlist        = "Tonight"                      # each person's own: this Jellyfin playlist and the Plex shelf "Tonight · <name>"; "" = none
+plex_tv         = "https://clients.plex.tv"      # the sharing restrictions of every account, and the Home (to remove the old playlists)
 jellyfin_user   = "saahil"                       # his own account, whose played flags count
 sink_timeout    = "3m"                           # per sink per run; a failed write is retried with backoff
 plex_map_timeout = "10m"                         # the daily TMDB id → ratingKey listing; a page took 112 s in a scan
 # The household. person: their name in jfsync's users (their plays and ratings in the watch record count as seen, and
-# that entry's jellyfin owns their Jellyfin playlist); user: their Letterboxd username; plex_user: their Plex Home user,
-# as [stages.letterboxd] names it (its username, or a managed user's name; his is the Home admin); export_dir: a folder
-# holding their own letterboxd-<user>-* export ("" = none). Every
+# that entry's jellyfin owns their Jellyfin playlist); user: their Letterboxd username; plex_user: their Plex account,
+# as [stages.letterboxd] names it (its username, or a managed user's name; his is the server's own sign-in); name: their
+# shelf's ("" = person, capitalized); export_dir: a folder holding their own letterboxd-<user>-* export ("" = none).
+# Each person's shelf is a Plex collection labelled Tonight-<person>: his on his own Home alone, anyone else's on the
+# shared Home. Every account the server is shared with, these and all others, gets the other people's labels added to
+# its Movies restrictions on plex.tv (every other filter and setting kept, each write read back), so each sees only
+# their own. A shelf some account would see is not shown until that account's restrictions take the labels. Every
 # run reads each feed (the latest 50 diary entries, reviews included), and once a day page 1 of the films of anyone
 # without an export (their newest 72, rated): Cloudflare refuses deeper and sorted pages, so for them only what those
 # show, kept since the first run, and the watch record count as seen. All paced with every stage (lbpace). A person
@@ -324,7 +328,7 @@ plex_map_timeout = "10m"                         # the daily TMDB id → ratingK
 # cached, and the day's picks raise one alert naming them. Unset: him alone.
 people = [
   { person = "saahil", user = "saahilsan",  plex_user = "saahilsanganeriya", export_dir = "/volume1/docker/projectionist/data/letterboxd" },
-  { person = "roger",  user = "auralb", plex_user = "roger" }, # Aurelia
+  { person = "roger",  user = "auralb", plex_user = "roger", name = "Aurelia" },
   { person = "aaron", user = "aaron1009", plex_user = "aarontest941" },
 ]
 
