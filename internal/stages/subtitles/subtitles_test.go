@@ -1070,6 +1070,35 @@ func TestRunQueueCapAndIdle(t *testing.T) {
 	}
 }
 
+// Catches a run whose roots are narrowed (a one-off over one folder) dropping the queue rows of titles outside them:
+// they lost their place and waited out retry_after. Inside its roots a title that has a sidecar now leaves the queue.
+func TestRunNarrowedRootsKeepTheRestOfTheQueue(t *testing.T) {
+	f := newFixture(t)
+	f.options(`providers = ["opensubtitles"]` + "\nalign_per_day = 0")
+	f.run(t)
+	if q := f.queued(); !slices.Equal(q, []string{f.path(ran), f.path(clerks), ""}) {
+		t.Fatalf("queue %v; want Ran and Clerks waiting", q)
+	}
+	os.WriteFile(strings.TrimSuffix(f.path(clerks), ".mkv")+".en.srt", []byte("theirs"), 0o644)
+	over := func(rel string) {
+		f.h.SetOptions(`roots = ["` + filepath.Dir(f.path(rel)) + `"]
+stats_file = "` + filepath.Join(f.dir, "sub_stats.tsv") + `"
+secrets_dir = "` + f.dir + `"
+legacy_quota = "` + f.dir + `"
+providers = ["opensubtitles"]
+mode = "careful"
+align_per_day = 0`)
+		f.run(t)
+	}
+	if over(clerks); !slices.Equal(f.queued(), []string{f.path(ran), ""}) {
+		t.Errorf("after a run over Clerks' folder alone (Clerks now has a sidecar): queue %v; want Ran still waiting, Clerks out", f.queued())
+	}
+	os.Remove(f.path(ran))
+	if over(ran); !slices.Equal(f.queued(), []string{""}) {
+		t.Errorf("after Ran's video went: queue %v; want it out", f.queued())
+	}
+}
+
 // Catches a helper's reads of the video left out of the title's bytes, which would make the gate's "no byte read"
 // evidence prove nothing. Linux only: the count is rchar from /proc/<pid>/io.
 func TestHelperReadsAreCounted(t *testing.T) {

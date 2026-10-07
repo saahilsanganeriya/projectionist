@@ -3,6 +3,8 @@
 //	projectionist serve [-config FILE]          scheduler + HTTP until SIGTERM
 //	projectionist run [-config FILE] STAGE      one run of one stage; exit 1 on alert or error
 //	projectionist stages                        list the stages this binary knows
+//	projectionist align-worker [-server URL] [-via CMD] [-lanes N] [-ffmpeg DIR] [-alass FILE] [-work DIR]
+//	                                            on another machine: align the subtitles queue's titles until Ctrl-C
 package main
 
 import (
@@ -12,7 +14,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 	_ "time/tzdata" // stage windows need zoneinfo; the slim runtime image may not ship it
@@ -27,6 +32,7 @@ import (
 	"projectionist/internal/scheduler"
 	"projectionist/internal/server"
 	"projectionist/internal/stage"
+	"projectionist/internal/stages/subtitles"
 	"projectionist/internal/store"
 	"projectionist/internal/tmdb"
 	"projectionist/internal/viewers"
@@ -41,6 +47,22 @@ func main() {
 	cmd, args := os.Args[1], os.Args[2:]
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	cfgPath := fs.String("config", "/config/projectionist.toml", "config file")
+	var worker subtitles.WorkerOptions
+	if cmd == "align-worker" {
+		exe, _ := os.Executable()
+		ffmpeg, _ := exec.LookPath("ffmpeg")
+		alass, err := exec.LookPath("alass-cli")
+		if err != nil {
+			alass = filepath.Join(filepath.Dir(exe), "alass", "bin", "alass-cli")
+		}
+		fs.StringVar(&worker.Server, "server", "http://127.0.0.1:18097", "the NAS's listener: a forwarded port, or with -via its address on the NAS")
+		fs.Func("via", "a command that runs a command on the NAS (e.g. ~/.ssh/bin/nas): each connection is a relay it runs there",
+			func(v string) error { worker.Via = strings.Fields(v); return nil })
+		fs.IntVar(&worker.Lanes, "lanes", 8, "titles aligned at once")
+		fs.StringVar(&worker.FFmpegDir, "ffmpeg", filepath.Dir(ffmpeg), "directory holding ffmpeg")
+		fs.StringVar(&worker.Alass, "alass", alass, "alass-cli, built from the NAS image's alass commit")
+		fs.StringVar(&worker.Work, "work", filepath.Join(filepath.Dir(exe), "work"), "the media being aligned (deleted as each title ends)")
+	}
 	fs.Parse(args)
 	switch cmd {
 	case "stages":
@@ -56,14 +78,36 @@ func main() {
 			usage()
 		}
 		os.Exit(run(*cfgPath, fs.Arg(0)))
+	case "align-worker":
+		os.Exit(alignWorker(worker))
 	default:
 		usage()
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: projectionist serve|run STAGE|stages|version [-config FILE]")
+	fmt.Fprintln(os.Stderr, "usage: projectionist serve|run STAGE|stages|version [-config FILE] | align-worker [flags]")
 	os.Exit(2)
+}
+
+// alignWorker runs subtitles.Work until SIGINT or SIGTERM; it returns the process exit code.
+func alignWorker(o subtitles.WorkerOptions) int {
+	o.Log = obs.NewLogger(os.Stderr, "text", "info").With("version", version)
+	for _, bin := range []string{filepath.Join(o.FFmpegDir, "ffmpeg"), o.Alass} {
+		if _, err := os.Stat(bin); err != nil {
+			o.Log.Error("helper missing", "event", "config_error", "err", err)
+			return 2
+		}
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	o.Log.Info("align worker started", "event", "start", "server", o.Server, "via", strings.Join(o.Via, " "), "lanes", o.Lanes, "ffmpeg", o.FFmpegDir, "alass", o.Alass, "work", o.Work)
+	if err := subtitles.Work(ctx, o); err != nil {
+		o.Log.Error("align worker", "event", "align_worker_error", "err", err)
+		return 1
+	}
+	o.Log.Info("stopped", "event", "stop")
+	return 0
 }
 
 // run serves (only == "") or runs one stage once; it returns the process exit code.

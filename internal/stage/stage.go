@@ -28,10 +28,12 @@ type Stage interface {
 	Run(ctx context.Context, env *Env, rep *Report) error
 }
 
-// Hooker is a stage that also takes events pushed to the service's HTTP listener (e.g. Plex webhooks). The
-// handlers only record what arrived; the stage's next run acts on it. Mounted by `serve` for enabled stages.
+// Hooker is a stage that also takes requests on the service's HTTP listener (e.g. Plex webhooks). Webhook handlers
+// only record what arrived, and the stage's next run acts on it; the subtitles stage's align-worker API instead serves
+// the run in progress (its queue's titles, leased to a worker on another machine). Mounted by `serve` for enabled
+// stages.
 type Hooker interface {
-	Hooks(env *Env) map[string]http.Handler // "POST /hooks/<name>" → handler
+	Hooks(env *Env) map[string]http.Handler // pattern ("POST /hooks/<name>") → handler
 }
 
 // Env is everything a stage may use. Clients read their secrets from files on every call, never from env vars.
