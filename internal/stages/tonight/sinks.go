@@ -21,12 +21,12 @@ import (
 // sinkState is one sink's progress toward the desired picks. A failed write is retried on a later run with
 // backoff and never fails the run.
 type sinkState struct {
-	ID           string         `json:"id,omitempty"`        // Plex collection ratingKey / Jellyfin BoxSet id
+	ID           string         `json:"id,omitempty"`        // Plex collection ratingKey / Jellyfin BoxSet or playlist id
 	Pending      *pendingCreate `json:"pending,omitempty"`   // a create sent whose answer has not named the collection
 	PosterOf     string         `json:"poster_of,omitempty"` // the day of the last uploaded poster
 	HubStale     bool           `json:"hub_stale,omitempty"` // Plex: members edited since the Home hub was last refreshed
-	Synced       []string       `json:"synced,omitempty"`    // own playlist: the items last written, so unchanged picks cost no call
-	Skip         string         `json:"skip,omitempty"`      // own playlist: why it is not written for them, alerted once
+	Synced       []string       `json:"synced,omitempty"`    // own Jellyfin playlist: the items last written, so unchanged picks cost no call
+	Skip         string         `json:"skip,omitempty"`      // own playlist or shelf: why it is not written for them, alerted once
 	Fails        int            `json:"fails,omitempty"`
 	RetryAt      time.Time      `json:"retry_at,omitzero"`
 	FailingSince time.Time      `json:"failing_since,omitzero"`

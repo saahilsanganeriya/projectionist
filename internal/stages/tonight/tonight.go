@@ -5,21 +5,24 @@
 // a reason that names no film a viewer rated 4★ or more, or quotes a review, is retried and then dropped. The same picks
 // fill a BoxSet of that name in Jellyfin.
 //
-// Each person also gets a private "Tonight" playlist (playlist; "" = none) of five films they alone have not seen, from
-// one more call a day that reads their history alone, under the same rules. In Plex it is in their own account on this
-// server: the owner's with the server's sign-in, anyone else's through a switch to their Plex Home user (plex_user, as
-// the letterboxd stage names it). In Jellyfin it is owned by their user (jfsync's users name it) and made private.
-// Someone it cannot write for (no such Home user, one behind a PIN, no Jellyfin user) is skipped, with one alert.
+// Each person also gets their own five films they alone have not seen, from one more call a day that reads their
+// history alone, under the same rules (playlist names them; "" = none). In Plex they fill that person's shelf, a
+// collection "<playlist> · <name>" labelled Tonight-<person>, on their own Home alone: the owner's (the server's own
+// sign-in) is promoted to his Home, anyone else's to the shared Home, and every account the server is shared with has
+// the other people's labels added to its Movies restrictions on plex.tv, so each sees only their own (shelves.go has
+// what happens when plex.tv cannot be read or written). In Jellyfin they fill a playlist of that name owned by the
+// person's user (jfsync's users name it), made private. Someone it cannot write for (no Plex account of theirs shares
+// the server, no Jellyfin user) is skipped, with one alert.
 //
 // Every 30 min the stage reconciles: a pick anyone in the household has since watched (a Letterboxd feed, the watch
 // record, or the owner's Plex and Jellyfin) leaves the row at once, and a pick a person has watched leaves their own
-// playlist. Once per day, after pick_after, it re-picks: the household's call first, then each person's, all inside
-// one daily cap, and each playlist then holds only the day's picks.
+// shelf and playlist. Once per day, after pick_after, it re-picks: the household's call first, then each person's, all
+// inside one daily cap, and each shelf and playlist then holds only the day's picks.
 //
 //	per person: export | feed + films page (cached) ─┐
 //	watch record (jfsync: Plex, Jellyfin plays)      ├─► unseen by all ─► AI call ─► household: Plex collection + Home row, BoxSet
 //	library folders {tmdb-N} + TMDB facts (cached)  ─┤
-//	                                                 └─► unseen by one ─► AI call ─► that person: own Plex and Jellyfin playlists
+//	                                                 └─► unseen by one ─► AI call ─► that person: own Plex shelf, Jellyfin playlist
 //	(once a day each, +1 retry; all calls ≤ daily_cap_usd; writes retried with backoff, never failing the run)
 //
 // A person whose feed has not answered for feedStale does not stop the picks: they are made from the others (and
@@ -27,8 +30,9 @@
 // task's ([llm.tasks.tonight], env.LLM), through the AI gateway.
 //
 // The stage never writes watched state, never touches Continue Watching / On Deck, and never edits or deletes anything
-// of anyone's: it edits only the collection and the playlists it made (a playlist with our title that it did not make
-// is never written to).
+// of anyone's: it edits only the collections and playlists it made (one with our title that it did not make is never
+// written to), and of each account's sharing restrictions it only adds shelf labels to the Movies labels they exclude,
+// keeping every other filter and setting.
 package tonight
 
 import (

@@ -51,7 +51,7 @@ type homeUser struct {
 
 // plexHome finds, for each person, the Plex client that acts as them on this server: the server's own sign-in for
 // the Home admin, else a Home switch to their Home user (as the letterboxd stage makes for their watchlist) and their
-// token for this server from plex.tv's resources, both per run and never stored. The Home is listed at most once a run.
+// token for this server from plex.tv's resources, both per run and never stored. The Home is listed once a run.
 type plexHome struct {
 	env   *stage.Env
 	base  string

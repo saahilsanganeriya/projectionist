@@ -44,7 +44,9 @@ func TestRestrictionsAreMergedNotReplaced(t *testing.T) {
 	for _, wr := range w.tv.writes {
 		got := maps.Clone(wr.Settings)
 		delete(got, "filterMovies")
-		got["allowTuners"] = int(got["allowTuners"].(float64))
+		if n, ok := got["allowTuners"].(float64); ok {
+			got["allowTuners"] = int(n)
+		}
 		if !maps.Equal(got, kept) {
 			t.Errorf("settings sent back %v, want the rest as listed: %v", wr.Settings, kept)
 		}
