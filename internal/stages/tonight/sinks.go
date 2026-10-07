@@ -236,7 +236,7 @@ func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarg
 		return errors.New("plex: no ratingKey map yet")
 	}
 	want := m.desired(picks)
-	c, ok := rememberedPlexCollection(ctx, px, t, s.ID)
+	c, ok := rememberedPlexCollection(ctx, px, s.ID)
 	if !ok {
 		titled, err := plexCollections(ctx, px, t)
 		if err != nil {
@@ -286,7 +286,7 @@ func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarg
 				return err
 			}
 			log.Info("collection created", "event", "plex_write", "action", "create", "id", s.ID, "items", len(want))
-			if c, ok = rememberedPlexCollection(ctx, px, t, s.ID); !ok {
+			if c, ok = rememberedPlexCollection(ctx, px, s.ID); !ok {
 				return fmt.Errorf("plex: collection %s not readable yet", s.ID)
 			}
 		}
@@ -388,7 +388,7 @@ func (c plexColl) owned() bool {
 
 // rememberedPlexCollection is the collection this stage made, if it is still a collection, whatever its title. A
 // deleted one answers 404; the title search after it surfaces a real outage.
-func rememberedPlexCollection(ctx context.Context, px *plex.Client, t plexTarget, id string) (plexColl, bool) {
+func rememberedPlexCollection(ctx context.Context, px *plex.Client, id string) (plexColl, bool) {
 	var mc struct {
 		Metadata []plexColl `json:"Metadata"`
 	}
