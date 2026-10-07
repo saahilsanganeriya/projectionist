@@ -245,9 +245,9 @@ quiet        = "10m" # a folder written to more recently is still arriving
 # free user) come last whatever this list's order, and are used for a hash match, or when no other provider has a
 # candidate; OpenSubtitles.com joins only when opensubtitles_api_key (a free consumer key), opensubtitles_username and
 # opensubtitles_password exist, and a subtitle both find is tried once. A spent daily limit waits for its reset across
-# runs without an alert. IMDb and TheTVDB ids come from TMDB. A title waits until every listed free
-# provider has answered (OpenSubtitles only when it is the title's one source), so drop a provider that cannot be
-# reached from this network (Subdl, 2026-10-05) from the list.
+# runs without an alert. IMDb and TheTVDB ids come from TMDB. A provider that is out holds back only a title none of
+# the others' subtitles is written for, which waits for it unrecorded; drop one that cannot be reached from this
+# network (Subdl, 2026-10-05) from the list.
 [stages.subtitles]
 every         = "6h"
 roots         = ["/volume1/media/Movies", "/volume1/media/TV"]
