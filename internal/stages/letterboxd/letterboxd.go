@@ -101,6 +101,7 @@ type Person struct {
 	ExportDir     string `toml:"export_dir"`      // "" = none; may be the owner's: only folders named for User are read
 	History       bool   `toml:"history"`         // as the owner's history
 	KeepHandAdded bool   `toml:"keep_hand_added"` // as the owner's keep_hand_added
+	Name          string `toml:"name"`            // shown on their own tonight shelf; "" = person, capitalized
 }
 
 // member is the owner or one person, as one run sees them. who is "" for the owner, whose state keeps the names it
