@@ -207,12 +207,15 @@ var (
 	releaseCut      = regexp.MustCompile(`(?i)(?:^|[ \[(])(?:S\d{1,2}(?:E\d+)?|season|series|complete|\d{3,4}p|web[ -]?(?:dl|rip)?|blu[ -]?ray|bdrip|brrip|hdtv|dvdrip|x26[45]|h[ .]?26[45]|hevc|remux|uhd|imax|extended|unrated|proper|repack)(?:$|[ \])\-])`)
 	yearToken       = regexp.MustCompile(`\b((?:19|20)\d\d)\b`)
 	bracketOpen     = regexp.MustCompile(`[\[(]`)
+	// a torrent site's tag in front of the release: a www. host, or any host in brackets ('www.SiteF.org  -  ',
+	// '[ www.SiteH.com ] - ', '[SITEB.MX]'). A bracket with no host in it is a title ('[REC]').
+	siteTag = regexp.MustCompile(`(?i)^(?:www\.[\w-]+\.[a-z]{2,}|\[ *(?:www\.)?[\w-]+\.[a-z]{2,} *\])[ ._\-–]*`)
 )
 
 // parseRelease reads (title, year) from a release name: 'Alien.1979.Theatrical.Cut.UHD.BluRay.2160p-X' → Alien, 1979;
 // 'A Beautiful Day In The Neighborhood (2019) [1080p]' → ..., 2019; 'Breaking.Bad.S01.1080p' → Breaking Bad, 0.
 func parseRelease(name string) (string, int) {
-	name = tagInName.ReplaceAllString(name, "")
+	name = siteTag.ReplaceAllString(tagInName.ReplaceAllString(name, ""), "")
 	if m := titleYearParens.FindStringSubmatch(name); m != nil && strings.TrimSpace(m[1]) != "" {
 		return strings.Trim(clean(m[1]), " -–"), atoi(m[2])
 	}
