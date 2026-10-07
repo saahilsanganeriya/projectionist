@@ -33,9 +33,11 @@
 // as the watch record has it, in Plex or Jellyfin, a film arriving on the NAS by the next run; it loses every film not
 // in movies_dir, every show not in tv_root (both by the {tmdb-N} in the folder names) and every item with no TMDB id,
 // also those they put there by hand, and the films this stage added (letterboxd_sink.added) once they are off their
-// Letterboxd watchlist. A title on the NAS that they put there by hand stays. A movies_dir or tv_root that is missing,
-// unreadable or holds no {tmdb-N} folder fails the run, so nothing is taken off. The owner's watchlist films not on the
-// NAS go to missing_file. Reviews are not synced: a Plex review is
+// Letterboxd watchlist. A title on the NAS that they put there by hand stays. A member with keep_hand_added (the
+// owner's key, or a person's in their people entry) loses only the films this stage added, once they are off the NAS
+// or off their Letterboxd watchlist: what they put there by hand stays, on the NAS or not. A movies_dir or tv_root that
+// is missing, unreadable or holds no {tmdb-N} folder fails the run, so nothing is taken off. The owner's watchlist films
+// not on the NAS go to missing_file. Reviews are not synced: a Plex review is
 // a community post whose privacy the poster cannot set (createReview takes none; other members' reviews carry ANYONE
 // or PLEX and are listed to non-friends), and Jellyfin has no per-user text field (UpdateUserItemDataDto).
 package letterboxd
@@ -76,10 +78,11 @@ type Options struct {
 	MissingFile    string        `toml:"missing_file"` // the owner's watchlist films not on the NAS; "" = none
 	SinkRefresh    time.Duration `toml:"sink_refresh"` // re-read each Plex watchlist this often (also before writing to it)
 
-	Person        string `toml:"person"`         // the owner in the watch record: his name in jfsync's users (jfsync alerts otherwise)
-	History       bool   `toml:"history"`        // also record the export and the feed's backlog, not just entries logged from now on
-	PlexWatchlist bool   `toml:"plex_watchlist"` // each member's Letterboxd watchlist → their own Plex watchlist (visible per their Plex privacy)
-	PlexUser      string `toml:"-"`              // a person's Plex Home user (Person.PlexUser); the owner's token is the server's
+	Person        string `toml:"person"`          // the owner in the watch record: his name in jfsync's users (jfsync alerts otherwise)
+	History       bool   `toml:"history"`         // also record the export and the feed's backlog, not just entries logged from now on
+	PlexWatchlist bool   `toml:"plex_watchlist"`  // each member's Letterboxd watchlist → their own Plex watchlist (visible per their Plex privacy)
+	PlexUser      string `toml:"-"`               // a person's Plex Home user (Person.PlexUser); the owner's token is the server's
+	KeepHandAdded bool   `toml:"keep_hand_added"` // the Plex watchlist loses only this stage's adds: titles put there by hand stay, on the NAS or not
 	PlexTVURL     string `toml:"plex_tv"`
 	DiscoverURL   string `toml:"discover_url"`
 
@@ -92,11 +95,12 @@ type Options struct {
 // Person is one more Letterboxd member whose diary becomes watch events for Person, a name in jfsync's users, and
 // whose watchlist goes to their own Plex watchlist when they name a Plex Home user. The missing-films file is the owner's.
 type Person struct {
-	Person    string `toml:"person"`
-	User      string `toml:"user"`       // their Letterboxd username
-	PlexUser  string `toml:"plex_user"`  // their Plex Home user: its username, or its title for a managed user (no username); "" = none
-	ExportDir string `toml:"export_dir"` // "" = none; may be the owner's: only folders named for User are read
-	History   bool   `toml:"history"`    // as the owner's history
+	Person        string `toml:"person"`
+	User          string `toml:"user"`            // their Letterboxd username
+	PlexUser      string `toml:"plex_user"`       // their Plex Home user: its username, or its title for a managed user (no username); "" = none
+	ExportDir     string `toml:"export_dir"`      // "" = none; may be the owner's: only folders named for User are read
+	History       bool   `toml:"history"`         // as the owner's history
+	KeepHandAdded bool   `toml:"keep_hand_added"` // as the owner's keep_hand_added
 }
 
 // member is the owner or one person, as one run sees them. who is "" for the owner, whose state keeps the names it
@@ -116,7 +120,7 @@ func (o Options) members() ([]member, error) {
 		persons[p.Person] = true
 		m := o
 		m.People = nil
-		m.Person, m.User, m.ExportDir, m.History, m.PlexUser = p.Person, p.User, p.ExportDir, p.History, p.PlexUser
+		m.Person, m.User, m.ExportDir, m.History, m.PlexUser, m.KeepHandAdded = p.Person, p.User, p.ExportDir, p.History, p.PlexUser, p.KeepHandAdded
 		m.MissingFile, m.PlexWatchlist = "", o.PlexWatchlist && p.PlexUser != ""
 		out = append(out, member{opt: m, who: p.Person})
 	}

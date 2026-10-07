@@ -4,10 +4,10 @@ package letterboxd
 //
 // The films on the watchlist are a stored snapshot, re-read every sink_refresh and before any write (a film the member
 // added or removed by hand since the last read must count), and each successful write updates its stored row, so a
-// rerun plans nothing. Shows and items with no TMDB id are not stored: each read takes off those not on the NAS, so
-// one added by hand leaves at the next read, and a removal of one that fails is sent again at the next read. Calls get
-// 3 attempts (2 s, 4 s apart); 3 failed calls in a row end the member's part of the run, and what is left stays in the
-// diff for the next run. A film whose writes fail in 3 runs in a row parks, with one alert.
+// rerun plans nothing. Shows and items with no TMDB id are not stored: each read takes off those not on the NAS (none
+// with keep_hand_added), so one added by hand leaves at the next read, and a removal of one that fails is sent again at
+// the next read. Calls get 3 attempts (2 s, 4 s apart); 3 failed calls in a row end the member's part of the run, and
+// what is left stays in the diff for the next run. A film whose writes fail in 3 runs in a row parks, with one alert.
 
 import (
 	"cmp"
@@ -460,8 +460,8 @@ func (r *run) played(ctx context.Context) (map[string]bool, error) {
 // syncWatchlist keeps the member's own Plex watchlist holding only titles on the NAS: it adds the films of their
 // Letterboxd watchlist that are on the NAS and that they have not watched (see unwatchedOnNAS), and takes off every
 // film not in movies, every show not in shows and every item with no TMDB id, whoever put it there, and the films it
-// added that are no longer wanted. A title on the NAS that the member put there by hand stays. It writes only against
-// a read made in the same run.
+// added that are no longer wanted. A title on the NAS that the member put there by hand stays; with keep_hand_added,
+// every title they put there by hand. It writes only against a read made in the same run.
 func (r *run) syncWatchlist(ctx context.Context, wants []want, movies, shows map[int]library.Folder) error {
 	if !r.opt.PlexWatchlist {
 		return nil
@@ -485,7 +485,7 @@ func (r *run) syncWatchlist(ctx context.Context, wants []want, movies, shows map
 		if haves, listing, read, err = r.snapshot(ctx, b, force); err != nil {
 			return fmt.Errorf("plex watchlist snapshot: %w", err)
 		}
-		add, remove := planMembers(desired, movies, haves)
+		add, remove := planMembers(desired, movies, haves, r.opt.KeepHandAdded)
 		if p, parked, err = r.settle(ctx, sinkPlan{add: add, remove: remove}, haves, retries); err != nil {
 			return err
 		}
@@ -493,7 +493,10 @@ func (r *run) syncWatchlist(ctx context.Context, wants []want, movies, shows map
 			break
 		}
 	}
-	strays := offNAS(listing, shows)
+	var strays []plexItem
+	if !r.opt.KeepHandAdded {
+		strays = offNAS(listing, shows)
+	}
 	r.count(app+".parked", parked)
 	r.count(app+".watchlist_add", len(p.add))
 	r.count(app+".watchlist_remove", len(p.remove)+len(strays))

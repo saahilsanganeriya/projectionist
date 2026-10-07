@@ -140,7 +140,7 @@ func TestPlanMembers(t *testing.T) {
 		3: {Item: "c", Member: true, Added: true},
 	}
 	onNAS := map[int]library.Folder{1: {}, 2: {}, 3: {}}
-	add, remove := planMembers(unwatchedOnNAS(wants, map[string]bool{movieItem(3): true}), onNAS, haves)
+	add, remove := planMembers(unwatchedOnNAS(wants, map[string]bool{movieItem(3): true}), onNAS, haves, false)
 	if !reflect.DeepEqual(add, []int{1}) || !reflect.DeepEqual(remove, []int{2, 3}) {
 		t.Errorf("add=%v remove=%v", add, remove)
 	}
