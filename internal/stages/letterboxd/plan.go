@@ -345,10 +345,10 @@ type have struct {
 	Added  bool   // put there by this stage, so this stage may take it out again
 }
 
-// planMembers diffs the films on the Plex watchlist against the desired set. It removes every film not on the NAS
-// (onNAS), whoever put it there, and those this stage added that are no longer desired: a film on the NAS that the
-// member put there by hand stays.
-func planMembers(desired map[int]bool, onNAS map[int]library.Folder, haves map[int]have) (add, remove []int) {
+// planMembers diffs the films on the Plex watchlist against the desired set. It removes those this stage added that
+// are no longer desired and, unless keepHandAdded, every film not on the NAS (onNAS), whoever put it there: a film on
+// the NAS that the member put there by hand stays, and with keepHandAdded every one they put there.
+func planMembers(desired map[int]bool, onNAS map[int]library.Folder, haves map[int]have, keepHandAdded bool) (add, remove []int) {
 	for _, id := range sortedKeys(desired) {
 		if !haves[id].Member {
 			add = append(add, id)
@@ -356,7 +356,7 @@ func planMembers(desired map[int]bool, onNAS map[int]library.Folder, haves map[i
 	}
 	for _, id := range sortedKeys(haves) {
 		_, there := onNAS[id]
-		if h := haves[id]; h.Member && (!there || h.Added && !desired[id]) {
+		if h := haves[id]; h.Member && (h.Added && !desired[id] || !there && !keepHandAdded) {
 			remove = append(remove, id)
 		}
 	}

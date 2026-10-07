@@ -1296,6 +1296,49 @@ func TestMissingOrEmptyRootRemovesNothing(t *testing.T) {
 	}
 }
 
+// Catches keep_hand_added ignored, or reaching a member whose entry lacks it. With it on Aurelia's entry only: a film,
+// a show or an item with no TMDB id that she put on her Plex watchlist by hand, none on the NAS, taken off; a film
+// this stage added for her (What Happened Was) kept once it is off the NAS; and, in the same runs, a title off the NAS
+// that the owner or Aaron put there by hand kept.
+func TestKeepHandAddedKeepsWhatThatMemberAddedByHand(t *testing.T) {
+	w := newWorld(t)
+	w.onNAS(whwFolder)
+	w.lb.serve("/zaurelia/rss/", herFeed())
+	w.lb.serve("/zaaron/rss/", herFeed())
+	w.lb.serve("/zaurelia/watchlist/", watchlistPage(gridEntry("What Happened Was... (1994)", "what-happened-was")))
+	w.lb.serve("/zaaron/watchlist/", watchlistPage(gridEntry("Licorice Pizza (2021)", "licorice-pizza")))
+	w.pt.set(fake.PlexToken, "show565", "m999") // all put there by hand; of these only show565 is on the NAS
+	w.pt.set(rogerToken, "m999", "show1399", "plex1")
+	w.pt.set(aaronToken, "m999", "show1399")
+	people := strings.Replace(threePeople, "plex_user = \"roger\"\n", "plex_user = \"roger\"\nkeep_hand_added = true\n", 1)
+	type check struct {
+		tok, item string
+		kept      bool
+		bug       string
+	}
+	step := func(name string, d time.Duration, checks ...check) {
+		t.Helper()
+		w.h.Now = w.h.Now.Add(d)
+		w.run(t, people)
+		for _, c := range checks {
+			if got := w.pt.list(c.tok); slices.Contains(strings.Split(got, ","), c.item) != c.kept {
+				t.Errorf("%s: Plex watchlist %s: %s", name, got, c.bug)
+			}
+		}
+	}
+	step("first run", 0,
+		check{rogerToken, "m18", true, "What Happened Was, on her Letterboxd watchlist and on the NAS, not added"},
+		check{rogerToken, "m999", true, "her film off the NAS, put there by hand, taken off"},
+		check{rogerToken, "show1399", true, "her show off the NAS, put there by hand, taken off"},
+		check{rogerToken, "plex1", true, "her item with no TMDB id, put there by hand, taken off"},
+		check{fake.PlexToken, "m999", false, "his film off the NAS, put there by hand, kept: her keep_hand_added reached the owner"},
+		check{aaronToken, "m999", false, "Aaron's film off the NAS, put there by hand, kept: her keep_hand_added reached him"},
+		check{aaronToken, "show1399", false, "Aaron's show off the NAS, put there by hand, kept: her keep_hand_added reached him"})
+	os.RemoveAll(filepath.Join(w.movies, whwFolder))
+	step("What Happened Was left the NAS", 30*time.Minute,
+		check{rogerToken, "m18", false, "What Happened Was, which this stage added for her, kept once it is off the NAS"})
+}
+
 // Catches a person whose Plex Home user projectionist cannot switch to (no user by that name; one behind a PIN, which
 // it cannot enter) failing without telling the owner, switched to anyway, or keeping his own watchlist from syncing.
 func TestHomeUserProblemsAlert(t *testing.T) {
