@@ -93,22 +93,22 @@ func TestUnreadableRestrictionsHoldShelvesAndAlertOnce(t *testing.T) {
 	}
 }
 
-// Catches a shelf left up where an account that does not exclude it would see it: a new friend whose restrictions
-// cannot be written must take down Aurelia's and Aaron's shelves (and not the owner's), with one alert naming the
-// friend, none 30 min later and no shelf made again meanwhile; once the friend's restrictions take the labels, the
-// shelves come back.
+// Catches a shelf left up where an account that does not exclude it would see it: once Aurelia's restrictions lose
+// the labels (someone cleared them) and cannot take them again, her own shelf and Aaron's (which she could see) must
+// come down, not the owner's, with one alert naming her, none 30 min later and no shelf made again meanwhile; once her
+// restrictions take the labels, both shelves come back.
 func TestUnwritableRestrictionsTakeDownWhatTheyWouldShow(t *testing.T) {
 	w := newOwn(t, threeWithPlex)
 	w.ai.script(threeDays...)
 	w.run(t)
 	w.tv.mu.Lock()
-	w.tv.shares = append(w.tv.shares, shareOf("machine1", 222, "newfriend", "newfriend", ""))
-	w.tv.failWrite["newfriend"] = true
+	w.tv.shares[0]["sharingSettings"] = shareOf("machine1", 578, "roger", nil, "")["sharingSettings"]
+	w.tv.failWrite["roger"] = true
 	w.tv.mu.Unlock()
 	w.h.Now = w.h.Now.Add(30 * time.Minute)
 	rep := w.run(t)
-	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "newfriend") {
-		t.Fatalf("alerts %q, want one naming newfriend\n%s", rep.Alerts, w.logs)
+	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "restrictions of roger") {
+		t.Fatalf("alerts %q, want one naming roger\n%s", rep.Alerts, w.logs)
 	}
 	if w.shelfItems("Tonight · Aurelia") != "" || w.shelfItems("Tonight · Aaron") != "" || w.shelfItems("Tonight · Saahil") == "" {
 		t.Fatalf("shelves: his %q, Aurelia's %q, Aaron's %q; want his alone", w.shelfItems("Tonight · Saahil"),
@@ -120,19 +120,19 @@ func TestUnwritableRestrictionsTakeDownWhatTheyWouldShow(t *testing.T) {
 			w.shelfItems("Tonight · Aurelia"), len(w.plex.shelves))
 	}
 	w.tv.mu.Lock()
-	w.tv.failWrite["newfriend"] = false
+	w.tv.failWrite["roger"] = false
 	w.tv.mu.Unlock()
 	w.h.Now = w.h.Now.Add(30 * time.Minute)
 	w.run(t)
-	if w.shelfItems("Tonight · Aurelia") != plexKeys(559907, 954, 13) || w.tv.filter("newfriend") != "label!=Tonight-aaron,Tonight-roger,Tonight-saahil" {
-		t.Fatalf("writable again: Aurelia's shelf %q, newfriend's restrictions %q\n%s", w.shelfItems("Tonight · Aurelia"),
-			w.tv.filter("newfriend"), w.logs)
+	if w.shelfItems("Tonight · Aurelia") != plexKeys(559907, 954, 13) || w.shelfItems("Tonight · Aaron") != plexKeys(843, 419704, 10948) {
+		t.Fatalf("writable again: Aurelia's shelf %q, Aaron's %q\n%s", w.shelfItems("Tonight · Aurelia"), w.shelfItems("Tonight · Aaron"), w.logs)
 	}
 }
 
 // Catches the old private Plex playlists left behind, or the wrong ones removed: once a person's shelf is up, the
-// playlist an earlier build made in their account (tracked by id) must be deleted, as them; a person whose shelf is
-// held back (Aaron: the server is not shared with him here) keeps theirs; a playlist of hers with our title stays.
+// playlist an earlier build made in their account (tracked by id, in the state 7e548a9 wrote) must be deleted, as them;
+// a person whose shelf is held back (Aaron: the server is not shared with him here) keeps theirs; a playlist of hers
+// with our title stays.
 func TestOwnPlaylistsAreRemovedOnceTheShelfIsUp(t *testing.T) {
 	w := newOwn(t, threeWithPlex)
 	w.px.add(fake.PlexToken, "5003", "Tonight", rk(680))
@@ -140,11 +140,11 @@ func TestOwnPlaylistsAreRemovedOnceTheShelfIsUp(t *testing.T) {
 	w.px.add(userToken("roger"), "4000", "Tonight", rk(389)) // hers
 	w.px.add(userToken("aaron"), "5002", "Tonight", rk(954))
 	w.tv.shares = slices.DeleteFunc(w.tv.shares, func(s map[string]any) bool { return s["invitedId"] == 372 })
-	st := state{shelf: shelf{Recent: map[int]string{}}, Spend: map[string]float64{}, Persons: map[string]*own{}}
+	deployed := map[string]any{"recent": map[string]string{}, "spend": map[string]float64{}, "persons": map[string]any{}} // as 7e548a9 left it
 	for person, id := range map[string]string{"saahil": "5003", "roger": "5001", "aaron": "5002"} {
-		st.Persons[person] = &own{Playlist: sinkState{ID: id}}
+		deployed["persons"].(map[string]any)[person] = map[string]any{"recent": map[string]string{}, "plex": map[string]any{"id": id, "synced": []string{rk(13)}}}
 	}
-	if err := w.h.Env.Store.PutJSON(context.Background(), name, "state", st); err != nil {
+	if err := w.h.Env.Store.PutJSON(context.Background(), name, "state", deployed); err != nil {
 		t.Fatal(err)
 	}
 	w.ai.script(threeDays...)

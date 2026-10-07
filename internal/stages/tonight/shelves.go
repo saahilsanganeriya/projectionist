@@ -295,22 +295,13 @@ func labelValues(g string) []string {
 
 // ---- taking a shelf down, and the old playlists ----
 
-// takeDown removes person's shelf, the collection this stage made and nothing else, so no account that does not
-// exclude it can see it; it is made again once every account does.
+// takeDown removes person's shelf, so no account that does not exclude it can see it; it is made again once every
+// account does.
 func takeDown(ctx context.Context, log *slog.Logger, px *plex.Client, person string, s *sinkState) error {
-	var mc struct {
-		Metadata []plexColl `json:"Metadata"`
-	}
-	switch err := px.GetJSON(ctx, "/library/metadata/"+s.ID, &mc); {
-	case errors.Is(err, plex.ErrNotFound):
-	case err != nil:
+	if err := px.Do(ctx, http.MethodDelete, "/library/collections/"+s.ID); err != nil && !errors.Is(err, plex.ErrNotFound) {
 		return err
-	case len(mc.Metadata) == 1 && mc.Metadata[0].Type == "collection" && mc.Metadata[0].owned():
-		if err := px.Do(ctx, http.MethodDelete, "/library/collections/"+s.ID); err != nil && !errors.Is(err, plex.ErrNotFound) {
-			return err
-		}
-		log.Info("own shelf taken down", "event", "plex_write", "action", "delete", "person", person, "id", s.ID)
 	}
+	log.Info("own shelf taken down", "event", "plex_write", "action", "delete", "person", person, "id", s.ID)
 	*s = sinkState{Skip: s.Skip}
 	return nil
 }
