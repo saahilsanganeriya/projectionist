@@ -3,7 +3,7 @@
 //	projectionist serve [-config FILE]          scheduler + HTTP until SIGTERM
 //	projectionist run [-config FILE] STAGE      one run of one stage; exit 1 on alert or error
 //	projectionist stages                        list the stages this binary knows
-//	projectionist align-worker [-server URL] [-lanes N] [-ffmpeg DIR] [-alass FILE] [-work DIR]
+//	projectionist align-worker [-server URL] [-via CMD] [-lanes N] [-ffmpeg DIR] [-alass FILE] [-work DIR]
 //	                                            on another machine: align the subtitles queue's titles until Ctrl-C
 package main
 
@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 	_ "time/tzdata" // stage windows need zoneinfo; the slim runtime image may not ship it
@@ -54,7 +55,9 @@ func main() {
 		if err != nil {
 			alass = filepath.Join(filepath.Dir(exe), "alass", "bin", "alass-cli")
 		}
-		fs.StringVar(&worker.Server, "server", "http://127.0.0.1:18097", "the NAS's listener, through the SSH tunnel")
+		fs.StringVar(&worker.Server, "server", "http://127.0.0.1:18097", "the NAS's listener: a forwarded port, or with -via its address on the NAS")
+		fs.Func("via", "a command that runs a command on the NAS (e.g. ~/.ssh/bin/nas): each connection is a relay it runs there",
+			func(v string) error { worker.Via = strings.Fields(v); return nil })
 		fs.IntVar(&worker.Lanes, "lanes", 8, "titles aligned at once")
 		fs.StringVar(&worker.FFmpegDir, "ffmpeg", filepath.Dir(ffmpeg), "directory holding ffmpeg")
 		fs.StringVar(&worker.Alass, "alass", alass, "alass-cli, built from the NAS image's alass commit")
@@ -98,7 +101,7 @@ func alignWorker(o subtitles.WorkerOptions) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	o.Log.Info("align worker started", "event", "start", "server", o.Server, "lanes", o.Lanes, "ffmpeg", o.FFmpegDir, "alass", o.Alass, "work", o.Work)
+	o.Log.Info("align worker started", "event", "start", "server", o.Server, "via", strings.Join(o.Via, " "), "lanes", o.Lanes, "ffmpeg", o.FFmpegDir, "alass", o.Alass, "work", o.Work)
 	if err := subtitles.Work(ctx, o); err != nil {
 		o.Log.Error("align worker", "event", "align_worker_error", "err", err)
 		return 1

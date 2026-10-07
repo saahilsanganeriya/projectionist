@@ -1,8 +1,8 @@
 // Package plex is a small Plex Media Server client. Plex's API shares one SQLite database with its scanner and
 // stalls during scans, so it is a sink, never a data source: stages use it for writes of state that lives in Plex
 // (preferences, posters, collections), live sessions, and the owner's request lists, each call bounded by a short
-// deadline that never fails a run. Settings are read from Preferences.xml directly (ReadPrefs). No stage asks Plex
-// to rescan: its filesystem events see every change.
+// deadline that never fails a run. Settings are read from Preferences.xml directly (ReadPrefs). One stage asks Plex to
+// scan: subtitles, a partial scan of each folder it wrote a sidecar to, which Plex's own watcher does not add.
 package plex
 
 import (

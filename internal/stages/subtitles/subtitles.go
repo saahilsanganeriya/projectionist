@@ -2006,7 +2006,7 @@ func (r *run) scanPlex(ctx context.Context, folders []string) []string {
 			r.env.Log.Warn("no Plex library holds the folder: not scanned", "event", "plex_no_section", "folder", dir)
 			continue
 		}
-		// QueryEscape writes a space as "+", which Plex keeps as a plus sign.
+		// QueryEscape writes a space as "+", which not every server reads as one; %20 every server does.
 		path := strings.ReplaceAll(url.QueryEscape(dir), "+", "%20")
 		if err := r.env.Plex.Do(ctx, http.MethodGet, "/library/sections/"+key+"/refresh?path="+path); err != nil {
 			r.env.Log.Warn("plex not asked to scan; kept queued", "event", "plex_error", "folder", dir, "err", err)

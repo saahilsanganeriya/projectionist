@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -48,22 +49,29 @@ case "$*" in *matroska*) printf media;; *framecrc*) cat "`+ff+`/ran.framecrc";; 
 	return rm
 }
 
-// worker runs the real align worker against rm until the test ends; it returns once the NAS has heard from it.
-func (rm *remote) worker(t *testing.T, f *fixture) {
+// worker runs the real align worker against rm until the test ends (through via, when given); it returns once the NAS
+// has heard from it.
+func (rm *remote) worker(t *testing.T, f *fixture, via ...string) {
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
+	var err error
+	done := make(chan struct{})
 	go func() {
-		done <- Work(ctx, WorkerOptions{Server: rm.srv.URL, Lanes: 2, FFmpegDir: f.h.Env.FFmpeg.Dir,
+		err = Work(ctx, WorkerOptions{Server: rm.srv.URL, Via: via, Lanes: 2, FFmpegDir: f.h.Env.FFmpeg.Dir,
 			Alass: filepath.Join(f.h.Env.FFmpeg.Dir, "alass"), Work: t.TempDir(), Log: slog.New(slog.DiscardHandler)})
+		close(done)
 	}()
 	t.Cleanup(func() {
 		cancel()
-		if err := <-done; err != nil {
+		if <-done; err != nil {
 			t.Errorf("worker: %v", err)
 		}
 	})
 	for !rm.b.connected() {
-		time.Sleep(time.Millisecond)
+		select {
+		case <-done:
+			t.Fatalf("the worker ended before the NAS heard from it: %v", err)
+		case <-time.After(time.Millisecond):
+		}
 	}
 }
 
@@ -179,6 +187,20 @@ func relative(m map[string]string, lib string) map[string]string {
 		out[strings.TrimPrefix(k, lib)] = v
 	}
 	return out
+}
+
+// Catches the worker unable to reach the NAS through a relay (the NAS's sshd refuses port forwarding): requests or a
+// media stream cut short, or a connection the relay does not close.
+func TestRemoteWorkerThroughARelay(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("no python3 for the relay")
+	}
+	f := newFixture(t)
+	rm := f.remote(t, 2)
+	rm.worker(t, f, "sh", "-c")
+	if f.run(t); f.outcomes()[f.path(ran)] != "retimed" || f.outcomes()[f.path(clerks)] != "retimed" {
+		t.Errorf("through the relay: Ran %q, Clerks %q; want both retimed", f.outcomes()[f.path(ran)], f.outcomes()[f.path(clerks)])
+	}
 }
 
 // Catches a lease that never answers losing its title (recorded, or out of the queue), holding the run past the lease

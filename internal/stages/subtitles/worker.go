@@ -8,8 +8,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -22,7 +25,10 @@ import (
 
 // WorkerOptions configure an align worker (projectionist align-worker).
 type WorkerOptions struct {
-	Server    string // the NAS's listener, through the SSH tunnel: http://127.0.0.1:18097
+	Server string // the NAS's listener: through a forwarded port, or with Via its address on the NAS
+	// Via, when set, is a command prefix that runs a command on the NAS (e.g. ~/.ssh/bin/nas): each connection to Server
+	// is a relay it runs there, for an sshd that refuses port forwarding (the NAS's does).
+	Via       []string
 	Lanes     int    // titles aligned at once
 	FFmpegDir string // holds ffmpeg
 	Alass     string
@@ -53,9 +59,13 @@ func Work(ctx context.Context, o WorkerOptions) error {
 		}
 	}()
 	w := &worker{opt: o, hc: &http.Client{}}
+	if len(o.Via) > 0 {
+		w.hc.Transport = &http.Transport{MaxConnsPerHost: max(1, o.Lanes) + 1, // each one an ssh session
+			DialContext: func(context.Context, string, string) (net.Conn, error) { return dialVia(o.Via, o.Server) }}
+	}
 	w.env = &stage.Env{Log: o.Log, Store: st, FFmpeg: config.FFmpeg{Dir: o.FFmpegDir}, Now: func() time.Time { return time.Now().UTC() }}
 	if err := w.ping(ctx); err != nil {
-		return fmt.Errorf("the NAS is not answering at %s (is the SSH tunnel up, and align_remote_lanes set?): %w", o.Server, err)
+		return fmt.Errorf("the NAS is not answering at %s (the tunnel or -via, and align_remote_lanes set?): %w", o.Server, err)
 	}
 	go func() { // a worker whose lanes are all busy still counts as connected
 		tick := time.NewTicker(connectedFor / 3)
@@ -192,6 +202,72 @@ func (p nasProvider) Download(ctx context.Context, c Candidate) (string, error) 
 }
 
 // ---- HTTP to the NAS ----
+
+// relay copies its stdin to a TCP connection and the connection to its stdout (Python 3.8 is on DSM; nc is not).
+const relay = `import socket,sys,threading
+s=socket.create_connection((sys.argv[1],int(sys.argv[2])))
+def up():
+ i=sys.stdin.buffer
+ while True:
+  b=i.read1(65536)
+  if not b:
+   s.shutdown(socket.SHUT_WR);return
+  s.sendall(b)
+threading.Thread(target=up,daemon=True).start()
+o=sys.stdout.buffer
+while True:
+ b=s.recv(65536)
+ if not b:break
+ o.write(b);o.flush()`
+
+// dialVia connects to server's host and port as the NAS sees them, through relay run by the via command.
+func dialVia(via []string, server string) (net.Conn, error) {
+	u, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.Command(via[0], append(via[1:], fmt.Sprintf("python3 -c '%s' %s %s", relay, u.Hostname(), u.Port()))...)
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	return &viaConn{cmd: cmd, Reader: out, WriteCloser: in}, nil
+}
+
+// viaConn is a connection carried by a relay's stdin and stdout; closing it ends the relay.
+type viaConn struct {
+	cmd *exec.Cmd
+	io.Reader
+	io.WriteCloser
+	once sync.Once
+}
+
+func (c *viaConn) Close() error {
+	c.once.Do(func() {
+		c.WriteCloser.Close()
+		c.cmd.Process.Kill()
+		c.cmd.Wait()
+	})
+	return nil
+}
+
+type viaAddr struct{}
+
+func (viaAddr) Network() string { return "via" }
+func (viaAddr) String() string  { return "via" }
+
+func (c *viaConn) LocalAddr() net.Addr              { return viaAddr{} }
+func (c *viaConn) RemoteAddr() net.Addr             { return viaAddr{} }
+func (c *viaConn) SetDeadline(time.Time) error      { return nil }
+func (c *viaConn) SetReadDeadline(time.Time) error  { return nil }
+func (c *viaConn) SetWriteDeadline(time.Time) error { return nil }
 
 func (w *worker) do(ctx context.Context, method, path string, body []byte) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, w.opt.Server+path, bytes.NewReader(body))
