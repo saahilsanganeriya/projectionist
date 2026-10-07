@@ -43,10 +43,15 @@
 // times it, and a queued title is searched again on the same schedule. A title is recorded only once TMDB and every
 // provider it needs answered (and alass ran, where it is needed); else it is deferred, not recorded, and an alert names
 // the cause (a spent quota, OpenSubtitles' downloads, OpenSubtitles.com's, or Subdl's or SubSource's daily limit, is
-// routine and only logged, and waits for its reset across runs). Each run also refreshes sub_stats.py's TSV over the
-// whole library. Jellyfin hears of each new sidecar, and Plex of its folder, through queues kept in the store: Plex
-// gets a partial scan of the folder (GET /library/sections/<id>/refresh?path=), as its own watcher does not add a
-// sidecar beside a video it holds already; a push Plex does not take is retried at the next push, never failing a run.
+// routine and only logged, and waits for its reset across runs). alass exiting non-zero on a candidate (one it cannot
+// parse, say) fails that title alone: recorded alass_failed, with the last lines alass printed, and tried again on the
+// same schedule, its candidate never refused for it. Only alass failing on alassTrip titles in a row, or not starting at
+// all, makes the titles behind them that need alass wait for the next run, with one alert. Each run also refreshes
+// sub_stats.py's TSV over the whole library. Jellyfin hears of each new sidecar, and Plex of its video, through queues
+// kept in the store: Plex refreshes the item(s) whose media part the video is (PUT /library/metadata/<ratingKey>/refresh,
+// the ratingKey read from Plex's own database, plex_db, opened read-only), as neither its watcher nor a partial scan of
+// the folder attaches a new sidecar beside a video it holds already; a push Plex does not take is retried at the next
+// push, never failing a run.
 //
 // With align_remote_lanes set, the queue hands its titles to align workers on another machine while one has called in
 // the last minute (remote.go): the NAS streams only the tracks the alignment reads, serves the candidates under the
@@ -63,6 +68,7 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"database/sql"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -82,6 +88,8 @@ import (
 	"syscall"
 	"time"
 
+	_ "modernc.org/sqlite" // read-only lookups in Plex's library database
+
 	"projectionist/internal/config"
 	"projectionist/internal/fsx"
 	"projectionist/internal/library"
@@ -96,6 +104,7 @@ const (
 	userAgent  = "projectionist v0.1"
 	maxTries   = 4    // candidates downloaded per title, on each route (the queue's: per provider)
 	alassAgree = 0.75 // alass: share of cues that must sit within 0.5 s of the median shift (6 of 8 chunks in align)
+	alassTrip  = 3    // titles in a row alass fails on before the rest of the run's titles that need it wait
 	rescueMax  = 300  // ms: a rescued subtitle's median distance to the captions (the gate's bar)
 	// A release match cheapCheck refused waits this long in http_cache for its alignment, so it is downloaded once.
 	keptFor = 90 * 24 * time.Hour
@@ -135,6 +144,9 @@ type Options struct {
 	// (its path below the root, the root's own name first), which must exist: unmounted, it would be the container's own.
 	VerifyPerRun int    `toml:"verify_per_run"`
 	ArchiveDir   string `toml:"archive_dir"`
+	// Plex's library database, read-only: the item (ratingKey) whose media part a video is, refreshed once it has a new
+	// sidecar. A live database in WAL mode, so a read-write mount: SQLite's readers share its -shm.
+	PlexDB string `toml:"plex_db"`
 }
 
 func defaults() Options {
@@ -154,6 +166,7 @@ func defaults() Options {
 		SampleLength:  90 * time.Second,
 		VerifyPerRun:  300,
 		ArchiveDir:    "/volume1/PlexMediaServer/_archive/subtitles",
+		PlexDB:        "/volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db",
 		UndoLogs: []string{"/volume1/PlexMediaServer/rename/undo.tsv", "/volume1/PlexMediaServer/rename/undo_auto.tsv",
 			"/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv",
 			"/volume1/media/.projectionist/rename/undo.tsv"},
@@ -223,16 +236,17 @@ type run struct {
 	providers []Provider
 	undo      func() map[string]string // video path -> its first path in the rename logs, read on first need
 
-	mu        sync.Mutex
-	rep       *stage.Report
-	written   int
-	alerted   map[string]bool
-	alassDown bool                        // alass or the hearing failed on a title this run: the titles behind it wait for the next run
-	window    config.Window               // sampled mode: when the queue may align
-	pools     map[string][]Candidate      // titles queued this run: their candidates, so the queue need not search again
-	reading   sync.Mutex                  // one title at a time reads its windows
-	remote    *broker                     // align_remote_lanes set: the align workers
-	media     func(context.Context) error // an align worker: streams the title's tracks from the NAS, where it reads the video
+	mu         sync.Mutex
+	rep        *stage.Report
+	written    int
+	alerted    map[string]bool
+	alassDown  string                      // why the titles that need alass wait for the next run ("" while they need not)
+	alassFails int                         // titles in a row whose alignment alass failed
+	window     config.Window               // sampled mode: when the queue may align
+	pools      map[string][]Candidate      // titles queued this run: their candidates, so the queue need not search again
+	reading    sync.Mutex                  // one title at a time reads its windows
+	remote     *broker                     // align_remote_lanes set: the align workers
+	media      func(context.Context) error // an align worker: streams the title's tracks from the NAS, where it reads the video
 
 	apps   sync.Mutex // the Jellyfin and Plex queues
 	pushed time.Time
@@ -306,7 +320,7 @@ feed:
 			o.logout(ctx)
 		}
 	}
-	r.tellApps(ctx, "", true)
+	r.tellApps(ctx, "", "", true)
 	verifying := 0
 	for _, t := range due {
 		if t.verify {
@@ -1365,8 +1379,25 @@ func (r *run) settled(p string) bool {
 }
 
 // finish writes an alignment's accepted subtitle and records the outcome, for an alignment here or a worker's; a
-// verify title's alignment of its own sidecars is settled instead (settle).
+// verify title's alignment of its own sidecars is settled instead (settle). The alassTrip-th title in a row that alass
+// failed on makes the titles behind it that need alass wait for the next run; any other verdict starts the count again.
 func (r *run) finish(ctx context.Context, t *title, o outcome) {
+	r.mu.Lock()
+	trip := false
+	switch {
+	case o.result == "alass_failed":
+		r.alassFails++
+		if trip = r.alassFails == alassTrip; trip {
+			r.alassDown = fmt.Sprintf("alass failed on %d titles in a row this run", alassTrip)
+		}
+	case o.result != "deferred":
+		r.alassFails = 0
+	}
+	r.mu.Unlock()
+	if trip {
+		r.alertOnce("alass-failed", "alass failed on %d titles in a row (titles without an English image track wait for the next run); the last, %s: %s",
+			alassTrip, t.path, o.detail)
+	}
 	switch {
 	case t.verify:
 		o = r.settle(ctx, t, o)
@@ -1504,12 +1535,16 @@ func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 		if ctx.Err() != nil {
 			return outcome{result: "deferred"}
 		}
-		if ref.broken != nil { // no candidate is refused for it: this title and those behind it wait for the next run
-			r.mu.Lock()
-			r.alassDown = true
+		if ref.broken != nil { // no candidate is refused for it
+			var exit *exec.ExitError
+			if errors.As(ref.broken, &exit) {
+				return outcome{result: "alass_failed", detail: ref.broken.Error(), fields: attempt}
+			}
+			r.mu.Lock() // it did not start, so it would not for any title: they wait for the next run
+			r.alassDown = "alass could not run this run"
 			r.mu.Unlock()
-			r.alertOnce("alass-failed", "alass failed (titles without an English image track wait for the next run): %v", ref.broken)
-			return outcome{result: "deferred", detail: "alass failed: " + ref.broken.Error()}
+			r.alertOnce("alass-failed", "alass could not run (titles without an English image track wait for the next run): %v", ref.broken)
+			return outcome{result: "deferred", detail: "alass could not run: " + ref.broken.Error()}
 		}
 		if !ok {
 			r.event(ctx, t.path, outcome{result: "rejected_misaligned", fields: attempt})
@@ -1633,7 +1668,7 @@ func (r *run) reference(ctx context.Context, t *title) (reference, error) {
 		// This title's audio or ffmpeg itself: the title is recorded, and the titles behind it wait for the next run
 		// rather than each fail the same way and lose a week.
 		r.mu.Lock()
-		r.alassDown = true
+		r.alassDown = "the hearing failed on another title this run"
 		r.mu.Unlock()
 		r.alertOnce("hearing-failed", "hearing the audio failed (titles without an English image track wait for the next run): %v", err)
 		return reference{why: "the audio could not be heard: " + err.Error()}, nil
@@ -1641,19 +1676,16 @@ func (r *run) reference(ctx context.Context, t *title) (reference, error) {
 	return ref, nil
 }
 
-// alassOut is why alass cannot run now ("" when it can): missing (alerted once), or it failed on a title this run.
+// alassOut is why alass cannot run now ("" when it can): missing (alerted once), or alassDown.
 func (r *run) alassOut() string {
 	r.mu.Lock()
 	down := r.alassDown
 	r.mu.Unlock()
-	switch {
-	case !fileExists(r.opt.Alass):
+	if !fileExists(r.opt.Alass) {
 		r.alertOnce("alass", "alass not found at %s: titles without an English image track wait for it", r.opt.Alass)
 		return "alass missing"
-	case down:
-		return "alass or the hearing failed on another title this run"
 	}
-	return ""
+	return down
 }
 
 // hear finds the speech in the default audio track, decoded once per title and reused per candidate: the voice band of
@@ -1742,21 +1774,34 @@ func (r *run) realign(ctx context.Context, ref *reference, txt string) (string, 
 	if err := os.WriteFile(in, []byte(txt), 0o644); err != nil {
 		return "", 0, err
 	}
-	stdout, err := r.cmd(ctx, nil, r.opt.Alass, ref.speech, in, out)
-	if err != nil {
-		return "", 0, err
+	var stdout bytes.Buffer
+	if err := r.cmdTo(ctx, nil, 0, &stdout, r.opt.Alass, ref.speech, in, out); err != nil {
+		return "", 0, fmt.Errorf("%w: %s", err, lastLines(stdout.Bytes(), 8)) // alass-cli prints its errors on stdout
 	}
 	aligned, err := os.ReadFile(out)
 	if err != nil {
 		return "", 0, err
 	}
 	ratio := 1.0
-	if m := ratioRe.FindStringSubmatch(string(stdout)); m != nil && m[2] != "" {
+	if m := ratioRe.FindStringSubmatch(stdout.String()); m != nil && m[2] != "" {
 		a, _ := strconv.ParseFloat(m[1], 64)
 		b, _ := strconv.ParseFloat(m[2], 64)
 		ratio = a / b
 	}
 	return string(aligned), ratio, nil
+}
+
+// lastLines is the last n lines of a helper's output that hold text, joined by " | ", each as a terminal shows it: alass
+// redraws its progress bars with \r.
+func lastLines(out []byte, n int) string {
+	var lines []string
+	for _, l := range strings.Split(string(out), "\n") {
+		l = strings.TrimRight(l, "\r")
+		if l = strings.TrimSpace(l[strings.LastIndexByte(l, '\r')+1:]); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	return strings.Join(lines[max(0, len(lines)-n):], " | ")
 }
 
 // fit lines a candidate up with the reference; it returns the text to write and kept|retimed, or ok=false.
@@ -1816,7 +1861,7 @@ func (r *run) fit(ctx context.Context, ref *reference, txt string, attempt map[s
 // Ugly: +0.5 s, then -0.46 s, a median 461 ms from its captions). Without alass it does nothing.
 func (r *run) rescue(ctx context.Context, t *title, ref *reference, txt string, attempt map[string]any) (string, string, bool) {
 	r.mu.Lock()
-	down := r.alassDown
+	down := r.alassDown != ""
 	r.mu.Unlock()
 	if ref.deaf || down || len(t.info.Audio) == 0 || !fileExists(r.opt.Alass) {
 		return "", "", false
@@ -1886,7 +1931,7 @@ func (r *run) write(ctx context.Context, t *title, data []byte, result string, f
 	r.written++
 	r.mu.Unlock()
 	r.env.Log.Info("subtitle written", "event", "subtitle_written", "item", t.path, "result", result, "sidecar", filepath.Base(dest))
-	r.tellApps(ctx, dest, false)
+	r.tellApps(ctx, t.path, dest, false)
 	return outcome{result: result, detail: filepath.Base(dest), fields: fields, wrote: true}
 }
 
@@ -2022,6 +2067,9 @@ func (r *run) cmdTo(ctx context.Context, t *title, limit int64, w io.Writer, bin
 		if len(msg) > 300 {
 			msg = msg[len(msg)-300:]
 		}
+		if msg == "" {
+			return fmt.Errorf("%s: %w", filepath.Base(bin), err)
+		}
 		return fmt.Errorf("%s: %w: %s", filepath.Base(bin), err, msg)
 	}
 	return nil
@@ -2075,31 +2123,30 @@ func (r *run) event(ctx context.Context, path string, o outcome) {
 
 const pushEvery = 15 * time.Minute // a backlog run lasts days: Jellyfin and Plex hear of its sidecars at least this often
 
-// tellApps queues a new sidecar (path set) in the store at once, so a run stopped early loses none: its path for
-// Jellyfin, its folder for Plex (whose own watcher does not add a sidecar beside a video it holds already). It pushes
-// both queues when forced (the end of a run) or when the last push is pushEvery old; what an app did not take waits
-// for the next push.
-func (r *run) tellApps(ctx context.Context, path string, force bool) {
+// tellApps queues a new sidecar (sidecar set, beside video) in the store at once, so a run stopped early loses none:
+// its path for Jellyfin, its video for Plex (whose item is refreshed: see the package doc). It pushes both queues when
+// forced (the end of a run) or when the last push is pushEvery old; what an app did not take waits for the next push.
+func (r *run) tellApps(ctx context.Context, video, sidecar string, force bool) {
 	if r.opt.OutputDir != "" {
 		return
 	}
 	r.apps.Lock()
 	defer r.apps.Unlock()
 	keep := context.WithoutCancel(ctx) // a sidecar written as the run stops still joins the queues
-	var files, folders []string
+	var files, videos []string
 	if _, err := r.env.Store.GetJSON(keep, name, "jellyfin_pending", &files); err != nil {
 		r.env.Log.Error("jellyfin queue unreadable", "event", "store_error", "err", err)
 	}
-	if _, err := r.env.Store.GetJSON(keep, name, "plex_pending", &folders); err != nil {
+	if _, err := r.env.Store.GetJSON(keep, name, "plex_pending", &videos); err != nil {
 		r.env.Log.Error("plex queue unreadable", "event", "store_error", "err", err)
 	}
-	if path != "" {
-		files = append(files, path)
-		if dir := filepath.Dir(path); !slices.Contains(folders, dir) {
-			folders = append(folders, dir)
+	if sidecar != "" {
+		files = append(files, sidecar)
+		if !slices.Contains(videos, video) {
+			videos = append(videos, video)
 		}
 	}
-	if len(files)+len(folders) == 0 {
+	if len(files)+len(videos) == 0 {
 		return
 	}
 	if ctx.Err() == nil && (force || r.env.Now().Sub(r.pushed) >= pushEvery) {
@@ -2111,74 +2158,88 @@ func (r *run) tellApps(ctx context.Context, path string, force bool) {
 				files = nil
 			}
 		}
-		folders = r.scanPlex(ctx, folders)
+		videos = r.refreshPlex(ctx, videos)
 	}
 	if err := r.env.Store.PutJSON(keep, name, "jellyfin_pending", files); err != nil {
 		r.env.Log.Error("jellyfin queue not saved", "event", "store_error", "err", err)
 	}
-	if err := r.env.Store.PutJSON(keep, name, "plex_pending", folders); err != nil {
+	if err := r.env.Store.PutJSON(keep, name, "plex_pending", videos); err != nil {
 		r.env.Log.Error("plex queue not saved", "event", "store_error", "err", err)
 	}
 }
 
-// plexBox bounds one push's scan requests: the push holds every sidecar write (the first one carries the folders of
+// plexBox bounds one push's refresh requests: the push holds every sidecar write (the first one carries the videos of
 // every sidecar written before), and Plex's API stalls while it scans.
 const plexBox = 30 * time.Second
 
-// scanPlex asks Plex for a partial scan of each folder, in the library section that holds it, until Plex refuses one or
-// plexBox is up, and returns the folders to ask at the next push. A folder no section holds is dropped.
-func (r *run) scanPlex(ctx context.Context, folders []string) []string {
-	if len(folders) == 0 {
+// refreshPlex asks Plex to refresh the item(s) whose media part each video is, until Plex refuses one or plexBox is up,
+// and returns the videos to ask for at the next push. A video Plex holds no item for is dropped: the scan that adds it
+// attaches its sidecars.
+func (r *run) refreshPlex(ctx context.Context, videos []string) []string {
+	if len(videos) == 0 {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, plexBox)
 	defer cancel()
-	var mc struct {
-		Directory []struct {
-			Key      string `json:"key"`
-			Location []struct {
-				Path string `json:"path"`
-			} `json:"Location"`
-		} `json:"Directory"`
+	items, err := plexItems(ctx, r.opt.PlexDB, videos)
+	if err != nil {
+		r.env.Log.Warn("plex items not looked up; kept queued", "event", "plex_error", "videos", len(videos), "err", err)
+		return videos
 	}
-	if err := r.env.Plex.GetJSON(ctx, "/library/sections", &mc); err != nil {
-		r.env.Log.Warn("plex not asked to scan; kept queued", "event", "plex_error", "folders", len(folders), "err", err)
-		return folders
-	}
-	var left []string
-	for i, dir := range folders {
-		key, held := "", 0
-		for _, d := range mc.Directory {
-			for _, loc := range d.Location {
-				if p := strings.TrimSuffix(loc.Path, "/"); len(p) > held && (dir == p || strings.HasPrefix(dir, p+"/")) {
-					key, held = d.Key, len(p)
-				}
+	for i, video := range videos {
+		if len(items[video]) == 0 {
+			r.env.Log.Info("no Plex item holds the video yet: not refreshed", "event", "plex_no_item", "item", video)
+		}
+		for _, key := range items[video] {
+			if err := r.env.Plex.Do(ctx, http.MethodPut, "/library/metadata/"+key+"/refresh"); err != nil {
+				r.env.Log.Warn("plex not asked to refresh; kept queued", "event", "plex_error", "item", video, "refreshed", i,
+					"left", len(videos)-i, "err", err)
+				return videos[i:]
 			}
 		}
-		if key == "" {
-			r.env.Log.Warn("no Plex library holds the folder: not scanned", "event", "plex_no_section", "folder", dir)
-			continue
-		}
-		// QueryEscape writes a space as "+", which not every server reads as one; %20 every server does.
-		path := strings.ReplaceAll(url.QueryEscape(dir), "+", "%20")
-		if err := r.env.Plex.Do(ctx, http.MethodGet, "/library/sections/"+key+"/refresh?path="+path); err != nil {
-			r.env.Log.Warn("plex not asked to scan; kept queued", "event", "plex_error", "folder", dir, "left", len(folders)-i, "err", err)
-			left = append(left, folders[i:]...)
-			break
-		}
 	}
-	r.env.Log.Info("plex asked to scan the new sidecars' folders", "event", "plex_scan", "folders", len(folders)-len(left), "left", len(left))
-	return left
+	r.env.Log.Info("plex asked to refresh the new sidecars' items", "event", "plex_refresh", "videos", len(videos))
+	return nil
 }
 
-// seedPlex queues, once, the folders of the sidecars written before the stage asked Plex to scan them.
+// plexItems maps each video to the ratingKeys of the Plex items whose media part it is (a file two libraries hold is
+// a part of two), read from Plex's library database: Plex's API has no lookup by file.
+func plexItems(ctx context.Context, path string, videos []string) (map[string][]string, error) {
+	db, err := sql.Open("sqlite", "file:"+(&url.URL{Path: path}).EscapedPath()+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	items := map[string][]string{}
+	for _, video := range videos {
+		rows, err := db.QueryContext(ctx, `SELECT DISTINCT i.metadata_item_id FROM media_parts p JOIN media_items i ON i.id = p.media_item_id
+			WHERE p.file = ? AND p.deleted_at IS NULL AND i.deleted_at IS NULL ORDER BY 1`, video)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var key string
+			if err := rows.Scan(&key); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			items[video] = append(items[video], key)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return items, nil
+}
+
+// seedPlex queues, once, the videos of the sidecars written before the stage told Plex of them.
 func (r *run) seedPlex(ctx context.Context) error {
 	var seeded bool
 	if _, err := r.env.Store.GetJSON(ctx, name, "plex_seeded", &seeded); err != nil || seeded {
 		return err
 	}
-	var folders []string
-	if _, err := r.env.Store.GetJSON(ctx, name, "plex_pending", &folders); err != nil {
+	var videos []string
+	if _, err := r.env.Store.GetJSON(ctx, name, "plex_pending", &videos); err != nil {
 		return err
 	}
 	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT DISTINCT item FROM events WHERE stage=? AND json_extract(fields, '$.sidecar') IS NOT NULL`, name)
@@ -2191,12 +2252,12 @@ func (r *run) seedPlex(ctx context.Context) error {
 			rows.Close()
 			return err
 		}
-		if dir := filepath.Dir(item); fileExists(dir) && !slices.Contains(folders, dir) {
-			folders = append(folders, dir)
+		if fileExists(item) && !slices.Contains(videos, item) {
+			videos = append(videos, item)
 		}
 	}
 	rows.Close()
-	if err := r.env.Store.PutJSON(ctx, name, "plex_pending", folders); err != nil {
+	if err := r.env.Store.PutJSON(ctx, name, "plex_pending", videos); err != nil {
 		return err
 	}
 	return r.env.Store.PutJSON(ctx, name, "plex_seeded", true)

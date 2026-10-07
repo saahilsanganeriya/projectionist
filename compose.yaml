@@ -60,6 +60,7 @@ services:
       # The superblock's own rw/ro still shows through this read-only bind, so health sees a read-only remount.
       - { type: bind, source: /volume2, target: /volume2, read_only: true, bind: { create_host_path: false } }
       # appbackup: SQLite's online backup opens each database's -shm read-write, so these folders are writable.
+      # subtitles reads Plex's library database here (plex_db, opened read-only): the item a new sidecar's video is.
       - type: bind
         source: /volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases
         target: /volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases

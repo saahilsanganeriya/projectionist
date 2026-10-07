@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"io/fs"
 	"math"
-	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -91,14 +89,14 @@ func TestVerifyKept(t *testing.T) {
 
 // Catches a sidecar the windows find consistently shifted (a PAL speed-up and 2.4 s) left as it is, written over in
 // place instead of moved to the archive first, archived anywhere but archive_dir's mirror of its path, its retimed
-// copy written under another name (.en.srt beside the .en.sdh.srt) or not onto the speech, or Plex not asked to scan
-// its folder.
+// copy written under another name (.en.srt beside the .en.sdh.srt) or not onto the speech, or Plex not asked to
+// refresh its item.
 func TestVerifyRetimed(t *testing.T) {
 	truth := dense(1000, 7)
 	pal := srtOf(cueSpans(truth, 25/23.976, -2.4))
 	f := verifyFixture(t, false, map[string]string{".en.sdh.srt": pal})
-	f.h.Plex.Handle("GET", "/library/sections", 200, fmt.Sprintf(`{"MediaContainer":{"Directory":[{"key":"2","Location":[{"path":%q}]}]}}`, f.path("TV")))
-	f.h.Plex.Handle("GET", "/library/sections/2/refresh", 200, "")
+	f.options("providers = [\"gestdown\"]\nalign_per_day = 0\nplex_db = \"" + f.plexDB(t, map[string]int{f.path(show): 13}) + "\"")
+	f.h.Plex.Handle("PUT", "/library/metadata/13/refresh", 200, "")
 	f.run(t)
 	got, _ := os.ReadFile(f.showBase() + ".en.sdh.srt")
 	_, err := os.Stat(f.showBase() + ".en.srt")
@@ -112,13 +110,8 @@ func TestVerifyRetimed(t *testing.T) {
 			t.Fatalf("retimed .en.sdh.srt: cue %d of %d at %.3f, want %.3f", i, len(cs), s.start, truth[i])
 		}
 	}
-	var scanned []string
-	for _, c := range f.h.Plex.Calls("GET", "/library/sections/2/refresh") {
-		q, _ := url.ParseQuery(c.RawQuery)
-		scanned = append(scanned, q.Get("path"))
-	}
-	if !slices.Contains(scanned, filepath.Dir(f.path(show))) {
-		t.Errorf("Plex scanned %v; want Show's folder", scanned)
+	if f.refreshed()["13"] == 0 {
+		t.Errorf("Plex refreshed %v; want Show's item, 13", f.refreshed())
 	}
 }
 

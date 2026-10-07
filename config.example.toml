@@ -276,6 +276,9 @@ verify_per_run = 300                   # sampled mode: videos a run whose Englis
 archive_dir = "/volume1/PlexMediaServer/_archive/subtitles" # where a replaced or refused sidecar moves, its library path
                                        # mirrored (Movies/..., TV/...), never overwritten; it must exist (bind-mount it
                                        # read-write), else the verify pass waits, with an alert
+plex_db = "/volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
+                                       # read-only: the Plex item whose video got a new sidecar, which Plex is asked to
+                                       # refresh (a scan does not attach it); the read-write mount, as Plex keeps it in WAL mode
 # undo_logs = [...]                    # rename logs for original names a note lacks; default: the details stage's list
 # output_dir = "/volume1/PlexMediaServer/projectionist-test/subtitles/out" # test runs: write sidecars here instead
 

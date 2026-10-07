@@ -571,10 +571,9 @@ func TestRunEpisodeFromGestdown(t *testing.T) {
 	}
 }
 
-// Catches a missing or broken alass parking titles for a week, or failing quietly: missing, every title that needs it
-// waits in the queue, spending neither a download nor one of the day's alignments; failing, no candidate is refused for
-// it (a refusal is for good) and the title waits with those behind it; a title whose audio cannot be heard is recorded
-// (it may be that title's audio) and the titles behind it wait; one alert each.
+// Catches a missing alass or an unheard title parking titles for a week, or failing quietly: missing, every title that
+// needs it waits in the queue, spending neither a download nor one of the day's alignments; a title whose audio cannot
+// be heard is recorded (it may be that title's audio) and the titles behind it wait; one alert each.
 func TestRunWhenAlassBreaks(t *testing.T) {
 	missing := newFixture(t)
 	os.Remove(filepath.Join(missing.h.Env.FFmpeg.Dir, "alass"))
@@ -582,14 +581,6 @@ func TestRunWhenAlassBreaks(t *testing.T) {
 		missing.queued()[0] != missing.path(clerks) || rep.Counts["cap_used"] != 1 || strings.Contains(strings.Join(missing.requests, " "), "/dl/clerks") {
 		t.Errorf("alass missing: alerts %q, recorded %v, queue %v, %d alignments, Clerks downloaded %v; want one alert, Clerks still queued, only Ran's, no",
 			rep.Alerts, missing.outcomes(), missing.queued(), rep.Counts["cap_used"], strings.Contains(strings.Join(missing.requests, " "), "/dl/clerks"))
-	}
-	broken := newFixture(t)
-	broken.h.Script(t, "alass", "exit 1\n")
-	rep := broken.run(t)
-	if refused := broken.verdict(clerks, "rejected_misaligned"); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "alass failed") ||
-		broken.outcomes()[broken.path(clerks)] != "queued" || len(refused) != 0 {
-		t.Errorf("alass failing: alerts %q, recorded %v, refusal %v; want one alert, Clerks still queued, its candidate not refused", rep.Alerts,
-			broken.outcomes(), refused)
 	}
 	deaf := newFixture(t)
 	ff := deaf.h.Env.FFmpeg.Dir
@@ -605,6 +596,111 @@ func TestRunWhenAlassBreaks(t *testing.T) {
 	if after, _ := r.alignments(context.Background()); first.deferred || !second.deferred || len(after)-len(before) != 1 {
 		t.Errorf("deferred %v, then %v, %d alignments counted; want the title after the audio failed deferred, costing none", first.deferred,
 			second.deferred, len(after)-len(before))
+	}
+}
+
+// alassQueue queues one title per candidate, in that order, each with English audio and no image track, and returns
+// the run that works the queue: the fake ffmpeg hears speech 1 s after each of captionTimes, and the fake alass aligns
+// a candidate onto it, but fails as alass-cli does (exit 1, its error chain on stdout) on a candidate holding "BAD".
+func alassQueue(t *testing.T, candidates ...string) (*run, []*title) {
+	h := fake.NewEnv(t, nil)
+	if _, err := h.Env.Store.DB().Exec(schema); err != nil {
+		t.Fatal(err)
+	}
+	ff, lib, texts := h.Env.FFmpeg.Dir, t.TempDir(), t.TempDir()
+	speechPCM(filepath.Join(ff, "speech.pcm"), captionTimes(), 1, 1.5)
+	os.WriteFile(filepath.Join(ff, "realign.srt"), []byte(srt(captionTimes(), 1)), 0o644)
+	h.Script(t, "ffmpeg", `cat "`+ff+`/speech.pcm"`+"\n")
+	alass := h.Script(t, "alass", `if grep -q BAD "$2"; then
+  echo "error: parsing subtitle file '$2' failed"; echo "caused by: invalid digit found in string"; exit 1
+fi
+cp "`+ff+`/realign.srt" "$3"; echo "info: 'reference file FPS/input file FPS' ratio is 1"
+`)
+	r := &run{env: h.Env, opt: Options{Alass: alass, AlignPerDay: 100, Mode: "careful"}, rep: &stage.Report{},
+		alerted: map[string]bool{}, pools: map[string][]Candidate{}}
+	var titles []*title
+	for i, text := range candidates {
+		name := fmt.Sprintf("Film %d (2000) {tmdb-%d}", i, i+1)
+		ti := &title{root: lib, path: filepath.Join(lib, name, name+".mkv"), kind: "movie", id: strconv.Itoa(i + 1), key: "1:1", described: true}
+		ti.useInfo(probe.Info{Duration: 3000, Audio: []probe.Audio{{Index: 1, Language: "eng", Default: true}}})
+		os.MkdirAll(filepath.Dir(ti.path), 0o755)
+		os.WriteFile(ti.path, []byte{byte(i)}, 0o644)
+		cand := filepath.Join(texts, strconv.Itoa(i)+".srt")
+		os.WriteFile(cand, []byte(text), 0o644)
+		r.pools[ti.path] = []Candidate{{Source: "sidecar", ID: strconv.Itoa(i), link: cand, provider: sidecarFile{}}}
+		h.Env.Store.DB().Exec(`INSERT INTO subtitles_queue(path, priority, queued_at) VALUES (?, 2, ?)`, ti.path, fmt.Sprintf("2026-10-07T00:00:%02dZ", i))
+		titles = append(titles, ti)
+	}
+	return r, titles
+}
+
+// alassOutcomes are the titles' recorded outcomes, in order ("" for none: deferred).
+func alassOutcomes(r *run, titles []*title) []string {
+	var out []string
+	for _, ti := range titles {
+		var o string
+		r.env.Store.DB().QueryRow(`SELECT outcome FROM subtitles_titles WHERE path=?`, ti.path).Scan(&o)
+		out = append(out, o)
+	}
+	return out
+}
+
+// Catches one title alass fails on holding back every title behind it, run after run (Dil Dhadakne Do's .en.srt, a
+// cue split by a blank line that alass cannot parse, deferred 406 titles each run of 2026-10-07), or its candidate
+// refused for good for alass's failure: the title is recorded alass_failed and leaves the queue, to be tried again on
+// the usual schedule, and the titles behind it are aligned, with no alert.
+func TestAlassFailureDefersNoOtherTitle(t *testing.T) {
+	good, bad := srt(captionTimes(), 0), srt(captionTimes(), 0)+"BAD\n"
+	r, titles := alassQueue(t, bad, good, good)
+	if err := r.workQueue(context.Background(), titles, nil); err != nil {
+		t.Fatal(err)
+	}
+	var queued, refusals int
+	db := r.env.Store.DB()
+	db.QueryRow(`SELECT count(*) FROM subtitles_queue WHERE path=?`, titles[0].path).Scan(&queued)
+	db.QueryRow(`SELECT count(*) FROM events WHERE item=? AND status LIKE 'rejected%'`, titles[0].path).Scan(&refusals)
+	if got := alassOutcomes(r, titles); !slices.Equal(got, []string{"alass_failed", "retimed", "retimed"}) || queued+refusals != 0 || len(r.rep.Alerts) != 0 {
+		t.Errorf("outcomes %q, the failed title still queued %v, its candidate refused %d time(s), alerts %q; want alass_failed then both "+
+			"retimed, out of the queue, never refused, no alert", got, queued == 1, refusals, r.rep.Alerts)
+	}
+}
+
+// Catches a broken alass costing every title in the queue a week (or the breaker never tripping), the breaker tripped
+// by failures that are not in a row, or its alert raised more than once: alassTrip titles in a row that alass fails
+// on are recorded, and the titles behind them that need alass wait for the next run, with one alert; an alignment in
+// between starts the count again.
+func TestAlassBreakerTripsOnFailuresInARow(t *testing.T) {
+	good, bad := srt(captionTimes(), 0), srt(captionTimes(), 0)+"BAD\n"
+	for _, c := range []struct {
+		candidates []string
+		want       []string
+		alerts     int
+	}{
+		{[]string{bad, bad, bad, good, bad}, []string{"alass_failed", "alass_failed", "alass_failed", "", ""}, 1},
+		{[]string{bad, bad, good, bad, bad}, []string{"alass_failed", "alass_failed", "retimed", "alass_failed", "alass_failed"}, 0},
+	} {
+		r, titles := alassQueue(t, c.candidates...)
+		if err := r.workQueue(context.Background(), titles, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got := alassOutcomes(r, titles); !slices.Equal(got, c.want) || len(r.rep.Alerts) != c.alerts {
+			t.Errorf("outcomes %q, alerts %q; want %q, %d alert(s)", got, r.rep.Alerts, c.want, c.alerts)
+		}
+	}
+}
+
+// Catches an alass failure recorded without what alass said: alass-cli prints its error chain on stdout, and stderr
+// alone (empty) left the detail "alass: exit status 1: ", with no word of which file or why.
+func TestAlassFailureDetailHoldsWhatAlassSaid(t *testing.T) {
+	r, titles := alassQueue(t, srt(captionTimes(), 0)+"BAD\n")
+	if err := r.workQueue(context.Background(), titles, nil); err != nil {
+		t.Fatal(err)
+	}
+	var detail string
+	r.env.Store.DB().QueryRow(`SELECT detail FROM subtitles_titles WHERE path=?`, titles[0].path).Scan(&detail)
+	if !strings.Contains(detail, "exit status 1") || !strings.Contains(detail, "error: parsing subtitle file") ||
+		!strings.Contains(detail, "caused by: invalid digit found in string") {
+		t.Errorf("detail %q; want the exit and alass's own error lines", detail)
 	}
 }
 

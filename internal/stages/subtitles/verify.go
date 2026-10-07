@@ -170,7 +170,7 @@ func (r *run) decide(ctx context.Context, t *title, path, verdict, out string, f
 		fields["sidecar_file"] = fileKey(path)
 	}
 	if changed {
-		r.tellApps(ctx, path, false)
+		r.tellApps(ctx, t.path, path, false)
 	}
 	r.count("sidecars_" + verdict)
 	r.event(ctx, t.path, outcome{result: "verify_" + verdict, fields: fields})
