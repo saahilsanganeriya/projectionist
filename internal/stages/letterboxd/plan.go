@@ -365,12 +365,12 @@ func planMembers(desired map[int]bool, haves map[int]have) (add, remove []int) {
 	return add, remove
 }
 
-// unwatchedWatchlist is the films on the Letterboxd watchlist watched neither on Letterboxd nor, as played (watch
-// record items) has it, in Plex or Jellyfin. Films not on the NAS are kept: the Plex watchlist takes any film.
-func unwatchedWatchlist(wants []want, played map[string]bool) map[int]bool {
+// unwatchedOnNAS is the films on the Letterboxd watchlist that are on the NAS and watched neither on Letterboxd nor,
+// as played (watch record items) has it, in Plex or Jellyfin.
+func unwatchedOnNAS(wants []want, played map[string]bool) map[int]bool {
 	out := map[int]bool{}
 	for _, w := range wants {
-		if w.Watchlist && !w.Watched && !played[movieItem(w.TMDB)] {
+		if w.Watchlist && w.InLibrary && !w.Watched && !played[movieItem(w.TMDB)] {
 			out[w.TMDB] = true
 		}
 	}

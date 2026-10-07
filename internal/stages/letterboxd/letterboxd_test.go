@@ -401,8 +401,19 @@ type world struct {
 	st      Stage
 	sleeps  []time.Duration // plex.tv retry waits
 	pace    *paceClock      // Letterboxd waits
+	movies  string          // the library: the folders readLibrary lists
 	missing string
 	opts    string
+}
+
+// whwFolder is What Happened Was's folder; newWorld's library lacks it.
+const whwFolder = "What Happened Was (1994) {tmdb-18}"
+
+// onNAS puts these film folders in the library, as films arriving on the NAS.
+func (w *world) onNAS(folders ...string) {
+	for _, f := range folders {
+		os.MkdirAll(filepath.Join(w.movies, f), 0o755)
+	}
 }
 
 func newWorld(t *testing.T) *world {
@@ -410,6 +421,7 @@ func newWorld(t *testing.T) *world {
 	w.apps = setupApps(t, w.h)
 	root := t.TempDir()
 	movies := filepath.Join(root, "Movies")
+	w.movies = movies
 	for _, d := range []string{"Licorice Pizza (2021) {tmdb-718032}", "Ad Astra (2019) {tmdb-419704}", "The Ring (2002) {tmdb-565}", "Digger (2026) {tmdb-1248832}", "_archive"} {
 		os.MkdirAll(filepath.Join(movies, d), 0o755)
 	}
@@ -466,7 +478,7 @@ func TestRunEndToEnd(t *testing.T) {
 	if _, err := os.Stat(w.missing); !os.IsNotExist(err) {
 		t.Fatalf("dry run wrote the missing file: %v", err)
 	}
-	for k, v := range map[string]int{"plextv.watchlist_add": 2, "missing_films": 1, "unresolved": 0} {
+	for k, v := range map[string]int{"plextv.watchlist_add": 1, "missing_films": 1, "unresolved": 0} {
 		if dry.Counts[k] != v {
 			t.Errorf("dry run %s = %d, want %d (all: %v)", k, dry.Counts[k], v, dry.Counts)
 		}
@@ -486,8 +498,8 @@ func TestRunEndToEnd(t *testing.T) {
 	if n := watchWrites(w.h); n != 0 {
 		t.Errorf("letterboxd sent %d watch-state writes; jfsync is their one writer", n)
 	}
-	// The Ring (on the NAS) and What Happened Was (not on it) are unwatched; Digger is watched.
-	if got := w.pt.list(fake.PlexToken); got != "m18,m565,show565" {
+	// The Ring is unwatched and on the NAS; What Happened Was is not on the NAS (the missing file lists it); Digger is watched.
+	if got := w.pt.list(fake.PlexToken); got != "m565,show565" {
 		t.Errorf("his Plex watchlist = %s", got)
 	}
 	text, _ := os.ReadFile(w.missing)
@@ -507,7 +519,7 @@ func TestRunEndToEnd(t *testing.T) {
 
 	w.h.Now = w.h.Now.Add(25 * time.Hour) // the daily re-read must agree with what was written
 	day := w.run(t, "")
-	if w.writes() != before || day.Counts["plextv.snapshot"] != 1 || w.pt.count("GET /library/metadata/matches") != 2 {
+	if w.writes() != before || day.Counts["plextv.snapshot"] != 1 || w.pt.count("GET /library/metadata/matches") != 1 {
 		t.Errorf("after the daily re-read: %d writes, %d lookups, counts %v", w.writes()-before, w.pt.count("GET /library/metadata/matches"), day.Counts)
 	}
 	w.h.Now = w.h.Now.Add(25 * time.Hour) // only "not modified" feed answers since the first read: still fresh
@@ -799,7 +811,7 @@ func TestEmptyWatchlistPageIsRefused(t *testing.T) {
 	w.h.Now = w.h.Now.Add(25 * time.Hour) // the daily crawl
 	rep := w.run(t, "")
 	text, _ := os.ReadFile(w.missing)
-	if got := w.pt.list(fake.PlexToken); got != "m18,m565,show565" || string(text) != string(before) || rep.Counts["challenged.watchlist"] != 1 {
+	if got := w.pt.list(fake.PlexToken); got != "m565,show565" || string(text) != string(before) || rep.Counts["challenged.watchlist"] != 1 {
 		t.Errorf("a page listing no films ended the crawl: his Plex watchlist %s, missing file %q (counts %v)", got, text, rep.Counts)
 	}
 	w.lb.serve("/saahilsan/watchlist/", `<div class="cols-2 js-watchlist-content" data-num-entries="0"></div>`) // he empties it
@@ -953,7 +965,7 @@ func TestOlderStateDBGainsTheNewColumns(t *testing.T) {
 	rep := w.run(t, "")
 	var ratedAt string
 	if err := db.QueryRow(`SELECT rated_at FROM letterboxd_entry WHERE id='1100000000'`).Scan(&ratedAt); err != nil ||
-		ratedAt != "2026-01-02T06:00:00.000000000Z" || rep.Counts["plextv.watchlist_added"] != 2 {
+		ratedAt != "2026-01-02T06:00:00.000000000Z" || rep.Counts["plextv.watchlist_added"] != 1 {
 		t.Errorf("migrated: rated_at %q (%v), counts %v; want the logged time, and the watchlist written", ratedAt, err, rep.Counts)
 	}
 }
@@ -1171,6 +1183,7 @@ func TestEachMembersOwnPlexWatchlist(t *testing.T) {
 	w := newWorld(t)
 	okja, ring := gridEntry("Okja (2017)", "okja"), gridEntry("The Ring (2002)", "the-ring-2002")
 	whw, prime := gridEntry("What Happened Was... (1994)", "what-happened-was"), gridEntry("Primetime (2026)", "primetime-2026")
+	w.onNAS(whwFolder, "Okja (2017) {tmdb-387426}", "Primetime (2026) {tmdb-999001}") // films off the NAS: TestPlexWatchlistHoldsOnlyFilmsOnTheNAS
 	w.lb.serve("/zaurelia/rss/", herFeed())
 	w.lb.serve("/zaaron/rss/", herFeed())
 	w.lb.serve("/zaurelia/watchlist/", watchlistPage(okja, ring, whw))
@@ -1208,6 +1221,38 @@ func TestEachMembersOwnPlexWatchlist(t *testing.T) {
 	step("after she watched Okja", 30*time.Minute, "his m18,m565,show565; hers m18,m999,m999001; Aaron's m387426,m718032", 3)
 }
 
+// Catches, on his Plex watchlist: a film on his Letterboxd watchlist that is not on the NAS added (What Happened Was);
+// a film arriving on the NAS not added by the next run; a film this stage added kept once it is off the NAS (the
+// state every film the stage added before this rule is in at its first run); and a film he put there by hand taken
+// out because it is not on the NAS (Okja, on his Letterboxd watchlist too).
+func TestPlexWatchlistHoldsOnlyFilmsOnTheNAS(t *testing.T) {
+	w := newWorld(t)
+	w.lb.serve("/saahilsan/watchlist/", watchlistPage(gridEntry("The Ring (2002)", "the-ring-2002"),
+		gridEntry("What Happened Was... (1994)", "what-happened-was"), gridEntry("Okja (2017)", "okja")))
+	w.pt.set(fake.PlexToken, "show565", "m387426") // Okja, put there by hand
+	step := func(d time.Duration) string {
+		t.Helper()
+		w.h.Now = w.h.Now.Add(d)
+		w.run(t, "")
+		return w.pt.list(fake.PlexToken)
+	}
+	if got := step(0); got != "m387426,m565,show565" {
+		t.Errorf("first run: his Plex watchlist %s, want What Happened Was (not on the NAS) left off", got)
+	}
+	w.onNAS(whwFolder)
+	if got := step(30 * time.Minute); got != "m18,m387426,m565,show565" {
+		t.Errorf("What Happened Was arrived on the NAS: his Plex watchlist %s, want it added", got)
+	}
+	os.RemoveAll(filepath.Join(w.movies, whwFolder))
+	got := step(30 * time.Minute)
+	if strings.Contains(got, "m18") {
+		t.Errorf("What Happened Was left the NAS: his Plex watchlist %s, want this stage's add taken off", got)
+	}
+	if !strings.Contains(got, "m387426") {
+		t.Errorf("his Plex watchlist %s: Okja, which he put there by hand, was taken off", got)
+	}
+}
+
 // Catches a person whose Plex Home user projectionist cannot switch to (no user by that name; one behind a PIN, which
 // it cannot enter) failing without telling the owner, switched to anyway, or keeping his own watchlist from syncing.
 func TestHomeUserProblemsAlert(t *testing.T) {
@@ -1217,7 +1262,7 @@ func TestHomeUserProblemsAlert(t *testing.T) {
 		w.lb.serve("/zaurelia/watchlist/", watchlistPage(gridEntry("Okja (2017)", "okja")))
 		rep := w.run(t, fmt.Sprintf("[[people]]\nperson = \"roger\"\nuser = \"zaurelia\"\nplex_user = %q\n", tc.plexUser))
 		if len(rep.Alerts) != 1 || !strings.HasPrefix(rep.Alerts[0], "roger: ") || !strings.Contains(rep.Alerts[0], tc.alert) ||
-			w.pt.count("POST /api/v2/home/users/u-kid/switch") != 0 || w.pt.list(fake.PlexToken) != "m18,m565,show565" {
+			w.pt.count("POST /api/v2/home/users/u-kid/switch") != 0 || w.pt.list(fake.PlexToken) != "m565,show565" {
 			t.Errorf("%s: alerts %q, his watchlist %s", tc.plexUser, rep.Alerts, w.pt.list(fake.PlexToken))
 		}
 	}
@@ -1228,6 +1273,7 @@ func TestHomeUserProblemsAlert(t *testing.T) {
 // Ring, listed last, would be added a second time, and the films he put there by hand past page 1 forgotten.
 func TestWatchlistListingReadsEveryPage(t *testing.T) {
 	w := newWorld(t)
+	w.onNAS(whwFolder)
 	var mine []string
 	for i := range 249 {
 		mine = append(mine, fmt.Sprintf("m%d", 900000+i))
@@ -1247,6 +1293,7 @@ func TestWatchlistListingReadsEveryPage(t *testing.T) {
 // then lands; when he logs it and its removal fails once, that is one failed run, not a third).
 func TestFailingWatchlistWritesPark(t *testing.T) {
 	w := newWorld(t)
+	w.onNAS(whwFolder)
 	w.pt.refuse["m565"], w.pt.unknown[18] = true, true
 	for i, step := range []struct{ reads, adds, alerts, parked int }{{1, 3, 0, 0}, {1, 3, 0, 0}, {1, 3, 1, 0}, {0, 0, 0, 2}} {
 		adds := w.pt.count("PUT /actions/addToWatchlist")

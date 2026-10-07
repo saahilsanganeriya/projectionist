@@ -131,10 +131,11 @@ person          = "saahil"                # the owner in the watch record: his n
 # feed's backlog (for him on 2026-10-05 about 465 Plex watched marks and 649 ratings, which Plex shows his friends:
 # watch history to friends of friends, ratings to friends). His decision.
 history         = false
-# Each member's Letterboxd watchlist films they have not watched (on Letterboxd, or in Plex or Jellyfin as the watch
-# record has it) go on their own Plex watchlist, films not on the NAS included; only films this stage added are taken
-# off again, so what they add by hand stays. His is written with the server's own sign-in, a person's through a Plex
-# Home switch to their plex_user (a managed user has a watchlist too). Visible as each Plex account's privacy allows.
+# Each member's Letterboxd watchlist films that are on the NAS (in movies_dir) and that they have not watched (on
+# Letterboxd, or in Plex or Jellyfin as the watch record has it) go on their own Plex watchlist: a film arriving on the
+# NAS is added by the next run, and one this stage added leaves once it is off the NAS. Only films this stage added are
+# taken off again, so what they add by hand stays. His is written with the server's own sign-in, a person's through a
+# Plex Home switch to their plex_user (a managed user has a watchlist too). Visible as each account's privacy allows.
 plex_watchlist  = false
 run_budget      = "25m"                   # no plex.tv call starts later than this into a run; keep it under every
 dry_run         = false                   # count events and watchlist writes only
