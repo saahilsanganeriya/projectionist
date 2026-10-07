@@ -36,9 +36,10 @@
 // title waits for it only when nothing else aligned. The duration, frame rate and tracks come from the probe cache,
 // else the .details note (ffprobe runs only for a video that has neither, or once the sampled fit needs its stream
 // indexes); the original release name from that note, else the rename logs. Three titles at a time look for a subtitle,
-// and one at a time reads its windows; the queue aligns one at a time, and an alignment counts against align_per_day
-// only once it is about to read the whole video. While anyone but the owner is watching no title starts, and every
-// running ffmpeg/ffprobe/alass is stopped. Every attempt is an event, each verdict with the bytes read from the video
+// and one at a time reads its windows; the queue aligns one at a time, beside them from the start of the run (a title
+// they are searching, once they are done), and an alignment counts against align_per_day only once it is about to read
+// the whole video. While anyone but the owner is watching no title starts, and every running ffmpeg/ffprobe/alass is
+// stopped. Every attempt is an event, each verdict with the bytes read from the video
 // (and of those, from the disk); a title that got no subtitle is tried again after retry_after, then after 2, 4 and 8
 // times it, and a queued title is searched again on the same schedule. A title is recorded only once TMDB and every
 // provider it needs answered (and alass ran, where it is needed); else it is deferred, not recorded, and an alert names
@@ -304,6 +305,8 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 			}
 		}()
 	}
+	searched, worked := make(chan struct{}), make(chan error, 1)
+	go func() { worked <- r.workQueue(ctx, titles, sidecarred, due, searched) }()
 feed:
 	for _, t := range due {
 		select {
@@ -314,7 +317,8 @@ feed:
 	}
 	close(queue)
 	wg.Wait()
-	err = r.workQueue(ctx, titles, sidecarred)
+	close(searched)
+	err = <-worked
 	for _, p := range r.providers {
 		if o, ok := p.(*dotCom); ok {
 			o.logout(ctx)
@@ -1270,8 +1274,10 @@ func (r *run) query(t *title) (Query, error) {
 // mode, also only inside align_window); a title keeps its place until its alignment ends in a sidecar or a verdict.
 // A queued title first gets another look for a release match (a subtitle may have been added since), unless this run
 // queued it. While an align worker is connected it gets the title instead (remote.go), and the run ends once each
-// title it leased has a result or its lease ran out.
-func (r *run) workQueue(ctx context.Context, lacking, sidecarred []*title) error {
+// title it leased has a result or its lease ran out. It runs beside the search pass, which holds the due titles until
+// searched closes: the queue works one only after that, so no title is worked by both at once, and a title the search
+// queued is aligned this run, with the candidates the search found.
+func (r *run) workQueue(ctx context.Context, lacking, sidecarred, due []*title, searched <-chan struct{}) error {
 	if ctx.Err() != nil {
 		return nil
 	}
@@ -1279,76 +1285,92 @@ func (r *run) workQueue(ctx context.Context, lacking, sidecarred []*title) error
 	for _, t := range slices.Concat(lacking, sidecarred) {
 		byPath[t.path] = t
 	}
+	held := map[string]bool{}
+	for _, t := range due {
+		held[t.path] = true
+	}
 	db := r.env.Store.DB()
-	rows, err := db.QueryContext(ctx, `SELECT path, priority FROM subtitles_queue ORDER BY priority, queued_at, path`)
-	if err != nil {
-		return err
-	}
-	var queued []string
-	verifying := map[string]bool{}
-	for rows.Next() {
-		var p string
-		var priority int
-		if err := rows.Scan(&p, &priority); err != nil {
-			rows.Close()
-			return err
-		}
-		queued = append(queued, p)
-		verifying[p] = priority == verifyPriority
-	}
-	rows.Close()
 	defer r.remote.drain(ctx, r)
-	for _, p := range queued {
-		t := byPath[p]
-		// outside this run's roots, or queued as lacking a sidecar that it has now, or for its sidecars that are gone
-		if t == nil || t.verify != verifying[p] {
-			if t != nil || r.settled(p) {
-				if _, err := db.ExecContext(ctx, `DELETE FROM subtitles_queue WHERE path=?`, p); err != nil {
-					return err
-				}
+	for _, afterSearch := range []bool{false, true} {
+		if afterSearch {
+			select {
+			case <-searched:
+			case <-ctx.Done():
+				return nil
 			}
-			continue
 		}
-		starts, err := r.alignments(ctx)
-		if err != nil || len(starts) >= r.opt.AlignPerDay || !r.alignNow() {
+		rows, err := db.QueryContext(ctx, `SELECT path, priority FROM subtitles_queue ORDER BY priority, queued_at, path`)
+		if err != nil {
 			return err
 		}
-		if !r.waitIdle(ctx) {
-			return nil
-		}
-		if !r.describe(ctx, t) {
-			continue
-		}
-		if why := r.alassOut(); why != "" && !t.englishImage { // it would need alass: it waits, with no search or cap spent
-			r.record(ctx, t, outcome{result: "deferred", detail: why})
-			continue
-		}
-		r.mu.Lock()
-		pool, fresh := r.pools[p]
-		r.mu.Unlock()
-		o := outcome{result: "queued"}
-		switch {
-		case t.verify: // its own sidecars, never a search
-			t.pool, err = r.sidecarPool(ctx, t)
-			switch pool = t.pool; {
-			case err != nil:
-				o = outcome{result: "error", detail: err.Error()}
-			case len(pool) == 0: // judged meanwhile: finish records the verdict
-				o = outcome{}
+		var queued []string
+		verifying := map[string]bool{}
+		for rows.Next() {
+			var p string
+			var priority int
+			if err := rows.Scan(&p, &priority); err != nil {
+				rows.Close()
+				return err
 			}
-		case !fresh:
-			o = r.fetch(ctx, t)
-			pool = o.pool
+			queued = append(queued, p)
+			verifying[p] = priority == verifyPriority
 		}
-		if o.result == "queued" {
-			if r.remote.handOff(ctx, r, t, pool) {
+		rows.Close()
+		for _, p := range queued {
+			if held[p] != afterSearch {
 				continue
 			}
-			o = r.align(ctx, t, pool)
-		}
-		r.finish(ctx, t, o)
-		if ctx.Err() != nil {
-			return nil
+			t := byPath[p]
+			// outside this run's roots, or queued as lacking a sidecar that it has now, or for its sidecars that are gone
+			if t == nil || t.verify != verifying[p] {
+				if t != nil || r.settled(p) {
+					if _, err := db.ExecContext(ctx, `DELETE FROM subtitles_queue WHERE path=?`, p); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			starts, err := r.alignments(ctx)
+			if err != nil || len(starts) >= r.opt.AlignPerDay || !r.alignNow() {
+				return err
+			}
+			if !r.waitIdle(ctx) {
+				return nil
+			}
+			if !r.describe(ctx, t) {
+				continue
+			}
+			if why := r.alassOut(); why != "" && !t.englishImage { // it would need alass: it waits, with no search or cap spent
+				r.record(ctx, t, outcome{result: "deferred", detail: why})
+				continue
+			}
+			r.mu.Lock()
+			pool, fresh := r.pools[p]
+			r.mu.Unlock()
+			o := outcome{result: "queued"}
+			switch {
+			case t.verify: // its own sidecars, never a search
+				t.pool, err = r.sidecarPool(ctx, t)
+				switch pool = t.pool; {
+				case err != nil:
+					o = outcome{result: "error", detail: err.Error()}
+				case len(pool) == 0: // judged meanwhile: finish records the verdict
+					o = outcome{}
+				}
+			case !fresh:
+				o = r.fetch(ctx, t)
+				pool = o.pool
+			}
+			if o.result == "queued" {
+				if r.remote.handOff(ctx, r, t, pool) {
+					continue
+				}
+				o = r.align(ctx, t, pool)
+			}
+			r.finish(ctx, t, o)
+			if ctx.Err() != nil {
+				return nil
+			}
 		}
 	}
 	return nil

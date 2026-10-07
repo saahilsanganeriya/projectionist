@@ -27,6 +27,7 @@ import (
 	"projectionist/internal/fake"
 	"projectionist/internal/probe"
 	"projectionist/internal/stage"
+	"projectionist/internal/store"
 )
 
 // fixture is a small library on disk, fake ffprobe/ffmpeg/alass, and fake OpenSubtitles and TMDB servers:
@@ -634,6 +635,9 @@ cp "`+ff+`/realign.srt" "$3"; echo "info: 'reference file FPS/input file FPS' ra
 	return r, titles
 }
 
+// searchOver is a search pass already over: workQueue works the whole queue at once.
+var searchOver = func() chan struct{} { c := make(chan struct{}); close(c); return c }()
+
 // alassOutcomes are the titles' recorded outcomes, in order ("" for none: deferred).
 func alassOutcomes(r *run, titles []*title) []string {
 	var out []string
@@ -652,7 +656,7 @@ func alassOutcomes(r *run, titles []*title) []string {
 func TestAlassFailureDefersNoOtherTitle(t *testing.T) {
 	good, bad := srt(captionTimes(), 0), srt(captionTimes(), 0)+"BAD\n"
 	r, titles := alassQueue(t, bad, good, good)
-	if err := r.workQueue(context.Background(), titles, nil); err != nil {
+	if err := r.workQueue(context.Background(), titles, nil, nil, searchOver); err != nil {
 		t.Fatal(err)
 	}
 	var queued, refusals int
@@ -680,7 +684,7 @@ func TestAlassBreakerTripsOnFailuresInARow(t *testing.T) {
 		{[]string{bad, bad, good, bad, bad}, []string{"alass_failed", "alass_failed", "retimed", "alass_failed", "alass_failed"}, 0},
 	} {
 		r, titles := alassQueue(t, c.candidates...)
-		if err := r.workQueue(context.Background(), titles, nil); err != nil {
+		if err := r.workQueue(context.Background(), titles, nil, nil, searchOver); err != nil {
 			t.Fatal(err)
 		}
 		if got := alassOutcomes(r, titles); !slices.Equal(got, c.want) || len(r.rep.Alerts) != c.alerts {
@@ -693,7 +697,7 @@ func TestAlassBreakerTripsOnFailuresInARow(t *testing.T) {
 // alone (empty) left the detail "alass: exit status 1: ", with no word of which file or why.
 func TestAlassFailureDetailHoldsWhatAlassSaid(t *testing.T) {
 	r, titles := alassQueue(t, srt(captionTimes(), 0)+"BAD\n")
-	if err := r.workQueue(context.Background(), titles, nil); err != nil {
+	if err := r.workQueue(context.Background(), titles, nil, nil, searchOver); err != nil {
 		t.Fatal(err)
 	}
 	var detail string
@@ -1167,6 +1171,40 @@ func TestRunQueueCapAndIdle(t *testing.T) {
 	<-done
 	if f.sidecar(t, clerks); f.queued()[0] != "" {
 		t.Errorf("queue %v after Clerks was aligned; want empty", f.queued())
+	}
+}
+
+// Catches the queue waiting for the whole search pass (on the NAS, half an hour of titles deferred one by one, every
+// run, while the queue's titles and the align worker sat idle), the queue working a title the search still holds (it
+// would align it beside the search, or wait on the same lookup), and a title the search queued left for the next run:
+// with Ran's search held open until Clerks, already queued, is aligned, Clerks must be aligned during the search, and
+// Ran, queued by it, aligned once the search ends.
+func TestRunQueueDrainsDuringTheSearch(t *testing.T) {
+	f := newFixture(t)
+	db := f.h.Env.Store.DB()
+	now := f.h.Now.UTC().Format(store.TimeFormat)
+	db.Exec(schema)
+	db.Exec(`INSERT INTO subtitles_queue(path, priority, queued_at) VALUES (?, 0, ?), (?, 2, ?)`, f.path(ran), now, f.path(clerks), now)
+	db.Exec(`INSERT INTO subtitles_titles(path, outcome, detail, tries, last_try) VALUES (?, 'queued', '', 1, ?)`, f.path(clerks), now)
+	told := make(chan struct{})
+	var once sync.Once
+	f.h.Jellyfin.HandleFunc("POST", "/Library/Media/Updated", func(w http.ResponseWriter, _ *http.Request) {
+		once.Do(func() { close(told) })
+		w.WriteHeader(http.StatusNoContent)
+	})
+	var late atomic.Bool
+	f.h.TMDB.HandleFunc("GET", "/movie/11645", func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case <-told:
+		case <-time.After(8 * time.Second): // reached only when nothing was aligned meanwhile (TMDB's client waits 10 s)
+			late.Store(true)
+		}
+		w.Write([]byte(`{"id":11645,"external_ids":{"imdb_id":"tt0089881"}}`))
+	})
+	f.run(t)
+	if o := f.outcomes(); late.Load() || o[f.path(clerks)] != "retimed" || o[f.path(ran)] != "retimed" {
+		t.Errorf("Ran's search held open: nothing aligned meanwhile %v; Clerks %q, Ran %q; want Clerks aligned during the search, "+
+			"Ran after it, both retimed", late.Load(), o[f.path(clerks)], o[f.path(ran)])
 	}
 }
 
