@@ -13,13 +13,14 @@ import (
 
 // facts is everything known from Letterboxd, keyed by the sources' own references, before the TMDB join.
 type facts struct {
-	ex        *export              // nil when no export is on the NAS
-	entries   []rssEntry           // diary entries kept from the feed
-	seen      map[string]bool      // slugs the films grid shows watched
-	watchlist *watchlistSnapshot   // last complete watchlist crawl; nil when never
-	lidSlug   map[string]string    // boxd.it code → slug ("" = not a film)
-	films     map[string]filmFacts // slug → film page facts
-	library   map[int]libraryFilm  // TMDB id → folder on disk
+	ex        *export                // nil when no export is on the NAS
+	entries   []rssEntry             // diary entries kept from the feed
+	seen      map[string]bool        // slugs the films grid shows watched
+	watchlist *watchlistSnapshot     // last complete watchlist crawl; nil when never
+	lidSlug   map[string]string      // boxd.it code → slug ("" = not a film)
+	films     map[string]filmFacts   // slug → film page facts
+	library   map[int]library.Folder // TMDB id → movie folder on disk
+	shows     map[int]library.Folder // TMDB id → show folder on disk; read only for the Plex watchlist
 }
 
 type watchlistSnapshot struct {
@@ -30,11 +31,6 @@ type watchlistSnapshot struct {
 type filmFacts struct {
 	TMDB int
 	Kind string // "movie", "tv", or "" when the page names no TMDB entry
-}
-
-type libraryFilm struct {
-	Title string
-	Year  int
 }
 
 // want is what Letterboxd says of one film (TMDB movie id) that the Plex watchlist needs.
@@ -349,16 +345,18 @@ type have struct {
 	Added  bool   // put there by this stage, so this stage may take it out again
 }
 
-// planMembers diffs the Plex watchlist against the desired set. It removes only what this stage added: anything
-// the member put there by hand stays.
-func planMembers(desired map[int]bool, haves map[int]have) (add, remove []int) {
+// planMembers diffs the films on the Plex watchlist against the desired set. It removes every film not on the NAS
+// (onNAS), whoever put it there, and those this stage added that are no longer desired: a film on the NAS that the
+// member put there by hand stays.
+func planMembers(desired map[int]bool, onNAS map[int]library.Folder, haves map[int]have) (add, remove []int) {
 	for _, id := range sortedKeys(desired) {
 		if !haves[id].Member {
 			add = append(add, id)
 		}
 	}
 	for _, id := range sortedKeys(haves) {
-		if h := haves[id]; h.Member && h.Added && !desired[id] {
+		_, there := onNAS[id]
+		if h := haves[id]; h.Member && (!there || h.Added && !desired[id]) {
 			remove = append(remove, id)
 		}
 	}
