@@ -10,7 +10,9 @@ import (
 )
 
 // Catches release names parsed into the wrong search: a year taken from the title ('1917', '2001: ...'), quality or
-// season words left in the title, and a scheme-style 'Title (Year)' name read as anything else.
+// season words left in the title, a scheme-style 'Title (Year)' name read as anything else, a torrent site's tag at the
+// front kept in the title ('www.SiteF.org - ', '[SITEB.MX]'), and a title's own leading word or bracket ('M - ', '[REC]')
+// taken for one.
 func TestParseRelease(t *testing.T) {
 	cases := []struct {
 		in    string
@@ -25,6 +27,12 @@ func TestParseRelease(t *testing.T) {
 		{"Sonny Boy S01 1080p WEBRip AAC x265-EMBER", "Sonny Boy", 0},
 		{"Too Old to Die Young (2019) Season 1 S01 (1080p AMZN WEB-DL x265 HEVC 10bit EAC3 5.1 ImE)", "Too Old to Die Young", 2019},
 		{"Heat (1995) {imdb-tt0113277}", "Heat", 1995},
+		{"www.SiteF.org    -    Slow Horses S06E04 Lost and Found 1080p ATVP WEB-DL DDP5 1 Atmos H 264-FLUX", "Slow Horses", 0},
+		{"www.SiteG.com.Dune.Part.Two.2024.2160p.WEB-DL.DDP5.1", "Dune Part Two", 2024},
+		{"[ www.SiteH.com ] - Oppenheimer.2023.1080p.BluRay.x264-SPARKS", "Oppenheimer", 2023},
+		{"[SITEB.MX] Past Lives (2023) [1080p]", "Past Lives", 2023},
+		{"M - Eine Stadt sucht einen Mörder (1931) 1080p", "M - Eine Stadt sucht einen Mörder", 1931},
+		{"[REC] (2007) 1080p BluRay", "[REC]", 2007},
 	}
 	for _, c := range cases {
 		if title, year := parseRelease(c.in); title != c.title || year != c.year {
