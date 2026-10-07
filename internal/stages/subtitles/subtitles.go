@@ -51,6 +51,12 @@
 // With align_remote_lanes set, the queue hands its titles to align workers on another machine while one has called in
 // the last minute (remote.go): the NAS streams only the tracks the alignment reads, serves the candidates under the
 // same quotas, and writes and records the worker's result as its own; with none connected it aligns here.
+//
+// The verify pass (verify.go, sampled mode) judges, verify_per_run videos a run, the English .srt sidecars no record
+// shows verified, each fitted to its video's windows as a download is: one in sync is kept, one consistently shifted
+// is archived and created again retimed under its own name, one that cannot fit is archived (and its video searched
+// for anew), and one the windows cannot judge waits in the queue, behind every title lacking a subtitle, for a full
+// alignment of its own. A sidecar leaves the library only by a move into archive_dir, never overwriting there.
 package subtitles
 
 import (
@@ -124,6 +130,11 @@ type Options struct {
 	// Align workers on another machine (projectionist align-worker, over SSH to the listener) take the
 	// queue's titles while one has called in the last minute, at most this many leased at once; 0: off.
 	AlignRemoteLanes int `toml:"align_remote_lanes"`
+	// The verify pass (verify.go, sampled mode): this many videos a run whose English .srt sidecars no record shows
+	// verified have them fitted to the windows; 0: off. A sidecar the pass replaces or refuses moves under archive_dir
+	// (its path below the root, the root's own name first), which must exist: unmounted, it would be the container's own.
+	VerifyPerRun int    `toml:"verify_per_run"`
+	ArchiveDir   string `toml:"archive_dir"`
 }
 
 func defaults() Options {
@@ -141,6 +152,8 @@ func defaults() Options {
 		AlignWindow:   "01:00-07:00",
 		SampleWindows: 4,
 		SampleLength:  90 * time.Second,
+		VerifyPerRun:  300,
+		ArchiveDir:    "/volume1/PlexMediaServer/_archive/subtitles",
 		UndoLogs: []string{"/volume1/PlexMediaServer/rename/undo.tsv", "/volume1/PlexMediaServer/rename/undo_auto.tsv",
 			"/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv",
 			"/volume1/media/.projectionist/rename/undo.tsv"},
@@ -170,8 +183,8 @@ CREATE TABLE IF NOT EXISTS subtitles_stats (
   mtime_ns INTEGER NOT NULL,
   row      TEXT NOT NULL
 );
--- titles waiting for an alignment: worked by priority (0 no English audio, 1 an English image track, 2 the rest),
--- then oldest first
+-- titles waiting for an alignment: worked by priority (0 no English audio, 1 an English image track, 2 the rest, 3
+-- the verify pass's: a sidecar of its own to align), then oldest first
 CREATE TABLE IF NOT EXISTS subtitles_queue (
   path      TEXT PRIMARY KEY,
   priority  INTEGER NOT NULL,
@@ -199,6 +212,9 @@ type title struct {
 	read, disk                              int64         // bytes read from the video by the stage and its helpers; disk: of those, from the disk
 	idx                                     *reference    // sampled mode: the caption starts of its English VobSub sidecar
 	sampling                                time.Duration // the sampled fit's time on this title: its reads and fits
+
+	verify bool        // it has English .srt sidecars: the verify pass's, not the search's
+	pool   []Candidate // a verify title's alignment: its sidecars not yet judged, which finish settles
 }
 
 type run struct {
@@ -255,11 +271,11 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 	if err := r.seedPlex(ctx); err != nil {
 		return err
 	}
-	titles, err := r.scan(ctx)
+	titles, sidecarred, err := r.scan(ctx)
 	if err != nil {
 		return err
 	}
-	due, err := r.plan(ctx, titles)
+	due, err := r.plan(ctx, titles, sidecarred)
 	if err != nil {
 		return err
 	}
@@ -284,14 +300,20 @@ feed:
 	}
 	close(queue)
 	wg.Wait()
-	err = r.workQueue(ctx, titles)
+	err = r.workQueue(ctx, titles, sidecarred)
 	for _, p := range r.providers {
 		if o, ok := p.(*dotCom); ok {
 			o.logout(ctx)
 		}
 	}
 	r.tellApps(ctx, "", true)
-	r.summarise(ctx, len(titles), len(due))
+	verifying := 0
+	for _, t := range due {
+		if t.verify {
+			verifying++
+		}
+	}
+	r.summarise(ctx, len(titles), len(due)-verifying, verifying)
 	rep.Wake = r.wake(ctx)
 	if err != nil {
 		return err
@@ -443,21 +465,23 @@ func legacyQuota(dir string, now time.Time) (quotaState, error) {
 	return st, err
 }
 
-// ---- the walk: stats for every subtitle file, and the videos still lacking an English sidecar ----
+// ---- the walk: stats for every subtitle file, the videos still lacking an English sidecar, and those with one ----
 
-func (r *run) scan(ctx context.Context) ([]*title, error) {
+// scan also returns the videos with English .srt sidecars, for the verify pass (library files only, never a test
+// run's).
+func (r *run) scan(ctx context.Context) (lacking, sidecarred []*title, err error) {
 	db := r.env.Store.DB()
 	cache := map[string]statsCache{}
 	rows, err := db.QueryContext(ctx, `SELECT path, size, mtime_ns, row FROM subtitles_stats`)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for rows.Next() {
 		var p string
 		var c statsCache
 		if err := rows.Scan(&p, &c.size, &c.mtime, &c.row); err != nil {
 			rows.Close()
-			return nil, err
+			return nil, nil, err
 		}
 		cache[p] = c
 	}
@@ -467,7 +491,6 @@ func (r *run) scan(ctx context.Context) ([]*title, error) {
 	tsv.WriteString(statsHeader)
 	fresh := map[string]statsCache{}
 	seen := map[string]bool{}
-	var titles []*title
 	for _, root := range r.opt.Roots {
 		pyWalk(root, func(dir string, files []string) {
 			if ctx.Err() != nil {
@@ -502,16 +525,23 @@ func (r *run) scan(ctx context.Context) ([]*title, error) {
 					}
 					tsv.WriteString(p + "\t" + c.row + "\n")
 				}
-				if t := parseTitle(root, p); t != nil && !hasEnglishSidecar(strings.TrimSuffix(f, filepath.Ext(f)), names) {
-					titles = append(titles, t)
+				t := parseTitle(root, p)
+				stem := strings.TrimSuffix(f, filepath.Ext(f))
+				switch {
+				case t == nil:
+				case !hasEnglishSidecar(stem, names):
+					lacking = append(lacking, t)
+				case slices.ContainsFunc(englishSidecars(stem, files), isSRT):
+					t.verify = true
+					sidecarred = append(sidecarred, t)
 				}
 			}
 		})
 	}
 	if err := r.saveStats(ctx, cache, fresh, seen, tsv.String()); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return titles, nil
+	return lacking, sidecarred, nil
 }
 
 // statsCache is one cached sub_stats row, valid while the file keeps its size and mtime.
@@ -573,12 +603,18 @@ func parseTitle(root, p string) *title {
 	return nil
 }
 
-// hasEnglishSidecar is subfetch2.py's test, <stem>.[...].(en|eng|english)[...].(srt|ass|ssa|vtt), except that a
-// forced track (foreign dialogue only) does not count as an English subtitle.
 func hasEnglishSidecar(stem string, names []string) bool {
+	return len(englishSidecars(stem, names)) > 0
+}
+
+// englishSidecars are the names subfetch2.py's test takes for stem's English subtitles,
+// <stem>.[...].(en|eng|english)[...].(srt|ass|ssa|vtt), except a forced track (foreign dialogue only), which does not
+// count as an English subtitle.
+func englishSidecars(stem string, names []string) []string {
 	prefix := strings.ToLower(stem) + "."
-	for _, n := range names {
-		n = strings.ToLower(n)
+	var out []string
+	for _, name := range names {
+		n := strings.ToLower(name)
 		if !strings.HasPrefix(n, prefix) {
 			continue
 		}
@@ -595,11 +631,13 @@ func hasEnglishSidecar(stem string, names []string) bool {
 			forced = forced || p == "forced"
 		}
 		if english && !forced {
-			return true
+			out = append(out, name)
 		}
 	}
-	return false
+	return out
 }
+
+func isSRT(name string) bool { return strings.EqualFold(filepath.Ext(name), ".srt") }
 
 // mirror is where a test run writes what belongs in dir.
 func (r *run) mirror(root, dir string) string {
@@ -614,21 +652,24 @@ func (r *run) mirror(root, dir string) string {
 
 func english(lang string) bool { return lang == "en" || lang == "eng" }
 
-func (r *run) plan(ctx context.Context, titles []*title) ([]*title, error) {
-	next := map[string]time.Time{}
-	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT path, last_try, tries FROM subtitles_titles`)
+// plan is the run's titles for the workers: the due titles lacking a subtitle, best first, then (sampled mode) up to
+// verify_per_run due titles whose sidecars no record shows verified and the queue does not hold.
+func (r *run) plan(ctx context.Context, titles, sidecarred []*title) ([]*title, error) {
+	next, verified := map[string]time.Time{}, map[string]bool{}
+	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT path, outcome, last_try, tries FROM subtitles_titles`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
-		var p, at string
+		var p, result, at string
 		var tries int
-		if err := rows.Scan(&p, &at, &tries); err != nil {
+		if err := rows.Scan(&p, &result, &at, &tries); err != nil {
 			rows.Close()
 			return nil, err
 		}
 		last, _ := time.Parse(store.TimeFormat, at)
 		next[p] = last.Add(r.opt.RetryAfter << min(tries-1, 3)) // each miss doubles the wait, up to 8x retry_after
+		verified[p] = verifiedOutcomes[result]
 	}
 	rows.Close()
 	var due []*title
@@ -656,6 +697,42 @@ func (r *run) plan(ctx context.Context, titles []*title) ([]*title, error) {
 	})
 	if r.opt.MaxTitles > 0 && len(due) > r.opt.MaxTitles {
 		due = due[:r.opt.MaxTitles]
+	}
+	if r.opt.VerifyPerRun <= 0 || !r.sampled() || r.opt.OutputDir != "" || !r.archiveReady() {
+		return due, nil
+	}
+	queued := map[string]bool{}
+	rows, err = r.env.Store.DB().QueryContext(ctx, `SELECT path FROM subtitles_queue`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		queued[p] = true
+	}
+	rows.Close()
+	n := 0
+	for _, t := range sidecarred {
+		if n == r.opt.VerifyPerRun {
+			break
+		}
+		if at, ok := next[t.path]; verified[t.path] || queued[t.path] || ok && r.env.Now().Before(at) {
+			continue
+		}
+		if !r.describe(ctx, t) {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			continue
+		}
+		if !t.englishText { // with an embedded English text track a sidecar is the owner's own choice
+			due = append(due, t)
+			n++
+		}
 	}
 	return due, nil
 }
@@ -771,9 +848,14 @@ type outcome struct {
 	text   string      // an alignment's accepted subtitle, which finish writes
 }
 
-// process looks for a release match for a due title; one it does not find sends the title to the queue.
+// process looks for a release match for a due title; one it does not find sends the title to the queue. A verify
+// title gets the verify pass instead.
 func (r *run) process(ctx context.Context, t *title) {
 	if err := r.env.Viewers.WaitIdle(ctx); err != nil {
+		return
+	}
+	if t.verify {
+		r.record(ctx, t, r.verifyPass(ctx, t))
 		return
 	}
 	o := r.fetch(ctx, t)
@@ -786,30 +868,37 @@ func (r *run) process(ctx context.Context, t *title) {
 }
 
 // record counts an outcome, adds it to the history and the title's row, and keeps the queue: a queued title is added
-// (keeping its place when it was already there), any other verdict takes it out.
+// (keeping its place when it was already there), any other verdict takes it out. A verify title is counted apart and
+// queued behind every title lacking a subtitle; "archived" (none of its sidecars left) drops its row, so the next run
+// searches for it as for any title lacking one.
 func (r *run) record(ctx context.Context, t *title, o outcome) {
 	if ctx.Err() != nil && !o.wrote {
 		return // shutting down mid-title: nothing was written, the next run starts it again
 	}
 	ctx = context.WithoutCancel(ctx) // a sidecar written as the run stops is still recorded
-	r.count(o.result)
-	switch o.result {
-	case "deferred":
+	if t.verify {
+		r.count("verify_" + o.result)
+	} else {
+		r.count(o.result)
+	}
+	switch {
+	case o.result == "deferred":
 		r.env.Log.Info("title deferred", "event", "subtitle_deferred", "item", t.path, "detail", o.detail)
 		return
-	case "release_matched":
+	case t.verify:
+	case o.result == "release_matched":
 		r.count("written_release_matched")
-	case "idx_kept", "idx_retimed":
+	case o.result == "idx_kept" || o.result == "idx_retimed":
 		r.count("written_idx")
-	case "sampled":
+	case o.result == "sampled":
 		r.count("written_sampled")
-	case "kept", "retimed", "rescued":
+	case o.result == "kept" || o.result == "retimed" || o.result == "rescued":
 		r.count("written_aligned")
 	}
 	if o.fields == nil {
 		o.fields = map[string]any{}
 	}
-	if o.wrote {
+	if o.wrote && !t.verify {
 		r.count(fmt.Sprint("provider_hits_", o.fields["provider"]))
 	}
 	o.fields["video_bytes"], o.fields["disk_bytes"], o.fields["ffprobe"] = t.read, t.disk, t.ffprobed
@@ -818,6 +907,14 @@ func (r *run) record(ctx context.Context, t *title, o outcome) {
 	}
 	r.event(ctx, t.path, o)
 	db := r.env.Store.DB()
+	if o.result == "archived" {
+		for _, table := range []string{"subtitles_titles", "subtitles_queue"} {
+			if _, err := db.ExecContext(ctx, `DELETE FROM `+table+` WHERE path=?`, t.path); err != nil {
+				r.env.Log.Error("title record failed", "event", "store_error", "item", t.path, "err", err)
+			}
+		}
+		return
+	}
 	now := r.env.Now().UTC().Format(store.TimeFormat)
 	if _, err := db.ExecContext(ctx, `INSERT INTO subtitles_titles(path, outcome, detail, tries, last_try) VALUES (?, ?, ?, 1, ?)
 		ON CONFLICT(path) DO UPDATE SET outcome=excluded.outcome, detail=excluded.detail, tries=tries+1, last_try=excluded.last_try`,
@@ -828,6 +925,8 @@ func (r *run) record(ctx context.Context, t *title, o outcome) {
 	if o.result == "queued" {
 		priority := 2
 		switch {
+		case t.verify:
+			priority = verifyPriority
 		case !t.englishAudio:
 			priority = 0
 		case t.englishImage:
@@ -1040,13 +1139,7 @@ func (r *run) sampledFit(ctx context.Context, t *title, pool []Candidate, reject
 				return outcome{}, false
 			}
 		}
-		lo, hi := smp.span()
-		fit := fitSamples(cues(txt), smp.samples, lo, hi)
-		attempt["reference"], attempt["ratio"], attempt["offset_ms"] = smp.label(), fit.Ratio, math.Round(fit.Offset*1000)
-		attempt["unseen_lines"] = fit.Unseen
-		attempt["window_offsets_ms"], attempt["evidence"] = rounded(fit.Offsets, 1000, 1), rounded(fit.Evidence, 10, 0.1)
-		attempt["score"], attempt["runner_up"], attempt["windows"] = math.Round(fit.Score), math.Round(fit.RunnerUp), smp.starts()
-		attempt["sample_bytes"], attempt["sample_disk_bytes"] = smp.read, smp.disk
+		fit := smp.fit(txt, attempt)
 		out := txt
 		if fit.Ratio != 1 || fit.Offset != 0 {
 			out = retime(txt, fit.Ratio, fit.Offset)
@@ -1164,34 +1257,38 @@ func (r *run) query(t *title) (Query, error) {
 // A queued title first gets another look for a release match (a subtitle may have been added since), unless this run
 // queued it. While an align worker is connected it gets the title instead (remote.go), and the run ends once each
 // title it leased has a result or its lease ran out.
-func (r *run) workQueue(ctx context.Context, lacking []*title) error {
+func (r *run) workQueue(ctx context.Context, lacking, sidecarred []*title) error {
 	if ctx.Err() != nil {
 		return nil
 	}
 	byPath := map[string]*title{}
-	for _, t := range lacking {
+	for _, t := range slices.Concat(lacking, sidecarred) {
 		byPath[t.path] = t
 	}
 	db := r.env.Store.DB()
-	rows, err := db.QueryContext(ctx, `SELECT path FROM subtitles_queue ORDER BY priority, queued_at, path`)
+	rows, err := db.QueryContext(ctx, `SELECT path, priority FROM subtitles_queue ORDER BY priority, queued_at, path`)
 	if err != nil {
 		return err
 	}
 	var queued []string
+	verifying := map[string]bool{}
 	for rows.Next() {
 		var p string
-		if err := rows.Scan(&p); err != nil {
+		var priority int
+		if err := rows.Scan(&p, &priority); err != nil {
 			rows.Close()
 			return err
 		}
 		queued = append(queued, p)
+		verifying[p] = priority == verifyPriority
 	}
 	rows.Close()
 	defer r.remote.drain(ctx, r)
 	for _, p := range queued {
 		t := byPath[p]
-		if t == nil { // outside this run's roots, or no longer lacking a sidecar
-			if r.settled(p) {
+		// outside this run's roots, or queued as lacking a sidecar that it has now, or for its sidecars that are gone
+		if t == nil || t.verify != verifying[p] {
+			if t != nil || r.settled(p) {
 				if _, err := db.ExecContext(ctx, `DELETE FROM subtitles_queue WHERE path=?`, p); err != nil {
 					return err
 				}
@@ -1216,7 +1313,16 @@ func (r *run) workQueue(ctx context.Context, lacking []*title) error {
 		pool, fresh := r.pools[p]
 		r.mu.Unlock()
 		o := outcome{result: "queued"}
-		if !fresh {
+		switch {
+		case t.verify: // its own sidecars, never a search
+			t.pool, err = r.sidecarPool(ctx, t)
+			switch pool = t.pool; {
+			case err != nil:
+				o = outcome{result: "error", detail: err.Error()}
+			case len(pool) == 0: // judged meanwhile: finish records the verdict
+				o = outcome{}
+			}
+		case !fresh:
 			o = r.fetch(ctx, t)
 			pool = o.pool
 		}
@@ -1258,9 +1364,13 @@ func (r *run) settled(p string) bool {
 	return hasEnglishSidecar(strings.TrimSuffix(filepath.Base(p), filepath.Ext(p)), names)
 }
 
-// finish writes an alignment's accepted subtitle and records the outcome, for an alignment here or a worker's.
+// finish writes an alignment's accepted subtitle and records the outcome, for an alignment here or a worker's; a
+// verify title's alignment of its own sidecars is settled instead (settle).
 func (r *run) finish(ctx context.Context, t *title, o outcome) {
-	if o.text != "" {
+	switch {
+	case t.verify:
+		o = r.settle(ctx, t, o)
+	case o.text != "":
 		o = r.write(ctx, t, []byte(o.text), o.result, o.fields)
 	}
 	r.record(ctx, t, o)
@@ -1415,7 +1525,7 @@ func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 		}
 		return outcome{result: result, fields: attempt, text: out}
 	}
-	if incomplete || r.meteredOut() {
+	if incomplete || !t.verify && r.meteredOut() { // a verify title's pool is its own sidecars: no provider could add one
 		return outcome{result: "deferred", detail: "a provider was out"}
 	}
 	n := 0
@@ -1431,7 +1541,7 @@ func (r *run) meteredOut() bool {
 }
 
 // summarise is the run's report: what was written by which route, what waits in the queue, and the cap used.
-func (r *run) summarise(ctx context.Context, lacking, due int) {
+func (r *run) summarise(ctx context.Context, lacking, due, verifying int) {
 	ctx = context.WithoutCancel(ctx)
 	starts, _ := r.alignments(ctx)
 	var waiting int
@@ -1450,9 +1560,11 @@ func (r *run) summarise(ctx context.Context, lacking, due int) {
 	slices.Sort(hits)
 	r.rep.Summary = fmt.Sprintf("%s mode: %d sidecar(s) written: %d release-matched, %d fitted to a VobSub sidecar, "+
 		"%d by the sampled fit, %d aligned; %d queued, %d waiting in the queue; alignments %d of %d in 24 h; "+
-		"provider hits %s; %d title(s) lacked a sidecar, %d of them carry an English text track, %d were due",
+		"provider hits %s; %d title(s) lacked a sidecar, %d of them carry an English text track, %d were due; "+
+		"verify pass: %d title(s), their sidecars %d kept, %d retimed, %d archived, %d left to a full alignment",
 		r.opt.Mode, r.written, c["written_release_matched"], c["written_idx"], c["written_sampled"], c["written_aligned"],
-		c["queued"], waiting, len(starts), r.opt.AlignPerDay, cmp.Or(strings.Join(hits, " "), "none"), lacking, c["embedded_text"], due)
+		c["queued"], waiting, len(starts), r.opt.AlignPerDay, cmp.Or(strings.Join(hits, " "), "none"), lacking, c["embedded_text"], due,
+		verifying, c["sidecars_kept"], c["sidecars_retimed"], c["sidecars_refused"], c["sidecars_undecided"])
 }
 
 // reference is the timing a candidate must line up with: an English image track's caption starts (from the video, or
@@ -1782,30 +1894,39 @@ func (r *run) write(ctx context.Context, t *title, data []byte, result string, f
 // path once the file is synced and re-reads identical.
 func writeSidecar(base string, data []byte) (string, error) {
 	for _, dest := range []string{base + ".en.srt", base + ".eng.srt"} {
-		f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644) // no chmod: it would strip the Synology ACL
+		err := createSidecar(dest, data)
 		if errors.Is(err, os.ErrExist) {
 			continue
 		}
 		if err != nil {
 			return "", err
 		}
-		_, err = f.Write(data)
-		if err == nil {
-			err = f.Sync()
-		}
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-		if err != nil {
-			os.Remove(dest) // ours, half written
-			return "", err
-		}
-		if back, err := os.ReadFile(dest); err != nil || !bytes.Equal(back, data) {
-			return "", fmt.Errorf("%s re-read differs from what was written", dest)
-		}
-		return dest, fsx.SyncDir(filepath.Dir(dest))
+		return dest, nil
 	}
 	return "", nil
+}
+
+// createSidecar creates dest with data (an error matching os.ErrExist if it exists), synced and re-read identical.
+func createSidecar(dest string, data []byte) error {
+	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644) // no chmod: it would strip the Synology ACL
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(dest) // ours, half written
+		return err
+	}
+	if back, err := os.ReadFile(dest); err != nil || !bytes.Equal(back, data) {
+		return fmt.Errorf("%s re-read differs from what was written", dest)
+	}
+	return fsx.SyncDir(filepath.Dir(dest))
 }
 
 // ---- side effects shared by the workers ----

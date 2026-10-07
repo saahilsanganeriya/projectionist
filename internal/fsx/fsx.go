@@ -7,11 +7,24 @@ import (
 	"errors"
 	"io"
 	"os"
+	"syscall"
 )
 
 // RenameNoReplace moves old to new atomically and fails with an error matching os.ErrExist if new exists.
 func RenameNoReplace(oldPath, newPath string) error {
 	return renameNoReplace(oldPath, newPath)
+}
+
+// MoveNoReplace moves old to new and fails with an error matching os.ErrExist if new exists: a rename where both share
+// a mount, else a Clone that is complete and synced before old is removed (a failure leaves old in place).
+func MoveNoReplace(oldPath, newPath string) error {
+	if err := RenameNoReplace(oldPath, newPath); !errors.Is(err, syscall.EXDEV) {
+		return err
+	}
+	if err := Clone(oldPath, newPath); err != nil {
+		return err
+	}
+	return os.Remove(oldPath)
 }
 
 // Clone makes dst a copy of src that shares its blocks (btrfs reflink / APFS clonefile) and falls back to a byte

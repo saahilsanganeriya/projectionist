@@ -201,7 +201,7 @@ func fitSamples(spans []span, samples []sample, lo, hi float64) sampledFit {
 	}
 	skipped := math.Round((max(0, first-lo) + max(0, hi-last)) / w)
 	if slices.Max(fit.Offsets)-slices.Min(fit.Offsets) > agreeSpread {
-		fit.Refused = "the windows disagree on the offset"
+		fit.Refused = windowsDisagree
 	} else if fit.Score < minMargin*fit.RunnerUp {
 		fit.Refused = "another frame-rate ratio fits almost as well"
 	} else if float64(fit.Unseen) > skipped*(quietLines-1) {
@@ -209,6 +209,10 @@ func fitSamples(spans []span, samples []sample, lo, hi float64) sampledFit {
 	}
 	return fit
 }
+
+// windowsDisagree is the refusal of a subtitle that every window matches at the joint offset while their own offsets
+// lie apart: one no single retime mends.
+const windowsDisagree = "the windows disagree on the offset"
 
 func binOffset(bin int) float64 { return float64(bin)*frame - sampleShift }
 
@@ -496,6 +500,18 @@ func (s *sampler) label() string {
 		return "captions"
 	}
 	return "speech"
+}
+
+// fit fits txt's cues to the samples, and notes the fit and the reads in fields for the history.
+func (s *sampler) fit(txt string, fields map[string]any) sampledFit {
+	lo, hi := s.span()
+	fit := fitSamples(cues(txt), s.samples, lo, hi)
+	fields["reference"], fields["ratio"], fields["offset_ms"] = s.label(), fit.Ratio, math.Round(fit.Offset*1000)
+	fields["unseen_lines"] = fit.Unseen
+	fields["window_offsets_ms"], fields["evidence"] = rounded(fit.Offsets, 1000, 1), rounded(fit.Evidence, 10, 0.1)
+	fields["score"], fields["runner_up"], fields["windows"] = math.Round(fit.Score), math.Round(fit.RunnerUp), s.starts()
+	fields["sample_bytes"], fields["sample_disk_bytes"] = s.read, s.disk
+	return fit
 }
 
 // starts are the windows' starts in whole seconds, replacements included.

@@ -424,7 +424,7 @@ func (b *broker) result(w http.ResponseWriter, req *http.Request) {
 	if o.fields == nil {
 		o.fields = map[string]any{}
 	}
-	if o.result == "no_aligned_candidate" && r.meteredOut() {
+	if o.result == "no_aligned_candidate" && !t.verify && r.meteredOut() {
 		o = outcome{result: "deferred", detail: "a provider was out"}
 	}
 	r.finish(ctx, t, o)
