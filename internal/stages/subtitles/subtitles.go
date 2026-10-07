@@ -1286,8 +1286,8 @@ func (r *run) workQueue(ctx context.Context, lacking, sidecarred []*title) error
 	defer r.remote.drain(ctx, r)
 	for _, p := range queued {
 		t := byPath[p]
-		// outside this run's roots, or a title queued lacking a sidecar that has one now (the verify pass's from here)
-		if t == nil || t.verify && !verifying[p] {
+		// outside this run's roots, or queued as lacking a sidecar that it has now, or for its sidecars that are gone
+		if t == nil || t.verify != verifying[p] {
 			if t != nil || r.settled(p) {
 				if _, err := db.ExecContext(ctx, `DELETE FROM subtitles_queue WHERE path=?`, p); err != nil {
 					return err
@@ -1315,10 +1315,11 @@ func (r *run) workQueue(ctx context.Context, lacking, sidecarred []*title) error
 		o := outcome{result: "queued"}
 		switch {
 		case t.verify: // its own sidecars, never a search
-			if pool, err = r.sidecarPool(ctx, t); err != nil {
-				return err
-			}
-			if t.pool = pool; len(pool) == 0 { // judged meanwhile: finish records the verdict
+			t.pool, err = r.sidecarPool(ctx, t)
+			switch pool = t.pool; {
+			case err != nil:
+				o = outcome{result: "error", detail: err.Error()}
+			case len(pool) == 0: // judged meanwhile: finish records the verdict
 				o = outcome{}
 			}
 		case !fresh:

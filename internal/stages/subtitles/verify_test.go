@@ -292,3 +292,18 @@ func TestVerifyPerRunCap(t *testing.T) {
 		t.Errorf("second run: Show's sidecar there %v, archive %v; want Show's verified too", s, f.archived())
 	}
 }
+
+// Catches a verify title's queue row outliving its sidecars (removed by hand): worked as a title lacking a subtitle at
+// the back of the queue, behind every other, for good. The row must go; the title is searched for on its schedule.
+func TestVerifyQueueRowGoesWithItsSidecars(t *testing.T) {
+	f, _ := queueFixture(t, false, srtOf(cueSpans(dense(1000, 7), 1, 2)))
+	f.run(t)
+	if f.queued()[0] != f.path(show) {
+		t.Fatalf("queue %v; want Show waiting for a full alignment", f.queued())
+	}
+	os.Remove(f.showBase() + ".en.srt")
+	f.queueOptions(false, 5)
+	if f.run(t); f.queued()[0] != "" || f.outcomes()[f.path(show)] != "queued" {
+		t.Errorf("after its sidecar went: queue %v, Show %q; want the row gone, the title left to its schedule", f.queued(), f.outcomes()[f.path(show)])
+	}
+}
