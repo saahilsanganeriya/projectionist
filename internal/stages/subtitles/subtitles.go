@@ -45,13 +45,13 @@
 // the cause (a spent quota, OpenSubtitles' downloads, OpenSubtitles.com's, or Subdl's or SubSource's daily limit, is
 // routine and only logged, and waits for its reset across runs). alass exiting non-zero on a candidate (one it cannot
 // parse, say) fails that title alone: recorded alass_failed, with the last lines alass printed, and tried again on the
-// same schedule, its candidate never refused for it. Only alass failing on alassTrip titles in a row, or not starting at
-// all, makes the titles behind them that need alass wait for the next run, with one alert. Each run also refreshes
-// sub_stats.py's TSV over the whole library. Jellyfin hears of each new sidecar, and Plex of its video, through queues
-// kept in the store: Plex refreshes the item(s) whose media part the video is (PUT /library/metadata/<ratingKey>/refresh,
-// the ratingKey read from Plex's own database, plex_db, opened read-only), as neither its watcher nor a partial scan of
-// the folder attaches a new sidecar beside a video it holds already; a push Plex does not take is retried at the next
-// push, never failing a run.
+// same schedule, its candidate never refused for it. Only alass failing on alassTrip titles in a row, alass not starting
+// at all, or a title's audio not heard, makes the titles behind them that need alass wait for the next run, with one
+// alert. Each run also refreshes sub_stats.py's TSV over the whole library. Jellyfin hears of each new sidecar, and
+// Plex of its video, through queues kept in the store: Plex refreshes the item(s) whose media part the video is (PUT
+// /library/metadata/<ratingKey>/refresh, the ratingKey read from Plex's own database, plex_db, opened read-only), as
+// neither its watcher nor a partial scan of the folder attaches a new sidecar beside a video it holds already; a push
+// Plex does not take is retried at the next push, never failing a run.
 //
 // With align_remote_lanes set, the queue hands its titles to align workers on another machine while one has called in
 // the last minute (remote.go): the NAS streams only the tracks the alignment reads, serves the candidates under the
