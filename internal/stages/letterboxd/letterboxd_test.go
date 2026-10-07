@@ -268,7 +268,7 @@ const (
 type fakePlexTV struct {
 	*httptest.Server
 	mu      sync.Mutex
-	lists   map[string][]string // token → plex.tv ids on that user's watchlist ("m<tmdb>" a film, "show<tmdb>" a show)
+	lists   map[string][]string // token → plex.tv ids on that user's watchlist ("m<tmdb>" a film, "show<tmdb>" a show, any other a film with no TMDB id)
 	refuse  map[string]bool     // plex.tv ids whose add or removal answers 500
 	unknown map[int]bool        // TMDB ids plex.tv has no film for
 	calls   map[string]int      // "METHOD path" →
@@ -303,11 +303,14 @@ func newPlexTV(t *testing.T) *fakePlexTV {
 			size, _ := strconv.Atoi(q.Get("X-Plex-Container-Size"))
 			md := []map[string]any{}
 			for _, k := range list[min(start, len(list)):min(start+size, len(list))] {
-				kind, id := "movie", strings.TrimPrefix(k, "m")
-				if strings.HasPrefix(k, "show") {
-					kind, id = "show", strings.TrimPrefix(k, "show")
+				kind, guids := "movie", []map[string]string{}
+				switch {
+				case strings.HasPrefix(k, "show"):
+					kind, guids = "show", []map[string]string{{"id": "tmdb://" + strings.TrimPrefix(k, "show")}}
+				case strings.HasPrefix(k, "m"):
+					guids = []map[string]string{{"id": "tmdb://" + strings.TrimPrefix(k, "m")}}
 				}
-				md = append(md, map[string]any{"ratingKey": k, "type": kind, "guid": "plex://" + kind + "/" + k, "Guid": []map[string]string{{"id": "tmdb://" + id}}})
+				md = append(md, map[string]any{"ratingKey": k, "type": kind, "title": k, "guid": "plex://" + kind + "/" + k, "Guid": guids})
 			}
 			reply(map[string]any{"totalSize": len(list), "Metadata": md})
 		case r.Method == "GET" && r.URL.Path == "/library/metadata/matches":
@@ -402,6 +405,7 @@ type world struct {
 	sleeps  []time.Duration // plex.tv retry waits
 	pace    *paceClock      // Letterboxd waits
 	movies  string          // the library: the folders readLibrary lists
+	tv      string          // its shows: TMDB TV 565 (his show565) only
 	missing string
 	opts    string
 }
@@ -425,10 +429,12 @@ func newWorld(t *testing.T) *world {
 	for _, d := range []string{"Licorice Pizza (2021) {tmdb-718032}", "Ad Astra (2019) {tmdb-419704}", "The Ring (2002) {tmdb-565}", "Digger (2026) {tmdb-1248832}", "_archive"} {
 		os.MkdirAll(filepath.Join(movies, d), 0o755)
 	}
+	w.tv = filepath.Join(root, "TV")
+	os.MkdirAll(filepath.Join(w.tv, "The Show (2001) {tmdb-565}", "Season 01"), 0o755)
 	writeExport(t, filepath.Join(root, "export"))
 	w.missing = filepath.Join(root, "_watchlist-missing.txt")
-	w.opts = fmt.Sprintf("letterboxd_url = %q\nboxd_url = %q\nexport_dir = %q\nmovies_dir = %q\nmissing_file = %q\nplex_watchlist = true\nplex_tv = %q\ndiscover_url = %q\n",
-		w.lb.URL, w.lb.URL+"/boxd", filepath.Join(root, "export"), movies, w.missing, w.pt.URL, w.pt.URL)
+	w.opts = fmt.Sprintf("letterboxd_url = %q\nboxd_url = %q\nexport_dir = %q\nmovies_dir = %q\ntv_root = %q\nmissing_file = %q\nplex_watchlist = true\nplex_tv = %q\ndiscover_url = %q\n",
+		w.lb.URL, w.lb.URL+"/boxd", filepath.Join(root, "export"), movies, w.tv, w.missing, w.pt.URL, w.pt.URL)
 	w.pace = &paceClock{now: w.h.Now}
 	w.st = Stage{sleep: func(_ context.Context, d time.Duration) error { w.sleeps = append(w.sleeps, d); return nil },
 		pace: lbpace.New(w.pace.Now, w.pace.Sleep)}
@@ -1183,7 +1189,7 @@ func TestEachMembersOwnPlexWatchlist(t *testing.T) {
 	w := newWorld(t)
 	okja, ring := gridEntry("Okja (2017)", "okja"), gridEntry("The Ring (2002)", "the-ring-2002")
 	whw, prime := gridEntry("What Happened Was... (1994)", "what-happened-was"), gridEntry("Primetime (2026)", "primetime-2026")
-	w.onNAS(whwFolder, "Okja (2017) {tmdb-387426}", "Primetime (2026) {tmdb-999001}") // films off the NAS: TestPlexWatchlistHoldsOnlyFilmsOnTheNAS
+	w.onNAS(whwFolder, "Okja (2017) {tmdb-387426}", "Primetime (2026) {tmdb-999001}", "Hers (1999) {tmdb-999}") // titles off the NAS: TestPlexWatchlistHoldsOnlyTitlesOnTheNAS
 	w.lb.serve("/zaurelia/rss/", herFeed())
 	w.lb.serve("/zaaron/rss/", herFeed())
 	w.lb.serve("/zaurelia/watchlist/", watchlistPage(okja, ring, whw))
@@ -1221,35 +1227,72 @@ func TestEachMembersOwnPlexWatchlist(t *testing.T) {
 	step("after she watched Okja", 30*time.Minute, "his m18,m565,show565; hers m18,m999,m999001; Aaron's m387426,m718032", 3)
 }
 
-// Catches, on his Plex watchlist: a film on his Letterboxd watchlist that is not on the NAS added (What Happened Was);
-// a film arriving on the NAS not added by the next run; a film this stage added kept once it is off the NAS (the
-// state every film the stage added before this rule is in at its first run); and a film he put there by hand taken
-// out because it is not on the NAS (Okja, on his Letterboxd watchlist too).
-func TestPlexWatchlistHoldsOnlyFilmsOnTheNAS(t *testing.T) {
+// Catches, on his Plex watchlist, which holds only titles on the NAS, whoever put them there: a film on his Letterboxd
+// watchlist that is not on the NAS added (What Happened Was); a film arriving on the NAS not added by the next run; a
+// film this stage added kept once it is off the NAS; a film he put there by hand kept while it is not on the NAS (Okja,
+// on his Letterboxd watchlist too), or taken off while it is (Licorice Pizza, which he has watched); a show taken off
+// while its folder is in tv_root (show565), or kept while it is not (show1399); and an item with no TMDB id kept.
+func TestPlexWatchlistHoldsOnlyTitlesOnTheNAS(t *testing.T) {
 	w := newWorld(t)
 	w.lb.serve("/saahilsan/watchlist/", watchlistPage(gridEntry("The Ring (2002)", "the-ring-2002"),
 		gridEntry("What Happened Was... (1994)", "what-happened-was"), gridEntry("Okja (2017)", "okja")))
-	w.pt.set(fake.PlexToken, "show565", "m387426") // Okja, put there by hand
+	w.pt.set(fake.PlexToken, "show565", "show1399", "m387426", "m718032", "plex1") // all put there by hand
 	step := func(d time.Duration) string {
 		t.Helper()
 		w.h.Now = w.h.Now.Add(d)
 		w.run(t, "")
 		return w.pt.list(fake.PlexToken)
 	}
-	if got := step(0); got != "m387426,m565,show565" {
-		t.Errorf("first run: his Plex watchlist %s, want What Happened Was (not on the NAS) left off", got)
+	got := step(0)
+	for _, c := range []struct {
+		item string
+		kept bool
+		bug  string
+	}{
+		{"m565", true, "The Ring, on his Letterboxd watchlist and on the NAS, not added"},
+		{"m18", false, "What Happened Was, not on the NAS, added"},
+		{"m387426", false, "Okja, put there by hand and not on the NAS, kept"},
+		{"m718032", true, "Licorice Pizza, put there by hand and on the NAS, taken off"},
+		{"show565", true, "the show whose folder is in tv_root taken off"},
+		{"show1399", false, "a show not on the NAS kept"},
+		{"plex1", false, "an item with no TMDB id kept"},
+	} {
+		if slices.Contains(strings.Split(got, ","), c.item) != c.kept {
+			t.Errorf("first run: his Plex watchlist %s: %s", got, c.bug)
+		}
 	}
 	w.onNAS(whwFolder)
-	if got := step(30 * time.Minute); got != "m18,m387426,m565,show565" {
+	if got := step(30 * time.Minute); got != "m18,m565,m718032,show565" {
 		t.Errorf("What Happened Was arrived on the NAS: his Plex watchlist %s, want it added", got)
 	}
 	os.RemoveAll(filepath.Join(w.movies, whwFolder))
-	got := step(30 * time.Minute)
-	if strings.Contains(got, "m18") {
+	if got := step(30 * time.Minute); strings.Contains(got, "m18") {
 		t.Errorf("What Happened Was left the NAS: his Plex watchlist %s, want this stage's add taken off", got)
 	}
-	if !strings.Contains(got, "m387426") {
-		t.Errorf("his Plex watchlist %s: Okja, which he put there by hand, was taken off", got)
+}
+
+// Catches a movies_dir or tv_root that is missing, or that reads but holds no title folder (a volume gone, leaving its
+// mount point empty), read as an empty library: every title on every Plex watchlist would be taken off (here Licorice
+// Pizza and show565, both on the NAS). The run fails instead, and nothing is taken off.
+func TestMissingOrEmptyRootRemovesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name, root string
+		empty      bool
+	}{{"movies_dir missing", "Movies", false}, {"movies_dir empty", "Movies", true}, {"tv_root missing", "TV", false}, {"tv_root empty", "TV", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := newWorld(t)
+			w.pt.set(fake.PlexToken, "m718032", "show565")
+			dir := filepath.Join(filepath.Dir(w.missing), tc.root)
+			os.RemoveAll(dir)
+			if tc.empty {
+				os.Mkdir(dir, 0o755)
+			}
+			w.h.SetOptions(w.opts)
+			err := w.st.Run(context.Background(), w.h.Env, &stage.Report{})
+			if err == nil || w.pt.count("PUT /actions/removeFromWatchlist") != 0 || w.pt.list(fake.PlexToken) != "m718032,show565" {
+				t.Errorf("run error %v, his Plex watchlist %s; want the run failed and nothing taken off", err, w.pt.list(fake.PlexToken))
+			}
+		})
 	}
 }
 
@@ -1275,8 +1318,9 @@ func TestWatchlistListingReadsEveryPage(t *testing.T) {
 	w := newWorld(t)
 	w.onNAS(whwFolder)
 	var mine []string
-	for i := range 249 {
+	for i := range 249 { // on the NAS, so they stay
 		mine = append(mine, fmt.Sprintf("m%d", 900000+i))
+		w.onNAS(fmt.Sprintf("Film (2000) {tmdb-%d}", 900000+i))
 	}
 	w.pt.set(fake.PlexToken, append(mine, "m565")...)
 	rep := w.run(t, "")

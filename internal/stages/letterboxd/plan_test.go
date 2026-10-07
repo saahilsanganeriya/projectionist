@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"projectionist/internal/library"
 	"projectionist/internal/watch"
 )
 
@@ -43,7 +44,7 @@ func baseFacts() facts {
 		lidSlug: map[string]string{"lp": "licorice-pizza", "aa": "ad-astra-2019", "tv": "chernobyl", "ring": "the-ring-2002", "okja": "okja", "dune": "dune-2021"},
 		films: map[string]filmFacts{"licorice-pizza": {718032, "movie"}, "licorice-pizza-2021": {718032, "movie"}, "ad-astra-2019": {419704, "movie"},
 			"chernobyl": {87108, "tv"}, "the-ring-2002": {565, "movie"}, "okja": {387426, "movie"}, "dune-2021": {438631, "movie"}},
-		library: map[int]libraryFilm{718032: {"Licorice Pizza", 2021}, 419704: {"Ad Astra", 2019}, 565: {"The Ring", 2002}},
+		library: map[int]library.Folder{718032: {Title: "Licorice Pizza", Year: 2021}, 419704: {Title: "Ad Astra", Year: 2019}, 565: {Title: "The Ring", Year: 2002}},
 	}
 }
 
@@ -127,8 +128,7 @@ func TestEvents(t *testing.T) {
 	}
 }
 
-// Catches: a film the member put on the watchlist by hand removed, and a watched film (on Letterboxd, or played in the
-// apps as the watch record has it) kept or added.
+// Catches a watched film (on Letterboxd, or played in the apps as the watch record has it) kept or added.
 func TestPlanMembers(t *testing.T) {
 	wants := []want{
 		{TMDB: 1, InLibrary: true, Watchlist: true},
@@ -138,9 +138,9 @@ func TestPlanMembers(t *testing.T) {
 	haves := map[int]have{
 		2: {Item: "b", Member: true, Added: true},
 		3: {Item: "c", Member: true, Added: true},
-		9: {Item: "z", Member: true}, // the member's own
 	}
-	add, remove := planMembers(unwatchedOnNAS(wants, map[string]bool{movieItem(3): true}), haves)
+	onNAS := map[int]library.Folder{1: {}, 2: {}, 3: {}}
+	add, remove := planMembers(unwatchedOnNAS(wants, map[string]bool{movieItem(3): true}), onNAS, haves)
 	if !reflect.DeepEqual(add, []int{1}) || !reflect.DeepEqual(remove, []int{2, 3}) {
 		t.Errorf("add=%v remove=%v", add, remove)
 	}

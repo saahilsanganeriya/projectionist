@@ -28,11 +28,14 @@
 // film unreadable for 3 days, is an alert each run. Films join the library on the TMDB id in the folder names.
 //
 // A member's Plex watchlist is written with their own plex.tv token: the server's sign-in for the owner, a Plex Home
-// switch for a person (see plexToken). It gets the films on their Letterboxd watchlist that are on the NAS (in
-// movies_dir) and that they have watched neither on Letterboxd nor, as the watch record has it, in Plex or Jellyfin; a
-// film arriving on the NAS is added by the next run, a film leaves once it is off that list or off the NAS, and only
-// films this stage added are ever taken out (letterboxd_sink.added), so whatever they put there by hand stays, on the
-// NAS or not. The owner's watchlist films not on the NAS go to missing_file. Reviews are not synced: a Plex review is
+// switch for a person (see plexToken). It holds only titles on the NAS, whoever put them there. It gets the films on
+// their Letterboxd watchlist that are on the NAS (in movies_dir) and that they have watched neither on Letterboxd nor,
+// as the watch record has it, in Plex or Jellyfin, a film arriving on the NAS by the next run; it loses every film not
+// in movies_dir, every show not in tv_root (both by the {tmdb-N} in the folder names) and every item with no TMDB id,
+// also those they put there by hand, and the films this stage added (letterboxd_sink.added) once they are off their
+// Letterboxd watchlist. A title on the NAS that they put there by hand stays. A movies_dir or tv_root that is missing,
+// unreadable or holds no {tmdb-N} folder fails the run, so nothing is taken off. The owner's watchlist films not on the
+// NAS go to missing_file. Reviews are not synced: a Plex review is
 // a community post whose privacy the poster cannot set (createReview takes none; other members' reviews carry ANYONE
 // or PLEX and are listed to non-friends), and Jellyfin has no per-user text field (UpdateUserItemDataDto).
 package letterboxd
@@ -46,6 +49,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,6 +72,7 @@ type Options struct {
 	PagesEvery     time.Duration `toml:"pages_every"`     // the owner's watched-films grid crawl
 	ExportDir      string        `toml:"export_dir"`      // holds letterboxd-<user>-<date>-utc/ folders; newest wins
 	MoviesDir      string        `toml:"movies_dir"`
+	TVRoot         string        `toml:"tv_root"`      // its shows, as posters reads them: only for the Plex watchlist
 	MissingFile    string        `toml:"missing_file"` // the owner's watchlist films not on the NAS; "" = none
 	SinkRefresh    time.Duration `toml:"sink_refresh"` // re-read each Plex watchlist this often (also before writing to it)
 
@@ -129,6 +134,7 @@ func defaults() Options {
 		PagesEvery:     24 * time.Hour,
 		ExportDir:      "/volume1/docker/projectionist/data/letterboxd",
 		MoviesDir:      "/volume1/media/Movies",
+		TVRoot:         "/volume1/media/TV",
 		MissingFile:    "/volume1/media/_watchlist-missing.txt",
 		SinkRefresh:    24 * time.Hour,
 		Person:         "saahil",
@@ -352,7 +358,7 @@ func (r *run) sync(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	switch err := r.syncWatchlist(ctx, wants); {
+	switch err := r.syncWatchlist(ctx, wants, f.library, f.shows); {
 	case ctx.Err() != nil:
 		return "", ctx.Err()
 	case isStoreErr(err):
@@ -915,8 +921,13 @@ func (r *run) loadFacts(ctx context.Context) (facts, error) {
 	if found {
 		f.watchlist = &wl
 	}
-	if f.library, err = readLibrary(r.opt.MoviesDir); err != nil {
+	if f.library, err = readLibrary(r.opt.MoviesDir, library.ParseMovieFolder); err != nil {
 		return f, err
+	}
+	if r.opt.PlexWatchlist {
+		if f.shows, err = readLibrary(r.opt.TVRoot, library.ParseShowFolder); err != nil {
+			return f, err
+		}
 	}
 	err = query(ctx, r.db, `SELECT lid, slug FROM letterboxd_lid`, func(rows *sql.Rows) error {
 		var lid, slug string
@@ -973,26 +984,23 @@ func query(ctx context.Context, db *sql.DB, q string, scan func(*sql.Rows) error
 	return rows.Err()
 }
 
-// readLibrary lists the movie folders on disk: the library is the files, not what Plex or Jellyfin indexed.
-func readLibrary(dir string) (map[int]libraryFilm, error) {
-	entries, err := os.ReadDir(dir)
+// readLibrary lists the folders in root that parse (a movie or a show folder's name) reads with a {tmdb-N} id: the
+// library is the files, not what Plex or Jellyfin indexed. A root holding none fails like a missing one: read as an
+// empty library (a volume gone, leaving its mount point), it would take every title off every Plex watchlist.
+func readLibrary(root string, parse func(string) (library.Folder, bool)) (map[int]library.Folder, error) {
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		return nil, err
 	}
-	out := make(map[int]libraryFilm, len(entries))
+	out := make(map[int]library.Folder, len(entries))
 	for _, e := range entries {
-		if !e.IsDir() {
-			continue
+		f, ok := parse(e.Name())
+		if id, err := strconv.Atoi(f.ID.Value); ok && err == nil && e.IsDir() && f.ID.Source == "tmdb" {
+			out[id] = f
 		}
-		// ParseMovie reads a file path; the folder's own main-file name puts the folder through the same parser.
-		m, ok := library.ParseMovie(filepath.Join(dir, e.Name(), e.Name()+".mkv"))
-		if !ok || m.ID.Source != "tmdb" {
-			continue
-		}
-		var id int
-		if _, err := fmt.Sscan(m.ID.Value, &id); err == nil {
-			out[id] = libraryFilm{Title: m.Title, Year: m.Year}
-		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s holds no folder with a {tmdb-N} id: not read as an empty library", root)
 	}
 	return out, nil
 }

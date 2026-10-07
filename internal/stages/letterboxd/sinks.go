@@ -1,12 +1,13 @@
 package letterboxd
 
-// ---- the sink: each member's own Plex watchlist on plex.tv, kept in step with their Letterboxd watchlist ----
+// ---- the sink: each member's own Plex watchlist on plex.tv, holding only titles on the NAS ----
 //
-// What the watchlist holds is a stored snapshot, re-read every sink_refresh and before any write (a film the member
+// The films on the watchlist are a stored snapshot, re-read every sink_refresh and before any write (a film the member
 // added or removed by hand since the last read must count), and each successful write updates its stored row, so a
-// rerun plans nothing. Calls get 3 attempts (2 s, 4 s apart); 3 failed calls in a row end the member's part of the
-// run, and what is left stays in the diff for the next run. A film whose writes fail in 3 runs in a row parks, with
-// one alert.
+// rerun plans nothing. Shows and items with no TMDB id are not stored: each read takes off those not on the NAS, so
+// one added by hand leaves at the next read, and a removal of one that fails is sent again at the next read. Calls get
+// 3 attempts (2 s, 4 s apart); 3 failed calls in a row end the member's part of the run, and what is left stays in the
+// diff for the next run. A film whose writes fail in 3 runs in a row parks, with one alert.
 
 import (
 	"cmp"
@@ -23,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"projectionist/internal/library"
 	"projectionist/internal/store"
 	"projectionist/internal/watch"
 )
@@ -132,17 +134,17 @@ func (r *run) replaceSnapshot(ctx context.Context, fresh map[int]have) error {
 	return tx.Commit()
 }
 
-// snapshot returns the member's Plex watchlist as stored, re-read when forced or older than sink_refresh; fresh
-// reports a read made now. Films are keyed by TMDB movie id: a show's TMDB id is in another number space, so the
-// member's shows are left out (and so never touched).
-func (r *run) snapshot(ctx context.Context, b *breaker, force bool) (haves map[int]have, fresh bool, err error) {
+// snapshot returns the films on the member's Plex watchlist as stored, re-read when forced or older than
+// sink_refresh; fresh reports a read made now, and listing is every item it listed. Films are keyed by TMDB movie id:
+// a show's TMDB id is in another number space, so shows, like items with no TMDB id, are in listing only.
+func (r *run) snapshot(ctx context.Context, b *breaker, force bool) (haves map[int]have, listing []plexItem, fresh bool, err error) {
 	var m sinkMeta
 	if _, err := r.env.Store.GetJSON(ctx, r.ns, "sink."+app, &m); err != nil {
-		return nil, false, err
+		return nil, nil, false, err
 	}
 	if !force && r.env.Now().Sub(m.FetchedAt) < r.opt.SinkRefresh {
 		haves, err = r.loadHaves(ctx)
-		return haves, false, err
+		return haves, nil, false, err
 	}
 	listed := map[int]have{}
 	const page = 100 // plex.tv refuses 200 ("Invalid value provided for x-plex-container-size", 2026-10-05)
@@ -150,8 +152,9 @@ func (r *run) snapshot(ctx context.Context, b *breaker, force bool) (haves map[i
 		var l plexListing
 		path := fmt.Sprintf("/library/sections/watchlist/all?includeGuids=1&X-Plex-Container-Start=%d&X-Plex-Container-Size=%d", start, page)
 		if err := r.discover(ctx, b, http.MethodGet, path, &l); err != nil {
-			return nil, false, err
+			return nil, nil, false, err
 		}
+		listing = append(listing, l.Metadata...)
 		for _, it := range l.Metadata {
 			if id := tmdbFromGuids(it.Guid); id > 0 && it.Type == "movie" {
 				listed[id] = have{Item: it.RatingKey, Member: true}
@@ -162,15 +165,29 @@ func (r *run) snapshot(ctx context.Context, b *breaker, force bool) (haves map[i
 		}
 	}
 	if err := r.replaceSnapshot(ctx, listed); err != nil {
-		return nil, false, storeErr{err}
+		return nil, nil, false, storeErr{err}
 	}
 	m.FetchedAt = r.env.Now()
 	if err := r.env.Store.PutJSON(ctx, r.ns, "sink."+app, m); err != nil {
-		return nil, false, storeErr{err}
+		return nil, nil, false, storeErr{err}
 	}
 	r.count(app+".snapshot", 1)
 	haves, err = r.loadHaves(ctx)
-	return haves, err == nil, err
+	return haves, listing, err == nil, err
+}
+
+// offNAS is what a listing holds beside its films (see snapshot) that is not on the NAS: a show whose TMDB id names
+// no folder in shows, and any item with no TMDB id or of another type.
+func offNAS(listing []plexItem, shows map[int]library.Folder) []plexItem {
+	var out []plexItem
+	for _, it := range listing {
+		id := tmdbFromGuids(it.Guid)
+		_, showThere := shows[id]
+		if !(it.Type == "movie" && id > 0) && !(it.Type == "show" && showThere) {
+			out = append(out, it)
+		}
+	}
+	return out
 }
 
 // sinkPlan is the watchlist writes one run needs.
@@ -290,6 +307,7 @@ func (r *run) failed(what string, err error, id int) {
 
 type plexItem struct {
 	RatingKey string `json:"ratingKey"`
+	Title     string `json:"title"`
 	PlexGUID  string `json:"guid"` // the string "plex://movie/..."; without its own field Go's case-insensitive keys pour it into Guid
 	Type      string `json:"type"`
 	Guid      []struct {
@@ -439,10 +457,12 @@ func (r *run) played(ctx context.Context) (map[string]bool, error) {
 	return out, nil
 }
 
-// syncWatchlist keeps the member's own Plex watchlist holding the films of their Letterboxd watchlist that are on the
-// NAS and that they have not watched (see unwatchedOnNAS). It writes only against a read made in the same run, and
-// takes out only films it added: a film the member put there by hand, shows included, stays.
-func (r *run) syncWatchlist(ctx context.Context, wants []want) error {
+// syncWatchlist keeps the member's own Plex watchlist holding only titles on the NAS: it adds the films of their
+// Letterboxd watchlist that are on the NAS and that they have not watched (see unwatchedOnNAS), and takes off every
+// film not in movies, every show not in shows and every item with no TMDB id, whoever put it there, and the films it
+// added that are no longer wanted. A title on the NAS that the member put there by hand stays. It writes only against
+// a read made in the same run.
+func (r *run) syncWatchlist(ctx context.Context, wants []want, movies, shows map[int]library.Folder) error {
 	if !r.opt.PlexWatchlist {
 		return nil
 	}
@@ -457,14 +477,15 @@ func (r *run) syncWatchlist(ctx context.Context, wants []want) error {
 	}
 	b := &breaker{}
 	var haves map[int]have
+	var listing []plexItem
 	var p sinkPlan
 	var parked int
 	for _, force := range []bool{false, true} {
 		var read bool
-		if haves, read, err = r.snapshot(ctx, b, force); err != nil {
+		if haves, listing, read, err = r.snapshot(ctx, b, force); err != nil {
 			return fmt.Errorf("plex watchlist snapshot: %w", err)
 		}
-		add, remove := planMembers(desired, haves)
+		add, remove := planMembers(desired, movies, haves)
 		if p, parked, err = r.settle(ctx, sinkPlan{add: add, remove: remove}, haves, retries); err != nil {
 			return err
 		}
@@ -472,11 +493,26 @@ func (r *run) syncWatchlist(ctx context.Context, wants []want) error {
 			break
 		}
 	}
+	strays := offNAS(listing, shows)
 	r.count(app+".parked", parked)
 	r.count(app+".watchlist_add", len(p.add))
-	r.count(app+".watchlist_remove", len(p.remove))
+	r.count(app+".watchlist_remove", len(p.remove)+len(strays))
 	if len(p.add)+len(p.remove) > 0 {
 		r.env.Log.Info("plex watchlist planned", "event", "watchlist_plan", "person", r.opt.Person, "add", p.add, "remove", p.remove, "dry_run", r.opt.DryRun)
+	}
+	titles := map[string]string{} // a removal follows a read made now, which lists every item it takes off
+	for _, it := range listing {
+		titles[it.RatingKey] = it.Title
+	}
+	logRemoval := func(title, kind string, tmdb int) {
+		r.env.Log.Info("plex watchlist removal", "event", "watchlist_remove", "person", r.opt.Person, "title", title, "type", kind, "tmdb", tmdb,
+			"dry_run", r.opt.DryRun)
+	}
+	for _, id := range p.remove {
+		logRemoval(titles[haves[id].Item], "movie", id)
+	}
+	for _, it := range strays {
+		logRemoval(it.Title, it.Type, tmdbFromGuids(it.Guid))
 	}
 	if r.opt.DryRun {
 		return nil
@@ -526,6 +562,19 @@ func (r *run) syncWatchlist(ctx context.Context, wants []want) error {
 		h.Member, h.Added = false, false
 		if err := r.saveHave(ctx, haves, id, h); err != nil {
 			return err
+		}
+		r.count(app+".watchlist_removed", 1)
+	}
+	for _, it := range strays {
+		if err := r.discover(ctx, b, http.MethodPut, "/actions/removeFromWatchlist?ratingKey="+url.QueryEscape(it.RatingKey), nil); err != nil {
+			// Never parked (a show's TMDB id is no film's, and an item may have none): the next read sends it again.
+			r.count(app+".failed", 1)
+			r.env.Log.Warn("write failed", "event", "sink_write_failed", "app", app, "what", "watchlist_remove", "person", r.opt.Person,
+				"item", it.RatingKey, "title", it.Title, "err", err)
+			if b.fails >= 3 {
+				return errBreakerOpen
+			}
+			continue
 		}
 		r.count(app+".watchlist_removed", 1)
 	}
