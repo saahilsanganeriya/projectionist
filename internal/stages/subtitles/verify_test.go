@@ -214,10 +214,9 @@ func TestVerifyUndecidedGoesToTheQueue(t *testing.T) {
 	}
 }
 
-// Catches a sidecar the queue's full alignment refuses (here or on an align worker) kept, or its title left waiting
-// for OpenSubtitles while its quota is spent (the pool is the sidecars alone: no provider could add to it), which
-// would read the whole video again every run: it must be archived, its title's record dropped so the next run
-// searches for it anew.
+// Catches a sidecar the queue's full alignment refuses (here or on an align worker) kept, or its title left waiting in
+// the queue for OpenSubtitles while its quota is spent (the pool is the sidecars alone: no provider could add to it):
+// the sidecar must be archived and its title's record dropped, so the next run searches for it anew.
 func TestVerifyRefusedByTheQueueIsArchived(t *testing.T) {
 	other := srtOf(cueSpans(dense(1000, 11), 1, 0)) // another film's: the windows cannot judge it, alass cannot place it
 	for _, onWorker := range []bool{false, true} {
