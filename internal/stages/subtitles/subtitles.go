@@ -121,7 +121,7 @@ type Options struct {
 	SampleLength  time.Duration `toml:"sample_length"`
 	// Rename logs, oldest first: the original release name of a video whose .details note does not give one.
 	UndoLogs []string `toml:"undo_logs"`
-	// Align workers on another machine (projectionist align-worker, through an SSH tunnel to the listener) take the
+	// Align workers on another machine (projectionist align-worker, over SSH to the listener) take the
 	// queue's titles while one has called in the last minute, at most this many leased at once; 0: off.
 	AlignRemoteLanes int `toml:"align_remote_lanes"`
 }
@@ -1974,12 +1974,18 @@ func (r *run) tellApps(ctx context.Context, path string, force bool) {
 	}
 }
 
-// scanPlex asks Plex for a partial scan of each folder, in the library section that holds it, and returns the folders
-// to ask again at the next push. A folder no section holds is dropped.
+// plexBox bounds one push's scan requests: the push holds every sidecar write (the first one carries the folders of
+// every sidecar written before), and Plex's API stalls while it scans.
+const plexBox = 30 * time.Second
+
+// scanPlex asks Plex for a partial scan of each folder, in the library section that holds it, until Plex refuses one or
+// plexBox is up, and returns the folders to ask at the next push. A folder no section holds is dropped.
 func (r *run) scanPlex(ctx context.Context, folders []string) []string {
 	if len(folders) == 0 {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, plexBox)
+	defer cancel()
 	var mc struct {
 		Directory []struct {
 			Key      string `json:"key"`
@@ -1993,7 +1999,7 @@ func (r *run) scanPlex(ctx context.Context, folders []string) []string {
 		return folders
 	}
 	var left []string
-	for _, dir := range folders {
+	for i, dir := range folders {
 		key, held := "", 0
 		for _, d := range mc.Directory {
 			for _, loc := range d.Location {
@@ -2009,8 +2015,9 @@ func (r *run) scanPlex(ctx context.Context, folders []string) []string {
 		// QueryEscape writes a space as "+", which not every server reads as one; %20 every server does.
 		path := strings.ReplaceAll(url.QueryEscape(dir), "+", "%20")
 		if err := r.env.Plex.Do(ctx, http.MethodGet, "/library/sections/"+key+"/refresh?path="+path); err != nil {
-			r.env.Log.Warn("plex not asked to scan; kept queued", "event", "plex_error", "folder", dir, "err", err)
-			left = append(left, dir)
+			r.env.Log.Warn("plex not asked to scan; kept queued", "event", "plex_error", "folder", dir, "left", len(folders)-i, "err", err)
+			left = append(left, folders[i:]...)
+			break
 		}
 	}
 	r.env.Log.Info("plex asked to scan the new sidecars' folders", "event", "plex_scan", "folders", len(folders)-len(left), "left", len(left))

@@ -315,7 +315,7 @@ func TestRemoteFallsBackToLocal(t *testing.T) {
 
 // Catches Plex never hearing of a sidecar (its own watcher does not add one beside a video it holds): each written
 // sidecar's folder, and once each folder of the sidecars written before, gets one partial scan in the section holding
-// it, with the path escaped as Plex reads it; a scan Plex refuses is asked again at the next run, and never fails one.
+// it, with the path escaped as Plex reads it; a folder Plex did not take is kept for the next run, and never fails one.
 func TestPlexScansEachNewSidecarsFolder(t *testing.T) {
 	f := newFixture(t)
 	gone := filepath.Join(f.lib, "Movies", "Gone (2001)", "Gone (2001).mkv")
@@ -344,8 +344,11 @@ func TestPlexScansEachNewSidecarsFolder(t *testing.T) {
 		return out
 	}
 	want := []string{filepath.Dir(f.path(clerks)), filepath.Dir(f.path(dune)), filepath.Dir(f.path(ran))}
-	if rep := f.run(t); len(rep.Alerts) > 0 || !slices.Equal(slices.Compact(scanned(0)), want) {
-		t.Fatalf("Plex refusing: alerts %v, scans asked %v; want none, each of %v", rep.Alerts, scanned(0), want)
+	var pending []string
+	rep := f.run(t)
+	f.h.Env.Store.GetJSON(context.Background(), name, "plex_pending", &pending)
+	if slices.Sort(pending); len(rep.Alerts) > 0 || len(scanned(0)) == 0 || !slices.Equal(pending, want) {
+		t.Fatalf("Plex refusing: alerts %v, scans asked %v, kept %v; want none, some, all of %v", rep.Alerts, scanned(0), pending, want)
 	}
 	refused := len(f.h.Plex.Calls("GET", "/library/sections/4/refresh"))
 	refusing.Store(false)
