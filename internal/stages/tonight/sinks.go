@@ -215,10 +215,14 @@ func plexMembers(ctx context.Context, px *plex.Client, section, index int) ([]st
 	return out, nil
 }
 
+// plexTarget is one collection this stage keeps: the household's, or a person's own shelf.
 type plexTarget struct {
-	Section int
-	Title   string
-	Machine string // ProcessedMachineIdentifier, for server:// item URIs
+	Section     int
+	Title       string
+	Machine     string   // ProcessedMachineIdentifier, for server:// item URIs
+	Labels      []string // beside marker
+	Own, Shared bool     // its Home row on the owner's Home, on the Home of everyone the library is shared with
+	After       string   // the hub its Home row follows in the section's order; "" = first
 }
 
 func (t plexTarget) uri(rks []string) string {
@@ -226,9 +230,10 @@ func (t plexTarget) uri(rks []string) string {
 		strings.Join(rks, ",")))
 }
 
-// syncPlex converges the collection on the picks: members, summary, the day's poster, and its Home row at the
-// top of the Movies section's hubs. On his Home only Continue Watching, On Deck and the rows of libraries listed
-// before Movies come above it (2026-10-05: Recently Added in Home Videos, while that library has new items).
+// syncPlex converges the collection on the picks: members, summary, labels, the day's poster, and its Home row at
+// the top of the Movies section's hubs (or right after t.After). On his Home only Continue Watching, On Deck and the
+// rows of libraries listed before Movies come above the household's (2026-10-05: Recently Added in Home Videos, while
+// that library has new items).
 // persist saves the state around the create, so a crash or a lost answer never leaves a second collection behind.
 func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarget, m idMap, s *sinkState, day string,
 	picks []pick, poster func() ([]byte, error), persist func() error) error {
@@ -300,15 +305,21 @@ func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarg
 		}
 		log.Info("collection renamed", "event", "plex_write", "action", "rename", "id", id, "from", c.Title, "to", t.Title)
 	}
-	if !c.owned() { // labelled right after the create, so a run that lost its state still knows the collection
+	// Labelled right after the create, so a run that lost its state still knows the collection, and a person's shelf
+	// is filtered out of every other account's library from its first moments.
+	have := c.labels()
+	missing := slices.DeleteFunc(append([]string{marker}, t.Labels...), func(l string) bool {
+		return slices.ContainsFunc(have, func(h string) bool { return strings.EqualFold(h, l) })
+	})
+	if len(missing) > 0 {
 		q := fmt.Sprintf("/library/sections/%d/all?type=18&id=%s&label.locked=1", t.Section, id)
-		for i, l := range append(c.labels(), marker) {
+		for i, l := range append(have, missing...) {
 			q += fmt.Sprintf("&label[%d].tag.tag=%s", i, url.QueryEscape(l))
 		}
 		if err := px.Do(ctx, "PUT", q); err != nil {
 			return err
 		}
-		log.Info("collection labelled", "event", "plex_write", "action", "label", "id", id, "label", marker)
+		log.Info("collection labelled", "event", "plex_write", "action", "label", "id", id, "labels", strings.Join(missing, ","))
 	}
 	have, err := plexMembers(ctx, px, t.Section, c.Index)
 	if err != nil {
@@ -355,7 +366,7 @@ func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarg
 		s.PosterOf = day
 		log.Info("collection poster uploaded", "event", "plex_write", "action", "poster", "id", id, "bytes", len(img))
 	}
-	return promotePlexHub(ctx, log, px, t.Section, id, &s.HubStale)
+	return promotePlexHub(ctx, log, px, t, id, &s.HubStale)
 }
 
 // marker labels (Plex) or tags (Jellyfin) the collection this stage owns. A collection with the same title and no
@@ -430,15 +441,21 @@ type plexHub struct {
 	PromotedToRecommended bool   `json:"promotedToRecommended"`
 }
 
-// promotePlexHub shows the collection on the owner's Home and on the Home of everyone the library is shared with (the
-// household row: its reasons name films, never a viewer, a rating or a review), not on the library's Recommended tab,
-// and moves it to the top of the Movies section's hub order. Plex caches each Home hub answer and keeps it when a collection's members change (2026-10-05: one
-// /hubs/promoted query listed the old picks 27 minutes after the edit); a manage PUT on the hub drops it, so a stale
-// hub gets the flags again, and stale is cleared only once that PUT succeeds.
-func promotePlexHub(ctx context.Context, log *slog.Logger, px *plex.Client, section int, id string, stale *bool) error {
-	base := fmt.Sprintf("/hubs/sections/%d/manage", section)
-	ident := fmt.Sprintf("custom.collection.%d.%s", section, id)
-	const vis = "promotedToRecommended=0&promotedToOwnHome=1&promotedToSharedHome=1"
+func hubIdent(section int, id string) string {
+	return fmt.Sprintf("custom.collection.%d.%s", section, id)
+}
+
+// promotePlexHub shows the collection on the Homes t names (the household row on the owner's and on everyone's the
+// library is shared with: its reasons name films, never a viewer, a rating or a review), never on the library's
+// Recommended tab, and places it first in the Movies section's hub order, or right after t.After once that hub is up.
+// Plex caches each Home hub answer and keeps it when a collection's members change (2026-10-05: one /hubs/promoted
+// query listed the old picks 27 minutes after the edit); a manage PUT on the hub drops it, so a stale hub gets the
+// flags again, and stale is cleared only once that PUT succeeds.
+func promotePlexHub(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarget, id string, stale *bool) error {
+	base := fmt.Sprintf("/hubs/sections/%d/manage", t.Section)
+	ident := hubIdent(t.Section, id)
+	bit := map[bool]int{false: 0, true: 1}
+	vis := fmt.Sprintf("promotedToRecommended=0&promotedToOwnHome=%d&promotedToSharedHome=%d", bit[t.Own], bit[t.Shared])
 	var mc struct {
 		Hub []plexHub `json:"Hub"`
 	}
@@ -452,20 +469,28 @@ func promotePlexHub(ctx context.Context, log *slog.Logger, px *plex.Client, sect
 			return err
 		}
 		log.Info("home row promoted", "event", "plex_write", "action", "promote", "hub", ident)
-	case mc.Hub[at] != plexHub{Identifier: ident, PromotedToOwnHome: true, PromotedToSharedHome: true} || *stale:
+	case mc.Hub[at] != plexHub{Identifier: ident, PromotedToOwnHome: t.Own, PromotedToSharedHome: t.Shared} || *stale:
 		if err := px.Do(ctx, "PUT", base+"/"+ident+"?"+vis); err != nil {
 			return err
 		}
 		log.Info("home row promoted", "event", "plex_write", "action", "promote", "hub", ident, "hub_stale", *stale)
 		*stale = false
 	}
-	if at == 0 {
+	move, want := base+"/"+ident+"/move", 0 // no "after": first in the section's order
+	if t.After != "" {
+		j := slices.IndexFunc(mc.Hub, func(h plexHub) bool { return h.Identifier == t.After })
+		if j < 0 { // what it follows is not up yet
+			return nil
+		}
+		move, want = move+"?after="+url.QueryEscape(t.After), j+1
+	}
+	if at == want {
 		return nil
 	}
-	if err := px.Do(ctx, "PUT", base+"/"+ident+"/move"); err != nil { // no "after": first in the section's order
+	if err := px.Do(ctx, "PUT", move); err != nil {
 		return err
 	}
-	log.Info("home row moved to the top", "event", "plex_write", "action", "move", "hub", ident, "from", at)
+	log.Info("home row moved", "event", "plex_write", "action", "move", "hub", ident, "from", at, "after", t.After)
 	return nil
 }
 

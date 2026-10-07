@@ -269,7 +269,8 @@ func filmsHTML(items []lbItem) string {
 // need the real library's ~190 candidate lines.
 func newWorld(t *testing.T, options string, fillers int) *world {
 	t.Helper()
-	w := &world{h: fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "machine1"}), logs: &bytes.Buffer{}}
+	w := &world{h: fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "machine1", "PlexOnlineUsername": "saahilsanganeriya"}),
+		logs: &bytes.Buffer{}}
 	w.h.Env.Log = slog.New(slog.NewTextHandler(w.logs, nil))
 	la, _ := time.LoadLocation("America/Los_Angeles")
 	w.h.Env.Loc = la
@@ -509,6 +510,8 @@ func answer3(ids ...int) string {
 
 // ---- fake Plex: one Movies section with the films above, and whatever collections the stage makes ----
 
+// The first collection made is the household's (900, its fields below); each one after it is a person's own shelf
+// (901, 902, ...).
 type plexFake struct {
 	srv     *fake.Server
 	mu      sync.Mutex
@@ -520,6 +523,8 @@ type plexFake struct {
 	hubs    []plexHub
 	home    []string // the members his Home row lists: Plex's cached hub, refreshed only by a manage call on it
 	posters [][]byte
+	shelves []*fakeShelf
+	foreign []map[string]any // collections not ours beside 777, listed and readable, with no route that writes them
 
 	dropCreate   bool           // POST /library/collections makes the collection, then hangs up: its answer is lost
 	failReadBack int            // GET /library/metadata/900 answers 503 this many times first
@@ -562,10 +567,12 @@ func newPlexFake(srv *fake.Server) *plexFake {
 		var items []map[string]any
 		for _, it := range all {
 			k := it["ratingKey"].(string)
-			switch {
-			case q.Get("collection") == "90000" && !slices.Contains(p.coll, k),
+			switch c := q.Get("collection"); {
+			case c == "90000" && !slices.Contains(p.coll, k),
 				q.Has("id") && !slices.Contains(strings.Split(q.Get("id"), ","), k),
-				q.Has("collection") && q.Get("collection") != "90000":
+				c != "" && c != "90000" && !slices.ContainsFunc(p.shelves, func(s *fakeShelf) bool {
+					return strconv.Itoa(s.index) == c && !s.gone && slices.Contains(s.items, k)
+				}):
 				continue
 			}
 			item := maps.Clone(it)
@@ -583,6 +590,11 @@ func newPlexFake(srv *fake.Server) *plexFake {
 	srv.HandleFunc("POST", "/library/collections", func(rw http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
+		if p.coll != nil {
+			s := p.addShelf(r.URL.Query().Get("title"), members(r))
+			mc(rw, map[string]any{"Metadata": []map[string]string{{"ratingKey": s.rk}}})
+			return
+		}
 		p.coll, p.title = members(r), r.URL.Query().Get("title")
 		if p.onCreate != nil {
 			p.onCreate()
@@ -612,7 +624,13 @@ func newPlexFake(srv *fake.Server) *plexFake {
 	srv.HandleFunc("GET", "/library/sections/4/collections", func(rw http.ResponseWriter, _ *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		mc(rw, map[string]any{"Metadata": append([]map[string]any{his}, collection()...)})
+		list := append([]map[string]any{his}, collection()...)
+		for _, s := range p.shelves {
+			if !s.gone {
+				list = append(list, s.metadata())
+			}
+		}
+		mc(rw, map[string]any{"Metadata": append(list, p.foreign...)})
 	})
 	srv.HandleFunc("GET", "/library/metadata/900", func(rw http.ResponseWriter, _ *http.Request) {
 		p.mu.Lock()
@@ -656,6 +674,22 @@ func newPlexFake(srv *fake.Server) *plexFake {
 				p.labeled = q.Get("label[0].tag.tag") == "projectionist"
 			}
 		}
+		for _, s := range p.shelves {
+			if q := r.URL.Query(); q.Get("type") == "18" && q.Get("id") == s.rk && !s.gone {
+				if q.Has("summary.value") {
+					s.summary = q.Get("summary.value")
+				}
+				if q.Has("title.value") {
+					s.title = q.Get("title.value")
+				}
+				if q.Has("label[0].tag.tag") {
+					s.labels = nil
+					for i := 0; q.Has(fmt.Sprintf("label[%d].tag.tag", i)); i++ {
+						s.labels = append(s.labels, q.Get(fmt.Sprintf("label[%d].tag.tag", i)))
+					}
+				}
+			}
+		}
 	})
 	srv.HandleFunc("POST", "/library/metadata/900/posters", func(rw http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
@@ -677,6 +711,8 @@ func newPlexFake(srv *fake.Server) *plexFake {
 		if q := r.URL.Query(); q.Get("metadataItemId") == "900" {
 			p.hubs = append(p.hubs, hubFlags("custom.collection.4.900", q))
 			p.home = slices.Clone(p.coll)
+		} else if slices.ContainsFunc(p.shelves, func(s *fakeShelf) bool { return s.rk == q.Get("metadataItemId") && !s.gone }) {
+			p.hubs = append(p.hubs, hubFlags("custom.collection.4."+q.Get("metadataItemId"), q))
 		}
 	})
 	srv.HandleFunc("PUT", "/hubs/sections/4/manage/custom.collection.4.900", func(rw http.ResponseWriter, r *http.Request) {
@@ -690,20 +726,144 @@ func newPlexFake(srv *fake.Server) *plexFake {
 			p.home = slices.Clone(p.coll)
 		}
 	})
-	srv.HandleFunc("PUT", "/hubs/sections/4/manage/custom.collection.4.900/move", func(rw http.ResponseWriter, r *http.Request) {
+	srv.HandleFunc("PUT", "/hubs/sections/4/manage/custom.collection.4.900/move", p.move("custom.collection.4.900"))
+	return p
+}
+
+// move serves a hub's move: to the top of the section's order, or after the hub its "after" names.
+func (p *plexFake) move(ident string) http.HandlerFunc {
+	return func(rw http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		if r.URL.RawQuery == "" {
-			i := slices.IndexFunc(p.hubs, func(h plexHub) bool { return h.Identifier == "custom.collection.4.900" })
-			if i < 0 {
-				http.NotFound(rw, r)
+		find := func(id string) int {
+			return slices.IndexFunc(p.hubs, func(h plexHub) bool { return h.Identifier == id })
+		}
+		i := find(ident)
+		if i < 0 {
+			http.NotFound(rw, r)
+			return
+		}
+		ours := p.hubs[i]
+		p.hubs = slices.Delete(p.hubs, i, i+1)
+		at := 0
+		if after := r.URL.Query().Get("after"); after != "" {
+			if at = find(after) + 1; at == 0 {
+				p.hubs = slices.Insert(p.hubs, i, ours)
+				http.Error(rw, "no hub "+after, http.StatusBadRequest)
 				return
 			}
-			ours := p.hubs[i]
-			p.hubs = append([]plexHub{ours}, slices.Delete(p.hubs, i, i+1)...)
+		}
+		p.hubs = slices.Insert(p.hubs, at, ours)
+	}
+}
+
+// fakeShelf is a collection made after the household's: a person's own shelf.
+type fakeShelf struct {
+	rk, title, summary string
+	index              int
+	labels, items      []string // labels as sent; Plex answers each with its first letter upper-cased
+	posters            int
+	gone               bool // deleted
+}
+
+func (s *fakeShelf) metadata() map[string]any {
+	var labels []map[string]string
+	for _, l := range s.labels {
+		labels = append(labels, map[string]string{"tag": strings.ToUpper(l[:1]) + l[1:]})
+	}
+	return map[string]any{"ratingKey": s.rk, "index": s.index, "type": "collection", "title": s.title, "summary": s.summary, "Label": labels}
+}
+
+// addShelf makes a shelf and its routes; the caller holds p.mu.
+func (p *plexFake) addShelf(title string, items []string) *fakeShelf {
+	n := len(p.shelves) + 1
+	s := &fakeShelf{rk: strconv.Itoa(900 + n), index: 90000 + 100*n, title: title, items: items}
+	p.shelves = append(p.shelves, s)
+	mc := func(rw http.ResponseWriter, v any) { json.NewEncoder(rw).Encode(map[string]any{"MediaContainer": v}) }
+	live := func(rw http.ResponseWriter, r *http.Request) bool {
+		if s.gone {
+			http.NotFound(rw, r)
+		}
+		return !s.gone
+	}
+	p.srv.HandleFunc("GET", "/library/metadata/"+s.rk, func(rw http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if live(rw, r) {
+			mc(rw, map[string]any{"Metadata": []any{s.metadata()}})
 		}
 	})
-	return p
+	p.srv.HandleFunc("PUT", "/library/collections/"+s.rk+"/items", func(rw http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if live(rw, r) {
+			u := r.URL.Query().Get("uri")
+			s.items = append(s.items, strings.Split(u[strings.LastIndex(u, "/")+1:], ",")...)
+		}
+	})
+	for _, f := range films {
+		key := rk(f.tmdb)
+		p.srv.HandleFunc("DELETE", "/library/collections/"+s.rk+"/items/"+key, func(rw http.ResponseWriter, r *http.Request) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if live(rw, r) {
+				s.items = slices.DeleteFunc(s.items, func(k string) bool { return k == key })
+			}
+		})
+	}
+	p.srv.HandleFunc("POST", "/library/metadata/"+s.rk+"/posters", func(rw http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if live(rw, r) {
+			s.posters++
+		}
+	})
+	ident := "custom.collection.4." + s.rk
+	p.srv.HandleFunc("PUT", "/hubs/sections/4/manage/"+ident, func(rw http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if i := slices.IndexFunc(p.hubs, func(h plexHub) bool { return h.Identifier == ident }); i >= 0 {
+			p.hubs[i] = hubFlags(ident, r.URL.Query())
+		}
+	})
+	p.srv.HandleFunc("PUT", "/hubs/sections/4/manage/"+ident+"/move", p.move(ident))
+	p.srv.HandleFunc("DELETE", "/library/collections/"+s.rk, func(rw http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if live(rw, r) {
+			s.gone = true
+			p.hubs = slices.DeleteFunc(p.hubs, func(h plexHub) bool { return h.Identifier == ident })
+		}
+	})
+	return s
+}
+
+// addForeign adds a collection that is not ours (no label), listed and readable; no route writes it.
+func (p *plexFake) addForeign(key, title string) {
+	c := map[string]any{"ratingKey": key, "index": 77800, "type": "collection", "title": title, "summary": "hers"}
+	p.foreign = append(p.foreign, c)
+	p.srv.HandleFunc("GET", "/library/metadata/"+key, func(rw http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(rw).Encode(map[string]any{"MediaContainer": map[string]any{"Metadata": []any{c}}})
+	})
+}
+
+// shelf is a copy of the live shelf titled title, nil when there is none; hub is its hub's flags and place in the
+// section's order (-1 when it has none).
+func (p *plexFake) shelf(title string) (s *fakeShelf, hub plexHub, at int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, x := range p.shelves {
+		if x.title == title && !x.gone {
+			c := *x
+			c.items = slices.Sorted(slices.Values(x.items))
+			at = slices.IndexFunc(p.hubs, func(h plexHub) bool { return h.Identifier == "custom.collection.4."+x.rk })
+			if at >= 0 {
+				hub = p.hubs[at]
+			}
+			return &c, hub, at
+		}
+	}
+	return nil, plexHub{}, -1
 }
 
 func hubFlags(ident string, q url.Values) plexHub {

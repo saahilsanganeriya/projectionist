@@ -57,15 +57,15 @@ type Options struct {
 	MaxCandidates int     `toml:"max_candidates"` // unseen films shown to the model, best-ranked first
 	Section       int     `toml:"section"`
 	Collection    string  `toml:"collection"` // the household's Plex collection and Jellyfin BoxSet
-	Playlist      string  `toml:"playlist"`   // each person's own playlist in Plex and Jellyfin; "" = none
+	Playlist      string  `toml:"playlist"`   // each person's own: this Jellyfin playlist, and the Plex shelf "<playlist> · <name>"; "" = none
 	MoviesDir     string  `toml:"movies_dir"`
 	ImageBase     string  `toml:"image_base"`
 	JellyfinUser  string  `toml:"jellyfin_user"` // the owner's account, whose played flags count
 	// People is the household, in the letterboxd stage's shape: person is their name in jfsync's users (the watch
 	// record; jfsync's jellyfin for that name owns their Jellyfin playlist), user their Letterboxd username, export_dir a
 	// folder holding their own letterboxd-<user>-* export ("" = none: their feed and films page instead), plex_user
-	// their Plex Home user, as the letterboxd stage names it (the Home admin's is the server's own sign-in). history
-	// means nothing here. Unset: the owner alone.
+	// their Plex account (its username, or a managed user's name; the owner's is the server's own sign-in), name what
+	// their shelf is called. history and keep_hand_added mean nothing here. Unset: the owner alone.
 	People         []letterboxd.Person `toml:"people"`
 	PlexTVURL      string              `toml:"plex_tv"`
 	LetterboxdURL  string              `toml:"letterboxd_url"`
@@ -131,14 +131,18 @@ type state struct {
 	Spend    map[string]float64 `json:"spend"` // local day → USD, every call's, including reservations for calls in flight
 	Plex     sinkState          `json:"plex"`
 	Jellyfin sinkState          `json:"jellyfin"`
-	Persons  map[string]*own    `json:"persons,omitempty"` // person → their own picks and playlists
+	Persons  map[string]*own    `json:"persons,omitempty"` // person → their own picks, shelf and playlist
+	// Restrict holds what plex.tv's sharing restrictions have been alerted for until it is fixed: "" a failed read,
+	// else an account (its username, or a managed user's name) whose restrictions could not take the shelf labels.
+	Restrict map[string]bool `json:"restrict,omitempty"`
 }
 
-// own is one person's own picks and the private playlists that hold them.
+// own is one person's own picks, their Plex shelf and their private Jellyfin playlist.
 type own struct {
 	shelf
-	Plex     sinkState `json:"plex"`
+	Plex     sinkState `json:"shelf"` // their Plex collection "<playlist> · <name>", on their own Home alone
 	Jellyfin sinkState `json:"jellyfin"`
+	Playlist sinkState `json:"plex,omitzero"` // the private Plex playlist an earlier build made them, until their shelf is up
 }
 
 func (st *state) person(name string) *own {
@@ -254,20 +258,23 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		return err
 	}
 
-	dayTime, _ := time.ParseInLocation(time.DateOnly, st.Day, loc)
-	var posterJPEG []byte
-	poster := func() ([]byte, error) { // rendered once per run, only when a sink needs today's
-		if posterJPEG == nil {
-			pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-			defer cancel()
-			img, err := renderPoster(pctx, &http.Client{Timeout: 10 * time.Second}, opt.ImageBase, dayTime, st.Picks)
-			if err != nil {
-				return nil, err
+	posterOf := func(sh *shelf) func() ([]byte, error) { // rendered once per run, only when a sink needs today's
+		var jpg []byte
+		return func() ([]byte, error) {
+			if jpg == nil {
+				day, _ := time.ParseInLocation(time.DateOnly, sh.Day, loc)
+				pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				defer cancel()
+				img, err := renderPoster(pctx, &http.Client{Timeout: 10 * time.Second}, opt.ImageBase, day, sh.Picks)
+				if err != nil {
+					return nil, err
+				}
+				jpg = img
 			}
-			posterJPEG = img
+			return jpg, nil
 		}
-		return posterJPEG, nil
 	}
+	poster := posterOf(&st.shelf)
 	runSink(ctx, env, rep, opt, "jellyfin", &st.Jellyfin, func(sctx context.Context) error {
 		return syncJellyfin(sctx, env.Log, env.Jellyfin, opt.Collection, jm, &st.Jellyfin, st.Day, st.Picks, poster, save)
 	})
@@ -279,20 +286,53 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 		if err != nil {
 			return err
 		}
-		t := plexTarget{Section: opt.Section, Title: opt.Collection, Machine: prefs["ProcessedMachineIdentifier"]}
+		t := plexTarget{Section: opt.Section, Title: opt.Collection, Machine: prefs["ProcessedMachineIdentifier"], Own: true, Shared: true}
 		return syncPlex(sctx, env.Log, env.Plex, t, pm, &st.Plex, st.Day, st.Picks, poster, save)
 	})
 	if opt.Playlist != "" {
 		home := &plexHome{env: env, base: opt.PlexTVURL}
 		jfUsers := &jellyfinUsers{jf: env.Jellyfin, mapped: jfs.Users}
+		people := make([]letterboxd.Person, len(members))
+		for i, m := range members {
+			people[i] = m.who
+		}
+		plan := planShelves(ctx, env, rep, opt, &st, people)
+		after := "" // each shelf's Home row follows the household's, then the shelf before it
+		if st.Plex.ID != "" {
+			after = hubIdent(opt.Section, st.Plex.ID)
+		}
 		for _, m := range members {
 			p, o := m.who, st.person(m.who.Person)
 			runSink(ctx, env, rep, opt, p.Person+".jellyfin", &o.Jellyfin, func(sctx context.Context) error {
 				return syncOwnJellyfin(sctx, env.Log, rep, jfUsers, opt.Playlist, p.Person, jm, &o.Jellyfin, o.Picks, save)
 			})
-			runSink(ctx, env, rep, opt, p.Person+".plex", &o.Plex, func(sctx context.Context) error {
-				return syncOwnPlex(sctx, env.Log, rep, home, opt.Playlist, p, pm, &o.Plex, o.Picks, save)
-			})
+			switch mode := plan[p.Person]; mode {
+			case shelfAsIs:
+			case shelfDown:
+				if o.Plex.ID != "" {
+					runSink(ctx, env, rep, opt, p.Person+".plex", &o.Plex, func(sctx context.Context) error {
+						return takeDown(sctx, env.Log, env.Plex, p.Person, &o.Plex)
+					})
+				}
+			default:
+				runSink(ctx, env, rep, opt, p.Person+".plex", &o.Plex, func(sctx context.Context) error {
+					prefs, err := env.Plex.Prefs()
+					if err != nil {
+						return err
+					}
+					t := plexTarget{Section: opt.Section, Title: opt.Playlist + " · " + displayName(p), Machine: prefs["ProcessedMachineIdentifier"],
+						Labels: []string{shelfLabel(p)}, Own: mode == shelfOwn, Shared: mode == shelfShared, After: after}
+					return syncPlex(sctx, env.Log, env.Plex, t, pm, &o.Plex, o.Day, o.Picks, posterOf(&o.shelf), save)
+				})
+				if o.Plex.ID != "" && o.Playlist.ID != "" {
+					runSink(ctx, env, rep, opt, p.Person+".plex_playlist", &o.Playlist, func(sctx context.Context) error {
+						return removeOwnPlaylist(sctx, env.Log, home, p, &o.Playlist)
+					})
+				}
+			}
+			if o.Plex.ID != "" {
+				after = hubIdent(opt.Section, o.Plex.ID)
+			}
 			rep.Count(p.Person+".picks", len(o.Picks))
 		}
 	}
