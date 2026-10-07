@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"projectionist/internal/stage"
 )
 
 // verifyFixture is sampledFixture with the verify pass on and Show already carrying the given sidecars (by suffix);
@@ -201,14 +203,23 @@ func TestVerifyArchiveNeverOverwrites(t *testing.T) {
 }
 
 // Catches a sidecar moved while archive_dir is missing (unmounted, the archive would live in the container's own layer
-// and vanish with it): no sidecar is verified then, and an alert says why.
+// and vanish with it): the pass verifies nothing then (no record, an alert naming archive_dir), and a move the queue's
+// settle asks for is refused too, creating no archive.
 func TestVerifyNeedsTheArchiveDir(t *testing.T) {
 	f := verifyFixture(t, true, map[string]string{".en.srt": "junk"})
-	os.Remove(filepath.Join(f.dir, "archive"))
+	archive := filepath.Join(f.dir, "archive")
+	os.Remove(archive)
 	rep := f.run(t)
 	got, _ := os.ReadFile(f.showBase() + ".en.srt")
-	if _, err := os.Stat(filepath.Join(f.dir, "archive")); err == nil || string(got) != "junk" || len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "archive_dir") {
-		t.Errorf("archive created %v, sidecar untouched %v, alerts %v; want no archive made, untouched, one alert naming archive_dir", err == nil, string(got) == "junk", rep.Alerts)
+	_, made := os.Stat(archive)
+	if o, ok := f.outcomes()[f.path(show)]; ok || made == nil || string(got) != "junk" || len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "archive_dir") {
+		t.Errorf("Show recorded %q, archive created %v, sidecar untouched %v, alerts %v; want no record, no archive, untouched, one alert naming archive_dir",
+			o, made == nil, string(got) == "junk", rep.Alerts)
+	}
+	r := &run{env: f.h.Env, opt: Options{ArchiveDir: archive}, rep: &stage.Report{}, alerted: map[string]bool{}}
+	_, err := r.archive(&title{root: f.path("TV")}, f.showBase()+".en.srt")
+	if _, made := os.Stat(archive); err == nil || made == nil {
+		t.Errorf("a move asked for directly: err %v, archive created %v; want refused, none", err, made == nil)
 	}
 }
 
