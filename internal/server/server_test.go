@@ -90,11 +90,19 @@ func TestHealthFollowsLatestRun(t *testing.T) {
 }
 
 // Catches an old alert holding /health at 503 through a long clean run (live: the owner e-mailed every 15 min for
-// 12 h while the subtitle backlog drained), and a run clearing it before it has gone 30 min without an alert.
+// 12 h while the subtitle backlog drained), a run clearing it before it has gone 30 min without an alert, and a run
+// that lasted over 30 min clearing its own alert as it ends.
 func TestCleanRunInProgressSupersedesOldAlert(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		runner, code := serve(t)
-		runner.RunOnce(context.Background(), guard("alert"))
+		alerting := held{alert: true, release: make(chan struct{})}
+		go runner.RunOnce(context.Background(), alerting)
+		time.Sleep(time.Hour)
+		close(alerting.release)
+		synctest.Wait()
+		if got := code(); got != 503 {
+			t.Fatalf("an hour-long run just ended in an alert, /health = %d, want 503", got)
+		}
 		run := held{release: make(chan struct{})}
 		defer close(run.release)
 		go runner.RunOnce(context.Background(), run)

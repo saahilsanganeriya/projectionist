@@ -27,6 +27,7 @@ type Job struct {
 type Status struct {
 	Running    bool      `json:"running"`
 	LastStart  time.Time `json:"last_start,omitzero"`
+	RunAlerts  []string  `json:"run_alerts,omitempty"` // raised so far by the run in progress
 	LastFinish time.Time `json:"last_finish,omitzero"`
 	Outcome    string    `json:"outcome,omitempty"`
 	Alerts     []string  `json:"alerts,omitempty"`
@@ -76,6 +77,8 @@ func (r *Runner) RunOnce(ctx context.Context, st stage.Stage) (rep stage.Report,
 	log := r.Log.With("stage", name)
 	started := r.Now()
 	r.set(name, func(s *Status) { s.Running, s.LastStart = true, started })
+	// Under r.mu, as Snapshot reads it; the stage serializes its own Alert calls.
+	rep.OnAlert = func(a string) { r.set(name, func(s *Status) { s.RunAlerts = append(s.RunAlerts, a) }) }
 	r.Metrics.Set("projectionist_stage_running", 1, "stage", name)
 	runID, err := r.Store.StartRun(ctx, name, started)
 	if err != nil {
@@ -133,7 +136,7 @@ func (r *Runner) RunOnce(ctx context.Context, st stage.Stage) (rep stage.Report,
 	r.Metrics.Set("projectionist_stage_last_run_timestamp_seconds", float64(finished.Unix()), "stage", name)
 	r.Metrics.Set("projectionist_stage_last_duration_seconds", finished.Sub(started).Seconds(), "stage", name)
 	r.set(name, func(s *Status) {
-		if s.Running = false; outcome == stage.Interrupted {
+		if s.Running, s.RunAlerts = false, nil; outcome == stage.Interrupted {
 			return // the last finished run's outcome stands
 		}
 		s.LastFinish, s.Outcome, s.Alerts, s.Error, s.Summary = finished, string(outcome), rep.Alerts, "", rep.Summary

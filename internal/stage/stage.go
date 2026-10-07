@@ -69,12 +69,19 @@ type Report struct {
 	// Wake asks the scheduler to run the stage again no later than this, inside its window, though the cadence would
 	// wait longer. Not kept across a restart: the next run on the cadence asks again.
 	Wake time.Time
+	// OnAlert, set by the scheduler, is called by Alert with each alert as it is raised, so /health has it before the
+	// run ends. An alert appended to Alerts directly reaches /health only when the run ends.
+	OnAlert func(alert string)
 }
 
-// Alert records a condition the owner must hear about: the run's outcome becomes "alert" and /health turns 503
-// until this stage's next run raises none.
+// Alert records a condition the owner must hear about: the run's outcome becomes "alert" and /health turns 503 at
+// once, until a later run of this stage ends without one or has run 30 min without one.
 func (r *Report) Alert(format string, args ...any) {
-	r.Alerts = append(r.Alerts, fmt.Sprintf(format, args...))
+	a := fmt.Sprintf(format, args...)
+	r.Alerts = append(r.Alerts, a)
+	if r.OnAlert != nil {
+		r.OnAlert(a)
+	}
 }
 
 // Count adds n to a per-run counter, exported as projectionist_stage_items_total{stage,kind}.
