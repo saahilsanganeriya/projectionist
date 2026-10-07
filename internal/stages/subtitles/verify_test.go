@@ -1,6 +1,7 @@
 package subtitles
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"math"
@@ -55,11 +56,19 @@ func (f *fixture) windowReads() int {
 const showArchive = "TV/Show (2008) {tmdb-1}/Season 01/Show (2008) - S01E01 - Pilot"
 
 // Catches a sidecar the windows find in sync touched anyway (archived, rewritten, its mtime changed), its title not
-// recorded as verified (kept, with the fit in its history), a provider asked about it, or it verified again later.
+// recorded as verified (kept, with the fit in its history), or a provider asked about it; and a sidecar whose title a
+// record already shows verified (Dune's, which the stage wrote) verified again.
 func TestVerifyKept(t *testing.T) {
 	truth := dense(1000, 7)
 	inSync := srtOf(cueSpans(truth, 1, 0.04)) // 40 ms late: within what is kept
 	f := verifyFixture(t, true, map[string]string{".en.srt": inSync})
+	f.note(dune, "Dune.2021.mkv", "none", "2h 35m")
+	db := f.h.Env.Store.DB()
+	db.Exec(schema)
+	if _, err := db.Exec(`INSERT INTO subtitles_titles(path, outcome, detail, tries, last_try) VALUES (?, 'release_matched', '', 1, '2020-01-01T00:00:00Z')`,
+		f.path(dune)); err != nil {
+		t.Fatal(err)
+	}
 	side := f.showBase() + ".en.srt"
 	before, _ := os.Stat(side)
 	f.run(t)
@@ -75,10 +84,8 @@ func TestVerifyKept(t *testing.T) {
 		len(v["window_offsets_ms"].([]any)) != 4 {
 		t.Errorf("verify_kept event %v; want the sidecar's name, captions, ratio 1, +40 ms, 4 window offsets", v)
 	}
-	reads := f.windowReads()
-	f.h.Now = f.h.Now.Add(30 * 24 * time.Hour)
-	if f.run(t); f.windowReads() != reads {
-		t.Errorf("a month later the windows were read again (%d reads, then %d): a kept sidecar is verified once", reads, f.windowReads())
+	if b, _ := os.ReadFile(strings.TrimSuffix(f.path(dune), ".mkv") + ".en.srt"); string(b) != "theirs" {
+		t.Errorf("Dune's sidecar, which its record shows verified, was judged again (now %q)", b)
 	}
 }
 
@@ -146,6 +153,36 @@ func TestVerifyRefusedIsArchivedAndSearchedAnew(t *testing.T) {
 	}
 }
 
+// queueFixture is verifyFixture with Show's sidecar left to the queue: no dialogue in any window (silence), the whole
+// audio heard as speech on the true timing, and alass answering realign.srt (the true timing) as any alignment, or
+// the candidate unchanged once realign.srt is gone. onWorker gives it an align worker's API (the caller starts the
+// worker). The queue aligns nothing until queueOptions lets it.
+func queueFixture(t *testing.T, onWorker bool, sidecar string) (*fixture, *remote) {
+	truth := dense(1000, 7)
+	f := verifyFixture(t, false, map[string]string{".en.srt": sidecar})
+	var rm *remote
+	if onWorker {
+		rm = f.remote(t, 1)
+	}
+	ff := f.h.Env.FFmpeg.Dir
+	speechPCM(filepath.Join(ff, "full.pcm"), truth, 0, 2)
+	os.WriteFile(filepath.Join(ff, "realign.srt"), []byte(srtOf(cueSpans(truth, 1, 0))), 0o644)
+	f.h.Script(t, "ffmpeg", `echo "$*" >> "`+ff+`/helper.calls"
+case "$*" in *matroska*) printf media; exit 0;; *"-ss "*) head -c 2880000 /dev/zero; exit 0;; *s16le*) cat "`+ff+`/full.pcm"; exit 0;; esac; exit 1
+`)
+	f.queueOptions(onWorker, 0)
+	return f, rm
+}
+
+// queueOptions lets the queue align perDay titles, at any hour.
+func (f *fixture) queueOptions(onWorker bool, perDay int) {
+	extra := fmt.Sprintf("\nalign_per_day = %d\nalign_window = \"00:00-23:59\"", perDay)
+	if onWorker {
+		extra += "\nalign_remote_lanes = 1"
+	}
+	f.options(`providers = ["gestdown", "opensubtitles"]` + extra)
+}
+
 // Catches a sidecar the windows cannot judge (no dialogue in any: a quiet film's, or one under a laugh track) archived
 // or rewritten by the verify pass instead of queued for a full alignment behind every title lacking a subtitle; and
 // that alignment, here or on an align worker, not run on the sidecar itself (alass to the speech), or its result not
@@ -154,19 +191,7 @@ func TestVerifyUndecidedGoesToTheQueue(t *testing.T) {
 	truth := dense(1000, 7)
 	early := srtOf(cueSpans(truth, 1, 2))
 	for _, onWorker := range []bool{false, true} {
-		f := verifyFixture(t, false, map[string]string{".en.srt": early})
-		var rm *remote
-		lanes := ""
-		if onWorker {
-			rm, lanes = f.remote(t, 1), "\nalign_remote_lanes = 1"
-		}
-		ff := f.h.Env.FFmpeg.Dir
-		speechPCM(filepath.Join(ff, "full.pcm"), truth, 0, 2)
-		os.WriteFile(filepath.Join(ff, "realign.srt"), []byte(srtOf(cueSpans(truth, 1, 0))), 0o644)
-		f.h.Script(t, "ffmpeg", `echo "$*" >> "`+ff+`/helper.calls"
-case "$*" in *matroska*) printf media; exit 0;; *"-ss "*) head -c 2880000 /dev/zero; exit 0;; *s16le*) cat "`+ff+`/full.pcm"; exit 0;; esac; exit 1
-`)
-		f.options(`providers = ["gestdown"]` + "\nalign_per_day = 0" + lanes)
+		f, rm := queueFixture(t, onWorker, early)
 		f.run(t)
 		var priority int
 		f.h.Env.Store.DB().QueryRow(`SELECT priority FROM subtitles_queue WHERE path=?`, f.path(show)).Scan(&priority)
@@ -175,7 +200,7 @@ case "$*" in *matroska*) printf media; exit 0;; *"-ss "*) head -c 2880000 /dev/z
 			t.Fatalf("on a worker %v: Show %q at priority %d, sidecar untouched %v, archive %v; want queued at 3 (after 0-2), untouched, empty",
 				onWorker, o, priority, string(got) == early, f.archived())
 		}
-		f.options(`providers = ["gestdown"]` + "\nalign_per_day = 5\nalign_window = \"00:00-23:59\"" + lanes)
+		f.queueOptions(onWorker, 5)
 		if onWorker {
 			rm.worker(t, f)
 		}
@@ -185,6 +210,29 @@ case "$*" in *matroska*) printf media; exit 0;; *"-ss "*) head -c 2880000 /dev/z
 			f.queued()[0] != "" || onWorker != (rep.Counts["remote_leased"] == 1) {
 			t.Errorf("on a worker %v, the queue: Show %q, sidecar aligned %v, old one archived %v, queue %v, leased %d; want retimed under its own name, archived, out of the queue",
 				onWorker, o, string(got) == srtOf(cueSpans(truth, 1, 0)), f.archived()[showArchive+".en.srt"] == early, f.queued(), rep.Counts["remote_leased"])
+		}
+	}
+}
+
+// Catches a sidecar the queue's full alignment refuses (here or on an align worker) kept, or its title left waiting
+// for OpenSubtitles while its quota is spent (the pool is the sidecars alone: no provider could add to it), which
+// would read the whole video again every run: it must be archived, its title's record dropped so the next run
+// searches for it anew.
+func TestVerifyRefusedByTheQueueIsArchived(t *testing.T) {
+	other := srtOf(cueSpans(dense(1000, 11), 1, 0)) // another film's: the windows cannot judge it, alass cannot place it
+	for _, onWorker := range []bool{false, true} {
+		f, rm := queueFixture(t, onWorker, other)
+		os.Remove(filepath.Join(f.h.Env.FFmpeg.Dir, "realign.srt"))
+		f.h.Env.Store.PutJSON(context.Background(), name, "opensubtitles_quota", quotaState{ResumeAfter: f.h.Now.Add(24 * time.Hour)})
+		f.queueOptions(onWorker, 5)
+		if onWorker {
+			rm.worker(t, f)
+		}
+		f.run(t)
+		_, err := os.Stat(f.showBase() + ".en.srt")
+		if o, ok := f.outcomes()[f.path(show)]; ok || err == nil || f.archived()[showArchive+".en.srt"] != other || f.queued()[0] != "" {
+			t.Errorf("on a worker %v: Show recorded %q, sidecar still there %v, archived %v, queue %v; want no record, archived, out of the queue",
+				onWorker, o, err == nil, f.archived()[showArchive+".en.srt"] == other, f.queued())
 		}
 	}
 }
