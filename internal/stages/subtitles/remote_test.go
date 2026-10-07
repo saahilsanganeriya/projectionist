@@ -3,13 +3,13 @@ package subtitles
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -263,6 +263,22 @@ func TestRemoteResultChecks(t *testing.T) {
 	}
 }
 
+// Catches a worker's alass failure refused by the NAS (400): the title would stay queued and be leased again, failing
+// the same way, every run. It is recorded as the title's own, as one here is.
+func TestRemoteAlassFailureIsRecorded(t *testing.T) {
+	f := newFixture(t)
+	rm := f.remote(t, 1)
+	j, reports := rm.lease(t, f)
+	if code, body := rm.call(t, "POST", "/align/result/"+j.Lease, result{Result: "alass_failed", Detail: "alass: exit status 1"}); code != http.StatusNoContent {
+		t.Fatalf("alass_failed answered %d %s; want 204", code, body)
+	}
+	rm.clock.Add(int64(2 * connectedFor))
+	<-reports
+	if o := f.outcomes()[j.Item]; o != "alass_failed" || slices.Contains(f.queued(), j.Item) {
+		t.Errorf("%s %q, queue %v; want alass_failed, out of the queue", j.Item, o, f.queued())
+	}
+}
+
 // Catches the unauthenticated align-worker API answering a caller on another machine.
 func TestRemoteRefusesOtherMachines(t *testing.T) {
 	f := newFixture(t)
@@ -313,51 +329,96 @@ func TestRemoteFallsBackToLocal(t *testing.T) {
 	}
 }
 
-// Catches Plex never hearing of a sidecar (its own watcher does not add one beside a video it holds): each written
-// sidecar's folder, and once each folder of the sidecars written before, gets one partial scan in the section holding
-// it, with the path escaped as Plex reads it; a folder Plex did not take is kept for the next run, and never fails one.
-func TestPlexScansEachNewSidecarsFolder(t *testing.T) {
+// plexDB writes a Plex library database in which each video is the one media part of the item with that ratingKey.
+func (f *fixture) plexDB(t *testing.T, keys map[string]int) string {
+	p := filepath.Join(t.TempDir(), "com.plexapp.plugins.library.db")
+	db, err := sql.Open("sqlite", p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE media_items (id INTEGER PRIMARY KEY, metadata_item_id INTEGER, deleted_at INTEGER);
+		CREATE TABLE media_parts (id INTEGER PRIMARY KEY, media_item_id INTEGER, file TEXT, deleted_at INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	for file, key := range keys {
+		res, _ := db.Exec(`INSERT INTO media_items(metadata_item_id) VALUES (?)`, key)
+		id, _ := res.LastInsertId()
+		db.Exec(`INSERT INTO media_parts(media_item_id, file) VALUES (?, ?)`, id, file)
+	}
+	return p
+}
+
+// refreshed counts Plex's item refreshes by ratingKey.
+func (f *fixture) refreshed() map[string]int {
+	out := map[string]int{}
+	for _, k := range []string{"11", "12", "13", "14", "15"} {
+		if n := len(f.h.Plex.Calls("PUT", "/library/metadata/"+k+"/refresh")); n > 0 {
+			out[k] = n
+		}
+	}
+	return out
+}
+
+// Catches a new sidecar Plex never shows (neither its watcher nor a partial scan of the folder attaches one beside a
+// video it holds already: 1,721 stayed hidden through full scans, and each appeared once its item was refreshed), or
+// another item refreshed: the item whose media part is each written sidecar's video, and once each video whose sidecar
+// was written before the stage refreshed items (not one that is gone), is refreshed once, and no other.
+func TestPlexRefreshesEachNewSidecarsItem(t *testing.T) {
 	f := newFixture(t)
 	gone := filepath.Join(f.lib, "Movies", "Gone (2001)", "Gone (2001).mkv")
 	for _, item := range []string{f.path(dune), gone} {
 		f.h.Env.Store.AddEvent(context.Background(), f.h.Now, name, item, "retimed", map[string]any{"sidecar": "x.en.srt"})
 	}
-	f.h.Plex.Handle("GET", "/library/sections", 200, fmt.Sprintf(`{"MediaContainer":{"Directory":[`+
-		`{"key":"4","Location":[{"path":%q}]},{"key":"2","Location":[{"path":%q}]}]}}`, f.path("Movies"), f.path("TV")))
-	var refusing atomic.Bool
-	refusing.Store(true)
-	f.h.Plex.HandleFunc("GET", "/library/sections/4/refresh", func(w http.ResponseWriter, _ *http.Request) {
-		if refusing.Load() {
-			w.WriteHeader(http.StatusServiceUnavailable)
-		}
-	})
-	scanned := func(from int) []string {
+	f.options("providers = [\"opensubtitles\"]\nplex_db = \"" + f.plexDB(t, map[string]int{f.path(ran): 11, f.path(clerks): 12,
+		f.path(dune): 13, f.path(heat): 14, gone: 15}) + "\"")
+	for _, k := range []string{"11", "12", "13", "14", "15"} {
+		f.h.Plex.Handle("PUT", "/library/metadata/"+k+"/refresh", 200, "")
+	}
+	f.run(t)
+	f.run(t)
+	if got, want := f.refreshed(), map[string]int{"11": 1, "12": 1, "13": 1}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("refreshes by ratingKey %v; want %v: Ran's, Clerks' and Dune's items once each", got, want)
+	}
+}
+
+// Catches Plex trouble failing a run, raising an alert, or losing a refresh: with Plex's database unreadable, then with
+// Plex refusing, each run ends without an alert and keeps the videos queued; the run after Plex answers refreshes each.
+func TestPlexErrorsNeverFailTheRun(t *testing.T) {
+	f := newFixture(t)
+	f.options("providers = [\"opensubtitles\"]\nplex_db = \"" + filepath.Join(f.dir, "missing.db") + "\"")
+	want := []string{f.path(clerks), f.path(ran)}
+	pending := func() []string {
 		var out []string
-		for _, c := range f.h.Plex.Calls("GET", "/library/sections/4/refresh")[from:] {
-			q, _ := url.ParseQuery(c.RawQuery)
-			if strings.Contains(c.RawQuery, "+") {
-				t.Errorf("refresh query %q: a space written as +, which Plex reads as a plus sign", c.RawQuery)
-			}
-			out = append(out, q.Get("path"))
-		}
+		f.h.Env.Store.GetJSON(context.Background(), name, "plex_pending", &out)
 		slices.Sort(out)
 		return out
 	}
-	want := []string{filepath.Dir(f.path(clerks)), filepath.Dir(f.path(dune)), filepath.Dir(f.path(ran))}
-	var pending []string
-	rep := f.run(t)
-	f.h.Env.Store.GetJSON(context.Background(), name, "plex_pending", &pending)
-	if slices.Sort(pending); len(rep.Alerts) > 0 || len(scanned(0)) == 0 || !slices.Equal(pending, want) {
-		t.Fatalf("Plex refusing: alerts %v, scans asked %v, kept %v; want none, some, all of %v", rep.Alerts, scanned(0), pending, want)
+	if rep := f.run(t); len(rep.Alerts) > 0 || !slices.Equal(pending(), want) {
+		t.Fatalf("database unreadable: alerts %v, kept %v; want none, %v", rep.Alerts, pending(), want)
 	}
-	refused := len(f.h.Plex.Calls("GET", "/library/sections/4/refresh"))
+	f.options("providers = [\"opensubtitles\"]\nplex_db = \"" + f.plexDB(t, map[string]int{f.path(ran): 11, f.path(clerks): 12}) + "\"")
+	var refusing atomic.Bool
+	refusing.Store(true)
+	for _, k := range []string{"11", "12"} {
+		f.h.Plex.HandleFunc("PUT", "/library/metadata/"+k+"/refresh", func(w http.ResponseWriter, _ *http.Request) {
+			if refusing.Load() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}
+		})
+	}
+	if rep := f.run(t); len(rep.Alerts) > 0 || len(f.refreshed()) == 0 || !slices.Equal(pending(), want) {
+		t.Fatalf("Plex refusing: alerts %v, refreshes asked %v, kept %v; want none, some, %v", rep.Alerts, f.refreshed(), pending(), want)
+	}
+	asked := f.refreshed()
 	refusing.Store(false)
 	f.run(t)
-	if got := scanned(refused); !slices.Equal(got, want) {
-		t.Errorf("next run: scans %v; want each of %v asked again, once", got, want)
+	for _, k := range []string{"11", "12"} {
+		if f.refreshed()[k] != asked[k]+1 {
+			t.Errorf("after Plex answered, %s refreshed %d time(s) more; want once", k, f.refreshed()[k]-asked[k])
+		}
 	}
-	f.run(t)
-	if n := len(f.h.Plex.Calls("GET", "/library/sections/4/refresh")); n != refused+len(want) {
-		t.Errorf("%d scans after a third run; want %d: none once Plex took them", n, refused+len(want))
+	if len(pending()) > 0 {
+		t.Errorf("still queued %v; want none", pending())
 	}
 }

@@ -381,7 +381,7 @@ type attempt struct {
 
 var (
 	verdicts = map[string]bool{"kept": true, "retimed": true, "rescued": true, // true: carries the subtitle
-		"no_reference": false, "no_aligned_candidate": false, "deferred": false, "error": false}
+		"no_reference": false, "no_aligned_candidate": false, "alass_failed": false, "deferred": false, "error": false}
 	attempts = map[string]bool{"download_failed": true, "rejected_misaligned": true, "rejected_length": true}
 )
 
