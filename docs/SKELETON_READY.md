@@ -31,7 +31,7 @@ type Env struct {
 	Options  func(v any) error // decodes your [stages.<name>] keys into v (toml tags; durations as "15m")
 }
 type Report struct{ Alerts []string; Counts map[string]int; Summary string }
-func (r *Report) Alert(format string, args ...any) // outcome "alert"; /health 503 until a clean run
+func (r *Report) Alert(format string, args ...any) // outcome "alert"; /health 503 at once, until a later run ends clean or runs 30 min clean
 func (r *Report) Count(kind string, n int)         // metric projectionist_stage_items_total{stage,kind}
 ```
 
@@ -57,7 +57,7 @@ raised before the error are kept.
 | `internal/llm` | Every model call, through the Vercel AI Gateway (OpenAI-compatible Chat Completions; `[llm]` in the config), or the API of its own a task names (`api`, `key_file`, `price_in`, `price_out`). `env.LLM.Session(task)` per stage run: `Chat(ctx, req)` sends `req` as the task's model with its fallbacks and reasoning, `WorstCase`/`Price` for a budget's reservation, `Parked()` and `TellBilling()` for the run's one alert. `Result.CostUSD` is the gateway's own figure (else usage at the dearest price the gateway's model list gives, cached a day; a task on its own API, usage at its own prices) plus every attempt whose answer was lost at its worst case. `llmtest` is the fake gateway the tests share. Key read per request |
 | `internal/fsx` | `RenameNoReplace` (renameat2 RENAME_NOREPLACE; link+unlink fallback for files), `Clone` (FICLONE reflink, byte-copy fallback, never overwrites), `MoveNoReplace` (a rename, else across mounts a `Clone` before the source goes), `SyncDir` (one fsync per unit) |
 | `internal/obs` | `NewLogger` (UTC, key=value or JSON), `Metrics` (Prometheus text) |
-| `internal/server` | `/health` (503 while any stage's latest run is alert/error) and `/metrics` |
+| `internal/server` | `/health` (503 while a stage's run in progress has raised an alert, or its latest finished run is alert/error and no later run has run 30 min clean) and `/metrics` |
 | `internal/fake` | `fake.NewEnv(t, prefs)` → a full `stage.Env` (fake Plex + Jellyfin with no sessions, fake TMDB `h.TMDB` and fanart.tv `h.Fanart` answering 404 until a route is registered, temp store, 5 ms viewer poll); `h.SetOptions(toml)`, `h.Script(t, "ffprobe"|"ffmpeg", body)` for stand-in binaries, `h.Now` to move the clock. Lower level: `fake.Plex(t, prefs)`, `fake.Jellyfin(t)`, `srv.Handle(method, path, status, body)`, `srv.HandleFunc`, `srv.Calls(method, path)`. A test in package X that imports `fake` must be `package X_test` when `fake` imports X |
 
 ## Build and run
