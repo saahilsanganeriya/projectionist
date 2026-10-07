@@ -57,8 +57,9 @@ type lease struct {
 	t       *title
 	pool    []Candidate
 	expires time.Time
-	claimed bool       // its result is being recorded: it no longer expires
-	mu      sync.Mutex // its media read and its result, one after the other
+	taken   chan struct{} // closed once a worker's lease of it is registered
+	claimed bool          // its result is being recorded: it no longer expires
+	mu      sync.Mutex    // its media read and its result, one after the other
 }
 
 var processBroker = newBroker()
@@ -124,7 +125,7 @@ func (b *broker) handOff(ctx context.Context, r *run, t *title, pool []Candidate
 	if b == nil {
 		return false
 	}
-	l := &lease{id: leaseID(), r: r, t: t, pool: pool}
+	l := &lease{id: leaseID(), r: r, t: t, pool: pool, taken: make(chan struct{})}
 	tick := time.NewTicker(b.tick)
 	defer tick.Stop()
 	held := false
@@ -151,6 +152,7 @@ func (b *broker) handOff(ctx context.Context, r *run, t *title, pool []Candidate
 		}
 		select {
 		case offers <- l:
+			<-l.taken // so drain, from here on, waits for it
 			r.count("remote_leased")
 			return true
 		case <-tick.C:
@@ -250,6 +252,7 @@ func (b *broker) next(w http.ResponseWriter, req *http.Request) {
 		l.expires = b.now().Add(leaseFor)
 		b.leases[l.id] = l
 		b.mu.Unlock()
+		close(l.taken)
 		info, _ := mediaTracks(l.t.info)
 		j := job{Lease: l.id, Item: l.t.path, File: l.t.key, Info: info}
 		for _, c := range l.pool {

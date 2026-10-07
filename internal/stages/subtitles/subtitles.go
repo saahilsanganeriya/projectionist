@@ -211,11 +211,12 @@ type run struct {
 	rep       *stage.Report
 	written   int
 	alerted   map[string]bool
-	alassDown bool                   // alass or the hearing failed on a title this run: the titles behind it wait for the next run
-	window    config.Window          // sampled mode: when the queue may align
-	pools     map[string][]Candidate // titles queued this run: their candidates, so the queue need not search again
-	reading   sync.Mutex             // one title at a time reads its windows
-	remote    *broker                // align_remote_lanes set: the align workers
+	alassDown bool                        // alass or the hearing failed on a title this run: the titles behind it wait for the next run
+	window    config.Window               // sampled mode: when the queue may align
+	pools     map[string][]Candidate      // titles queued this run: their candidates, so the queue need not search again
+	reading   sync.Mutex                  // one title at a time reads its windows
+	remote    *broker                     // align_remote_lanes set: the align workers
+	media     func(context.Context) error // an align worker: streams the title's tracks from the NAS, where it reads the video
 
 	apps   sync.Mutex // the Jellyfin and Plex queues
 	pushed time.Time
@@ -1286,8 +1287,12 @@ func (r *run) wake(ctx context.Context) time.Time {
 	return time.Time{}
 }
 
-// countAlignment spends one of the day's align_per_day, kept in the store before the video is read.
+// countAlignment spends one of the day's align_per_day, kept in the store before the video is read. On an align worker
+// it is where the tracks come from the NAS, which counts the read as it streams them.
 func (r *run) countAlignment(ctx context.Context) error {
+	if r.media != nil {
+		return r.media(ctx)
+	}
 	r.mu.Lock() // a worker's read and one here may start at once
 	defer r.mu.Unlock()
 	starts, err := r.alignments(ctx)

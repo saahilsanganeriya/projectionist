@@ -99,22 +99,15 @@ func (w *worker) lane(ctx context.Context) {
 	}
 }
 
-// align is one leased title: its media streamed to a file, align on it, the outcome posted.
+// align is one leased title: align on its media, streamed to a file once align is about to read it, and the outcome
+// posted. A stream that fails defers the title; the NAS has recorded a failed read itself.
 func (w *worker) align(ctx context.Context, j job) {
 	started := time.Now()
 	media := filepath.Join(w.opt.Work, j.Lease+".mkv")
 	defer os.Remove(media)
 	t := &title{path: media, key: j.File, described: true}
 	t.useInfo(j.Info)
-	if len(j.Info.Audio)+len(j.Info.Subtitles) > 0 {
-		if err := w.fetch(ctx, "/align/media/"+j.Lease, media); err != nil {
-			if ctx.Err() == nil {
-				w.opt.Log.Warn("media not streamed: the NAS keeps the title", "event", "align_worker_error", "item", j.Item, "err", err)
-			}
-			return
-		}
-	}
-	streamed := time.Since(started)
+	var streamed time.Duration
 	pool := make([]Candidate, len(j.Candidates))
 	for i, c := range j.Candidates {
 		pool[i] = Candidate{Source: c.Source, ID: c.ID, Release: c.Release, FileName: c.FileName,
@@ -122,7 +115,12 @@ func (w *worker) align(ctx context.Context, j job) {
 	}
 	opt := defaults()
 	opt.Alass = w.opt.Alass
-	r := &run{env: w.env, opt: opt, rep: &stage.Report{}, alerted: map[string]bool{}, pools: map[string][]Candidate{}}
+	r := &run{env: w.env, opt: opt, rep: &stage.Report{}, alerted: map[string]bool{}, pools: map[string][]Candidate{},
+		media: func(ctx context.Context) error { // once a candidate arrived, as align reads the video
+			began := time.Now()
+			defer func() { streamed = time.Since(began) }()
+			return w.fetch(ctx, "/align/media/"+j.Lease, media)
+		}}
 	o := r.align(ctx, t, pool)
 	if ctx.Err() != nil {
 		return
