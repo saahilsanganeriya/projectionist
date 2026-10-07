@@ -44,7 +44,13 @@
 // provider it needs answered (and alass ran, where it is needed); else it is deferred, not recorded, and an alert names
 // the cause (a spent quota, OpenSubtitles' downloads, OpenSubtitles.com's, or Subdl's or SubSource's daily limit, is
 // routine and only logged, and waits for its reset across runs). Each run also refreshes sub_stats.py's TSV over the
-// whole library. Jellyfin hears of each new sidecar through a queue kept in the store; Plex watches the disk.
+// whole library. Jellyfin hears of each new sidecar, and Plex of its folder, through queues kept in the store: Plex
+// gets a partial scan of the folder (GET /library/sections/<id>/refresh?path=), as its own watcher does not add a
+// sidecar beside a video it holds already; a push Plex does not take is retried at the next push, never failing a run.
+//
+// With align_remote_lanes set, the queue hands its titles to align workers on another machine while one has called in
+// the last minute (remote.go): the NAS streams only the tracks the alignment reads, serves the candidates under the
+// same quotas, and writes and records the worker's result as its own; with none connected it aligns here.
 package subtitles
 
 import (
@@ -57,6 +63,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -114,6 +121,9 @@ type Options struct {
 	SampleLength  time.Duration `toml:"sample_length"`
 	// Rename logs, oldest first: the original release name of a video whose .details note does not give one.
 	UndoLogs []string `toml:"undo_logs"`
+	// Align workers on another machine (projectionist align-worker, through an SSH tunnel to the listener) take the
+	// queue's titles while one has called in the last minute, at most this many leased at once; 0: off.
+	AlignRemoteLanes int `toml:"align_remote_lanes"`
 }
 
 func defaults() Options {
@@ -141,6 +151,7 @@ func defaults() Options {
 type Stage struct {
 	openSubtitles, openSubtitlesCom, subdlAPI, subdlDL, gestdownAPI, sitecSite, subsourceAPI string
 	sleep                                                                                   func(context.Context, time.Duration) error
+	remote                                                                                  *broker // nil: the process's own
 }
 
 func (Stage) Name() string { return name }
@@ -204,8 +215,9 @@ type run struct {
 	window    config.Window          // sampled mode: when the queue may align
 	pools     map[string][]Candidate // titles queued this run: their candidates, so the queue need not search again
 	reading   sync.Mutex             // one title at a time reads its windows
+	remote    *broker                // align_remote_lanes set: the align workers
 
-	jf     sync.Mutex // the Jellyfin queue
+	apps   sync.Mutex // the Jellyfin and Plex queues
 	pushed time.Time
 }
 
@@ -235,6 +247,13 @@ func (s Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error
 		return err
 	}
 	r.window = window
+	if opt.AlignRemoteLanes > 0 {
+		r.remote = s.broker()
+		r.remote.setLanes(opt.AlignRemoteLanes)
+	}
+	if err := r.seedPlex(ctx); err != nil {
+		return err
+	}
 	titles, err := r.scan(ctx)
 	if err != nil {
 		return err
@@ -270,7 +289,7 @@ feed:
 			o.logout(ctx)
 		}
 	}
-	r.tellJellyfin(ctx, "", true)
+	r.tellApps(ctx, "", true)
 	r.summarise(ctx, len(titles), len(due))
 	rep.Wake = r.wake(ctx)
 	if err != nil {
@@ -748,6 +767,7 @@ type outcome struct {
 	fields map[string]any
 	wrote  bool
 	pool   []Candidate // "queued": the candidates its alignment will try, best first
+	text   string      // an alignment's accepted subtitle, which finish writes
 }
 
 // process looks for a release match for a due title; one it does not find sends the title to the queue.
@@ -1141,7 +1161,8 @@ func (r *run) query(t *title) (Query, error) {
 // workQueue aligns queued titles, best first, while nobody but the owner watches and align_per_day allows (in sampled
 // mode, also only inside align_window); a title keeps its place until its alignment ends in a sidecar or a verdict.
 // A queued title first gets another look for a release match (a subtitle may have been added since), unless this run
-// queued it.
+// queued it. While an align worker is connected it gets the title instead (remote.go), and the run ends once each
+// title it leased has a result or its lease ran out.
 func (r *run) workQueue(ctx context.Context, lacking []*title) error {
 	if ctx.Err() != nil {
 		return nil
@@ -1165,6 +1186,7 @@ func (r *run) workQueue(ctx context.Context, lacking []*title) error {
 		queued = append(queued, p)
 	}
 	rows.Close()
+	defer r.remote.drain(ctx, r)
 	for _, p := range queued {
 		t := byPath[p]
 		if t == nil { // it has an English sidecar now, or it moved (its new path queues anew)
@@ -1196,14 +1218,25 @@ func (r *run) workQueue(ctx context.Context, lacking []*title) error {
 			pool = o.pool
 		}
 		if o.result == "queued" {
+			if r.remote.handOff(ctx, r, t, pool) {
+				continue
+			}
 			o = r.align(ctx, t, pool)
 		}
-		r.record(ctx, t, o)
+		r.finish(ctx, t, o)
 		if ctx.Err() != nil {
 			return nil
 		}
 	}
 	return nil
+}
+
+// finish writes an alignment's accepted subtitle and records the outcome, for an alignment here or a worker's.
+func (r *run) finish(ctx context.Context, t *title, o outcome) {
+	if o.text != "" {
+		o = r.write(ctx, t, []byte(o.text), o.result, o.fields)
+	}
+	r.record(ctx, t, o)
 }
 
 // alignNow: careful mode aligns at any hour, sampled mode only inside align_window in the config timezone.
@@ -1253,6 +1286,17 @@ func (r *run) wake(ctx context.Context) time.Time {
 	return time.Time{}
 }
 
+// countAlignment spends one of the day's align_per_day, kept in the store before the video is read.
+func (r *run) countAlignment(ctx context.Context) error {
+	r.mu.Lock() // a worker's read and one here may start at once
+	defer r.mu.Unlock()
+	starts, err := r.alignments(ctx)
+	if err != nil {
+		return err
+	}
+	return r.env.Store.PutJSON(ctx, name, "alignments", append(starts, r.env.Now()))
+}
+
 // alignments are the start times of the alignments in the last 24 h, kept in the store so no restart exceeds the cap.
 func (r *run) alignments(ctx context.Context) ([]time.Time, error) {
 	var starts []time.Time
@@ -1267,7 +1311,8 @@ func (r *run) alignments(ctx context.Context) ([]time.Time, error) {
 // maxTries of each provider, each only once the one before it failed (an OpenSubtitles download is quota); the
 // reference read from the video once the first arrives (a refused download costs no read); each fitted to it, and one
 // the captions reject given to alass (the rescue). None aligning while a metered provider is out (its day's downloads
-// spent, or its search skipped for them) leaves the title waiting for it, not refused.
+// spent, or its search skipped for them) leaves the title waiting for it, not refused. An aligned subtitle is returned,
+// not written: an align worker runs this too, and the NAS writes what it returns (finish).
 func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 	var ref *reference
 	defer func() {
@@ -1337,9 +1382,9 @@ func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 		if ref.starts != nil {
 			attempt["ref_median_ms"] = math.Round(medianOffsetMS(spans, ref.starts))
 		}
-		return r.write(ctx, t, []byte(out), result, attempt)
+		return outcome{result: result, fields: attempt, text: out}
 	}
-	if incomplete || slices.ContainsFunc(r.providers, func(p Provider) bool { return metered(p) && parked(p) != nil }) {
+	if incomplete || r.meteredOut() {
 		return outcome{result: "deferred", detail: "a provider was out"}
 	}
 	n := 0
@@ -1347,6 +1392,11 @@ func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 		n += k
 	}
 	return outcome{result: "no_aligned_candidate", detail: fmt.Sprintf("%d tried", n)}
+}
+
+// meteredOut: a metered provider is parked (its day's downloads spent, or its search skipped for them).
+func (r *run) meteredOut() bool {
+	return slices.ContainsFunc(r.providers, func(p Provider) bool { return metered(p) && parked(p) != nil })
 }
 
 // summarise is the run's report: what was written by which route, what waits in the queue, and the cap used.
@@ -1411,12 +1461,8 @@ func (r *run) reference(ctx context.Context, t *title) (reference, error) {
 			return ref, nil
 		}
 	}
-	// The video is read from here on: one of the day's align_per_day, kept in the store before the read.
-	starts, err := r.alignments(ctx)
-	if err == nil {
-		err = r.env.Store.PutJSON(ctx, name, "alignments", append(starts, r.env.Now()))
-	}
-	if err != nil {
+	// The video is read from here on.
+	if err := r.countAlignment(ctx); err != nil {
 		return reference{why: err.Error(), deferred: true}, nil
 	}
 	for _, s := range images {
@@ -1478,13 +1524,7 @@ func (r *run) hear(ctx context.Context, t *title, ref *reference) error {
 		return err
 	}
 	ref.dir, ref.speech = dir, filepath.Join(dir, "speech.srt")
-	audio := t.info.Audio[0]
-	for _, a := range t.info.Audio {
-		if a.Default {
-			audio = a
-			break
-		}
-	}
+	audio := speechTrack(t.info.Audio)
 	var heard voicing
 	d := dialogue(audio)
 	if err := r.cmdTo(ctx, t, 0, &heard, r.env.FFmpeg.FFmpegPath(), "-nostdin", "-hide_banner", "-loglevel", "error", "-i", t.path,
@@ -1498,6 +1538,16 @@ func (r *run) hear(ctx context.Context, t *title, ref *reference) error {
 	}
 	ref.talk = spanBits(spans, 1)
 	return os.WriteFile(ref.speech, []byte(b.String()), 0o644)
+}
+
+// speechTrack is the audio track hear listens to: the default one, else the first.
+func speechTrack(audio []probe.Audio) probe.Audio {
+	for _, a := range audio {
+		if a.Default {
+			return a
+		}
+	}
+	return audio[0]
 }
 
 // hearSpan is how much 16 kHz s16le PCM voiced judges at once (90 s, a sampled window): its quiet floor is that
@@ -1693,7 +1743,7 @@ func (r *run) write(ctx context.Context, t *title, data []byte, result string, f
 	r.written++
 	r.mu.Unlock()
 	r.env.Log.Info("subtitle written", "event", "subtitle_written", "item", t.path, "result", result, "sidecar", filepath.Base(dest))
-	r.tellJellyfin(ctx, dest, false)
+	r.tellApps(ctx, dest, false)
 	return outcome{result: result, detail: filepath.Base(dest), fields: fields, wrote: true}
 }
 
@@ -1733,7 +1783,7 @@ func writeSidecar(base string, data []byte) (string, error) {
 // runs so too and dies with it) and returns its stdout; the bytes it and its children read (rchar and, of those, from
 // the disk, read_bytes; Linux) are added to t's when t is the video it reads. The group is stopped while anyone but
 // the owner is watching (an unknown count counts as watching), checked every viewer-gate poll, and continued once they
-// stop.
+// stop; an align worker has no viewer gate (env.Viewers nil): nobody watches that machine.
 func (r *run) cmd(ctx context.Context, t *title, bin string, args ...string) ([]byte, error) {
 	return r.cmdUpTo(ctx, t, 0, bin, args...)
 }
@@ -1776,8 +1826,12 @@ func (r *run) cmdTo(ctx context.Context, t *title, limit int64, w io.Writer, bin
 		}
 		done <- c.Wait()
 	}()
-	tick := time.NewTicker(r.env.Viewers.Poll)
-	defer tick.Stop()
+	var gate <-chan time.Time
+	if r.env.Viewers != nil {
+		tick := time.NewTicker(r.env.Viewers.Poll)
+		defer tick.Stop()
+		gate = tick.C
+	}
 	var reads <-chan time.Time
 	if limit > 0 {
 		poll := time.NewTicker(readPoll)
@@ -1795,7 +1849,7 @@ func (r *run) cmdTo(ctx context.Context, t *title, limit int64, w io.Writer, bin
 				syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
 				over = true
 			}
-		case <-tick.C:
+		case <-gate:
 			others, cerr := r.env.Viewers.Count(ctx)
 			if busy := cerr != nil || others > 0; busy != paused {
 				sig := syscall.SIGCONT
@@ -1867,36 +1921,124 @@ func (r *run) event(ctx context.Context, path string, o outcome) {
 	r.env.Log.Info("subtitle "+o.result, "event", "subtitle_attempt", "item", path, "result", o.result, "detail", o.detail)
 }
 
-const pushEvery = 15 * time.Minute // a backlog run lasts days: Jellyfin hears of its sidecars at least this often
+const pushEvery = 15 * time.Minute // a backlog run lasts days: Jellyfin and Plex hear of its sidecars at least this often
 
-// tellJellyfin queues a new sidecar (path set) in the store at once, so a run stopped early loses none, and pushes the
-// queue when forced (the end of a run) or when the last push is pushEvery old. Plex watches the disk.
-func (r *run) tellJellyfin(ctx context.Context, path string, force bool) {
+// tellApps queues a new sidecar (path set) in the store at once, so a run stopped early loses none: its path for
+// Jellyfin, its folder for Plex (whose own watcher does not add a sidecar beside a video it holds already). It pushes
+// both queues when forced (the end of a run) or when the last push is pushEvery old; what an app did not take waits
+// for the next push.
+func (r *run) tellApps(ctx context.Context, path string, force bool) {
 	if r.opt.OutputDir != "" {
 		return
 	}
-	r.jf.Lock()
-	defer r.jf.Unlock()
-	keep := context.WithoutCancel(ctx) // a sidecar written as the run stops still joins the queue
-	var pending []string
-	if _, err := r.env.Store.GetJSON(keep, name, "jellyfin_pending", &pending); err != nil {
+	r.apps.Lock()
+	defer r.apps.Unlock()
+	keep := context.WithoutCancel(ctx) // a sidecar written as the run stops still joins the queues
+	var files, folders []string
+	if _, err := r.env.Store.GetJSON(keep, name, "jellyfin_pending", &files); err != nil {
 		r.env.Log.Error("jellyfin queue unreadable", "event", "store_error", "err", err)
 	}
-	if path != "" {
-		pending = append(pending, path)
+	if _, err := r.env.Store.GetJSON(keep, name, "plex_pending", &folders); err != nil {
+		r.env.Log.Error("plex queue unreadable", "event", "store_error", "err", err)
 	}
-	if len(pending) == 0 {
+	if path != "" {
+		files = append(files, path)
+		if dir := filepath.Dir(path); !slices.Contains(folders, dir) {
+			folders = append(folders, dir)
+		}
+	}
+	if len(files)+len(folders) == 0 {
 		return
 	}
 	if ctx.Err() == nil && (force || r.env.Now().Sub(r.pushed) >= pushEvery) {
 		r.pushed = r.env.Now()
-		if err := r.env.Jellyfin.MediaUpdated(ctx, pending...); err != nil {
-			r.env.Log.Warn("jellyfin not told; kept queued", "event", "jellyfin_error", "files", len(pending), "err", err)
-		} else {
-			pending = nil
+		if len(files) > 0 {
+			if err := r.env.Jellyfin.MediaUpdated(ctx, files...); err != nil {
+				r.env.Log.Warn("jellyfin not told; kept queued", "event", "jellyfin_error", "files", len(files), "err", err)
+			} else {
+				files = nil
+			}
 		}
+		folders = r.scanPlex(ctx, folders)
 	}
-	if err := r.env.Store.PutJSON(keep, name, "jellyfin_pending", pending); err != nil {
+	if err := r.env.Store.PutJSON(keep, name, "jellyfin_pending", files); err != nil {
 		r.env.Log.Error("jellyfin queue not saved", "event", "store_error", "err", err)
 	}
+	if err := r.env.Store.PutJSON(keep, name, "plex_pending", folders); err != nil {
+		r.env.Log.Error("plex queue not saved", "event", "store_error", "err", err)
+	}
+}
+
+// scanPlex asks Plex for a partial scan of each folder, in the library section that holds it, and returns the folders
+// to ask again at the next push. A folder no section holds is dropped.
+func (r *run) scanPlex(ctx context.Context, folders []string) []string {
+	if len(folders) == 0 {
+		return nil
+	}
+	var mc struct {
+		Directory []struct {
+			Key      string `json:"key"`
+			Location []struct {
+				Path string `json:"path"`
+			} `json:"Location"`
+		} `json:"Directory"`
+	}
+	if err := r.env.Plex.GetJSON(ctx, "/library/sections", &mc); err != nil {
+		r.env.Log.Warn("plex not asked to scan; kept queued", "event", "plex_error", "folders", len(folders), "err", err)
+		return folders
+	}
+	var left []string
+	for _, dir := range folders {
+		key, held := "", 0
+		for _, d := range mc.Directory {
+			for _, loc := range d.Location {
+				if p := strings.TrimSuffix(loc.Path, "/"); len(p) > held && (dir == p || strings.HasPrefix(dir, p+"/")) {
+					key, held = d.Key, len(p)
+				}
+			}
+		}
+		if key == "" {
+			r.env.Log.Warn("no Plex library holds the folder: not scanned", "event", "plex_no_section", "folder", dir)
+			continue
+		}
+		// QueryEscape writes a space as "+", which Plex keeps as a plus sign.
+		path := strings.ReplaceAll(url.QueryEscape(dir), "+", "%20")
+		if err := r.env.Plex.Do(ctx, http.MethodGet, "/library/sections/"+key+"/refresh?path="+path); err != nil {
+			r.env.Log.Warn("plex not asked to scan; kept queued", "event", "plex_error", "folder", dir, "err", err)
+			left = append(left, dir)
+		}
+	}
+	r.env.Log.Info("plex asked to scan the new sidecars' folders", "event", "plex_scan", "folders", len(folders)-len(left), "left", len(left))
+	return left
+}
+
+// seedPlex queues, once, the folders of the sidecars written before the stage asked Plex to scan them.
+func (r *run) seedPlex(ctx context.Context) error {
+	var seeded bool
+	if _, err := r.env.Store.GetJSON(ctx, name, "plex_seeded", &seeded); err != nil || seeded {
+		return err
+	}
+	var folders []string
+	if _, err := r.env.Store.GetJSON(ctx, name, "plex_pending", &folders); err != nil {
+		return err
+	}
+	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT DISTINCT item FROM events WHERE stage=? AND json_extract(fields, '$.sidecar') IS NOT NULL`, name)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var item string
+		if err := rows.Scan(&item); err != nil {
+			rows.Close()
+			return err
+		}
+		if dir := filepath.Dir(item); fileExists(dir) && !slices.Contains(folders, dir) {
+			folders = append(folders, dir)
+		}
+	}
+	rows.Close()
+	if err := r.env.Store.PutJSON(ctx, name, "plex_pending", folders); err != nil {
+		return err
+	}
+	return r.env.Store.PutJSON(ctx, name, "plex_seeded", true)
 }
