@@ -28,12 +28,13 @@
 // film unreadable for 3 days, is an alert each run. Films join the library on the TMDB id in the folder names.
 //
 // A member's Plex watchlist is written with their own plex.tv token: the server's sign-in for the owner, a Plex Home
-// switch for a person (see plexToken). It gets the films on their Letterboxd watchlist that they have watched neither
-// on Letterboxd nor, as the watch record has it, in Plex or Jellyfin; a film leaves once it is off that list, and
-// only films this stage added are ever taken out (letterboxd_sink.added), so whatever they put there by hand stays.
-// Films not on the NAS are added too: Discover lists every film. Reviews are not synced: a Plex review is a community
-// post whose privacy the poster cannot set (createReview takes none; other members' reviews carry ANYONE or PLEX and
-// are listed to non-friends), and Jellyfin has no per-user text field (UpdateUserItemDataDto).
+// switch for a person (see plexToken). It gets the films on their Letterboxd watchlist that are on the NAS (in
+// movies_dir) and that they have watched neither on Letterboxd nor, as the watch record has it, in Plex or Jellyfin; a
+// film arriving on the NAS is added by the next run, a film leaves once it is off that list or off the NAS, and only
+// films this stage added are ever taken out (letterboxd_sink.added), so whatever they put there by hand stays, on the
+// NAS or not. The owner's watchlist films not on the NAS go to missing_file. Reviews are not synced: a Plex review is
+// a community post whose privacy the poster cannot set (createReview takes none; other members' reviews carry ANYONE
+// or PLEX and are listed to non-friends), and Jellyfin has no per-user text field (UpdateUserItemDataDto).
 package letterboxd
 
 import (

@@ -439,9 +439,9 @@ func (r *run) played(ctx context.Context) (map[string]bool, error) {
 	return out, nil
 }
 
-// syncWatchlist keeps the member's own Plex watchlist holding the films of their Letterboxd watchlist they have not
-// watched (see unwatchedWatchlist). It writes only against a read made in the same run, and takes out only films it
-// added: a film the member put there by hand, shows included, stays.
+// syncWatchlist keeps the member's own Plex watchlist holding the films of their Letterboxd watchlist that are on the
+// NAS and that they have not watched (see unwatchedOnNAS). It writes only against a read made in the same run, and
+// takes out only films it added: a film the member put there by hand, shows included, stays.
 func (r *run) syncWatchlist(ctx context.Context, wants []want) error {
 	if !r.opt.PlexWatchlist {
 		return nil
@@ -450,7 +450,7 @@ func (r *run) syncWatchlist(ctx context.Context, wants []want) error {
 	if err != nil {
 		return err
 	}
-	desired := unwatchedWatchlist(wants, played)
+	desired := unwatchedOnNAS(wants, played)
 	retries, err := r.loadRetries(ctx)
 	if err != nil {
 		return err

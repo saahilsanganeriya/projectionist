@@ -127,22 +127,21 @@ func TestEvents(t *testing.T) {
 	}
 }
 
-// Catches: a film the member put on the watchlist by hand removed, a watched film (on Letterboxd, or played in the
-// apps as the watch record has it) kept or added, and a film not on the NAS left out (Discover lists every film).
+// Catches: a film the member put on the watchlist by hand removed, and a watched film (on Letterboxd, or played in the
+// apps as the watch record has it) kept or added.
 func TestPlanMembers(t *testing.T) {
 	wants := []want{
 		{TMDB: 1, InLibrary: true, Watchlist: true},
 		{TMDB: 2, InLibrary: true, Watchlist: true, Watched: true},
 		{TMDB: 3, InLibrary: true, Watchlist: true}, // played in Plex
-		{TMDB: 4, Watchlist: true},                  // not on the NAS
 	}
 	haves := map[int]have{
 		2: {Item: "b", Member: true, Added: true},
 		3: {Item: "c", Member: true, Added: true},
 		9: {Item: "z", Member: true}, // the member's own
 	}
-	add, remove := planMembers(unwatchedWatchlist(wants, map[string]bool{movieItem(3): true}), haves)
-	if !reflect.DeepEqual(add, []int{1, 4}) || !reflect.DeepEqual(remove, []int{2, 3}) {
+	add, remove := planMembers(unwatchedOnNAS(wants, map[string]bool{movieItem(3): true}), haves)
+	if !reflect.DeepEqual(add, []int{1}) || !reflect.DeepEqual(remove, []int{2, 3}) {
 		t.Errorf("add=%v remove=%v", add, remove)
 	}
 }
