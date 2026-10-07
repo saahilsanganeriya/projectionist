@@ -965,6 +965,12 @@ func (f *fixture) gestdownNTb(t *testing.T) func(string) int {
 	return calls
 }
 
+// parkSubdl gives f Subdl's key with its day's downloads spent: listed in providers, Subdl is out and never asked.
+func (f *fixture) parkSubdl() {
+	os.WriteFile(filepath.Join(f.dir, "subdl_api_key"), []byte("key\n"), 0o600)
+	f.h.Env.Store.PutJSON(context.Background(), name, "subdl_quota", quotaState{ResumeAfter: f.h.Now.Add(24 * time.Hour)})
+}
+
 // verdict is the fields of the title's last event with the given status.
 func (f *fixture) verdict(rel, status string) map[string]any {
 	var raw string
@@ -1047,10 +1053,13 @@ func TestRunReleaseMatchedReadsNoVideo(t *testing.T) {
 // (another film's too), then to OpenSubtitles' popular WEB one, last in its tier (OpenSubtitles' downloads are
 // rationed). And, while OpenSubtitles' day's downloads are spent (its download refused mid-queue, or its search
 // skipped from the start) or Gestdown fails mid-queue (5xx: parked), a title nothing else aligned refused instead of
-// waiting in the queue for it.
+// waiting in the queue for it. Subdl out from the start (its day's downloads spent) must hold back only such a title,
+// not one the others' candidates align for.
 func TestRunQueueFallsThrough(t *testing.T) {
-	for _, c := range []string{"falls through", "quota spent at its download", "quota spent before its search", "Gestdown down at its download"} {
-		down := c == "Gestdown down at its download" // and OpenSubtitles has nothing for Show
+	for _, c := range []string{"falls through", "quota spent at its download", "quota spent before its search", "Gestdown down at its download",
+		"Subdl out", "Subdl out, nothing fits"} {
+		down := c == "Gestdown down at its download"
+		bare := down || c == "Subdl out, nothing fits" // OpenSubtitles has nothing for Show
 		f := newFixture(t)
 		os.Remove(filepath.Join(f.h.Env.FFmpeg.Dir, "realign.srt")) // alass keeps each candidate's timing
 		f.h.TMDB.Handle("GET", "/tv/1", 200, `{"id":1,"external_ids":{"tvdb_id":81189,"imdb_id":"tt0000001"}}`)
@@ -1079,7 +1088,7 @@ func TestRunQueueFallsThrough(t *testing.T) {
 					`"SeriesEpisode":"1","SubDownloadLink":"%s/dl/%s.gz"}`, id, release, downloads, opensubs.URL, id)
 			}
 			switch {
-			case strings.Contains(r.URL.Path, "imdbid-0000001") && !down:
+			case strings.Contains(r.URL.Path, "imdbid-0000001") && !bare:
 				w.Write([]byte(`[` + cand("web", "Show.S01E01.1080p.WEB-DL", 9999) + `,` + cand("bluray", "Show.S01E01.1080p.Blu-ray", 1) + `]`))
 			case strings.HasPrefix(r.URL.Path, "/dl/") && quota.Load():
 				w.WriteHeader(429)
@@ -1093,6 +1102,10 @@ func TestRunQueueFallsThrough(t *testing.T) {
 		})
 		f.st.gestdownAPI, f.st.openSubtitles = gd.URL, opensubs.URL+"/search/"
 		f.options(`providers = ["opensubtitles", "gestdown"]`)
+		if strings.HasPrefix(c, "Subdl out") {
+			f.parkSubdl()
+			f.options(`providers = ["opensubtitles", "gestdown", "subdl"]`)
+		}
 		f.note(show, "Show.S01E01.1080p.BluRay.x264-GRP.mkv", "none", "0h 50m")
 		if c == "quota spent before its search" {
 			f.h.Env.Store.PutJSON(context.Background(), name, "opensubtitles_quota", quotaState{ResumeAfter: f.h.Now.Add(24 * time.Hour)})
@@ -1102,13 +1115,13 @@ func TestRunQueueFallsThrough(t *testing.T) {
 		for i := range maxTries + 1 {
 			tried = append(tried, gdCalls(fmt.Sprintf("/dl/%d", i)))
 		}
-		if c != "falls through" {
+		if c != "falls through" && c != "Subdl out" {
 			var refused int
 			f.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM events WHERE item=? AND status='no_aligned_candidate'`, f.path(show)).Scan(&refused)
 			if f.outcomes()[f.path(show)] != "queued" || f.queued()[0] != f.path(show) || refused != 0 {
 				t.Errorf("%s: Show %q, queue %v, %d refusals; want it waiting in the queue", c, f.outcomes()[f.path(show)], f.queued(), refused)
 			}
-			if down {
+			if bare {
 				continue
 			}
 			quota.Store(false)

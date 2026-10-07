@@ -386,8 +386,8 @@ var (
 )
 
 // result records a worker's alignment as finish records one done here, once the subtitle passes the length check
-// align ran (a subtitle that does not leaves the title queued, with an alert). A verdict of no fit while a metered
-// provider is out leaves the title waiting for it, as align does.
+// align ran (a subtitle that does not leaves the title queued, with an alert). A verdict of no fit while a provider is
+// out leaves the title waiting for it, as align does.
 func (b *broker) result(w http.ResponseWriter, req *http.Request) {
 	var res result
 	if err := json.NewDecoder(io.LimitReader(req.Body, 32<<20)).Decode(&res); err != nil {
@@ -424,7 +424,7 @@ func (b *broker) result(w http.ResponseWriter, req *http.Request) {
 	if o.fields == nil {
 		o.fields = map[string]any{}
 	}
-	if o.result == "no_aligned_candidate" && !t.verify && r.meteredOut() {
+	if o.result == "no_aligned_candidate" && !t.verify && r.providerOut() {
 		o = outcome{result: "deferred", detail: "a provider was out"}
 	}
 	r.finish(ctx, t, o)
