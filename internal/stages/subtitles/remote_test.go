@@ -138,45 +138,53 @@ func (f *fixture) history() map[string][]string {
 }
 
 // Catches a worker's alignment differing from the NAS's own: another sidecar, outcome or history (an attempt lost on
-// the way back, a candidate keyed to another file or provider, so the NAS would try a refused one again), the worker
-// not running the stage's alignment on the tracks streamed to it (a PGS track renumbered wrong, the speech audio not
-// the one hear picks), the NAS still reading the audio or captions itself, or reading a video no candidate arrived for.
+// the way back, a candidate keyed to another file or provider, so the NAS would try a refused one again, a verdict of
+// no fit recorded while Subdl is out), the worker not running the stage's alignment on the tracks streamed to it (a PGS
+// track renumbered wrong, the speech audio not the one hear picks), the NAS still reading the audio or captions itself,
+// or reading a video no candidate arrived for.
 func TestRemoteAlignmentMatchesLocal(t *testing.T) {
-	for _, dead := range []bool{false, true} { // dead: every download fails, so the history holds the attempts
+	for _, c := range []string{"", "dead", "dead, Subdl out"} { // dead: every download fails, so the history holds the attempts
+		dead := c != ""
 		local := newFixture(t)
 		local.dead = dead
-		lrep := local.run(t)
 		f := newFixture(t)
 		f.dead = dead
 		rm := f.remote(t, 2)
+		if c == "dead, Subdl out" { // Ran and Clerks wait for Subdl, not refused
+			local.parkSubdl()
+			local.options(`providers = ["opensubtitles", "subdl"]`)
+			f.parkSubdl()
+			f.options("providers = [\"opensubtitles\", \"subdl\"]\nalign_remote_lanes = 2")
+		}
+		lrep := local.run(t)
 		rm.worker(t, f)
 		rep := f.run(t)
 		for _, rel := range []string{ran, clerks} {
 			got, _ := os.ReadFile(strings.TrimSuffix(f.path(rel), ".mkv") + ".en.srt")
 			want, _ := os.ReadFile(strings.TrimSuffix(local.path(rel), ".mkv") + ".en.srt")
 			if string(got) != string(want) {
-				t.Errorf("dead %v, %s: the worker's sidecar differs from the NAS's own:\n%s\nwant\n%s", dead, rel, got, want)
+				t.Errorf("%q, %s: the worker's sidecar differs from the NAS's own:\n%s\nwant\n%s", c, rel, got, want)
 			}
 		}
 		if got, want := relative(f.outcomes(), f.lib), relative(local.outcomes(), local.lib); fmt.Sprint(got) != fmt.Sprint(want) {
-			t.Errorf("dead %v: outcomes %v; want %v", dead, got, want)
+			t.Errorf("%q: outcomes %v; want %v", c, got, want)
 		}
 		got, want := f.history(), local.history()
 		for rel := range want {
 			if !slices.Equal(got[rel], want[rel]) {
-				t.Errorf("dead %v, %s: history\n%s\nwant\n%s", dead, rel, strings.Join(got[rel], "\n"), strings.Join(want[rel], "\n"))
+				t.Errorf("%q, %s: history\n%s\nwant\n%s", c, rel, strings.Join(got[rel], "\n"), strings.Join(want[rel], "\n"))
 			}
 		}
 		calls, _ := os.ReadFile(filepath.Join(f.h.Env.FFmpeg.Dir, "helper.calls"))
 		for _, line := range strings.Split(strings.TrimSpace(string(calls)), "\n") {
 			if strings.Contains(line, f.lib) && !strings.Contains(line, "-c copy -f matroska -") {
-				t.Errorf("dead %v: the NAS read more than a stream copy: %s", dead, line)
+				t.Errorf("%q: the NAS read more than a stream copy: %s", c, line)
 			}
 		}
 		streamedRan := strings.Contains(string(calls), "-map 0:1 -map 0:2 -c copy -f matroska -")
 		if rep.Counts["remote_leased"] != 2 || streamedRan == dead || rep.Counts["cap_used"] != lrep.Counts["cap_used"] {
-			t.Errorf("dead %v: %d titles leased, Ran's audio and PGS track streamed %v, %d videos read (here %d); want 2, %v, the same",
-				dead, rep.Counts["remote_leased"], streamedRan, rep.Counts["cap_used"], lrep.Counts["cap_used"], !dead)
+			t.Errorf("%q: %d titles leased, Ran's audio and PGS track streamed %v, %d videos read (here %d); want 2, %v, the same",
+				c, rep.Counts["remote_leased"], streamedRan, rep.Counts["cap_used"], lrep.Counts["cap_used"], !dead)
 		}
 	}
 }

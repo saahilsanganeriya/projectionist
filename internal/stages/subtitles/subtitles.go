@@ -32,8 +32,9 @@
 //
 // Careful mode is the rollback: routes a and d only, and the queue aligns at any hour. OpenSubtitles is searched only
 // once no other provider's release-matched subtitle passed, and only its hash match is downloaded before the queue,
-// which tries its others by tier among the others', last within a tier; while it is out (its day's downloads spent) a
-// title waits for it only when nothing else aligned. The duration, frame rate and tracks come from the probe cache,
+// which tries its others by tier among the others', last within a tier. A provider that is out (its day's quota spent,
+// failing, or refusing) holds back only a title nothing the others found is written for, which waits for it unrecorded.
+// The duration, frame rate and tracks come from the probe cache,
 // else the .details note (ffprobe runs only for a video that has neither, or once the sampled fit needs its stream
 // indexes); the original release name from that note, else the rename logs. Three titles at a time look for a subtitle,
 // and one at a time reads its windows; the queue aligns one at a time, beside them from the start of the run (a title
@@ -993,12 +994,12 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	if r.sampled() {
 		t.idx = vobsubReference(t.path, t.durHi)
 	}
-	// A title is recorded only once every provider has answered its search and let its candidates be tried; while one
-	// is out (an outage, the day's quota, a refusal earlier in the run) the title waits for the next run, which skips
-	// the candidates already rejected for this file. A metered provider that is out here holds back only a title no
-	// cheaper provider has a candidate for: the queue tries theirs first, and the title waits for it only if none
-	// aligns (align). A title a provider refuses (a status no retry changes, or an answer that is not one) is recorded with
-	// the refusal once every other provider answered, so a refusal of that title alone cannot hold up every run.
+	// A title gets no subtitle on record only once every provider has answered its search and let its candidates be
+	// tried. A provider that is out (an outage, the day's quota, a refusal earlier in the run) holds back only a title
+	// the others have no candidate for: theirs go through every route, and the title waits for the next run, which skips
+	// the candidates already rejected for this file, only if none is written (align). A title a provider refuses (a
+	// status no retry changes, or an answer that is not one) is recorded with the refusal once every other provider
+	// answered, so a refusal of that title alone cannot hold up every run.
 	out, meteredOut, refusal, found, tried := false, false, "", 0, 0
 	var pool []Candidate
 	missing := func(p Provider) { // p could not search or serve this title
@@ -1078,7 +1079,7 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	}
 	pool = t.arrange(pool, r.providers) // OpenSubtitles' (searched last) by tier among the others'
 	switch {
-	case out || meteredOut && len(pool) == 0: // a provider that was out might have had what this title needs
+	case (out || meteredOut) && len(pool) == 0, out && refusal != "": // a provider that was out might have had what this title needs
 		return outcome{result: "deferred", detail: "a provider was out"}
 	case refusal != "":
 		return outcome{result: "error", detail: refusal}
@@ -1504,9 +1505,9 @@ func (r *run) alignments(ctx context.Context) ([]time.Time, error) {
 // align is the queue's work on one title: its candidates downloaded one at a time in the pool's order, the first
 // maxTries of each provider, each only once the one before it failed (an OpenSubtitles download is quota); the
 // reference read from the video once the first arrives (a refused download costs no read); each fitted to it, and one
-// the captions reject given to alass (the rescue). None aligning while a metered provider is out (its day's downloads
-// spent, or its search skipped for them) leaves the title waiting for it, not refused. An aligned subtitle is returned,
-// not written: an align worker runs this too, and the NAS writes what it returns (finish).
+// the captions reject given to alass (the rescue). None aligning while a provider is out (providerOut) leaves the title
+// waiting for it, not refused. An aligned subtitle is returned, not written: an align worker runs this too, and the NAS
+// writes what it returns (finish).
 func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 	var ref *reference
 	defer func() {
@@ -1582,7 +1583,7 @@ func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 		}
 		return outcome{result: result, fields: attempt, text: out}
 	}
-	if incomplete || !t.verify && r.meteredOut() { // a verify title's pool is its own sidecars: no provider could add one
+	if incomplete || !t.verify && r.providerOut() { // a verify title's pool is its own sidecars: no provider could add one
 		return outcome{result: "deferred", detail: "a provider was out"}
 	}
 	n := 0
@@ -1592,9 +1593,9 @@ func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 	return outcome{result: "no_aligned_candidate", detail: fmt.Sprintf("%d tried", n)}
 }
 
-// meteredOut: a metered provider is parked (its day's downloads spent, or its search skipped for them).
-func (r *run) meteredOut() bool {
-	return slices.ContainsFunc(r.providers, func(p Provider) bool { return metered(p) && parked(p) != nil })
+// providerOut: a provider is parked (its quota spent, failing, or refusing), so a title may lack its candidates.
+func (r *run) providerOut() bool {
+	return slices.ContainsFunc(r.providers, func(p Provider) bool { return parked(p) != nil })
 }
 
 // summarise is the run's report: what was written by which route, what waits in the queue, and the cap used.
