@@ -115,48 +115,8 @@ func TestReleaseMatched(t *testing.T) {
 	}
 }
 
-// Catches a release-matched subtitle written unaligned although the video says it cannot fit: a last cue after the
-// video's end (also one only the minute a note gives cannot rule out), one ending more than 8 % early, cues covering
-// too little of it, too few cues, a frame rate other than the video's, or no duration known at all. Also a fit
-// refused for 23.98 against 23.976.
-func TestCheapCheck(t *testing.T) {
-	spans := func(first, last float64) []span {
-		var out []span
-		for i := range 60 {
-			s := first + (last-2-first)*float64(i)/59
-			out = append(out, span{s, s + 2})
-		}
-		return out
-	}
-	for _, c := range []struct {
-		why          string
-		spans        []span
-		lo, hi       float64
-		videoFPS     float64
-		fps          float64
-		failsBecause string
-	}{
-		{"fits", spans(30, 2690), 2700, 2700, 23.976, 0, ""},
-		{"fits the note's minute", spans(30, 2690), 2700, 2760, 23.976, 0, ""},
-		{"23.98 is 23.976", spans(30, 2690), 2700, 2700, 23.976, 23.98, ""},
-		{"ends after the video", spans(30, 2710), 2700, 2700, 23.976, 0, "last cue ends after the video"},
-		{"may end after the video", spans(30, 2710), 2700, 2760, 23.976, 0, "last cue ends after the video"},
-		{"8 % short", spans(30, 2480), 2700, 2700, 23.976, 0, "last cue ends more than 8 % before the video's end"},
-		{"8 % short of the note's minute", spans(30, 2520), 2700, 2760, 23.976, 0, "last cue ends more than 8 % before the video's end"},
-		{"second half only", spans(1300, 2690), 2700, 2700, 23.976, 0, "cue starts span less than 70 % of the video"},
-		{"25 fps subtitle", spans(30, 2690), 2700, 2700, 23.976, 25, "timed for 25 fps, the video runs at 23.976"},
-		{"24 fps subtitle", spans(30, 2690), 2700, 2700, 23.976, 24, "timed for 24 fps, the video runs at 23.976"},
-		{"too few cues", spans(30, 2690)[:39], 2700, 2700, 23.976, 0, "fewer than 40 cues"},
-		{"duration unknown", spans(30, 2690), 0, 0, 0, 0, "video duration unknown"},
-	} {
-		if got := cheapCheck(c.spans, c.lo, c.hi, c.videoFPS, c.fps); got != c.failsBecause {
-			t.Errorf("%s: %q, want %q", c.why, got, c.failsBecause)
-		}
-	}
-}
-
-// Catches a subtitle's own frame rate missed (OpenSubtitles' MovieFPS, or one its release names), which cheapCheck
-// compares with the video's.
+// Catches a subtitle's own frame rate missed (OpenSubtitles' MovieFPS, or one its release names), which tier compares
+// with the video's.
 func TestSubFPS(t *testing.T) {
 	for _, c := range []struct {
 		cand Candidate
@@ -169,8 +129,8 @@ func TestSubFPS(t *testing.T) {
 	}
 }
 
-// Catches a .details note misread: the Container line's whole minutes taken as the exact duration (a subtitle ending
-// in the last, partial minute, or up to 8 % short of it, would then pass cheapCheck), the frame rate, the original
+// Catches a .details note misread: the Container line's whole minutes taken as the exact duration (the extraction and OCR
+// passes check a track's cues against the longest the minute allows), the frame rate, the original
 // names, or an English image track, a forced or a foreign track, or a sidecar taken for an embedded English text track.
 // The note is the details stage's, as written for a real film.
 func TestReadNote(t *testing.T) {
@@ -192,8 +152,8 @@ Audio 1:         eng · AAC · 5.1
 	n, ok := readNote(video)
 	var image, text bool
 	for _, s := range n.subs {
-		image = image || noteTrack(s, "hdmv_pgs_subtitle", "dvd_subtitle")
-		text = text || noteTrack(s, "subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text")
+		image = image || noteTrack(s, english, "hdmv_pgs_subtitle", "dvd_subtitle")
+		text = text || noteTrack(s, textLanguage, "subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text")
 	}
 	if !ok || n.durLo != 5700 || n.durHi != 5760 || n.fps != 23.976 || len(n.names) != 2 || n.names[1] != "Movies" || len(n.audio) != 2 || !image || text {
 		t.Errorf("note read as %+v (image track %v, text track %v)", n, image, text)

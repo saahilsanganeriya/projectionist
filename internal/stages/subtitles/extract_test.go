@@ -23,10 +23,10 @@ type extractFixture struct {
 	lib, ff string
 }
 
-// subTrack is one English subtitle track: codec "srt" or "ass", body its file.
+// subTrack is one subtitle track: codec "srt" or "ass", body its file, lang its language tag ("" for English).
 type subTrack struct {
-	codec, title, body string
-	forced, sdh        bool
+	codec, title, body, lang string
+	forced, sdh              bool
 }
 
 func newExtractFixture(t *testing.T) *extractFixture {
@@ -73,7 +73,7 @@ func (f *extractFixture) movie(t *testing.T, name string, tracks ...subTrack) st
 		if tr.sdh {
 			disposition = append(disposition, "hearing_impaired")
 		}
-		args = append(args, "-metadata:s"+s, "language=eng", "-metadata:s"+s, "title="+tr.title, "-disposition"+s,
+		args = append(args, "-metadata:s"+s, "language="+cmp.Or(tr.lang, "eng"), "-metadata:s"+s, "title="+tr.title, "-disposition"+s,
 			cmp.Or(strings.Join(disposition, "+"), "0"))
 	}
 	if out, err := exec.Command(f.ff, append(args, path)...).CombinedOutput(); err != nil {
@@ -193,8 +193,9 @@ exec "`+f.ff+`" "$@"`)
 
 // Catches a track that is not the English subtitle written: forced, by its flag or only by its title (War for the
 // Planet of the Apes' "Forced only"), a commentary, or one with too few cues (a forced track without a label); a video
-// whose only English text tracks are those left unsearched as if the players showed its subtitle; and a refused file
-// read again by every run though one whose video changed is read anew.
+// whose only English text tracks are those left unsearched as if the players showed its subtitle; a video whose only
+// English text track the extraction refused never searched, as if it still carried one; and a refused file read again
+// by every run though one whose video changed is read anew.
 func TestExtractRefusesATrackThatIsNotTheEnglishSubtitle(t *testing.T) {
 	f := newExtractFixture(t)
 	ts := cueTimes()
@@ -213,15 +214,53 @@ func TestExtractRefusesATrackThatIsNotTheEnglishSubtitle(t *testing.T) {
 	}
 	var refusals int
 	f.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM events WHERE item=? AND status='rejected_extract'`, partial).Scan(&refusals)
-	if refusals != 1 {
-		t.Errorf("Partial: %d rejected_extract events; want 1", refusals)
+	if refusals != 1 || f.outcome(partial) != "" {
+		t.Errorf("Partial: %d rejected_extract events, recorded %q; want 1, nothing yet", refusals, f.outcome(partial))
 	}
 	f.run(t)
+	if f.outcome(partial) != "no_candidates" {
+		t.Errorf("Partial, refused, recorded %q by the next run; want no_candidates: searched as a title without an English text track", f.outcome(partial))
+	}
 	again := f.extractions(partial)
 	later := time.Now().Add(time.Hour)
 	os.Chtimes(partial, later, later)
 	f.run(t)
 	if again != 1 || f.extractions(partial) != 2 {
 		t.Errorf("Partial read %d times by the second run, %d once the video changed; want 1, 2", again, f.extractions(partial))
+	}
+}
+
+// Catches a text track tagged undetermined ("und", which ffprobe leaves out) whose text reads as English searched for
+// instead of extracted, from the probe or a .details note ("und subrip"): Love Island USA S08's closed captions,
+// 1,457-3,404 cues each, recorded no_candidates and due again; nor a title still queued from before (Midnight Diner)
+// aligned instead. Each is written as its sidecar and nothing else is recorded for it.
+func TestExtractReadsAnUndeterminedTrack(t *testing.T) {
+	f := newExtractFixture(t)
+	ts := cueTimes()
+	probed := f.movie(t, "Probed (2003) {tmdb-103}", subTrack{codec: "srt", lang: "und", body: textSRT(ts, englishLines...)})
+	noted := f.movie(t, "Noted (2004) {tmdb-104}", subTrack{codec: "srt", lang: "und", body: textSRT(ts, englishLines...)})
+	queued := f.movie(t, "Queued (2005) {tmdb-105}", subTrack{codec: "srt", lang: "und", body: textSRT(ts, englishLines...)})
+	dir := filepath.Join(filepath.Dir(noted), ".details")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, filepath.Base(noted)+".txt"), []byte("Audio:           none\nSubtitles:       und subrip\n"+
+		"Container:       matroska · 1 MB · 0h 01m · 0 chapters\n"), 0o644)
+	db := f.h.Env.Store.DB()
+	db.Exec(schema)
+	db.Exec(`INSERT INTO subtitles_titles(path, outcome, detail, tries, last_try) VALUES (?, 'no_candidates', '', 1, '2020-01-01T00:00:00.000000000Z')`, probed)
+	db.Exec(`INSERT INTO subtitles_queue(path, priority, queued_at) VALUES (?, 2, '2020-01-01T00:00:00.000000000Z')`, queued)
+	f.run(t)
+	for _, v := range []string{probed, noted, queued} {
+		var statuses []string
+		rows, _ := db.Query(`SELECT status FROM events WHERE item=? ORDER BY id`, v)
+		for rows.Next() {
+			var s string
+			rows.Scan(&s)
+			statuses = append(statuses, s)
+		}
+		rows.Close()
+		if got := readFile(sidecarOf(v, ".en.srt")); got == "" || f.outcome(v) != "extracted" || strings.Join(statuses, " ") != "extracted" {
+			t.Errorf("%s: sidecar written %v, recorded %q, events %v; want written, extracted, that alone", filepath.Base(v), got != "",
+				f.outcome(v), statuses)
+		}
 	}
 }

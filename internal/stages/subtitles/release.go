@@ -1,8 +1,8 @@
 package subtitles
 
-// The cheap route: a subtitle made for this very release is written without reading the video. What the file is
-// comes from the probe cache or its .details note, and which release it was from the note's original names (or the
-// rename logs); what a candidate is comes from its release text. Nothing here opens the video.
+// What the file is and which release it came from, and what a candidate is: a subtitle made for this very release is
+// tried first. What the file is comes from the probe cache or its .details note, which release it was from the note's
+// original names (or the rename logs); what a candidate is comes from its release text. Nothing here opens the video.
 
 import (
 	"math"
@@ -60,10 +60,10 @@ func readNote(video string) (note, bool) {
 	return n, true
 }
 
-// noteTrack tells whether an Audio or Subtitles item of a note is an English stream of one of the codecs.
-func noteTrack(item string, codecs ...string) bool {
+// noteTrack tells whether an Audio or Subtitles item of a note is a stream of one of the codecs in a language lang takes.
+func noteTrack(item string, lang func(string) bool, codecs ...string) bool {
 	f := strings.Fields(item)
-	return len(f) >= 2 && english(f[0]) && slices.Contains(codecs, f[1]) && !slices.Contains(f, "forced")
+	return len(f) >= 2 && lang(f[0]) && slices.Contains(codecs, f[1]) && !slices.Contains(f, "forced")
 }
 
 // release is what a release name says about its encode, in lower case; "" where it says nothing.
@@ -194,7 +194,7 @@ func originOf(names []string) origin {
 	return o
 }
 
-// releaseMatched tells whether c was made for this very release, so it may be written without reading the video. A
+// releaseMatched tells whether c was made for this very release, so it is tried first, and fitted at once. A
 // commentary's or another language's file never is. An OpenSubtitles candidate must match the file's hash, be
 // labelled with this title, and its name contradict neither the file's source, edition nor episode (Bazarr's rule: a
 // hash is error-prone; Counterpart's BluRay file matched a WEB subtitle). Any other must be labelled with it too (this
@@ -289,35 +289,6 @@ func subFPS(c Candidate) float64 {
 	}
 	f, _ := strconv.ParseFloat(m[1]+m[2], 64)
 	return f
-}
-
-// cheapCheck is the test a release-matched subtitle passes before it is written unaligned: at least minCues cues, the
-// last ending within the video and no more than 8 % before its end, the cue starts spanning 70 % of it (sane), and a frame rate,
-// where the subtitle names one, equal to the video's (23.976 and 23.98 are equal; 24 and 25 are not). The duration
-// is [lo, hi] (exact from the probe cache, the minute from a note), so the test must hold for any duration in it.
-// It returns why the subtitle fails, "" when it passes.
-func cheapCheck(spans []span, lo, hi, videoFPS, fps float64) string {
-	switch {
-	case hi == 0:
-		return "video duration unknown"
-	case len(spans) < minCues:
-		return "fewer than " + strconv.Itoa(minCues) + " cues"
-	case fps > 0 && videoFPS > 0 && math.Abs(fps-videoFPS) > 0.0005*videoFPS:
-		return "timed for " + strconv.FormatFloat(fps, 'f', -1, 64) + " fps, the video runs at " + strconv.FormatFloat(videoFPS, 'f', -1, 64)
-	}
-	last, first, latest := spans[0].end, spans[0].start, spans[0].start
-	for _, s := range spans {
-		last, first, latest = math.Max(last, s.end), math.Min(first, s.start), math.Max(latest, s.start)
-	}
-	switch {
-	case last > lo:
-		return "last cue ends after the video"
-	case last < 0.92*hi:
-		return "last cue ends more than 8 % before the video's end"
-	case latest-first < 0.7*hi:
-		return "cue starts span less than 70 % of the video"
-	}
-	return ""
 }
 
 // tier is how surely c was made for this very file: 1 made for it (releaseMatched), 2 of its source (BluRay for a

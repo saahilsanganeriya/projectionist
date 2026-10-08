@@ -537,12 +537,14 @@ func (s *sampler) helper(ctx context.Context, limit int64, bin string, args ...s
 // one, else a mono mix) on the video's time base: an audio track that starts late (Lord of War's, 8.4 s in) is padded
 // from the start, as its PCM is read from its first sample at time zero.
 func dialogue(a probe.Audio) []string {
-	const fromStart = "aresample=async=1:first_pts=0"
 	if centred[a.Layout] {
 		return []string{"-af", "pan=mono|c0=FC," + fromStart}
 	}
 	return []string{"-ac", "1", "-af", fromStart}
 }
+
+// fromStart pads a decoded audio track to the video's start, so a track that starts late is heard on the video's time.
+const fromStart = "aresample=async=1:first_pts=0"
 
 var centred = map[string]bool{"3.0": true, "3.1": true, "4.0": true, "4.1": true, "5.0": true, "5.0(side)": true, "5.1": true,
 	"5.1(side)": true, "6.0": true, "6.1": true, "6.1(back)": true, "7.0": true, "7.0(front)": true, "7.1": true, "7.1(wide)": true,

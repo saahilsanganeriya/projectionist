@@ -263,7 +263,9 @@ type title struct {
 	origin                                  origin
 	read, disk                              int64         // bytes read from the video by the stage and its helpers; disk: of those, from the disk
 	idx                                     *reference    // sampled mode: the caption starts of its English VobSub sidecar
-	sampling                                time.Duration // the sampled fit's time on this title: its reads and fits
+	sampling                                time.Duration // the sampled fit's time on this title: its reads
+	windows                                 *sampler      // the sampled fit's windows, once read
+	blind                                   string        // why the windows cannot judge ("" until they are read, or while they can)
 
 	verify bool        // it has English .srt sidecars: the verify pass's, not the search's
 	pool   []Candidate // a verify title's alignment: its sidecars not yet judged, which finish settles
@@ -727,6 +729,14 @@ func english(lang string) bool { return lang == "en" || lang == "eng" }
 // plan is the run's titles for the workers: the due titles lacking a subtitle, best first, then (sampled mode) up to
 // verify_per_run due titles whose sidecars no record shows verified and the queue does not hold.
 func (r *run) plan(ctx context.Context, titles, sidecarred []*title) ([]*title, error) {
+	for _, root := range r.opt.Roots {
+		for _, rel := range misaligned {
+			if _, err := r.env.Store.DB().ExecContext(ctx, `DELETE FROM subtitles_titles WHERE path=? AND last_try < ?`,
+				filepath.Join(root, rel), misalignedFix); err != nil {
+				return nil, err
+			}
+		}
+	}
 	next, verified := map[string]time.Time{}, map[string]bool{}
 	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT path, outcome, last_try, tries FROM subtitles_titles`)
 	if err != nil {
@@ -837,8 +847,8 @@ func (r *run) describe(ctx context.Context, t *title) bool {
 			t.englishAudio = t.englishAudio || english(lang)
 		}
 		for _, s := range n.subs {
-			t.englishImage = t.englishImage || noteTrack(s, "hdmv_pgs_subtitle", "dvd_subtitle")
-			t.englishText = t.englishText || noteTrack(s, "subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text")
+			t.englishImage = t.englishImage || noteTrack(s, english, "hdmv_pgs_subtitle", "dvd_subtitle")
+			t.englishText = t.englishText || noteTrack(s, textLanguage, "subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text")
 		}
 	default:
 		err = r.probe(ctx, t)
@@ -847,6 +857,11 @@ func (r *run) describe(ctx context.Context, t *title) bool {
 		r.env.Log.Warn("probe failed", "event", "probe_error", "item", t.path, "err", err)
 		r.count("probe_failed")
 		return false
+	}
+	// a file whose text tracks the extraction pass read and refused carries no English one after all: it is searched
+	if t.englishText && r.env.Store.DB().QueryRowContext(ctx, `SELECT 1 FROM events WHERE stage=? AND item=? AND status='rejected_extract'
+		AND json_extract(fields, '$.file')=?`, name, t.path, fileKey(t.path)).Scan(new(int)) == nil {
+		t.englishText = false
 	}
 	t.described = true
 	return true
@@ -900,15 +915,21 @@ func imageTracks(info probe.Info) []probe.Subtitle {
 	return out
 }
 
-// textTracks are the video's English text subtitle tracks, not forced and not commentary as imageTracks', in the order
-// the extraction pass tries them: the full ones before the SDH ones (by the disposition or the title), each in the
-// video's order.
+// textLanguage tells whether a text track's language tag makes it the video's English subtitle, or one that may be:
+// English (Matroska's default for a track with no language element, which ffprobe reports as "eng"), or undetermined
+// ("und", which ffprobe leaves out of a Matroska track's tags), which counts only once its text reads as English.
+func textLanguage(lang string) bool { return english(lang) || lang == "" || lang == "und" }
+
+// textTracks are the video's text subtitle tracks that are, or may be, its English subtitle (textLanguage), not forced
+// and not commentary as imageTracks', in the order the extraction pass tries them, each only once its text reads as
+// English (trackRefusal): the full ones before the SDH ones (by the disposition or the title), each in the video's
+// order.
 func textTracks(info probe.Info) []probe.Subtitle {
 	var full, sdh []probe.Subtitle
 	for _, s := range info.Subtitles {
 		title := strings.ToLower(s.Title)
 		switch {
-		case !s.Text || !english(s.Language) || s.Forced || strings.Contains(title, "comment") || strings.Contains(title, "forced"):
+		case !s.Text || !textLanguage(s.Language) || s.Forced || strings.Contains(title, "comment") || strings.Contains(title, "forced"):
 		case s.HearingImpaired || strings.Contains(title, "sdh"):
 			sdh = append(sdh, s)
 		default:
@@ -968,8 +989,6 @@ func (r *run) record(ctx context.Context, t *title, o outcome) {
 		r.env.Log.Info("title deferred", "event", "subtitle_deferred", "item", t.path, "detail", o.detail)
 		return
 	case t.verify:
-	case o.result == "release_matched":
-		r.count("written_release_matched")
 	case o.result == "idx_kept" || o.result == "idx_retimed":
 		r.count("written_idx")
 	case o.result == "sampled":
@@ -1112,9 +1131,11 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 			if rejected[c.key()] == "aligned" {
 				continue
 			}
-			matched := t.releaseMatched(c)
-			try := matched
-			if t.idx != nil { // the .idx checks any plausible one; OpenSubtitles' downloads (180 a day) go only to its hash match
+			// a release match is fitted to the windows before the metered providers are searched (careful mode has none:
+			// the queue aligns it); the .idx checks any plausible one; OpenSubtitles' downloads (180 a day) go only to its
+			// hash match
+			try := r.sampled() && t.blind == "" && t.releaseMatched(c)
+			if t.idx != nil {
 				try = t.sampleable(c)
 			}
 			if rejected[c.key()] == "" && tried < maxTries && try {
@@ -1137,17 +1158,17 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 					r.event(ctx, t.path, outcome{result: "download_failed", detail: err.Error(), fields: attempt})
 					continue
 				}
-				out, result, why := r.check(ctx, t, c, txt, attempt)
-				if why == "" {
+				if t.idx == nil {
+					if o, done := r.windowFit(ctx, t, c, txt, attempt, rejected); done {
+						return o
+					}
+				} else if out, result, ok := r.check(ctx, t, txt, attempt); ok {
 					return r.write(ctx, t, []byte(out), result, attempt)
+				} else {
+					r.keep(ctx, t, c, txt)
+					rejected[c.key()] = "idx" // the sampled fit skips what the .idx refused
+					r.event(ctx, t.path, outcome{result: "rejected_idx", detail: "does not fit the English VobSub captions (.en.idx)", fields: attempt})
 				}
-				r.keep(ctx, t, c, txt)
-				status, route := "rejected_cheap", "cheap"
-				if t.idx != nil {
-					status, route = "rejected_idx", "idx"
-				}
-				rejected[c.key()] = route // the sampled fit skips what the .idx refused
-				r.event(ctx, t.path, outcome{result: status, detail: why, fields: attempt})
 			}
 			pool = append(pool, c)
 		}
@@ -1251,18 +1272,12 @@ func (t *title) sampleable(c Candidate) bool {
 }
 
 // sampledFit is route c: the pool's sampleable candidates downloaded one at a time, best first, each fitted to the
-// video's windows, read once as the first download arrives (a refused download costs no read); the first that fits is
-// written retimed. ok=false sends the title to the queue: nothing fitted, or the windows could not judge.
+// video's windows (windowFit); the first that fits is written retimed. ok=false sends the title to the queue: nothing
+// fitted, or the windows could not judge.
 func (r *run) sampledFit(ctx context.Context, t *title, pool []Candidate, rejected map[string]string) (outcome, bool) {
-	var smp *sampler
-	defer func() {
-		if smp != nil {
-			t.sampling += r.env.Now().Sub(smp.started)
-		}
-	}()
 	tried := 0
 	for _, c := range pool {
-		if tried == maxTries || rejected[c.key()] == "idx" || rejected[c.key()] == "sampled" || !t.sampleable(c) {
+		if t.blind != "" || tried == maxTries || rejected[c.key()] == "idx" || rejected[c.key()] == "sampled" || !t.sampleable(c) {
 			continue
 		}
 		tried++
@@ -1278,44 +1293,48 @@ func (r *run) sampledFit(ctx context.Context, t *title, pool []Candidate, reject
 			r.event(ctx, t.path, outcome{result: "download_failed", detail: err.Error(), fields: attempt})
 			continue
 		}
-		if smp == nil {
-			r.keep(ctx, t, c, txt) // the queue may want it: the windows may not judge
-			if err := r.probe(ctx, t); err != nil {
-				return outcome{result: "error", detail: err.Error()}, true
-			}
-			var why string
-			if smp, why = r.newSampler(t); smp == nil {
-				r.event(ctx, t.path, outcome{result: "sampled_skipped", detail: why})
-				return outcome{}, false
-			}
-			r.reading.Lock()
-			why, err = smp.readAll(ctx)
-			r.reading.Unlock()
-			switch {
-			case ctx.Err() != nil:
-				return outcome{result: "deferred"}, true
-			case err != nil || why != "":
-				r.event(ctx, t.path, outcome{result: "sampled_skipped", detail: cmp.Or(why, fmt.Sprint(err)),
-					fields: map[string]any{"video_bytes": smp.read, "disk_bytes": smp.disk}})
-				return outcome{}, false
-			}
+		if o, done := r.windowFit(ctx, t, c, txt, attempt, rejected); done {
+			return o, true
 		}
-		fit := smp.fit(txt, attempt)
-		out := txt
-		if fit.Ratio != 1 || fit.Offset != 0 {
-			out = retime(txt, fit.Ratio, fit.Offset)
-		}
-		if fit.Refused == "" && !sane(cues(out), t.info.Duration) {
-			fit.Refused = "the retimed cues do not fit the video's length"
-		}
-		if fit.Refused != "" {
-			r.keep(ctx, t, c, txt)
-			r.event(ctx, t.path, outcome{result: "rejected_sampled", detail: fit.Refused, fields: attempt})
-			continue
-		}
-		return r.write(ctx, t, []byte(out), "sampled", attempt), true
 	}
 	return outcome{}, false
+}
+
+// windowFit fits a downloaded candidate to t's windows, read once, when the first candidate needs them (a refused
+// download costs no read), and writes it retimed onto them when it fits. done: the title's outcome (written, or the
+// read failed or stopped); else the candidate was refused (rejected "sampled") or the windows cannot judge (t.blind),
+// and it is kept for the queue.
+func (r *run) windowFit(ctx context.Context, t *title, c Candidate, txt string, attempt map[string]any, rejected map[string]string) (outcome, bool) {
+	if t.windows == nil {
+		r.keep(ctx, t, c, txt) // the queue may want it: the windows may not judge
+		smp, why, err := r.windows(ctx, t)
+		switch {
+		case ctx.Err() != nil:
+			return outcome{result: "deferred"}, true
+		case err != nil:
+			return outcome{result: "error", detail: err.Error()}, true
+		case smp == nil:
+			t.blind = why
+			r.event(ctx, t.path, outcome{result: "sampled_skipped", detail: why, fields: map[string]any{"video_bytes": t.read, "disk_bytes": t.disk}})
+			return outcome{}, false
+		}
+		t.windows = smp
+	}
+	fit := t.windows.fit(txt, attempt)
+	out := txt
+	if fit.Ratio != 1 || fit.Offset != 0 {
+		out = retime(txt, fit.Ratio, fit.Offset)
+	}
+	if fit.Refused == "" && !sane(cues(out), t.info.Duration) {
+		fit.Refused = "the retimed cues do not fit the video's length"
+	}
+	if fit.Refused != "" {
+		r.keep(ctx, t, c, txt)
+		rejected[c.key()] = "sampled"
+		r.event(ctx, t.path, outcome{result: "rejected_sampled", detail: fit.Refused, fields: attempt})
+		return outcome{}, false
+	}
+	return r.write(ctx, t, []byte(out), "sampled", attempt), true
 }
 
 // rounded is each x times scale, rounded to a whole number, times unit: offsets in whole ms, evidence to tenths.
@@ -1334,23 +1353,15 @@ func (r *run) keep(ctx context.Context, t *title, c Candidate, txt string) {
 	}
 }
 
-// check is the test a downloaded candidate passes to be written without reading the video: a fit to the title's
-// English VobSub captions where it has them (sampled mode; retimed onto them), else, for a release match, cheapCheck.
-// It returns the text to write and the result, or why the candidate fails.
-func (r *run) check(ctx context.Context, t *title, c Candidate, txt string, attempt map[string]any) (string, string, string) {
-	if t.idx != nil {
-		out, result, ok := r.fit(ctx, t.idx, txt, attempt)
-		if !ok || !sane(cues(out), t.durHi) {
-			return "", "", "does not fit the English VobSub captions (.en.idx)"
-		}
-		attempt["reference"], attempt["ref_median_ms"] = "idx", math.Round(medianOffsetMS(cues(out), t.idx.starts))
-		return out, "idx_" + result, ""
+// check fits a downloaded candidate to the title's English VobSub captions (.en.idx), without reading the video: the
+// text retimed onto them and its result, or ok=false.
+func (r *run) check(ctx context.Context, t *title, txt string, attempt map[string]any) (string, string, bool) {
+	out, result, ok := r.fit(ctx, t.idx, txt, attempt)
+	if !ok || !sane(cues(out), t.durHi) {
+		return "", "", false
 	}
-	if why := cheapCheck(cues(txt), t.durLo, t.durHi, t.fps, subFPS(c)); why != "" {
-		return "", "", why
-	}
-	attempt["reference"] = "release"
-	return txt, "release_matched", ""
+	attempt["reference"], attempt["ref_median_ms"] = "idx", math.Round(medianOffsetMS(cues(out), t.idx.starts))
+	return out, "idx_" + result, true
 }
 
 func (r *run) sampled() bool { return r.opt.Mode == "sampled" }
@@ -1370,18 +1381,18 @@ func (r *run) download(ctx context.Context, c Candidate) (string, error) {
 
 // rejected are the candidates (provider:id) rejected for this very file before, by the furthest route that refused
 // them: "aligned" (an alignment or its length check: never tried again), "sampled" (the sampled fit), "idx" (the .idx
-// fit), "cheap" (cheapCheck). Each route skips what it or a later one refused; the queue tries all but "aligned". So a
-// candidate's refusals come in route order, and its latest is its furthest.
+// fit). Each route skips what it or a later one refused; the queue tries all but "aligned". So a candidate's refusals
+// come in route order, and its latest is its furthest.
 func (r *run) rejected(ctx context.Context, path, key string) (map[string]string, error) {
 	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT json_extract(fields, '$.id'), status FROM events WHERE stage=? AND item=?
-		AND status IN ('rejected_misaligned', 'rejected_length', 'rejected_sampled', 'rejected_idx', 'rejected_cheap')
+		AND status IN ('rejected_misaligned', 'rejected_length', 'rejected_sampled', 'rejected_idx')
 		AND json_extract(fields, '$.file')=? ORDER BY id`, name, path, key)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	route := map[string]string{"rejected_misaligned": "aligned", "rejected_length": "aligned", "rejected_sampled": "sampled",
-		"rejected_idx": "idx", "rejected_cheap": "cheap"}
+		"rejected_idx": "idx"}
 	out := map[string]string{}
 	for rows.Next() {
 		var id, status string
@@ -1481,6 +1492,12 @@ func (r *run) workQueue(ctx context.Context, lacking, sidecarred, due []*title, 
 				return nil
 			}
 			if !r.describe(ctx, t) {
+				continue
+			}
+			if t.englishText && !t.verify { // queued before its text track counted as English: the extraction pass's now
+				if _, err := db.ExecContext(ctx, `DELETE FROM subtitles_queue WHERE path=?`, p); err != nil {
+					return err
+				}
 				continue
 			}
 			if why := r.alassOut(); why != "" && !t.englishImage { // it would need alass: it waits, with no search or cap spent
@@ -1765,12 +1782,12 @@ func (r *run) summarise(ctx context.Context, lacking, due, verifying int) {
 		}
 	}
 	slices.Sort(hits)
-	r.rep.Summary = fmt.Sprintf("%s mode: %d sidecar(s) written: %d release-matched, %d fitted to a VobSub sidecar, "+
+	r.rep.Summary = fmt.Sprintf("%s mode: %d sidecar(s) written: %d fitted to a VobSub sidecar, "+
 		"%d by the sampled fit, %d aligned, %d read from an image track by OCR (%d refused), %d extracted from a text track (%d refused, %d waiting); "+
 		"%d queued, %d waiting in the queue; alignments %d of %d in 24 h; "+
 		"provider hits %s; %d title(s) lacked a sidecar, %d of them carry an English text track, %d were due; "+
 		"verify pass: %d title(s), their sidecars %d kept, %d retimed, %d archived, %d left to a full alignment",
-		r.opt.Mode, r.written, c["written_release_matched"], c["written_idx"], c["written_sampled"], c["written_aligned"],
+		r.opt.Mode, r.written, c["written_idx"], c["written_sampled"], c["written_aligned"],
 		c["written_ocr"], c["rejected_ocr"], c["written_extracted"], c["rejected_extract"], c["extract_waiting"], c["queued"], waiting, len(starts), r.opt.AlignPerDay, cmp.Or(strings.Join(hits, " "), "none"), lacking, c["embedded_text"], due,
 		verifying, c["sidecars_kept"], c["sidecars_retimed"], c["sidecars_refused"], c["sidecars_undecided"])
 }
@@ -1835,8 +1852,11 @@ func (r *run) reference(ctx context.Context, t *title) (reference, error) {
 	ref := reference{label: "alass"}
 	if err := r.hear(ctx, t, &ref); err != nil {
 		ref.cleanup()
-		if ctx.Err() != nil {
+		switch {
+		case ctx.Err() != nil:
 			return reference{}, ctx.Err()
+		case errors.Is(err, errNoSpeech): // this title's audio alone: the titles behind it are heard as usual
+			return reference{why: err.Error()}, nil
 		}
 		// This title's audio or ffmpeg itself: the title is recorded, and the titles behind it wait for the next run
 		// rather than each fail the same way and lose a week.
@@ -1872,11 +1892,16 @@ func (r *run) alassOut() string {
 	return down
 }
 
+// errNoSpeech: the audio holds no speech the stage hears. An SRT of none is an empty file, whose encoding alass cannot
+// tell: it fails on every candidate.
+var errNoSpeech = errors.New("no speech heard in its audio")
+
 // hear finds the speech in the default audio track, decoded once per title and reused per candidate: the voice band of
 // its dialogue channel, judged hearSpan at a time as the sampled fit judges a window, written as an SRT of the voiced
 // stretches for alass to align to. alass's own hearing ("_" as the subtitle) took 85-91 % of Brooklyn Nine-Nine's
 // runtime for speech (the score under the dialogue), and its alignments of the right subtitles split and stretched at
-// random: tens of seconds off.
+// random: tens of seconds off. A layout with a centre channel is read with its front pair in the same pass, which is
+// heard instead where nothing in the centre is voiced: a stereo mix dressed as 5.1 (Rocky III, T-34: the centre at -91 dB).
 func (r *run) hear(ctx context.Context, t *title, ref *reference) error {
 	dir, err := os.MkdirTemp("", "subtitles-")
 	if err != nil {
@@ -1884,12 +1909,22 @@ func (r *run) hear(ctx context.Context, t *title, ref *reference) error {
 	}
 	ref.dir, ref.speech = dir, filepath.Join(dir, "speech.srt")
 	audio := speechTrack(t.info.Audio)
-	var heard voicing
-	args := append(append(r.input(t), "-map", fmt.Sprintf("0:%d", audio.Index)), dialogue(audio)...)
+	heard, mix := channels{ch: []*voicing{{}}}, dialogue(audio)
+	if centred[audio.Layout] {
+		heard.ch = append(heard.ch, &voicing{})
+		mix = []string{"-af", "pan=stereo|c0=FC|c1=0.5*FL+0.5*FR," + fromStart}
+	}
+	args := append(append(r.input(t), "-map", fmt.Sprintf("0:%d", audio.Index)), mix...)
 	if err := r.cmdTo(ctx, t, 0, &heard, r.env.FFmpeg.FFmpegPath(), append(args, "-ar", "16000", "-f", "s16le", "-")...); err != nil {
 		return err
 	}
-	spans := heard.spans()
+	spans := heard.ch[0].spans()
+	if len(spans) == 0 && len(heard.ch) > 1 {
+		spans = heard.ch[1].spans()
+	}
+	if len(spans) == 0 {
+		return errNoSpeech
+	}
 	var b strings.Builder
 	for i, s := range spans {
 		fmt.Fprintf(&b, "%d\n%s --> %s\nspeech\n\n", i+1, srtTime(s.start), srtTime(s.end))
@@ -1925,6 +1960,27 @@ func (v *voicing) Write(p []byte) (int, error) {
 		v.voiced = append(v.voiced, voiced(voiceLevel(v.pcm[:hearSpan]))...)
 		v.pcm = v.pcm[hearSpan:]
 	}
+	return len(p), nil
+}
+
+// channels splits interleaved s16le PCM into one voicing per channel.
+type channels struct {
+	ch   []*voicing
+	rest []byte // a partial frame left by the last write
+}
+
+func (c *channels) Write(p []byte) (int, error) {
+	frame := 2 * len(c.ch)
+	buf := append(c.rest, p...)
+	n := len(buf) - len(buf)%frame
+	for k, v := range c.ch {
+		pcm := make([]byte, 0, n/len(c.ch))
+		for i := 2 * k; i < n; i += frame {
+			pcm = append(pcm, buf[i], buf[i+1])
+		}
+		v.Write(pcm)
+	}
+	c.rest = slices.Clone(buf[n:])
 	return len(p), nil
 }
 

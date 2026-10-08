@@ -40,9 +40,18 @@ const (
 )
 
 // verifiedOutcomes are the outcomes the stage records only once a subtitle's timing was checked against this very file;
-// an OCR'd or extracted one has the timing of the file's own image or text track.
-var verifiedOutcomes = map[string]bool{"sampled": true, "retimed": true, "release_matched": true, "idx_retimed": true,
-	"rescued": true, "kept": true, "idx_kept": true, "ocr": true, "extracted": true}
+// an OCR'd or extracted one has the timing of the file's own image or text track. release_matched is not one: such a
+// subtitle was written as downloaded, before a release match was fitted like any other (The Game sat 15.7 s off).
+var verifiedOutcomes = map[string]bool{"sampled": true, "retimed": true, "idx_retimed": true, "rescued": true, "kept": true,
+	"idx_kept": true, "ocr": true, "extracted": true}
+
+// misaligned are sidecars (by their path below a root) an alignment kept against a reference on the wrong time base:
+// Lord of War's, kept on an align worker whose ffmpeg counted the streamed media from its first packet, the audio's,
+// 8.383 s into the film, until the fix reached the worker at misalignedFix (the audio-start census of every aligned
+// sidecar found no other off). Their records from before then are dropped, so the verify pass judges each once.
+var misaligned = []string{"Lord of War (2005) {tmdb-1830}/Lord of War (2005) {tmdb-1830}.mkv"}
+
+const misalignedFix = "2026-10-08T06:01:24Z"
 
 // archiveReady tells whether archive_dir exists, alerting once when not: unmounted, a sidecar moved there would live in
 // the container's own layer and go with it.

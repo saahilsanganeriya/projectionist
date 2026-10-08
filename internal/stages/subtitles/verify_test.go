@@ -63,7 +63,7 @@ func TestVerifyKept(t *testing.T) {
 	f.note(dune, "Dune.2021.mkv", "none", "2h 35m")
 	db := f.h.Env.Store.DB()
 	db.Exec(schema)
-	if _, err := db.Exec(`INSERT INTO subtitles_titles(path, outcome, detail, tries, last_try) VALUES (?, 'release_matched', '', 1, '2020-01-01T00:00:00Z')`,
+	if _, err := db.Exec(`INSERT INTO subtitles_titles(path, outcome, detail, tries, last_try) VALUES (?, 'sampled', '', 1, '2020-01-01T00:00:00Z')`,
 		f.path(dune)); err != nil {
 		t.Fatal(err)
 	}
@@ -112,6 +112,57 @@ func TestVerifyRetimed(t *testing.T) {
 	}
 	if f.refreshed()["13"] == 0 {
 		t.Errorf("Plex refreshed %v; want Show's item, 13", f.refreshed())
+	}
+}
+
+// Catches a sidecar the stage wrote as downloaded because its release matched (release_matched: no timing check, The
+// Game 15.7 s off) left unjudged as if verified: once due on the usual schedule, the verify pass fits it to the windows
+// and retimes it onto them, the old file archived.
+func TestVerifyJudgesAReleaseMatch(t *testing.T) {
+	truth := dense(1000, 7)
+	late := srtOf(cueSpans(truth, 1, -15.7))
+	f := verifyFixture(t, true, map[string]string{".en.srt": late})
+	db := f.h.Env.Store.DB()
+	db.Exec(schema)
+	if _, err := db.Exec(`INSERT INTO subtitles_titles(path, outcome, detail, tries, last_try) VALUES (?, 'release_matched', '', 1, '2020-01-01T00:00:00.000000000Z')`,
+		f.path(show)); err != nil {
+		t.Fatal(err)
+	}
+	f.run(t)
+	got := cues(f.sidecar(t, show))
+	if o := f.outcomes()[f.path(show)]; o != "retimed" || f.archived()[showArchive+".en.srt"] != late || len(got) != len(truth) ||
+		math.Abs(got[0].start-truth[0]) > 0.05 {
+		t.Errorf("Show %q, archived %v, first cue %v; want retimed, the old one archived, on the captions", o,
+			f.archived()[showArchive+".en.srt"] == late, got[:min(1, len(got))])
+	}
+}
+
+// Catches Lord of War's sidecar left verified: it was kept on an align worker that counted the streamed media from its
+// first packet, the audio's, 8.383 s into the film (fixed in 9896f14), so its captions came 8.383 s early and the
+// sidecar, 8.2 s early throughout, fitted them. Its record from before the fix is dropped, so the verify pass judges the
+// sidecar; a record made since (a verdict on it) stays.
+func TestVerifyJudgesLordOfWarOnce(t *testing.T) {
+	for _, c := range []struct {
+		at      string
+		dropped bool
+	}{
+		{"2026-10-07T03:39:30.865372510Z", true},
+		{"2026-10-09T00:00:00.000000000Z", false},
+	} {
+		f := verifyFixture(t, true, nil)
+		lw := f.path("Movies/Lord of War (2005) {tmdb-1830}/Lord of War (2005) {tmdb-1830}.mkv")
+		os.MkdirAll(filepath.Dir(lw), 0o755)
+		os.WriteFile(lw, []byte("v"), 0o644)
+		os.WriteFile(strings.TrimSuffix(lw, ".mkv")+".en.srt", []byte(srt(captionTimes(), 0)), 0o644)
+		db := f.h.Env.Store.DB()
+		db.Exec(schema)
+		if _, err := db.Exec(`INSERT INTO subtitles_titles(path, outcome, detail, tries, last_try) VALUES (?, 'kept', '', 2, ?)`, lw, c.at); err != nil {
+			t.Fatal(err)
+		}
+		f.run(t)
+		if _, kept := f.outcomes()[lw]; kept == c.dropped {
+			t.Errorf("recorded kept at %s: record still there %v; want dropped %v", c.at, kept, c.dropped)
+		}
 	}
 }
 
