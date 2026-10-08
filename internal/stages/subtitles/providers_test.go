@@ -76,6 +76,29 @@ func TestRank(t *testing.T) {
 	}
 }
 
+// Catches a subtitle reaching alass in a shape its SubRip parser refuses, as the 9 alass_failed titles of 2026-10-08
+// did: a separator line between cues (Nosferatu: "expected SubRip index line, found '-------------------'"), a blank
+// line inside a cue (The Big Bang Theory S05E06: "found 'Sounds delicious.'"), an index glued to its timing (A Quiet
+// Place: "found '5200:30:21,770 --> ...'"), or an index then a blank line (How I Met Your Mother S07E05: "expected
+// SubRip timespan line, found ”"); or a timing changed, a cue that keeps no text kept, a cue's text line lost, or a
+// well-formed file changed at all.
+func TestCleanSRT(t *testing.T) {
+	well := "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:03,000 --> 00:00:04,500\nTwo\nlines\n"
+	for in, want := range map[string]string{
+		well: well,
+		"1\n00:00:01,000 --> 00:00:02,000\nHello\n\n-------------------------\n\n2\n00:00:03,000 --> 00:00:04,500\nTwo\n--------\nlines\n": well,
+		"1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:03,000 --> 00:00:04,500\nTwo\n\nlines\n\n":                                    well,
+		"7\n00:00:01,000 --> 00:00:02,000\nHello\n\n800:00:03,000 --> 00:00:04,500\nTwo\nlines\n":                                          well,
+		"1\n\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n\n00:00:03,000 --> 00:00:04,500\nTwo\nlines":                                      well,
+		"1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:02,500 --> 00:00:02,900\n\n3\n00:00:03,000 --> 00:00:04,500\nTwo\nlines\n":    well,
+		"no timing at all": "no timing at all",
+	} {
+		if got := cleanSRT(in); got != want {
+			t.Errorf("cleanSRT(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 type recorder struct {
 	mu    sync.Mutex
 	slept []time.Duration

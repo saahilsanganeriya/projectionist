@@ -188,6 +188,42 @@ func stripAds(txt string) string {
 	return strings.Join(kept, "\n\n") + "\n"
 }
 
+// cleanSRT rebuilds an SRT from its timing lines in the shape alass's SubRip parser needs: the cues numbered in order,
+// each its timing as it was, then its text lines but the blank ones and those that are only a separator ("-----"). An
+// index glued to its timing ("5200:30:21,770 --> ...") or set apart by a blank line goes with the old numbering, and a
+// cue left without text goes. Text without a timing line is returned as it is.
+func cleanSRT(txt string) string {
+	type cue struct {
+		timing string
+		text   []string
+	}
+	var cs []cue
+	for _, line := range strings.Split(strings.ReplaceAll(txt, "\r\n", "\n"), "\n") {
+		if m := cueRe.FindStringIndex(line); m != nil {
+			if n := len(cs); n > 0 && len(cs[n-1].text) > 0 && strings.Trim(cs[n-1].text[len(cs[n-1].text)-1], "0123456789 \t") == "" {
+				cs[n-1].text = cs[n-1].text[:len(cs[n-1].text)-1] // this cue's index
+			}
+			cs = append(cs, cue{timing: line[m[0]:m[1]]})
+			continue
+		}
+		if t := strings.TrimSpace(line); len(cs) > 0 && strings.Trim(t, "-=_*~") != "" {
+			cs[len(cs)-1].text = append(cs[len(cs)-1].text, line)
+		}
+	}
+	if len(cs) == 0 {
+		return txt
+	}
+	var b strings.Builder
+	n := 0
+	for _, c := range cs {
+		if len(c.text) > 0 {
+			n++
+			fmt.Fprintf(&b, "%d\n%s\n%s\n\n", n, c.timing, strings.Join(c.text, "\n"))
+		}
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
 // order ranks candidates best first (ties keep search order, as subfetch2.py's stable sort does) and drops unusable
 // ones and repeats, an OpenSubtitles subtitle found through both its APIs included.
 func order(cands []Candidate, release string) []Candidate {

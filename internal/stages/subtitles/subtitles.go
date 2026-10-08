@@ -1329,17 +1329,17 @@ func (r *run) check(ctx context.Context, t *title, c Candidate, txt string, atte
 
 func (r *run) sampled() bool { return r.opt.Mode == "sampled" }
 
-// download is c's text with OpenSubtitles' ads stripped: from the store when a route before the queue downloaded and
-// refused it, else from its provider.
+// download is c's text with OpenSubtitles' ads stripped, cleaned (cleanSRT): from the store when a route before the
+// queue downloaded and refused it, else from its provider.
 func (r *run) download(ctx context.Context, c Candidate) (string, error) {
 	if body, ok, err := r.env.Store.CacheGet(ctx, keptAs+c.key(), r.env.Now().Add(-keptFor)); err == nil && ok {
-		return string(body), nil
+		return cleanSRT(string(body)), nil // kept before cleanSRT, perhaps
 	}
 	txt, err := c.provider.Download(ctx, c)
 	if err != nil {
 		return "", err
 	}
-	return stripAds(txt), nil
+	return cleanSRT(stripAds(txt)), nil
 }
 
 // rejected are the candidates (provider:id) rejected for this very file before, by the furthest route that refused

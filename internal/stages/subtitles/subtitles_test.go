@@ -714,6 +714,25 @@ func TestAlassFailureDetailHoldsWhatAlassSaid(t *testing.T) {
 	}
 }
 
+// Catches a candidate reaching alass as downloaded: one with a separator line between cues (Nosferatu's), which
+// alass-cli refuses ("expected SubRip index line, found '-------------------------'"), recorded alass_failed instead
+// of aligned.
+func TestAlassGetsACleanCandidate(t *testing.T) {
+	r, titles := alassQueue(t, strings.Replace(srt(captionTimes(), 0), "\n\n2\n", "\n\n-------------------------\n\n2\n", 1))
+	ff := r.env.FFmpeg.Dir
+	os.WriteFile(filepath.Join(ff, "strict-alass"), []byte(`#!/bin/sh
+if grep -q -- '^---' "$2"; then echo "error: parsing subtitle file '$2' failed"; echo "caused by: expected SubRip index line"; exit 1; fi
+cp "`+ff+`/realign.srt" "$3"; echo "info: 'reference file FPS/input file FPS' ratio is 1"
+`), 0o755)
+	r.opt.Alass = filepath.Join(ff, "strict-alass")
+	if err := r.workQueue(context.Background(), titles, nil, nil, searchOver); err != nil {
+		t.Fatal(err)
+	}
+	if got := alassOutcomes(r, titles); !slices.Equal(got, []string{"retimed"}) {
+		t.Errorf("outcome %q; want retimed: alass given the candidate without its separator line", got)
+	}
+}
+
 // sessions makes Plex answer who is watching from *body ("" = Plex down) and reports each answer on the channel.
 func sessions(h *fake.Harness, mu *sync.Mutex, body *string) chan string {
 	served := make(chan string, 1000)
