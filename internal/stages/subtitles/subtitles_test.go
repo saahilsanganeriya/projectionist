@@ -120,7 +120,7 @@ func newFixture(t *testing.T) *fixture {
 for n in Ran Heat Clerks Show; do case "$*" in *"/$n "*) cat "`+ff+`/$n.json"; exit 0;; esac; done; exit 1
 `)
 	f.h.Script(t, "ffmpeg", `echo "$*" >> "`+ff+`/helper.calls"
-case "$*" in *framecrc*) cat "`+ff+`/ran.framecrc";; *s16le*) cat "`+ff+`/speech.pcm";; *"-f sup"*) for a; do out=$a; done; : > "$out";; *) exit 1;; esac
+case "$*" in *framecrc*) cat "`+ff+`/ran.framecrc";; *s16le*) cat "`+ff+`/speech.pcm";; *"-f sup"*) p=; for a; do [ "$p" = sup ] && : > "$a"; p=$a; done;; *) exit 1;; esac
 `)
 	// alass's real CLI: <reference> <incorrect> <output>.
 	f.h.Script(t, "alass", `echo "$*" >> "`+ff+`/helper.calls"

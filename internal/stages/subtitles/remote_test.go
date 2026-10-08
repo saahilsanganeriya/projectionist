@@ -44,7 +44,7 @@ func (f *fixture) remote(t *testing.T, lanes int) *remote {
 	// The NAS's ffmpeg streams a lease's tracks; the worker's (the same script) reads them as it would the video.
 	ff := f.h.Env.FFmpeg.Dir
 	f.h.Script(t, "ffmpeg", `echo "$*" >> "`+ff+`/helper.calls"
-case "$*" in *matroska*) printf media;; *framecrc*) cat "`+ff+`/ran.framecrc";; *s16le*) cat "`+ff+`/speech.pcm";; *"-f sup"*) for a; do out=$a; done; : > "$out";; *) exit 1;; esac
+case "$*" in *matroska*) printf media;; *framecrc*) cat "`+ff+`/ran.framecrc";; *s16le*) cat "`+ff+`/speech.pcm";; *"-f sup"*) p=; for a; do [ "$p" = sup ] && : > "$a"; p=$a; done;; *) exit 1;; esac
 `)
 	return rm
 }

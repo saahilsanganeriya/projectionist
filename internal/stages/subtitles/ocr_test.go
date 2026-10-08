@@ -91,3 +91,24 @@ func TestOCRRefusesATrackThatIsNotTheEnglishSubtitle(t *testing.T) {
 		})
 	}
 }
+
+// Catches the forced lines read first and written as the whole subtitle: a track of them alone, tagged only in its
+// title, can hold enough English to pass (War for the Planet of the Apes' "Forced only": 192 cues of its apes' signing).
+// It is the smaller track: Show's track 2 here, copied out at 10 bytes beside track 3's 1000.
+func TestOCRReadsTheLargestTrackFirst(t *testing.T) {
+	forced, full := textSRT(captionTimes(), englishLines[:2]...), textSRT(captionTimes(), englishLines...) // both pass
+	f := ocrFixture(t, "")
+	ff := f.h.Env.FFmpeg.Dir
+	eng := `"tags":{"language":"eng"},"disposition":{"default":1}`
+	os.WriteFile(filepath.Join(ff, "Show.json"), []byte(probeJSON(`{"index":1,"codec_type":"audio","codec_name":"aac",`+eng+
+		`},{"index":2,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle",`+eng+`},{"index":3,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle",`+eng+`}`)), 0o644)
+	f.h.Script(t, "ffmpeg", `p=; for a; do [ "$p" = sup ] && case "$a" in */2.sup) head -c 10 /dev/zero > "$a";; *) head -c 1000 /dev/zero > "$a";; esac; p=$a; done
+`)
+	os.WriteFile(filepath.Join(ff, "forced.srt"), []byte(forced), 0o644)
+	os.WriteFile(filepath.Join(ff, "full.srt"), []byte(full), 0o644)
+	f.h.Script(t, "subocr", `case "$2" in */2.sup) cat "`+ff+`/forced.srt";; *) cat "`+ff+`/full.srt";; esac`)
+	f.run(t)
+	if got := f.sidecar(t, show); got != full {
+		t.Errorf("Show's sidecar is the forced track's reading %v; want the full track's", got == forced)
+	}
+}
