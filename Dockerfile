@@ -27,7 +27,7 @@ RUN cargo install --locked --root /out --git https://github.com/kaegi/alass --re
 FROM --platform=$BUILDPLATFORM debian:trixie-slim AS ocr
 ADD --checksum=sha256:a5ed5a3cac51fbb2e90da632ae43d19212faaa20e76484e62bcb7c23ddb3b3fd \
     https://github.com/microsoft/onnxruntime/releases/download/v1.30.0/onnxruntime-linux-x64-1.30.0.tgz /ort.tgz
-ADD --checksum=sha256:6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884 \
+ADD --chmod=644 --checksum=sha256:6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884 \
     https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx /out/PP-OCRv6_rec_small.onnx
 RUN tar -xzf /ort.tgz -C / && cp /onnxruntime-linux-x64-1.30.0/lib/libonnxruntime.so.1.30.0 /out/
 
