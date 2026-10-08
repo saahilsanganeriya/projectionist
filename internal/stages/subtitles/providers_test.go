@@ -150,7 +150,7 @@ func TestLegacySearchEpisode(t *testing.T) {
 // Catches subfetch2.py v8's download quota not kept: a refusal (429 at once, never retried into a firewall block;
 // 407; the 404 "exceeded" page; a page instead of gzip) or the Download-Quota header at 10 not stopping downloads
 // AND searches for 24 h, a plain 404 taken for the quota, the 181st download in 24 h sent, the 8 min gap or the
-// resume time lost across a restart (both kept in the store).
+// resume time lost across a restart (both kept in the store), or a download inside the gap waited for, not refused.
 func TestLegacyQuota(t *testing.T) {
 	srv, calls := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
 		switch r.URL.Path {
@@ -173,53 +173,61 @@ func TestLegacyQuota(t *testing.T) {
 			w.Write([]byte("[]"))
 		}
 	})
-	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
-	open := func(st quotaState, saved *quotaState) (*legacy, *recorder) {
-		rec := &recorder{}
-		o := &legacy{base: srv.URL + "/", userAgent: userAgent, hc: srv.Client(), pace: testPacer(rec, &now), dl: testPacer(rec, &now),
+	start := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	now := start
+	open := func(st quotaState, saved *quotaState) *legacy {
+		o := &legacy{base: srv.URL + "/", userAgent: userAgent, hc: srv.Client(), pace: testPacer(&recorder{}, &now), dl: testPacer(&recorder{}, &now),
 			keep: func(st quotaState) { *saved = st }}
-		o.dl.gap, o.dl.quota429 = dlGap, true
+		o.dl.gap, o.dl.quota429, o.dl.slot = dlGap, true, true
 		o.restore(st)
-		return o, rec
+		return o
 	}
 	for path, quota := range map[string]bool{"/429": true, "/407": true, "/denied": true, "/page": true, "/10": true, "/11": false, "/gone": false} {
 		var saved quotaState
-		o, _ := open(quotaState{}, &saved)
+		now = start
+		o := open(quotaState{}, &saved)
 		_, first := o.Download(context.Background(), Candidate{link: srv.URL + path})
+		now = now.Add(dlGap)
 		_, again := o.Download(context.Background(), Candidate{link: srv.URL + path})
 		_, search := o.Search(context.Background(), Query{Hash: "00ff"})
-		stopped := errors.Is(again, errQuota) && errors.Is(search, errQuota) && saved.ResumeAfter.Equal(now.Add(quotaWait))
+		stopped := errors.Is(again, errQuota) && errors.Is(search, errQuota) && saved.ResumeAfter.Equal(start.Add(quotaWait))
 		if stopped != quota || calls(path) != map[bool]int{true: 1, false: 2}[quota] {
 			t.Errorf("%s: %v, then %v, search %v, %d requests, saved %+v; want stopped for 24 h: %v", path, first, again, search, calls(path), saved, quota)
 		}
 	}
 
 	var saved quotaState
+	now = start
 	full := quotaState{}
 	for i := range dlPerDay { // one an 8 min apart: the oldest leaves the 24 h window at 12:00 + 8 min
 		full.Downloads = append(full.Downloads, now.Add(-24*time.Hour+dlGap+time.Duration(i)*dlGap))
 	}
-	o, _ := open(full, &saved)
+	o := open(full, &saved)
 	if _, err := o.Download(context.Background(), Candidate{link: srv.URL + "/11"}); !errors.Is(err, errQuota) || calls("/11") != 2 ||
 		!saved.ResumeAfter.Equal(full.Downloads[0].Add(quotaWait)) {
 		t.Errorf("181st download in 24 h: %v, saved resume %v; want refused without a request, resume when the oldest leaves", err, saved.ResumeAfter)
 	}
 
-	o, rec := open(quotaState{Downloads: []time.Time{now.Add(-time.Minute)}}, &saved)
-	if _, err := o.Download(context.Background(), Candidate{link: srv.URL + "/11"}); err != nil || !containsDuration(rec.slept, dlGap-time.Minute) ||
-		len(saved.Downloads) != 2 {
-		t.Errorf("after a restart: %v, slept %v, saved %d downloads; want 7 min waited, the download recorded", err, rec.slept, len(saved.Downloads))
+	o = open(quotaState{Downloads: []time.Time{now.Add(-time.Minute)}}, &saved)
+	sent := calls("/11")
+	_, early := o.Download(context.Background(), Candidate{link: srv.URL + "/11"})
+	now = now.Add(dlGap - time.Minute)
+	if _, err := o.Download(context.Background(), Candidate{link: srv.URL + "/11"}); !errors.Is(early, errBusy) || err != nil ||
+		calls("/11") != sent+1 || len(saved.Downloads) != 2 {
+		t.Errorf("after a restart: %v a minute after the last download, then %v at 8 min, %d sent, saved %d downloads; "+
+			"want refused at once, then sent and recorded", early, err, calls("/11")-sent, len(saved.Downloads))
 	}
 	search := "/moviebytesize-0/moviehash-00ff/sublanguageid-eng"
 	searches := calls(search)
-	o, _ = open(quotaState{ResumeAfter: now.Add(time.Hour)}, &saved)
+	o = open(quotaState{ResumeAfter: now.Add(time.Hour)}, &saved)
 	if _, err := o.Search(context.Background(), Query{Hash: "00ff"}); !errors.Is(err, errQuota) || calls(search) != searches {
 		t.Errorf("search with a saved quota wait: %v; want refused without a request", err)
 	}
 }
 
 // Catches Retry-After ignored, or a provider retried forever while it is down: parked after six attempts, it then
-// refuses without a request.
+// refuses without a request. A slot pacer's caller (legacy downloads) must not sleep to retry: a failure is left to the
+// caller given the next slot, and six in a row (a success starts the count again) park it.
 func TestPacerBackoffAndParking(t *testing.T) {
 	srv, calls := counter(t, func(w http.ResponseWriter, r *http.Request, n int) {
 		if r.URL.Path == "/busy" && n == 1 {
@@ -245,6 +253,23 @@ func TestPacerBackoffAndParking(t *testing.T) {
 	}
 	if err := get(p, "/busy"); !errors.Is(err, errParked) || calls("/busy") != 2 {
 		t.Errorf("parked provider still called: err %v, %d calls", err, calls("/busy"))
+	}
+	slot := testPacer(rec, &now)
+	slot.gap, slot.slot = dlGap, true
+	sent, slept, left := calls("/down"), len(rec.slept), 0
+	for i := range 12 { // five failures, a success, six failures
+		path := "/down"
+		if i == 5 {
+			path = "/up"
+		}
+		if err := get(slot, path); errors.Is(err, errBusy) {
+			left++
+		}
+		now = now.Add(dlGap)
+	}
+	if err := get(slot, "/down"); !errors.Is(err, errParked) || errors.Is(err, errBusy) || left != 10 || calls("/down") != sent+11 || len(rec.slept) != slept {
+		t.Errorf("slot down: %d of 11 failures left to the next slot, then %v, %d sent, slept %v; want 10, parked, 11, none", left, err,
+			calls("/down")-sent, rec.slept[slept:])
 	}
 }
 
