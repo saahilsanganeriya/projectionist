@@ -247,7 +247,9 @@ quiet        = "10m" # a folder written to more recently is still arriving
 # opensubtitles_password exist, and a subtitle both find is tried once. A spent daily limit waits for its reset across
 # runs without an alert. IMDb and TheTVDB ids come from TMDB. A provider that is out holds back only a title none of
 # the others' subtitles is written for, which waits for it unrecorded; drop one that cannot be reached from this
-# network (Subdl, 2026-10-05) from the list.
+# network (Subdl, 2026-10-05) from the list. A title whose only English subtitle is an image track (PGS or VobSub) and
+# that no provider subtitle fits gets that track read by OCR (the image's subocr, PP-OCRv6 small) after the queue,
+# inside align_window, written with the track's own timing when it reads as a full English subtitle.
 [stages.subtitles]
 every         = "6h"
 roots         = ["/volume1/media/Movies", "/volume1/media/TV"]
