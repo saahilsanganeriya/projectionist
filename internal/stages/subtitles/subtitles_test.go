@@ -1598,7 +1598,7 @@ func TestRunIdxFit(t *testing.T) {
 			os.MkdirAll(filepath.Dir(f.path(special)), 0o755)
 			os.WriteFile(f.path(special), []byte("special"), 0o644)
 		}
-		f.note(c.rel, c.original, "none", "0h 50m") // 0h 50m: the cheap check fails both candidates
+		f.note(c.rel, c.original, "none", "0h 50m") // 0h 50m: the .idx of a longer cut ends past it
 		os.WriteFile(strings.TrimSuffix(f.path(c.rel), ".mkv")+".en.idx", []byte(vobsub+c.idx), 0o644)
 		f.run(t)
 		fields := f.verdict(c.rel, c.want)
@@ -1632,7 +1632,7 @@ func TestRunSampledQueueOnlyAtNight(t *testing.T) {
 		f.mode = mode
 		f.gestdownNTb(t)
 		f.options(`providers = ["gestdown"]`)
-		f.note(show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", "none", "0h 50m") // the cheap check fails: queued
+		f.note(show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", "none", "0h 50m") // no release match: queued
 		f.h.Env.Loc, _ = time.LoadLocation("America/Los_Angeles")
 		var mu sync.Mutex
 		now, guestUntil := time.Date(2026, 10, 5, 6, 0, 0, 0, time.UTC), time.Time{} // 23:00 the night before, Pacific
@@ -1753,10 +1753,10 @@ func TestRunModeOptions(t *testing.T) {
 // Catches sampled mode spending OpenSubtitles' downloads (180 a day, 8 minutes apart) before the queue on anything but
 // its hash match: beside Gestdown's candidates its episode match is not tried (it is queued after them), and for a
 // title only it has candidates for (Ran, a film; Show once Gestdown is not listed) they are queued untried, so the
-// capped queue alone spends them. Ran's, 2.5 s late, would pass the cheap check.
+// capped queue alone spends them.
 func TestRunSampledSparesOpenSubtitles(t *testing.T) {
 	for _, c := range []struct{ providers, length, want string }{
-		{`["opensubtitles", "gestdown"]`, "0h 50m", "3 candidate(s)"}, // Gestdown's two fail the cheap check
+		{`["opensubtitles", "gestdown"]`, "0h 50m", "3 candidate(s)"}, // Gestdown's two, then OpenSubtitles' episode match
 		{`["opensubtitles"]`, "0h 45m", "1 candidate(s)"},
 	} {
 		f := newFixture(t)

@@ -1,10 +1,13 @@
 // Package subtitles keeps an English text subtitle beside every movie and episode (port of scripts/sub_stats.py and
 // scripts/subfetch2.py, made cheap-first). It is a reconciler: each run walks the library and, for each video still
-// lacking an English sidecar, does only the missing step, and reads as little of the video as the step allows. A
-// subtitle made for the file's own release is trusted once its length fits the video's; any other is written only once
-// fitted to the video's captions or speech.
+// lacking an English sidecar, does only the missing step, and reads as little of the video as the step allows. Every
+// subtitle is written only once fitted to the video's captions or speech, one made for the file's own release first
+// (such one can still sit seconds off: a re-encoder's group names the file and a subtitle of its other encode, The Game
+// 15.7 s).
 //
-//	embedded English text track       -> not searched: the extraction pass writes it as the sidecar (extract.go)
+//	an English text track inside      -> not searched: the extraction pass reads it and writes it as the sidecar once
+//	(tagged English, or undetermined)    its text reads as English; a title whose tracks it refused is searched
+//	                                     (extract.go)
 //	else candidates from the providers (Gestdown, SubSource with a key, SITEC, Subdl with a key, OpenSubtitles through
 //	Stremio's add-on, the offline OPUS archive (opus.go); OpenSubtitles legacy and .com, with a key and a user's
 //	login, searched last and only for a title Stremio's route did not answer; one subtitle two OpenSubtitles routes
@@ -12,11 +15,11 @@
 //	by tier across providers: 1 made for this file (release-matched), 2 of its source (BluRay for BluRay, WEB from
 //	the same service) at its frame rate, 3 the rest (a commentary's or another language's file too); within a tier
 //	the free providers first, in the providers' order, the OPUS archive last; skipping any already rejected for this
-//	file, and per title the first route that succeeds:
-//	  a. release-matched               -> written WITHOUT reading the video once cheapCheck passes: an OpenSubtitles
-//	                                      file-hash match its name does not contradict (source, edition, episode),
-//	                                      or a subtitle naming the file's original release group
-//	  sampled mode (the default) only:
+//	file, and per title the first route that succeeds, in sampled mode (the default; careful mode has route d alone):
+//	  a. release-matched               -> fitted to the windows as in c at once, before the metered providers are
+//	                                      searched, and written retimed onto them: an OpenSubtitles file-hash match its
+//	                                      name does not contradict (source, edition, episode), or a subtitle naming the
+//	                                      file's original release group
 //	  b. an English VobSub sidecar     -> each plausible candidate fitted to <video>.en.idx's caption starts (its text
 //	                                      only) and written retimed onto them; still no read of the video
 //	  c. sampled fit                   -> plausible candidates fitted to K short windows of the video (its English
@@ -40,8 +43,9 @@
 // whose TMDB runtime and length are more than twice apart (by 20 minutes or more) is recorded "misidentified", with an
 // alert naming it, and not searched: its folder names another film.
 //
-// Careful mode is the rollback: routes a and d only, and the queue aligns at any hour. OpenSubtitles' capped routes
-// (legacy and .com) are searched only once no other provider's release-matched subtitle passed, and only for a title
+// Careful mode is the rollback: the queue alone (route d), aligning at any hour, a release match the first candidate it
+// tries. OpenSubtitles' capped routes (legacy and .com) are searched only once no other provider's release match was
+// written, and only for a title
 // Stremio's route did not answer (it is out, or the title has no IMDb id); only their hash match is downloaded before
 // the queue, which tries their others by tier among the others', last within a tier. Stremio's route is not capped:
 // its hash match is release-matched as theirs is, and its other candidates go every route a free provider's go. A
@@ -63,7 +67,10 @@
 // routine and only logged, and waits for its reset across runs). Every subtitle a route reads is cleaned first
 // (cleanSRT: renumbered, without the blank and separator lines inside cues alass cannot parse). alass exiting
 // non-zero on a candidate (one it still cannot parse, say) fails that title alone: recorded alass_failed, with the
-// last lines alass printed, and tried again on the same schedule, its candidate never refused for it. Only alass
+// last lines alass printed, and tried again on the same schedule, its candidate never refused for it. alass hears the
+// dialogue channel: the centre where the layout has one, read with the front pair, which is heard instead when nothing
+// in the centre is voiced (a stereo mix dressed as 5.1: Rocky III, T-34); audio with no speech at all is no reference
+// for its title (no_reference), never an empty speech.srt, which alass cannot decode. Only alass
 // failing on alassTrip titles in a row, alass not starting at all, or a title's audio not heard, makes the titles
 // behind them that need alass wait for the next run, with one alert. Each run also refreshes sub_stats.py's TSV over
 // the whole library. Jellyfin hears of each new sidecar, and
@@ -79,7 +86,8 @@
 // from the video's start: speech from an audio track that starts late is padded to it.
 //
 // The verify pass (verify.go, sampled mode) judges, verify_per_run videos a run, the English .srt sidecars no record
-// shows verified, each fitted to its video's windows as a download is: one in sync is kept, one consistently shifted
+// shows verified (release_matched, a release match written as downloaded before it was fitted, is not verified), each
+// fitted to its video's windows as a download is: one in sync is kept, one consistently shifted
 // is archived and created again retimed under its own name, one that cannot fit is archived (and its video searched
 // for anew), and one the windows cannot judge waits in the queue, behind every title lacking a subtitle, for a full
 // alignment of its own. A sidecar leaves the library only by a move into archive_dir, never overwriting there.
@@ -91,10 +99,11 @@
 // is not written. Each file is read once, written or refused, and a run starts no title once its OCR has taken an hour.
 //
 // The extraction pass (extract.go), after the OCR pass and inside align_window, converts the English text track (subrip,
-// ASS/SSA, mov_text, WebVTT) of a title that carries one and has no English sidecar to SRT, the cues timed as they are,
-// and writes it as <video>.en.srt, recorded "extracted"; one that is not a full English subtitle is not written. Each
-// file is read once, written or refused, titles with an ASS track first, and a run starts no title once its
-// extraction has taken an hour; the next run, asked for at once, goes on.
+// ASS/SSA, mov_text, WebVTT; tagged English, or undetermined) of a title that carries one and has no English sidecar to
+// SRT, the cues timed as they are, and writes it as <video>.en.srt, recorded "extracted"; one that is not a full English
+// subtitle (its text read as English) is not written, and its title is searched for from the next run on. Each file is
+// read once, written or refused, titles with an ASS track first, and a run starts no title once its extraction has
+// taken an hour; the next run, asked for at once, goes on.
 package subtitles
 
 import (
@@ -139,7 +148,7 @@ const (
 	alassAgree = 0.75 // alass: share of cues that must sit within 0.5 s of the median shift (6 of 8 chunks in align)
 	alassTrip  = 3    // titles in a row alass fails on before the rest of the run's titles that need it wait
 	rescueMax  = 300  // ms: a rescued subtitle's median distance to the captions (the gate's bar)
-	// A release match cheapCheck refused waits this long in http_cache for its alignment, so it is downloaded once.
+	// A candidate a route before the queue refused waits this long in http_cache for its alignment, so it is downloaded once.
 	keptFor = 90 * 24 * time.Hour
 	keptAs  = "subtitles:"
 )
@@ -1047,9 +1056,9 @@ func (r *run) record(ctx context.Context, t *title, o outcome) {
 	}
 }
 
-// fetch is routes a-c: the providers' candidates, a release-matched one written once cheapCheck passes or (sampled
-// mode) a plausible one that fits the title's .en.idx; then (sampled mode) the sampled fit; otherwise the candidates an
-// alignment may try ("queued"). Before the sampled fit the video is read only for OpenSubtitles' file hash (128 KiB),
+// fetch is routes a-c (sampled mode): the providers' candidates, a release-matched one written once it fits the windows,
+// or a plausible one that fits the title's .en.idx; then the sampled fit; otherwise (and in careful mode) the candidates
+// an alignment may try ("queued"). Before the windows the video is read only for OpenSubtitles' file hash (128 KiB),
 // and only when OpenSubtitles is about to be searched.
 func (r *run) fetch(ctx context.Context, t *title) outcome {
 	q, err := r.query(t)

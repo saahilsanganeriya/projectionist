@@ -1,7 +1,8 @@
 package subtitles
 
 // The verify pass: the English .srt sidecars that predate the stage (or that anything else put there), whose timing no
-// record shows checked against their video, judged as the sampled fit judges a download, verify_per_run videos a run
+// record shows checked against their video (a release match the stage wrote as downloaded, release_matched, among
+// them; and Lord of War's, misaligned), judged as the sampled fit judges a download, verify_per_run videos a run
 // (sampled mode, and never in a test run):
 //
 //	the video's windows, read once (and only when one sidecar is an SRT at all); each sidecar fitted to them

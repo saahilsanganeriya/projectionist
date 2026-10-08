@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// Catches a subtitle written unaligned that was not made for this release: another group, a group's name read from a
+// Catches a subtitle taken for this release's own (tried first, and fitted at once) that was not made for it: another group, a group's name read from a
 // codec or a "-DL" suffix, a source, resolution, service or edition the file's release contradicts (a named cut such
 // as Final Cut, Ultimate Cut, Special Edition or Redux is an edition), another episode (S03E06 or 3x06),
 // a subtitle labelled with another title, a word in trailing parentheses that names no resolution or source taken for

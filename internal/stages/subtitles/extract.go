@@ -2,15 +2,17 @@ package subtitles
 
 // The extraction pass: a title whose English subtitle is a text track inside the video (subrip, ASS/SSA, mov_text,
 // WebVTT) and that has no English sidecar gets that track written beside it, so a player that cannot show the embedded
-// track (a TV app with ASS, say) reads the sidecar. It runs after the queue and the OCR pass, inside align_window, while
-// nobody but the owner watches:
+// track (a TV app with ASS, say) reads the sidecar. A track tagged undetermined ("und") may be it too (Love Island USA
+// S08's closed captions): such a title is not searched before this pass has read it. It runs after the queue and the
+// OCR pass, inside align_window, while nobody but the owner watches:
 //
-//	an English text track (textTracks), no English sidecar, and no extraction yet of this very file
+//	an English or undetermined text track (textTracks), no English sidecar, and no extraction yet of this very file
 //	  every such track converted to SRT by one ffmpeg (the whole file read once; the cues timed as they are; an ASS
 //	  track as plain text, its styling and drawings dropped)
 //	  tried full tracks first, then SDH ones, each in the video's order:
 //	    the first whose text passes trackRefusal    -> <video>.en.srt (O_EXCL), recorded "extracted"
-//	    none passes, or ffmpeg cannot read the file -> an event rejected_extract, nothing recorded
+//	    none passes, or ffmpeg cannot read the file -> an event rejected_extract, nothing recorded; from the next run
+//	                                                   the title is searched for as one with no English text track
 //	  an English sidecar appeared during the read   -> not written, recorded not_written
 //
 // A file (size:mtime) is read at most once, written or refused: only a changed video is read again. Titles with an
