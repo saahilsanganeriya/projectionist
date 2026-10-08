@@ -480,9 +480,9 @@ func (s *sampler) readWindows(ctx context.Context, wins []sampleWindow) ([]sampl
 	}
 	var got []sample
 	for _, w := range wins {
-		pcm, err := s.helper(ctx, allowance(1), s.r.env.FFmpeg.FFmpegPath(), "-nostdin", "-hide_banner", "-loglevel", "error",
-			"-ss", fmt.Sprintf("%.3f", w.start), "-t", fmt.Sprintf("%.3f", w.dur), "-i", s.t.path,
-			"-map", fmt.Sprintf("0:%d", s.audio.Index), dialogue(s.audio)[0], dialogue(s.audio)[1], "-ar", "16000", "-f", "s16le", "-")
+		args := append([]string{"-nostdin", "-hide_banner", "-loglevel", "error", "-ss", fmt.Sprintf("%.3f", w.start), "-t",
+			fmt.Sprintf("%.3f", w.dur), "-i", s.t.path, "-map", fmt.Sprintf("0:%d", s.audio.Index)}, dialogue(s.audio)...)
+		pcm, err := s.helper(ctx, allowance(1), s.r.env.FFmpeg.FFmpegPath(), append(args, "-ar", "16000", "-f", "s16le", "-")...)
 		if errors.Is(err, errOverrun) {
 			return nil, fmt.Sprintf("reading a window was stopped past %d bytes: no usable index", allowance(1)), nil
 		} else if err != nil {
@@ -533,13 +533,15 @@ func (s *sampler) helper(ctx context.Context, limit int64, bin string, args ...s
 	return out, err
 }
 
-// dialogue is the output option that keeps where films put their dialogue: the centre channel when the layout has
-// one, else a mono mix.
-func dialogue(a probe.Audio) [2]string {
+// dialogue is the output options that keep where films put their dialogue (the centre channel when the layout has
+// one, else a mono mix) on the video's time base: an audio track that starts late (Lord of War's, 8.4 s in) is padded
+// from the start, as its PCM is read from its first sample at time zero.
+func dialogue(a probe.Audio) []string {
+	const fromStart = "aresample=async=1:first_pts=0"
 	if centred[a.Layout] {
-		return [2]string{"-af", "pan=mono|c0=FC"}
+		return []string{"-af", "pan=mono|c0=FC," + fromStart}
 	}
-	return [2]string{"-ac", "1"}
+	return []string{"-ac", "1", "-af", fromStart}
 }
 
 var centred = map[string]bool{"3.0": true, "3.1": true, "4.0": true, "4.1": true, "5.0": true, "5.0(side)": true, "5.1": true,

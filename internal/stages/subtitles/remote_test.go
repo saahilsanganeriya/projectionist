@@ -189,6 +189,61 @@ func TestRemoteAlignmentMatchesLocal(t *testing.T) {
 	}
 }
 
+// lateAudio gives f a fake ffmpeg for videos whose audio starts 8.4 s in, as Lord of War's does, and whose timestamps
+// start 1.4 s in, as an MPEG-TS's do. Read from the library, the captions are where they are (ffmpeg counts from the
+// file's start), or 1.4 s late with -copyts (its raw timestamps); read from an align worker's media they come 8.4 s
+// early unless -copyts keeps the media's own timestamps (the video's), as ffmpeg counts a file's time from its first
+// packet (there the audio's); and the speech starts at the first audio sample unless aresample pads it to the start
+// (first_pts=0) on the video's time base.
+func lateAudio(t *testing.T, f *fixture) {
+	ff := f.h.Env.FFmpeg.Dir
+	early, late := make([]float64, len(f.ts)), make([]float64, len(f.ts))
+	for i, s := range f.ts {
+		early[i], late[i] = s-8.4, s+1.4
+	}
+	os.WriteFile(filepath.Join(ff, "early.framecrc"), []byte(framecrc(early)), 0o644)
+	os.WriteFile(filepath.Join(ff, "late.framecrc"), []byte(framecrc(late)), 0o644)
+	f.h.Script(t, "ffmpeg", `echo "$*" >> "`+ff+`/helper.calls"
+base=; case "$*" in *-copyts*"`+f.lib+`"*) base=raw;; *"`+f.lib+`"*|*-copyts*) base=video;; esac
+case "$*" in
+*matroska*) printf media;;
+*framecrc*) case $base in video) cat "`+ff+`/ran.framecrc";; raw) cat "`+ff+`/late.framecrc";; *) cat "`+ff+`/early.framecrc";; esac;;
+*s16le*) case "$base $*" in "video "*first_pts=0*) cat "`+ff+`/speech.pcm";; *) tail -c +268801 "`+ff+`/speech.pcm";; esac;;
+*"-f sup"*) p=; for a; do [ "$p" = sup ] && : > "$a"; p=$a; done;;
+*) exit 1;;
+esac
+`)
+}
+
+// Catches an alignment's reference counted from anywhere but the video's start when its audio starts late (Lord of
+// War's, 8.4 s in): an align worker taking the streamed media's time from its first packet (Lord of War's PGS captions
+// came 8.4 s early there, and a sidecar 8.2 s early was recorded kept), or the speech heard from the first audio
+// sample, here or on a worker. Ran's candidate must land on its captions and Clerks' alass alignment pass its speech
+// cross-check, wherever they are aligned.
+func TestReferencesCountFromTheVideosStart(t *testing.T) {
+	for _, onWorker := range []bool{false, true} {
+		f := newFixture(t)
+		if onWorker {
+			rm := f.remote(t, 2)
+			lateAudio(t, f)
+			rm.worker(t, f)
+		} else {
+			lateAudio(t, f)
+		}
+		f.run(t)
+		o := f.outcomes()
+		written, _ := os.ReadFile(strings.TrimSuffix(f.path(ran), ".mkv") + ".en.srt")
+		got, ok := cues(string(written)), o[f.path(clerks)] == "retimed"
+		for i, s := range got {
+			ok = ok && len(got) == len(f.ts) && s.start-f.ts[i] <= 0.01 && s.start-f.ts[i] >= -0.21
+		}
+		if !ok || len(got) == 0 {
+			t.Errorf("on a worker %v: Ran %q with %d cues (the first %v, its caption %v), Clerks %q; want both aligned onto the video's own timing",
+				onWorker, o[f.path(ran)], len(got), got[:min(1, len(got))], f.ts[0], o[f.path(clerks)])
+		}
+	}
+}
+
 func relative(m map[string]string, lib string) map[string]string {
 	out := map[string]string{}
 	for k, v := range m {

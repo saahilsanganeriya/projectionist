@@ -1,9 +1,10 @@
 package subtitles
 
-// Subtitle providers, called directly (never through Plex): the OpenSubtitles legacy REST API, Gestdown (Addic7ed's
-// TV subtitles) and SITEC Subtitles (movies), none of which needs a key; SubSource (the Subscene archive) and Subdl,
-// each only when its API key file exists; and OpenSubtitles.com, only when its API key and a free user's username and
-// password files exist. Ranking, the file hash, the release name, the ad stripping and the legacy API's download quota
+// Subtitle providers, called directly (never through Plex): OpenSubtitles through Stremio's add-on (uncapped, the first
+// OpenSubtitles route) and its legacy REST API, Gestdown (Addic7ed's TV subtitles) and SITEC Subtitles (movies), none
+// of which needs a key; SubSource (the Subscene archive) and Subdl, each only when its API key file exists;
+// OpenSubtitles.com, only when its API key and a free user's username and password files exist; and the offline OPUS
+// archive (opus.go). Ranking, the file hash, the release name, the ad stripping and the legacy API's download quota
 // are ports of subfetch2.py v8. Every request goes through its provider's pacer: requests a gap apart (1 s; 2 s for
 // Gestdown, SITEC and SubSource), exponential backoff on 429/5xx/network errors, and parking for the rest of the run
 // once the provider keeps failing, refuses a search or spends its download quota, so the titles that need it wait for
@@ -47,6 +48,10 @@ type Query struct {
 	Show    bool   // an episode; its Season is 0 for a special
 	Season  int
 	Episode int
+	// A special's own IMDb id (TMDB's episode external_ids): OpenSubtitles may file it as another season's episode.
+	EpisodeIMDb int
+	// The film whose TV cut this miniseries is (identify): OpenSubtitles files such a cut under the film, a CD a part.
+	FilmIMDb int
 }
 
 // Candidate is one downloadable subtitle, normalised across providers to the fields rank() reads.
@@ -91,6 +96,9 @@ func (c Candidate) key() string { return c.provider.Name() + ":" + c.ID }
 
 // metered providers ration their downloads (OpenSubtitles: 180 a day per IP), so they come last.
 func metered(p Provider) bool { return p.Name() == "opensubtitles" || p.Name() == "opensubtitles-com" }
+
+// openSubtitles tells whether p is a route to OpenSubtitles' catalog, which matches a file by its hash.
+func openSubtitles(p Provider) bool { return strings.HasPrefix(p.Name(), "opensubtitles") }
 
 // parked is why p would refuse a search now (wrapping errParked), nil when it would not; the legacy API also refuses
 // while its downloads wait out the quota.
@@ -178,6 +186,44 @@ func stripAds(txt string) string {
 		}
 	}
 	return strings.Join(kept, "\n\n") + "\n"
+}
+
+// cleanSRT rebuilds an SRT from its timing lines in the shape alass's SubRip parser needs: the cues numbered in order,
+// each its timing as it was, then its text lines but the blank ones and those that are only a separator ("-----"). An
+// index glued to its timing ("5200:30:21,770 --> ...") or set apart by a blank line goes with the old numbering, and a
+// cue left without text goes. Text without a timing line is returned as it is.
+func cleanSRT(txt string) string {
+	type cue struct {
+		timing string
+		text   []string
+	}
+	var cs []cue
+	for _, line := range strings.Split(strings.ReplaceAll(txt, "\r\n", "\n"), "\n") {
+		if m := cueRe.FindStringIndex(line); m != nil {
+			if n := len(cs); n > 0 {
+				if text := cs[n-1].text; len(text) > 0 && strings.Trim(text[len(text)-1], "0123456789 \t") == "" {
+					cs[n-1].text = text[:len(text)-1] // this cue's index
+				}
+			}
+			cs = append(cs, cue{timing: line[m[0]:m[1]]})
+			continue
+		}
+		if t := strings.TrimSpace(line); len(cs) > 0 && strings.Trim(t, "-=_*~") != "" {
+			cs[len(cs)-1].text = append(cs[len(cs)-1].text, line)
+		}
+	}
+	if len(cs) == 0 {
+		return txt
+	}
+	var b strings.Builder
+	n := 0
+	for _, c := range cs {
+		if len(c.text) > 0 {
+			n++
+			fmt.Fprintf(&b, "%d\n%s\n%s\n\n", n, c.timing, strings.Join(c.text, "\n"))
+		}
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // order ranks candidates best first (ties keep search order, as subfetch2.py's stable sort does) and drops unusable
@@ -419,6 +465,7 @@ type legacyResult struct {
 	SubForeignPartsOnly flexString
 	SubBad              flexString
 	SubSumCD            flexString
+	SubActualCD         flexString
 	SubHearingImpaired  flexString
 	SubDownloadsCnt     flexString
 	SubRating           flexString
@@ -521,12 +568,17 @@ func (o *legacy) search(ctx context.Context, q Query, source string, params ...s
 		rating, _ := strconv.ParseFloat(string(r.SubRating), 64)
 		fps, _ := strconv.ParseFloat(string(r.MovieFPS), 64)
 		imdb, _ := strconv.Atoi(string(r.IDMovieImdb))
+		cd, _ := strconv.Atoi(string(r.SubActualCD))
+		part := q.FilmIMDb != 0 && imdb == q.FilmIMDb // a TV cut's episode: one CD of the film's set is one part
+		if part && (r.SubSumCD == "" || r.SubSumCD == "1" || max(cd-q.Episode, q.Episode-cd) > 1) {
+			continue // the film whole, or a part too far from this episode's number to be it
+		}
 		out = append(out, Candidate{
 			Source: source, ID: string(r.IDSubtitleFile), Release: string(r.MovieReleaseName), FileName: string(r.SubFileName),
 			HashMatch: r.MatchedBy == "moviehash", HearingImpaired: r.SubHearingImpaired == "1", Downloads: downloads,
 			Rating: rating, FPS: fps, Encoding: string(r.SubEncoding), Season: string(r.SeriesSeason), Episode: string(r.SeriesEpisode),
 			link: string(r.SubDownloadLink), provider: o, openSubtitlesID: string(r.IDSubtitle),
-			unusable: r.SubFormat != "srt" || r.SubSumCD != "" && r.SubSumCD != "1" || r.SubForeignPartsOnly == "1" || r.SubBad == "1",
+			unusable: r.SubFormat != "srt" || !part && r.SubSumCD != "" && r.SubSumCD != "1" || r.SubForeignPartsOnly == "1" || r.SubBad == "1",
 			ours:     imdb != 0 && imdb == q.IMDb, // an episode's own test replaces this in Search
 		})
 	}
@@ -535,7 +587,8 @@ func (o *legacy) search(ctx context.Context, q Query, source string, params ...s
 
 // Search is candidates() of subfetch2.py: file hash, then IMDb id (with season and episode for an episode), then for
 // an episode with nothing beyond hash hits, the show's name. Outside a hash match an episode result must be ours.
-// While downloads are parked there is nothing to search for.
+// A special is also searched by its own IMDb id, and a TV cut's episode by its film's (each part one CD of the film's
+// set, within one of the episode's number). While downloads are parked there is nothing to search for.
 func (o *legacy) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	if err := o.dl.parkedErr(); err != nil {
 		return nil, err
@@ -572,6 +625,21 @@ func (o *legacy) Search(ctx context.Context, q Query) ([]Candidate, error) {
 		c.ours = c.Season == strconv.Itoa(q.Season) && c.Episode == strconv.Itoa(q.Episode)
 		if c.Source == "opensubtitles-hash" || c.ours {
 			kept = append(kept, c)
+		}
+	}
+	// A special by its own id and a TV cut's episode by its film's, each kept whatever OpenSubtitles labels it
+	for _, alt := range []Query{{IMDb: q.EpisodeIMDb}, {IMDb: q.FilmIMDb, FilmIMDb: q.FilmIMDb, Show: true, Episode: q.Episode}} {
+		if alt.IMDb == 0 {
+			continue
+		}
+		more, err := o.search(ctx, alt, "opensubtitles-imdb", fmt.Sprintf("imdbid-%07d", alt.IMDb))
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range more {
+			if c.ours {
+				kept = append(kept, c)
+			}
 		}
 	}
 	return kept, nil
@@ -624,6 +692,85 @@ func (o *legacy) Download(ctx context.Context, c Candidate) (string, error) {
 // pyQuote is urllib.parse.quote(s): everything but unreserved characters and "/" percent-encoded.
 func pyQuote(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(url.QueryEscape(s), "+", "%20"), "%2F", "/")
+}
+
+// ---- OpenSubtitles through Stremio's "OpenSubtitles v3" add-on (opensubtitles-v3.strem.io, no key) ----
+
+// The whole OpenSubtitles catalog with no key and no daily cap (its downloads answer a Download-Quota of 999,999,999),
+// so it is the first OpenSubtitles route: the legacy and .com routes are searched only for a title it did not answer
+// (fetch). It is Stremio's own integration, not a published API: requests a second apart, under projectionist's name.
+type stremio struct {
+	base string // https://opensubtitles-v3.strem.io
+	hc   *http.Client
+	pace *pacer // searches and downloads
+}
+
+func (o *stremio) Name() string  { return "opensubtitles-stremio" }
+func (o *stremio) pacer() *pacer { return o.pace }
+
+func (o *stremio) get(ctx context.Context, link string) ([]byte, error) {
+	return o.pace.do(ctx, o.hc, func() (*http.Request, error) {
+		r, err := http.NewRequest(http.MethodGet, link, nil)
+		if err == nil {
+			r.Header.Set("User-Agent", userAgent)
+		}
+		return r, err
+	})
+}
+
+// Search asks once, by the IMDb id (the show's, with season and episode, for an episode) and the file's hash and size;
+// the add-on marks the subtitles whose hash matches ("m": "h").
+func (o *stremio) Search(ctx context.Context, q Query) ([]Candidate, error) {
+	if q.IMDb == 0 {
+		return nil, nil
+	}
+	id := fmt.Sprintf("movie/tt%07d", q.IMDb)
+	if q.Show {
+		id = fmt.Sprintf("series/tt%07d:%d:%d", q.IMDb, q.Season, q.Episode)
+	}
+	link := o.base + "/subtitles/" + id
+	if q.Hash != "" {
+		link += fmt.Sprintf("/videoHash=%s&videoSize=%d", q.Hash, q.Size)
+	}
+	body, err := o.get(ctx, link+".json")
+	if err != nil {
+		return nil, err
+	}
+	var res struct {
+		Subtitles []struct {
+			ID       string `json:"id"`
+			URL      string `json:"url"`
+			Lang     string `json:"lang"`
+			Match    string `json:"m"`
+			FileName string `json:"subtitleFileName"`
+			Release  string `json:"movieReleaseName"`
+			FPSMilli int    `json:"fpsMilli"`
+			Season   int    `json:"season"`
+			Episode  int    `json:"episode"`
+		} `json:"subtitles"`
+	}
+	if err := json.Unmarshal(body, &res); err != nil {
+		return nil, fmt.Errorf("opensubtitles-stremio search: %w", err)
+	}
+	var out []Candidate
+	for _, s := range res.Subtitles {
+		c := Candidate{Source: "opensubtitles-stremio", ID: s.ID, Release: s.Release, FileName: s.FileName, HashMatch: s.Match == "h",
+			FPS: float64(s.FPSMilli) / 1000, Season: strconv.Itoa(s.Season), Episode: strconv.Itoa(s.Episode), link: s.URL, provider: o,
+			openSubtitlesID: s.ID, ours: !q.Show || s.Season == q.Season && s.Episode == q.Episode}
+		if s.Lang == "eng" && c.ours {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// Download fetches the SRT, which the add-on has re-encoded as UTF-8.
+func (o *stremio) Download(ctx context.Context, c Candidate) (string, error) {
+	raw, err := o.get(ctx, c.link)
+	if err != nil {
+		return "", err
+	}
+	return decodeDownload(raw, ""), nil
 }
 
 // ---- OpenSubtitles.com REST (a consumer's API key and a free user's login) ----
@@ -748,10 +895,13 @@ func (o *dotCom) logout(ctx context.Context) {
 	}
 }
 
-// Search asks once with everything known; the API flags file-hash matches itself.
+// Search asks once with everything known (a special by its own IMDb id); the API flags file-hash matches itself.
 func (o *dotCom) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	v := url.Values{"languages": {"en"}, "moviehash": {q.Hash}}
+	own := q.Show && q.EpisodeIMDb != 0 // a special, by its own id: OpenSubtitles may number it as another season's
 	switch {
+	case own:
+		v.Set("imdb_id", strconv.Itoa(q.EpisodeIMDb))
 	case q.Show && q.IMDb != 0:
 		v.Set("parent_imdb_id", strconv.Itoa(q.IMDb))
 	case q.IMDb != 0:
@@ -763,7 +913,7 @@ func (o *dotCom) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	case q.Show:
 		v.Set("query", pyLower(q.Name))
 	}
-	if q.Show {
+	if q.Show && !own {
 		v.Set("season_number", strconv.Itoa(q.Season))
 		v.Set("episode_number", strconv.Itoa(q.Episode))
 	}
@@ -808,8 +958,8 @@ func (o *dotCom) Search(ctx context.Context, q Query) ([]Candidate, error) {
 		if a.LegacyID != 0 {
 			c.openSubtitlesID = strconv.Itoa(a.LegacyID)
 		}
-		// searched by the film's id, or labelled with the episode
-		c.ours = !q.Show && (q.IMDb != 0 || q.TMDB != "") || q.Show && c.Season == strconv.Itoa(q.Season) && c.Episode == strconv.Itoa(q.Episode)
+		// searched by the film's id or the special's own, or labelled with the episode
+		c.ours = own || !q.Show && (q.IMDb != 0 || q.TMDB != "") || q.Show && c.Season == strconv.Itoa(q.Season) && c.Episode == strconv.Itoa(q.Episode)
 		if !q.Show || c.HashMatch || c.ours {
 			out = append(out, c)
 		}

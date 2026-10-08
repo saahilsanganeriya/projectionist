@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// Person is a film's crew member.
+// Person is someone TMDB credits: a film's crew member, a show's creator.
 type Person struct {
 	ID   int    `json:"id"`
 	Name string `json:"name"`

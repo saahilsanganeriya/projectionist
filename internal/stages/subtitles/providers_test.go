@@ -76,6 +76,29 @@ func TestRank(t *testing.T) {
 	}
 }
 
+// Catches a subtitle reaching alass in a shape its SubRip parser refuses, as the 9 alass_failed titles of 2026-10-08
+// did: a separator line between cues (Nosferatu: "expected SubRip index line, found '-------------------'"), a blank
+// line inside a cue (The Big Bang Theory S05E06: "found 'Sounds delicious.'"), an index glued to its timing (A Quiet
+// Place: "found '5200:30:21,770 --> ...'"), or an index then a blank line (How I Met Your Mother S07E05: "expected
+// SubRip timespan line, found ”"); or a timing changed, a cue that keeps no text kept, a cue's text line lost, or a
+// well-formed file changed at all.
+func TestCleanSRT(t *testing.T) {
+	well := "1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:03,000 --> 00:00:04,500\nTwo\nlines\n"
+	for in, want := range map[string]string{
+		well: well,
+		"1\n00:00:01,000 --> 00:00:02,000\nHello\n\n-------------------------\n\n2\n00:00:03,000 --> 00:00:04,500\nTwo\n--------\nlines\n": well,
+		"1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:03,000 --> 00:00:04,500\nTwo\n\nlines\n\n":                                    well,
+		"7\n00:00:01,000 --> 00:00:02,000\nHello\n\n800:00:03,000 --> 00:00:04,500\nTwo\nlines\n":                                          well,
+		"1\n\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n\n00:00:03,000 --> 00:00:04,500\nTwo\nlines":                                      well,
+		"1\n00:00:01,000 --> 00:00:02,000\nHello\n\n2\n00:00:02,500 --> 00:00:02,900\n\n3\n00:00:03,000 --> 00:00:04,500\nTwo\nlines\n":    well,
+		"no timing at all": "no timing at all",
+	} {
+		if got := cleanSRT(in); got != want {
+			t.Errorf("cleanSRT(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 type recorder struct {
 	mu    sync.Mutex
 	slept []time.Duration
@@ -415,8 +438,12 @@ func TestDotCom(t *testing.T) {
 		query != "languages=en&moviehash=00ff&tmdb_id=949" {
 		t.Errorf("film without an IMDb id: query %q, %+v %v; want it asked by its TMDB id", query, got, err)
 	}
+	if got, err := o.Search(context.Background(), Query{Hash: "00ff", IMDb: 1400, EpisodeIMDb: 3845232, Show: true, Episode: 9}); err != nil ||
+		len(got) != 1 || !got[0].ours || query != "imdb_id=3845232&languages=en&moviehash=00ff" {
+		t.Errorf("a special: query %q, %+v %v; want it asked by its own IMDb id, whatever season and episode OpenSubtitles files it as", query, got, err)
+	}
 	if n := logins("/api/v1/login"); n != 1 {
-		t.Errorf("%d logins for two searches; want 1", n)
+		t.Errorf("%d logins for three searches; want 1", n)
 	}
 	reset := time.Date(2026, 10, 6, 13, 3, 15, 0, time.UTC)
 	if txt, err := o.Download(context.Background(), Candidate{ID: "4"}); err != nil || txt != "1\n00:00:01,000 --> 00:00:02,000\nHi\n" || o.pace.parkedErr() != nil {
@@ -604,6 +631,47 @@ func TestGestdown(t *testing.T) {
 	}
 	if n := calls("/shows/external/tvdb/81189"); n != 1 {
 		t.Errorf("show looked up %d times; want once", n)
+	}
+}
+
+// Catches Stremio's OpenSubtitles route asked by anything but the IMDb id (the show's, with season and episode, for
+// an episode) and the file's hash and size, a request without a User-Agent naming projectionist, another language's
+// or another episode's subtitle kept, the hash match, release name, frame rate or the subtitle id both other
+// OpenSubtitles APIs share lost, or the download fetched from anywhere but the subtitle's own link.
+func TestStremio(t *testing.T) {
+	var paths []string
+	var base string
+	srv, _ := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+		paths = append(paths, r.URL.Path)
+		switch {
+		case !strings.Contains(r.Header.Get("User-Agent"), "projectionist"):
+			w.WriteHeader(403)
+		case r.URL.Path == "/en/download/file/77":
+			w.Write([]byte("1\n00:00:01,000 --> 00:00:02,000\nHi\n"))
+		default:
+			w.Write([]byte(`{"subtitles":[{"id":"7","url":"` + base + `/en/download/file/77","lang":"eng","m":"h","subtitleFileName":"Show.S02E04.HDTV.x264-FoV.srt",` +
+				`"movieReleaseName":"Show.S02E04.HDTV.x264-FoV","fpsMilli":25000,"season":2,"episode":4},` +
+				`{"id":"8","url":"` + base + `/x","lang":"spa","m":"i","season":2,"episode":4},{"id":"9","url":"` + base + `/y","lang":"eng","m":"i","season":2,"episode":5}]}`))
+		}
+	})
+	base = srv.URL
+	now := time.Unix(0, 0)
+	o := &stremio{base: srv.URL, hc: srv.Client(), pace: testPacer(&recorder{}, &now)}
+	got, err := o.Search(context.Background(), Query{Size: 42, Hash: "00ff", IMDb: 1234, Show: true, Season: 2, Episode: 4})
+	if err != nil || len(got) != 1 || got[0].ID != "7" || !got[0].HashMatch || !got[0].ours || got[0].Release != "Show.S02E04.HDTV.x264-FoV" ||
+		got[0].FileName != "Show.S02E04.HDTV.x264-FoV.srt" || got[0].FPS != 25 || got[0].openSubtitlesID != "7" {
+		t.Fatalf("episode search: %+v %v", got, err)
+	}
+	if txt, err := o.Download(context.Background(), got[0]); err != nil || txt != "1\n00:00:01,000 --> 00:00:02,000\nHi\n" {
+		t.Errorf("download: %q %v", txt, err)
+	}
+	if _, err := o.Search(context.Background(), Query{Size: 42, Hash: "00ff", IMDb: 1234}); err != nil {
+		t.Errorf("film search: %v", err)
+	}
+	want := []string{"/subtitles/series/tt0001234:2:4/videoHash=00ff&videoSize=42.json", "/en/download/file/77",
+		"/subtitles/movie/tt0001234/videoHash=00ff&videoSize=42.json"}
+	if strings.Join(paths, "\n") != strings.Join(want, "\n") {
+		t.Errorf("requests:\n%s\nwant:\n%s", strings.Join(paths, "\n"), strings.Join(want, "\n"))
 	}
 }
 

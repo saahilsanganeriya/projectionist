@@ -138,6 +138,8 @@ type Details struct {
 	BackdropPath  string      `json:"backdrop_path"`
 	Runtime       int         `json:"runtime"`               // minutes; films only
 	Status        string      `json:"status"`                // "Released", "Returning Series", "Ended", ...
+	Type          string      `json:"type"`                  // shows only: "Scripted", "Miniseries", "Documentary", ...
+	CreatedBy     []Person    `json:"created_by"`            // shows only
 	Collection    *Collection `json:"belongs_to_collection"` // films only; nil when the film is in none
 	ExternalIDs   ExternalIDs `json:"external_ids"`
 	Seasons       []Season    `json:"seasons"` // shows only; season 0 holds the specials
@@ -266,6 +268,13 @@ func (c *Client) Episodes(ctx context.Context, showID, season int) ([]Episode, e
 	}
 	err := c.get(ctx, fmt.Sprintf("/tv/%d/season/%d", showID, season), nil, &resp)
 	return resp.Episodes, err
+}
+
+// EpisodeExternalIDs are one episode's own ids (a special's IMDb id, say).
+func (c *Client) EpisodeExternalIDs(ctx context.Context, showID, season, episode int) (ExternalIDs, error) {
+	var out ExternalIDs
+	err := c.get(ctx, fmt.Sprintf("/tv/%d/season/%d/episode/%d/external_ids", showID, season, episode), nil, &out)
+	return out, err
 }
 
 // Images lists a film's or show's posters, backdrops and logos. langs (ISO 639-1; "null" = untagged) narrows the

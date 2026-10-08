@@ -206,7 +206,7 @@ func (t *title) releaseMatched(c Candidate) bool {
 	if wrongText(c) {
 		return false
 	}
-	if metered(c.provider) {
+	if openSubtitles(c.provider) {
 		r := parseRelease(c.Release + " " + c.FileName)
 		return c.HashMatch && c.ours && !differ(r.source, t.origin.rel.source) && (r.editions == "" || r.editions == t.origin.rel.editions) &&
 			(t.show == "" || !differ(r.sxe, sxe(t.season, t.episode)))
@@ -336,7 +336,8 @@ func (t *title) tier(c Candidate) int {
 }
 
 // arrange orders a title's candidates (rank's order) for trying: by tier across providers; within a tier the free
-// providers before a metered one (OpenSubtitles' downloads are rationed), each in the providers' order.
+// online providers, then a metered one (OpenSubtitles' downloads are rationed), then the offline archive, each in the
+// providers' order.
 func (t *title) arrange(cands []Candidate, providers []Provider) []Candidate {
 	type keyed struct {
 		c Candidate
@@ -345,7 +346,10 @@ func (t *title) arrange(cands []Candidate, providers []Provider) []Candidate {
 	ks := make([]keyed, len(cands))
 	for i, c := range cands {
 		m := 0
-		if metered(c.provider) {
+		switch {
+		case c.provider.Name() == "opus": // the offline archive: after every online route
+			m = 2
+		case metered(c.provider):
 			m = 1
 		}
 		ks[i] = keyed{c, [3]int{t.tier(c), m, slices.Index(providers, c.provider)}}

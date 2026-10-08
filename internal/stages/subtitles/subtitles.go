@@ -5,12 +5,14 @@
 // fitted to the video's captions or speech.
 //
 //	embedded English text track       -> skipped: the players show it, so nothing is fetched and nothing read
-//	else candidates from the providers (Gestdown, SubSource with a key, SITEC, Subdl with a key; OpenSubtitles legacy
-//	and .com, with a key and a user's login, searched last; one subtitle both OpenSubtitles APIs find is one candidate),
+//	else candidates from the providers (Gestdown, SubSource with a key, SITEC, Subdl with a key, OpenSubtitles through
+//	Stremio's add-on, the offline OPUS archive (opus.go); OpenSubtitles legacy and .com, with a key and a user's
+//	login, searched last and only for a title Stremio's route did not answer; one subtitle two OpenSubtitles routes
+//	find is one candidate),
 //	by tier across providers: 1 made for this file (release-matched), 2 of its source (BluRay for BluRay, WEB from
 //	the same service) at its frame rate, 3 the rest (a commentary's or another language's file too); within a tier
-//	the free providers first, in the providers' order; skipping any already rejected for this file, and per title the
-//	first route that succeeds:
+//	the free providers first, in the providers' order, the OPUS archive last; skipping any already rejected for this
+//	file, and per title the first route that succeeds:
 //	  a. release-matched               -> written WITHOUT reading the video once cheapCheck passes: an OpenSubtitles
 //	                                      file-hash match its name does not contradict (source, edition, episode),
 //	                                      or a subtitle naming the file's original release group
@@ -30,10 +32,21 @@
 //	  else                             -> alass aligns the candidate to the speech in the audio
 //	accepted                           -> <video>.en.srt, else .eng.srt: created O_EXCL, never overwritten
 //
-// Careful mode is the rollback: routes a and d only, and the queue aligns at any hour. OpenSubtitles is searched only
-// once no other provider's release-matched subtitle passed, and only its hash match is downloaded before the queue,
-// which tries its others by tier among the others', last within a tier. A provider that is out (its day's quota spent,
-// failing, or refusing) holds back only a title nothing the others found is written for, which waits for it unrecorded.
+// TMDB gives a title its ids before any search (identify). A special is also searched by its own IMDb id (TMDB's
+// episode external_ids) on the routes that search by it: legacy, .com and the OPUS archive (OpenSubtitles files
+// Sherlock's S00E09 as its S04E00). A miniseries that is a film's TV cut (TMDB: the film's original title, released
+// within 3 years, directed by the show's creator) is also searched by the film's id on the legacy route, which lists
+// each part as one CD of the film's set. Neither leaves those titles to Stremio's route, which finds neither. A film
+// whose TMDB runtime and length are more than twice apart (by 20 minutes or more) is recorded "misidentified", with an
+// alert naming it, and not searched: its folder names another film.
+//
+// Careful mode is the rollback: routes a and d only, and the queue aligns at any hour. OpenSubtitles' capped routes
+// (legacy and .com) are searched only once no other provider's release-matched subtitle passed, and only for a title
+// Stremio's route did not answer (it is out, or the title has no IMDb id); only their hash match is downloaded before
+// the queue, which tries their others by tier among the others', last within a tier. Stremio's route is not capped:
+// its hash match is release-matched as theirs is, and its other candidates go every route a free provider's go. A
+// provider that is out (its day's quota spent, failing, or refusing) holds back only a title nothing the others found
+// is written for, which waits for it unrecorded.
 // No title waits for OpenSubtitles' download slot (one every 8 min): a title that finds it taken goes on as if
 // OpenSubtitles were out, and the next title to ask once it is free, in this run or the next, takes it.
 // The duration, frame rate and tracks come from the probe cache,
@@ -47,19 +60,23 @@
 // times it, and a queued title is searched again on the same schedule. A title is recorded only once TMDB and every
 // provider it needs answered (and alass ran, where it is needed); else it is deferred, not recorded, and an alert names
 // the cause (a spent quota, OpenSubtitles' downloads, OpenSubtitles.com's, or Subdl's or SubSource's daily limit, is
-// routine and only logged, and waits for its reset across runs). alass exiting non-zero on a candidate (one it cannot
-// parse, say) fails that title alone: recorded alass_failed, with the last lines alass printed, and tried again on the
-// same schedule, its candidate never refused for it. Only alass failing on alassTrip titles in a row, alass not starting
-// at all, or a title's audio not heard, makes the titles behind them that need alass wait for the next run, with one
-// alert. Each run also refreshes sub_stats.py's TSV over the whole library. Jellyfin hears of each new sidecar, and
+// routine and only logged, and waits for its reset across runs). Every subtitle a route reads is cleaned first
+// (cleanSRT: renumbered, without the blank and separator lines inside cues alass cannot parse). alass exiting
+// non-zero on a candidate (one it still cannot parse, say) fails that title alone: recorded alass_failed, with the
+// last lines alass printed, and tried again on the same schedule, its candidate never refused for it. Only alass
+// failing on alassTrip titles in a row, alass not starting at all, or a title's audio not heard, makes the titles
+// behind them that need alass wait for the next run, with one alert. Each run also refreshes sub_stats.py's TSV over
+// the whole library. Jellyfin hears of each new sidecar, and
 // Plex of its video, through queues kept in the store: Plex refreshes the item(s) whose media part the video is (PUT
 // /library/metadata/<ratingKey>/refresh, the ratingKey read from Plex's own database, plex_db, opened read-only), as
 // neither its watcher nor a partial scan of the folder attaches a new sidecar beside a video it holds already; a push
 // Plex does not take is retried at the next push, never failing a run.
 //
 // With align_remote_lanes set, the queue hands its titles to align workers on another machine while one has called in
-// the last minute (remote.go): the NAS streams only the tracks the alignment reads, serves the candidates under the
-// same quotas, and writes and records the worker's result as its own; with none connected it aligns here.
+// the last minute (remote.go): the NAS streams only the tracks the alignment reads, which the worker reads on the
+// video's own time base (its first packet need not be the video's start), serves the candidates under the same quotas,
+// and writes and records the worker's result as its own; with none connected it aligns here. Every reference counts
+// from the video's start: speech from an audio track that starts late is padded to it.
 //
 // The verify pass (verify.go, sampled mode) judges, verify_per_run videos a run, the English .srt sidecars no record
 // shows verified, each fitted to its video's windows as a download is: one in sync is kept, one consistently shifted
@@ -132,6 +149,8 @@ type Options struct {
 	Alass      string        `toml:"alass"`
 	// subsource and subdl also need subsource_api_key, subdl_api_key in secrets_dir; opensubtitles-com needs
 	// opensubtitles_api_key, opensubtitles_username and opensubtitles_password. A provider without them is skipped.
+	// opensubtitles-stremio (no key) is the first OpenSubtitles route: opensubtitles and opensubtitles-com are searched
+	// only for a title it did not answer.
 	Providers []string `toml:"providers"`
 	// subfetch2.py's OUT folder: its quota.csv and downloads.csv seed the OpenSubtitles quota once, at cutover.
 	LegacyQuota string `toml:"legacy_quota"`
@@ -161,13 +180,14 @@ type Options struct {
 
 func defaults() Options {
 	return Options{
-		Roots:         []string{"/volume1/media/Movies", "/volume1/media/TV"},
-		StatsFile:     "/state/sub_stats.tsv",
-		RetryAfter:    7 * 24 * time.Hour,
-		Workers:       3,
-		SecretsDir:    "/run/secrets",
-		Alass:         "/usr/local/bin/alass",
-		Providers:     []string{"gestdown", "subsource", "sitec", "subdl", "opensubtitles", "opensubtitles-com"},
+		Roots:      []string{"/volume1/media/Movies", "/volume1/media/TV"},
+		StatsFile:  "/state/sub_stats.tsv",
+		RetryAfter: 7 * 24 * time.Hour,
+		Workers:    3,
+		SecretsDir: "/run/secrets",
+		Alass:      "/usr/local/bin/alass",
+		Providers: []string{"gestdown", "subsource", "sitec", "subdl", "opensubtitles-stremio", "opensubtitles",
+			"opensubtitles-com"},
 		LegacyQuota:   "/volume1/PlexMediaServer/subtitle-downloads",
 		AlignPerDay:   20,
 		Mode:          "sampled",
@@ -185,10 +205,12 @@ func defaults() Options {
 
 // Stage's fields are test hooks; the zero value talks to the real services.
 type Stage struct {
-	openSubtitles, openSubtitlesCom, subdlAPI, subdlDL, gestdownAPI, sitecSite, subsourceAPI string
-	sleep                                                                                   func(context.Context, time.Duration) error
-	remote                                                                                  *broker // nil: the process's own
-	ocr                                                                                     string  // the OCR helper; "": the image's subocr
+	openSubtitles, openSubtitlesCom, subdlAPI, subdlDL, gestdownAPI, sitecSite, subsourceAPI, stremioAPI string
+
+	sleep   func(context.Context, time.Duration) error
+	remote  *broker // nil: the process's own
+	ocr     string  // the OCR helper; "": the image's subocr
+	opusZip string  // "": opusZipPath
 }
 
 func (Stage) Name() string { return name }
@@ -438,6 +460,17 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 				}
 				r.providers = append(r.providers, o)
 			}
+		case "opus":
+			o, err := openOpus(cmp.Or(s.opusZip, opusZipPath))
+			if err != nil {
+				r.alertOnce("opus", "the OPUS archive is not used: %v", err)
+				continue
+			}
+			o.pace = newPacer(0)
+			r.providers = append(r.providers, o)
+		case "opensubtitles-stremio":
+			r.providers = append(r.providers, &stremio{base: or(s.stremioAPI, "https://opensubtitles-v3.strem.io"), hc: hc,
+				pace: newPacer(time.Second)})
 		case "gestdown": // free community services: half the rate
 			r.providers = append(r.providers, &gestdown{base: or(s.gestdownAPI, "https://api.gestdown.info"), hc: hc,
 				pace: newPacer(2 * time.Second), shows: map[string]string{}})
@@ -990,18 +1023,16 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	if t.kind == "movie" || t.kind == "tv" {
 		// OpenSubtitles finds nearly every subtitle by the IMDb id, SITEC only by it, Gestdown by the TheTVDB id: without
 		// TMDB the title waits for it, rather than being searched without them and recorded as having none.
-		id, _ := strconv.Atoi(t.id)
-		d, err := r.env.TMDB.Details(ctx, tmdb.Kind(t.kind), id)
+		why, err := r.identify(ctx, t, &q)
 		switch {
-		case errors.Is(err, tmdb.ErrNotFound): // TMDB has no such title: searched without its ids
 		case err != nil:
 			if ctx.Err() == nil {
 				r.alertOnce("tmdb", "TMDB lookups failing, titles wait for them: %v", err)
 			}
 			return outcome{result: "deferred", detail: err.Error()}
-		default:
-			q.IMDb, _ = strconv.Atoi(strings.TrimPrefix(d.ExternalIDs.IMDb, "tt"))
-			q.TVDB = d.ExternalIDs.TVDB
+		case why != "":
+			r.alertOnce("misidentified:"+t.path, "%s is not searched: %s; fix its folder's TMDB id", t.path, why)
+			return outcome{result: "misidentified", detail: why}
 		}
 	}
 	rejected, err := r.rejected(ctx, t.path, t.key)
@@ -1020,6 +1051,7 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	// not one) is recorded with the refusal once every other provider answered, so a refusal of that title alone cannot
 	// hold up every run.
 	out, meteredOut, refusal, found, tried, busy := false, false, "", 0, 0, 0
+	answered := false // Stremio's route answered for this title: the capped OpenSubtitles routes are its fallbacks
 	var pool []Candidate
 	missing := func(p Provider) { // p could not search or serve this title
 		out, meteredOut = out || !metered(p), meteredOut || metered(p)
@@ -1027,11 +1059,11 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	for _, last := range []bool{false, true} { // the metered providers only when nothing cheaper was written
 		var cands []Candidate
 		for _, p := range r.providers {
-			if metered(p) != last {
+			if metered(p) != last || last && answered {
 				continue
 			}
 			err := parked(p) // a parked provider costs no request and no hash read
-			if err == nil && last && q.Hash == "" {
+			if err == nil && openSubtitles(p) && q.Hash == "" {
 				if q.Hash, _, err = openSubtitlesHash(t.path); err != nil {
 					return outcome{result: "error", detail: err.Error()}
 				}
@@ -1044,6 +1076,8 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 			switch {
 			case err == nil:
 				cands = append(cands, got...)
+				// Stremio searches neither a special by its own id nor a TV cut by its film's (it lists no CD set)
+				answered = answered || p.Name() == "opensubtitles-stremio" && q.IMDb != 0 && q.EpisodeIMDb == 0 && q.FilmIMDb == 0
 				continue
 			case ctx.Err() != nil:
 				return outcome{result: "deferred"}
@@ -1123,6 +1157,73 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	}
 	return outcome{result: "queued", detail: fmt.Sprintf("%d candidate(s)", len(pool)), pool: pool,
 		fields: map[string]any{"group": t.origin.group, "candidates": best}}
+}
+
+// identify sets q's ids from TMDB: the IMDb and TheTVDB ids, a special's own IMDb id (TMDB and OpenSubtitles number
+// specials apart: Sherlock's S00E09, "The Abominable Bride", is OpenSubtitles' S04E00) and the film a miniseries is the
+// TV cut of. A title TMDB has no record of is searched without them. It returns why a film's TMDB identity cannot be
+// the file ("" when it can): a runtime and a length more than twice apart and 20 minutes or more (Pleasure (2021), a
+// 2-hour file, was filed as TMDB's 10-minute short of that name).
+func (r *run) identify(ctx context.Context, t *title, q *Query) (string, error) {
+	id, _ := strconv.Atoi(t.id)
+	d, err := r.env.TMDB.Details(ctx, tmdb.Kind(t.kind), id)
+	if errors.Is(err, tmdb.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	q.IMDb, _ = strconv.Atoi(strings.TrimPrefix(d.ExternalIDs.IMDb, "tt"))
+	q.TVDB = d.ExternalIDs.TVDB
+	if t.kind == "movie" {
+		runtime, length := float64(d.Runtime*60), (t.durLo+t.durHi)/2
+		if d.Runtime > 0 && length > 0 && math.Abs(runtime-length) >= 20*60 && max(runtime, length) > 2*min(runtime, length) {
+			return fmt.Sprintf("TMDB gives its film %d min, the file runs %.0f min", d.Runtime, length/60), nil
+		}
+		return "", nil
+	}
+	if t.season == 0 {
+		ids, err := r.env.TMDB.EpisodeExternalIDs(ctx, id, 0, t.episode)
+		if err != nil && !errors.Is(err, tmdb.ErrNotFound) {
+			return "", err
+		}
+		q.EpisodeIMDb, _ = strconv.Atoi(strings.TrimPrefix(ids.IMDb, "tt"))
+	}
+	if q.FilmIMDb, err = r.filmOf(ctx, d); errors.Is(err, tmdb.ErrNotFound) {
+		err = nil
+	}
+	return "", err
+}
+
+// filmOf is the IMDb id of the film a miniseries is the TV cut of, as far as TMDB links them: a film of the show's
+// original title, released within 3 years of its first episode, directed by one of its creators (Bergman's Fanny and
+// Alexander, the film of 1982 and the miniseries of 1984); 0 when there is none.
+func (r *run) filmOf(ctx context.Context, show tmdb.Details) (int, error) {
+	if show.Type != "Miniseries" || len(show.CreatedBy) == 0 || show.OriginalTitle == "" || show.Date.IsZero() {
+		return 0, nil
+	}
+	films, err := r.env.TMDB.Search(ctx, tmdb.Movie, show.OriginalTitle, 0)
+	if err != nil {
+		return 0, err
+	}
+	for _, f := range films {
+		apart := max(f.Date.Year()-show.Date.Year(), show.Date.Year()-f.Date.Year())
+		if !strings.EqualFold(f.OriginalTitle, show.OriginalTitle) || f.Date.IsZero() || apart > 3 {
+			continue
+		}
+		directors, err := r.env.TMDB.Directors(ctx, f.ID)
+		if err != nil {
+			return 0, err
+		}
+		if slices.ContainsFunc(directors, func(p tmdb.Person) bool {
+			return slices.ContainsFunc(show.CreatedBy, func(c tmdb.Person) bool { return c.ID == p.ID })
+		}) {
+			film, err := r.env.TMDB.Details(ctx, tmdb.Movie, f.ID)
+			id, _ := strconv.Atoi(strings.TrimPrefix(film.ExternalIDs.IMDb, "tt"))
+			return id, err
+		}
+	}
+	return 0, nil
 }
 
 // sampleable tells whether a verified route before the queue (.idx or sampled fit) may download c: made for this
@@ -1237,17 +1338,17 @@ func (r *run) check(ctx context.Context, t *title, c Candidate, txt string, atte
 
 func (r *run) sampled() bool { return r.opt.Mode == "sampled" }
 
-// download is c's text with OpenSubtitles' ads stripped: from the store when a route before the queue downloaded and
-// refused it, else from its provider.
+// download is c's text with OpenSubtitles' ads stripped, cleaned (cleanSRT): from the store when a route before the
+// queue downloaded and refused it, else from its provider.
 func (r *run) download(ctx context.Context, c Candidate) (string, error) {
 	if body, ok, err := r.env.Store.CacheGet(ctx, keptAs+c.key(), r.env.Now().Add(-keptFor)); err == nil && ok {
-		return string(body), nil
+		return cleanSRT(string(body)), nil // kept before cleanSRT, perhaps
 	}
 	txt, err := c.provider.Download(ctx, c)
 	if err != nil {
 		return "", err
 	}
-	return stripAds(txt), nil
+	return cleanSRT(stripAds(txt)), nil
 }
 
 // rejected are the candidates (provider:id) rejected for this very file before, by the furthest route that refused
@@ -1691,8 +1792,8 @@ func (r *run) reference(ctx context.Context, t *title) (reference, error) {
 		return reference{why: err.Error(), deferred: true}, nil
 	}
 	for _, s := range images {
-		out, err := r.cmd(ctx, t, r.env.FFmpeg.FFmpegPath(), "-nostdin", "-hide_banner", "-loglevel", "error", "-i", t.path,
-			"-map", fmt.Sprintf("0:%d", s.Index), "-c", "copy", "-f", "framecrc", "-")
+		out, err := r.cmd(ctx, t, r.env.FFmpeg.FFmpegPath(), append(r.input(t), "-map", fmt.Sprintf("0:%d", s.Index), "-c", "copy",
+			"-f", "framecrc", "-")...)
 		if err != nil {
 			if ctx.Err() != nil {
 				return reference{}, ctx.Err()
@@ -1723,6 +1824,17 @@ func (r *run) reference(ctx context.Context, t *title) (reference, error) {
 	return ref, nil
 }
 
+// input is ffmpeg's options up to its input, t's video. An align worker's is the media the NAS streamed, whose time ffmpeg
+// would count from its first packet, not the video's start (Lord of War's audio starts 8.4 s in: its captions came
+// 8.4 s early, and a sidecar 8.2 s early was kept): -copyts keeps the video's timestamps, which the stream carries.
+func (r *run) input(t *title) []string {
+	in := []string{"-nostdin", "-hide_banner", "-loglevel", "error"}
+	if r.media != nil {
+		in = append(in, "-copyts")
+	}
+	return append(in, "-i", t.path)
+}
+
 // alassOut is why alass cannot run now ("" when it can): missing (alerted once), or alassDown.
 func (r *run) alassOut() string {
 	r.mu.Lock()
@@ -1748,9 +1860,8 @@ func (r *run) hear(ctx context.Context, t *title, ref *reference) error {
 	ref.dir, ref.speech = dir, filepath.Join(dir, "speech.srt")
 	audio := speechTrack(t.info.Audio)
 	var heard voicing
-	d := dialogue(audio)
-	if err := r.cmdTo(ctx, t, 0, &heard, r.env.FFmpeg.FFmpegPath(), "-nostdin", "-hide_banner", "-loglevel", "error", "-i", t.path,
-		"-map", fmt.Sprintf("0:%d", audio.Index), d[0], d[1], "-ar", "16000", "-f", "s16le", "-"); err != nil {
+	args := append(append(r.input(t), "-map", fmt.Sprintf("0:%d", audio.Index)), dialogue(audio)...)
+	if err := r.cmdTo(ctx, t, 0, &heard, r.env.FFmpeg.FFmpegPath(), append(args, "-ar", "16000", "-f", "s16le", "-")...); err != nil {
 		return err
 	}
 	spans := heard.spans()

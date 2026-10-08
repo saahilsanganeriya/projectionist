@@ -232,11 +232,13 @@ func TestPlausible(t *testing.T) {
 // Catches the order candidates are tried in not being by tier across providers: 1 made for this file (its group, or a
 // hash match its name does not contradict), 2 of its source (WEB from the same service where both name one, timed
 // for its frame rate where the subtitle says), 3 the rest; within a tier a metered provider (OpenSubtitles' quota) not
-// last, the providers' order lost, or rank's order lost. Also a commentary or another language's file ranked by its
-// source. The input is rank's order; the file is NTb's AMZN WEB-DL at 23.976 fps.
+// after the free ones, the offline archive (OPUS) not after every online route, the providers' order lost, or rank's
+// order lost. Also a commentary or another language's file ranked by its source. The input is rank's order; the file
+// is NTb's AMZN WEB-DL at 23.976 fps.
 func TestArrange(t *testing.T) {
-	gd, sd, os := &gestdown{}, &subdl{}, &legacy{}
+	gd, sd, os, op := &gestdown{}, &subdl{}, &legacy{}, &opus{}
 	cands := []Candidate{
+		{ID: "opus", ours: true, provider: op},
 		{ID: "os-web", Release: "Show.S01E01.1080p.WEB-DL", Downloads: 9000, ours: true, provider: os},
 		{ID: "sd-bluray", Release: "Show.S01E01.1080p.BluRay", provider: sd},
 		{ID: "gd-nf", Release: "NF.WEB-DL", ours: true, provider: gd},
@@ -250,10 +252,10 @@ func TestArrange(t *testing.T) {
 	}
 	ti := &title{origin: originOf([]string{"Show.S01E01.1080p.AMZN.WEB-DL.DDP5.1.H.264-NTb.mkv"}), show: "Show", season: 1, episode: 1, fps: 23.976}
 	var got []string
-	for _, x := range ti.arrange(slices.Clone(cands), []Provider{gd, os, sd}) { // OpenSubtitles listed before Subdl, as deployed
+	for _, x := range ti.arrange(slices.Clone(cands), []Provider{op, gd, os, sd}) { // OpenSubtitles listed before Subdl, as deployed
 		got = append(got, x.ID)
 	}
-	if want := "gd-group os-hash gd-web sd-amzn os-web gd-nf gd-25fps sd-bluray sd-web-commentary os-hash-hdtv"; strings.Join(got, " ") != want {
+	if want := "gd-group os-hash gd-web sd-amzn os-web gd-nf gd-25fps sd-bluray sd-web-commentary os-hash-hdtv opus"; strings.Join(got, " ") != want {
 		t.Errorf("%s; want %s", strings.Join(got, " "), want)
 	}
 }
