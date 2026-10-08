@@ -40,9 +40,9 @@ const (
 )
 
 // verifiedOutcomes are the outcomes the stage records only once a subtitle's timing was checked against this very file;
-// an OCR'd one has the timing of the file's own image track.
+// an OCR'd or extracted one has the timing of the file's own image or text track.
 var verifiedOutcomes = map[string]bool{"sampled": true, "retimed": true, "release_matched": true, "idx_retimed": true,
-	"rescued": true, "kept": true, "idx_kept": true, "ocr": true}
+	"rescued": true, "kept": true, "idx_kept": true, "ocr": true, "extracted": true}
 
 // archiveReady tells whether archive_dir exists, alerting once when not: unmounted, a sidecar moved there would live in
 // the container's own layer and go with it.

@@ -8,7 +8,7 @@ package subtitles
 //	recorded no_candidates, no_aligned_candidate or error, still no English sidecar, and no OCR yet of this very file
 //	  its .en.idx/.en.sub sidecar, else every English image track copied out of the video in one read (ffmpeg)
 //	  each read by subocr in turn, in the video's order (the main track first; a commentary can be the largest):
-//	    the first whose text passes ocrRefusal  -> <video>.en.srt (O_EXCL), recorded "ocr"
+//	    the first whose text passes trackRefusal -> <video>.en.srt (O_EXCL), recorded "ocr"
 //	    none passes                             -> an event rejected_ocr, the record unchanged
 //
 // A file (size:mtime) is read at most once, written or refused (a track subocr cannot decode is refused): only a changed
@@ -66,7 +66,7 @@ func (r *run) ocrPass(ctx context.Context, lacking []*title) {
 		if ctx.Err() != nil || r.env.Now().Sub(started) >= ocrBudget || !r.alignNow() {
 			return
 		}
-		if _, err := r.query(t); err != nil || r.ocred(ctx, t) {
+		if _, err := r.query(t); err != nil || r.readBefore(ctx, t, "ocr", "rejected_ocr") {
 			continue
 		}
 		if !r.waitIdle(ctx) {
@@ -89,10 +89,10 @@ func (r *run) ocrPass(ctx context.Context, lacking []*title) {
 	}
 }
 
-// ocred tells whether this very file (t.key) was read by OCR before, written or refused.
-func (r *run) ocred(ctx context.Context, t *title) bool {
-	err := r.env.Store.DB().QueryRowContext(ctx, `SELECT 1 FROM events WHERE stage=? AND item=? AND status IN ('ocr', 'rejected_ocr')
-		AND json_extract(fields, '$.file')=? LIMIT 1`, name, t.path, t.key).Scan(new(int))
+// readBefore tells whether this very file (t.key) was read before by a pass whose verdicts are written and refused.
+func (r *run) readBefore(ctx context.Context, t *title, written, refused string) bool {
+	err := r.env.Store.DB().QueryRowContext(ctx, `SELECT 1 FROM events WHERE stage=? AND item=? AND status IN (?, ?)
+		AND json_extract(fields, '$.file')=? LIMIT 1`, name, t.path, written, refused, t.key).Scan(new(int))
 	return !errors.Is(err, sql.ErrNoRows)
 }
 
@@ -105,7 +105,7 @@ func vobsubSidecar(video string) []string {
 	return []string{"vobsub", base + ".sub", base + ".idx"}
 }
 
-// ocr reads t's English image tracks until one passes ocrRefusal and writes it; the error is a helper's failure, not
+// ocr reads t's English image tracks until one passes trackRefusal and writes it; the error is a helper's failure, not
 // the title's.
 func (r *run) ocr(ctx context.Context, t *title) (outcome, error) {
 	dir, err := os.MkdirTemp("", "subtitles-ocr-")
@@ -133,7 +133,7 @@ func (r *run) ocr(ctx context.Context, t *title) (outcome, error) {
 			return outcome{}, err
 		}
 		fields["track"], fields["ocr_ms"] = filepath.Base(args[1]), r.env.Now().Sub(started).Milliseconds()
-		if refused := ocrRefusal(string(out), t.durHi); refused != "" {
+		if refused := trackRefusal(string(out), t.durHi); refused != "" {
 			why = append(why, fields["track"].(string)+": "+refused)
 			continue
 		}
@@ -201,10 +201,10 @@ func (r *run) codecHeader(ctx context.Context, t *title, index int) (string, err
 	return b.String(), nil
 }
 
-// ocrRefusal is why an OCR'd track is not written ("" when it is): not sane (fewer than 40 cues, or cues over less than
-// 70 % of the video, as a forced or partial track has), or text the stop words do not take for English (a mislabelled
-// track: the bake-off's Spanish one is guessed "es"; or misreads).
-func ocrRefusal(srt string, duration float64) string {
+// trackRefusal is why a track read out of the video (by OCR, or converted from text) is not written ("" when it is): not
+// sane (fewer than 40 cues, or cues over less than 70 % of the video, as a forced or partial track has), or text the
+// stop words do not take for English (a mislabelled track: the bake-off's Spanish one is guessed "es"; or misreads).
+func trackRefusal(srt string, duration float64) string {
 	if !sane(cues(srt), duration) {
 		return fmt.Sprintf("%d cues, too few or over too little of the video", len(cues(srt)))
 	}

@@ -216,8 +216,8 @@ func (f *fixture) requestCount() int {
 }
 
 // Catches, end to end: a sidecar not written for each route (PGS fit, alass), the PGS fit not landing on the captions
-// or the ad block kept, a title with an embedded English text track searched for or its track extracted (ffmpeg reads
-// the whole file), an existing sidecar touched or its video probed, titles with English audio
+// or the ad block kept, a title with an embedded English text track searched for, an existing sidecar touched or its
+// video probed, titles with English audio
 // served before the foreign one, Jellyfin not told (the first sidecar at once, the rest at the run's end), a rerun
 // repeating any search, a title without candidates searched again before retry_after or a second miss not doubling
 // the wait, and the API's redirect followed (OpenSubtitles parked, an alert).
@@ -237,12 +237,10 @@ func TestRunWritesSidecarsAndReconciles(t *testing.T) {
 		t.Error("Clerks' alass alignment not written")
 	}
 	calls, _ := os.ReadFile(filepath.Join(f.h.Env.FFmpeg.Dir, "ffprobe.calls"))
-	helpers, _ := os.ReadFile(filepath.Join(f.h.Env.FFmpeg.Dir, "helper.calls"))
-	_, err := os.Stat(strings.TrimSuffix(f.path(heat), ".mkv") + ".en.srt")
 	searched := len(f.h.TMDB.Calls("GET", "/movie/949")) > 0
-	if err == nil || strings.Contains(string(helpers), "Heat") || searched || f.outcomes()[f.path(heat)] != "" || rep.Counts["embedded_text"] != 1 {
-		t.Errorf("Heat (embedded English text): sidecar %v, a helper ran on it %v, searched %v, recorded %q, counted %d; want none, no, no, nothing, 1",
-			err == nil, strings.Contains(string(helpers), "Heat"), searched, f.outcomes()[f.path(heat)], rep.Counts["embedded_text"])
+	if searched || f.outcomes()[f.path(heat)] != "" || rep.Counts["embedded_text"] != 1 {
+		t.Errorf("Heat (embedded English text): searched %v, recorded %q, counted %d; want no, nothing, 1",
+			searched, f.outcomes()[f.path(heat)], rep.Counts["embedded_text"])
 	}
 	if b, _ := os.ReadFile(strings.TrimSuffix(f.path(dune), ".mkv") + ".en.srt"); string(b) != "theirs" || strings.Contains(string(calls), "Dune") {
 		t.Error("Dune's existing sidecar changed, or Dune probed")
@@ -1013,7 +1011,7 @@ func (f *fixture) verdict(rel, status string) map[string]any {
 // (8 % short), written instead of queued untouched; OpenSubtitles' other candidates not queued after a cheaper
 // provider's;
 // a release match that failed cheapCheck dropped from the alignment, tested cheaply again, or downloaded again by it;
-// and a title whose note names an embedded English text track probed or opened.
+// and a title whose note names an embedded English text track searched.
 func TestRunReleaseMatchedReadsNoVideo(t *testing.T) {
 	for _, c := range []struct {
 		why                  string
@@ -1035,8 +1033,8 @@ func TestRunReleaseMatchedReadsNoVideo(t *testing.T) {
 		ff := f.h.Env.FFmpeg.Dir
 		probed, _ := os.ReadFile(filepath.Join(ff, "ffprobe.calls"))
 		helpers, _ := os.ReadFile(filepath.Join(ff, "helper.calls"))
-		if strings.Contains(string(probed)+string(helpers), "Heat") || f.outcomes()[f.path(heat)] != "" {
-			t.Errorf("%s: Heat, whose note names an English text track, probed or opened, or recorded %q", c.why, f.outcomes()[f.path(heat)])
+		if f.outcomes()[f.path(heat)] != "" {
+			t.Errorf("%s: Heat, whose note names an English text track, searched: recorded %q", c.why, f.outcomes()[f.path(heat)])
 		}
 		for rel, want := range c.want {
 			fields := f.verdict(rel, want)

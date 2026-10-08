@@ -4,7 +4,7 @@
 // subtitle made for the file's own release is trusted once its length fits the video's; any other is written only once
 // fitted to the video's captions or speech.
 //
-//	embedded English text track       -> skipped: the players show it, so nothing is fetched and nothing read
+//	embedded English text track       -> not searched: the extraction pass writes it as the sidecar (extract.go)
 //	else candidates from the providers (Gestdown, SubSource with a key, SITEC, Subdl with a key, OpenSubtitles through
 //	Stremio's add-on, the offline OPUS archive (opus.go); OpenSubtitles legacy and .com, with a key and a user's
 //	login, searched last and only for a title Stremio's route did not answer; one subtitle two OpenSubtitles routes
@@ -89,6 +89,12 @@
 // fitted, or refused) with subocr (PP-OCRv6 small, the bake-off's most accurate engine), and writes it with the track's
 // own timing as <video>.en.srt, recorded "ocr"; a track that is not a full English subtitle (sane, and guessLang "en")
 // is not written. Each file is read once, written or refused, and a run starts no title once its OCR has taken an hour.
+//
+// The extraction pass (extract.go), after the OCR pass and inside align_window, converts the English text track (subrip,
+// ASS/SSA, mov_text, WebVTT) of a title that carries one and has no English sidecar to SRT, the cues timed as they are,
+// and writes it as <video>.en.srt, recorded "extracted"; one that is not a full English subtitle is not written. Each
+// file is read once, written or refused, titles with an ASS track first, and a run starts no title once its
+// extraction has taken an hour; the next run, asked for at once, goes on.
 package subtitles
 
 import (
@@ -353,6 +359,7 @@ feed:
 	close(searched)
 	if err = <-worked; err == nil {
 		r.ocrPass(ctx, titles)
+		r.extractPass(ctx, titles)
 	}
 	for _, p := range r.providers {
 		if o, ok := p.(*dotCom); ok {
@@ -867,7 +874,7 @@ func (t *title) useInfo(info probe.Info) {
 	if info.Video != nil {
 		t.fps = info.Video.FPS
 	}
-	t.englishAudio, t.englishImage, t.englishText = hasEnglishAudio(info), len(imageTracks(info)) > 0, hasEnglishText(info)
+	t.englishAudio, t.englishImage, t.englishText = hasEnglishAudio(info), len(imageTracks(info)) > 0, len(textTracks(info)) > 0
 }
 
 func hasEnglishAudio(info probe.Info) bool {
@@ -893,14 +900,22 @@ func imageTracks(info probe.Info) []probe.Subtitle {
 	return out
 }
 
-// hasEnglishText tells whether the video carries an English text track the players show: not forced, not commentary.
-func hasEnglishText(info probe.Info) bool {
+// textTracks are the video's English text subtitle tracks, not forced and not commentary as imageTracks', in the order
+// the extraction pass tries them: the full ones before the SDH ones (by the disposition or the title), each in the
+// video's order.
+func textTracks(info probe.Info) []probe.Subtitle {
+	var full, sdh []probe.Subtitle
 	for _, s := range info.Subtitles {
-		if s.Text && english(s.Language) && !s.Forced && !strings.Contains(strings.ToLower(s.Title), "comment") {
-			return true
+		title := strings.ToLower(s.Title)
+		switch {
+		case !s.Text || !english(s.Language) || s.Forced || strings.Contains(title, "comment") || strings.Contains(title, "forced"):
+		case s.HearingImpaired || strings.Contains(title, "sdh"):
+			sdh = append(sdh, s)
+		default:
+			full = append(full, s)
 		}
 	}
-	return false
+	return append(full, sdh...)
 }
 
 // ---- one title ----
@@ -963,6 +978,8 @@ func (r *run) record(ctx context.Context, t *title, o outcome) {
 		r.count("written_aligned")
 	case o.result == "ocr":
 		r.count("written_ocr")
+	case o.result == "extracted":
+		r.count("written_extracted")
 	}
 	if o.fields == nil {
 		o.fields = map[string]any{}
@@ -1579,16 +1596,23 @@ func (r *run) waitIdle(ctx context.Context) bool {
 	}
 }
 
-// wake is when the scheduler should run the stage again for the queue, sooner than its cadence (zero: no need). In
-// sampled mode, with titles waiting: outside the window, its opening; inside it with the day's cap spent, the moment the
-// oldest alignment counted leaves the 24 h, if the window is still open then. The cadence alone (6 h) may land after
-// the window closes and lose the night.
+// wake is when the scheduler should run the stage again for the extraction pass or the queue, sooner than its cadence
+// (zero: no need). With titles left to extract: now, or outside the window its opening. In sampled mode, with titles
+// waiting in the queue: outside the window, its opening; inside it with the day's cap spent, the moment the oldest
+// alignment counted leaves the 24 h, if the window is still open then. The cadence alone (6 h) may land after the
+// window closes and lose the night.
 func (r *run) wake(ctx context.Context) time.Time {
 	ctx = context.WithoutCancel(ctx)
+	now := r.env.Now()
+	if r.rep.Counts["extract_waiting"] > 0 {
+		if r.alignNow() {
+			return now
+		}
+		return r.window.Next(now, r.env.Loc)
+	}
 	if !r.sampled() || r.rep.Counts["queue_waiting"] == 0 {
 		return time.Time{}
 	}
-	now := r.env.Now()
 	if !r.alignNow() {
 		return r.window.Next(now, r.env.Loc)
 	}
@@ -1742,11 +1766,12 @@ func (r *run) summarise(ctx context.Context, lacking, due, verifying int) {
 	}
 	slices.Sort(hits)
 	r.rep.Summary = fmt.Sprintf("%s mode: %d sidecar(s) written: %d release-matched, %d fitted to a VobSub sidecar, "+
-		"%d by the sampled fit, %d aligned, %d read from an image track by OCR (%d refused); %d queued, %d waiting in the queue; alignments %d of %d in 24 h; "+
+		"%d by the sampled fit, %d aligned, %d read from an image track by OCR (%d refused), %d extracted from a text track (%d refused, %d waiting); "+
+		"%d queued, %d waiting in the queue; alignments %d of %d in 24 h; "+
 		"provider hits %s; %d title(s) lacked a sidecar, %d of them carry an English text track, %d were due; "+
 		"verify pass: %d title(s), their sidecars %d kept, %d retimed, %d archived, %d left to a full alignment",
 		r.opt.Mode, r.written, c["written_release_matched"], c["written_idx"], c["written_sampled"], c["written_aligned"],
-		c["written_ocr"], c["rejected_ocr"], c["queued"], waiting, len(starts), r.opt.AlignPerDay, cmp.Or(strings.Join(hits, " "), "none"), lacking, c["embedded_text"], due,
+		c["written_ocr"], c["rejected_ocr"], c["written_extracted"], c["rejected_extract"], c["extract_waiting"], c["queued"], waiting, len(starts), r.opt.AlignPerDay, cmp.Or(strings.Join(hits, " "), "none"), lacking, c["embedded_text"], due,
 		verifying, c["sidecars_kept"], c["sidecars_retimed"], c["sidecars_refused"], c["sidecars_undecided"])
 }
 
