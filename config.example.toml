@@ -229,8 +229,8 @@ notify       = true  # tell Jellyfin which folders changed (one /Library/Media/U
 quiet        = "10m" # a folder written to more recently is still arriving
 
 # An English text subtitle beside every movie and episode; replaces scripts/sub_stats.py and scripts/subfetch2.py.
-# A video carrying an embedded English text track already has English subtitles (the players show it, and the audit
-# counts it): it is skipped, never opened. A subtitle made for the file's own release is trusted once its length fits
+# A video carrying an embedded English text track is not searched: after the queue, inside align_window, that track is
+# converted to <video>.en.srt (one read of the whole file, an hour of it a run). A subtitle made for the file's own release is trusted once its length fits
 # the video's; any other is written only once fitted to the video's captions or speech. Per title, the first route
 # that succeeds: a subtitle made for the file's own release (its original name's group, from the .details note or the
 # rename logs; or an OpenSubtitles file-hash match) is written without reading the video once its last cue fits the
