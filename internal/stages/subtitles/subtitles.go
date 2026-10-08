@@ -5,8 +5,9 @@
 // fitted to the video's captions or speech.
 //
 //	embedded English text track       -> skipped: the players show it, so nothing is fetched and nothing read
-//	else candidates from the providers (Gestdown, SubSource with a key, SITEC, Subdl with a key; OpenSubtitles legacy
-//	and .com, with a key and a user's login, searched last; one subtitle both OpenSubtitles APIs find is one candidate),
+//	else candidates from the providers (Gestdown, SubSource with a key, SITEC, Subdl with a key, OpenSubtitles through
+//	Stremio's add-on; OpenSubtitles legacy and .com, with a key and a user's login, searched last and only for a title
+//	Stremio's route did not answer; one subtitle two OpenSubtitles routes find is one candidate),
 //	by tier across providers: 1 made for this file (release-matched), 2 of its source (BluRay for BluRay, WEB from
 //	the same service) at its frame rate, 3 the rest (a commentary's or another language's file too); within a tier
 //	the free providers first, in the providers' order; skipping any already rejected for this file, and per title the
@@ -30,9 +31,11 @@
 //	  else                             -> alass aligns the candidate to the speech in the audio
 //	accepted                           -> <video>.en.srt, else .eng.srt: created O_EXCL, never overwritten
 //
-// Careful mode is the rollback: routes a and d only, and the queue aligns at any hour. OpenSubtitles is searched only
-// once no other provider's release-matched subtitle passed, and only its hash match is downloaded before the queue,
-// which tries its others by tier among the others', last within a tier. A provider that is out (its day's quota spent,
+// Careful mode is the rollback: routes a and d only, and the queue aligns at any hour. OpenSubtitles' capped routes
+// (legacy and .com) are searched only once no other provider's release-matched subtitle passed, and only for a title
+// Stremio's route did not answer (it is out, or the title has no IMDb id); only their hash match is downloaded before
+// the queue, which tries their others by tier among the others', last within a tier. Stremio's route is not capped:
+// its hash match is release-matched as theirs is, and its other candidates go every route a free provider's go. A provider that is out (its day's quota spent,
 // failing, or refusing) holds back only a title nothing the others found is written for, which waits for it unrecorded.
 // No title waits for OpenSubtitles' download slot (one every 8 min): a title that finds it taken goes on as if
 // OpenSubtitles were out, and the next title to ask once it is free, in this run or the next, takes it.
@@ -132,6 +135,8 @@ type Options struct {
 	Alass      string        `toml:"alass"`
 	// subsource and subdl also need subsource_api_key, subdl_api_key in secrets_dir; opensubtitles-com needs
 	// opensubtitles_api_key, opensubtitles_username and opensubtitles_password. A provider without them is skipped.
+	// opensubtitles-stremio (no key) is the first OpenSubtitles route: opensubtitles and opensubtitles-com are searched
+	// only for a title it did not answer.
 	Providers []string `toml:"providers"`
 	// subfetch2.py's OUT folder: its quota.csv and downloads.csv seed the OpenSubtitles quota once, at cutover.
 	LegacyQuota string `toml:"legacy_quota"`
@@ -167,7 +172,7 @@ func defaults() Options {
 		Workers:       3,
 		SecretsDir:    "/run/secrets",
 		Alass:         "/usr/local/bin/alass",
-		Providers:     []string{"gestdown", "subsource", "sitec", "subdl", "opensubtitles", "opensubtitles-com"},
+		Providers:     []string{"gestdown", "subsource", "sitec", "subdl", "opensubtitles-stremio", "opensubtitles", "opensubtitles-com"},
 		LegacyQuota:   "/volume1/PlexMediaServer/subtitle-downloads",
 		AlignPerDay:   20,
 		Mode:          "sampled",
@@ -185,10 +190,10 @@ func defaults() Options {
 
 // Stage's fields are test hooks; the zero value talks to the real services.
 type Stage struct {
-	openSubtitles, openSubtitlesCom, subdlAPI, subdlDL, gestdownAPI, sitecSite, subsourceAPI string
-	sleep                                                                                   func(context.Context, time.Duration) error
-	remote                                                                                  *broker // nil: the process's own
-	ocr                                                                                     string  // the OCR helper; "": the image's subocr
+	openSubtitles, openSubtitlesCom, subdlAPI, subdlDL, gestdownAPI, sitecSite, subsourceAPI, stremioAPI string
+	sleep                                                                                               func(context.Context, time.Duration) error
+	remote                                                                                              *broker // nil: the process's own
+	ocr                                                                                                 string  // the OCR helper; "": the image's subocr
 }
 
 func (Stage) Name() string { return name }
@@ -438,6 +443,8 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 				}
 				r.providers = append(r.providers, o)
 			}
+		case "opensubtitles-stremio":
+			r.providers = append(r.providers, &stremio{base: or(s.stremioAPI, "https://opensubtitles-v3.strem.io"), hc: hc, pace: newPacer(time.Second)})
 		case "gestdown": // free community services: half the rate
 			r.providers = append(r.providers, &gestdown{base: or(s.gestdownAPI, "https://api.gestdown.info"), hc: hc,
 				pace: newPacer(2 * time.Second), shows: map[string]string{}})
@@ -1020,6 +1027,7 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	// not one) is recorded with the refusal once every other provider answered, so a refusal of that title alone cannot
 	// hold up every run.
 	out, meteredOut, refusal, found, tried, busy := false, false, "", 0, 0, 0
+	answered := false // Stremio's OpenSubtitles route answered for this title: the capped OpenSubtitles routes are its fallbacks
 	var pool []Candidate
 	missing := func(p Provider) { // p could not search or serve this title
 		out, meteredOut = out || !metered(p), meteredOut || metered(p)
@@ -1027,11 +1035,11 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	for _, last := range []bool{false, true} { // the metered providers only when nothing cheaper was written
 		var cands []Candidate
 		for _, p := range r.providers {
-			if metered(p) != last {
+			if metered(p) != last || last && answered {
 				continue
 			}
 			err := parked(p) // a parked provider costs no request and no hash read
-			if err == nil && last && q.Hash == "" {
+			if err == nil && openSubtitles(p) && q.Hash == "" {
 				if q.Hash, _, err = openSubtitlesHash(t.path); err != nil {
 					return outcome{result: "error", detail: err.Error()}
 				}
@@ -1044,6 +1052,7 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 			switch {
 			case err == nil:
 				cands = append(cands, got...)
+				answered = answered || p.Name() == "opensubtitles-stremio" && q.IMDb != 0
 				continue
 			case ctx.Err() != nil:
 				return outcome{result: "deferred"}

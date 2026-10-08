@@ -1053,6 +1053,47 @@ func TestRunReleaseMatchedReadsNoVideo(t *testing.T) {
 	}
 }
 
+// Catches the capped OpenSubtitles routes (legacy: one download every 8 min, 180 a day; .com: 20 a day) searched for a
+// title Stremio's route answered, or not searched once Stremio is out; and Stremio's file-hash match not written as the
+// legacy route's is, without reading the video beyond the hash's 2 x 64 KiB (the whole 4 KiB file twice here).
+func TestRunStremioIsTheFirstOpenSubtitlesRoute(t *testing.T) {
+	for _, out := range []bool{false, true} {
+		f := newFixture(t)
+		var base string
+		srv, _ := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+			switch {
+			case out:
+				w.WriteHeader(500)
+			case r.URL.Path == "/dl/ran":
+				w.Write([]byte(srt(f.ts, 0)))
+			case strings.Contains(r.URL.Path, "/tt0089881/videoHash="+f.ranHash+"&"):
+				w.Write([]byte(`{"subtitles":[{"id":"5","url":"` + base + `/dl/ran","lang":"eng","m":"h","movieReleaseName":"Ran.1985.1080p.BluRay.x264-OTHER"}]}`))
+			default:
+				w.Write([]byte(`{"subtitles":[]}`))
+			}
+		})
+		base = srv.URL
+		f.st.stremioAPI = srv.URL
+		f.options(`providers = ["opensubtitles-stremio", "opensubtitles"]` + "\nalign_per_day = 0")
+		f.note(ran, "Ran.1985.1080p.BluRay.x264-GRP.mkv", "none", "0h 45m")
+		f.note(clerks, "Clerks.1994.DVDRip.XviD-GRP.avi", "none", "0h 45m")
+		rep := f.run(t)
+		legacy := strings.Join(f.requests, " ")
+		asked := strings.Contains(legacy, "imdbid-0089881") || strings.Contains(legacy, "imdbid-0109445") || strings.Contains(legacy, f.ranHash)
+		if out {
+			if !strings.Contains(legacy, "imdbid-0089881") || len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "opensubtitles-stremio") {
+				t.Errorf("Stremio out: legacy route searched for Ran %v, alerts %q; want searched, one alert naming Stremio", asked, rep.Alerts)
+			}
+			continue
+		}
+		fields := f.verdict(ran, "release_matched")
+		if asked || fields["provider"] != "opensubtitles-stremio" || fields["video_bytes"] != 8192.0 || f.outcomes()[f.path(clerks)] != "no_candidates" {
+			t.Errorf("Stremio answering: legacy route asked about Ran or Clerks %v (%s), Ran %v, Clerks %q; want not asked, Ran written from Stremio's "+
+				"hash match reading 8192 bytes, Clerks without candidates", asked, legacy, fields, f.outcomes()[f.path(clerks)])
+		}
+	}
+}
+
 // Catches the queue not trying a title's candidates by tier across providers, or stopping at the first that fails:
 // OpenSubtitles' Blu-ray subtitle (the file's source: tier 2) must come before Gestdown's five WEB ones (tier 3)
 // though OpenSubtitles is searched last; it is another film's, so the queue goes on to Gestdown's first maxTries

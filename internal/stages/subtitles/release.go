@@ -206,7 +206,7 @@ func (t *title) releaseMatched(c Candidate) bool {
 	if wrongText(c) {
 		return false
 	}
-	if metered(c.provider) {
+	if openSubtitles(c.provider) {
 		r := parseRelease(c.Release + " " + c.FileName)
 		return c.HashMatch && c.ours && !differ(r.source, t.origin.rel.source) && (r.editions == "" || r.editions == t.origin.rel.editions) &&
 			(t.show == "" || !differ(r.sxe, sxe(t.season, t.episode)))

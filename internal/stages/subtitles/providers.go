@@ -1,7 +1,8 @@
 package subtitles
 
-// Subtitle providers, called directly (never through Plex): the OpenSubtitles legacy REST API, Gestdown (Addic7ed's
-// TV subtitles) and SITEC Subtitles (movies), none of which needs a key; SubSource (the Subscene archive) and Subdl,
+// Subtitle providers, called directly (never through Plex): OpenSubtitles through Stremio's add-on (uncapped, the first
+// OpenSubtitles route) and its legacy REST API, Gestdown (Addic7ed's TV subtitles) and SITEC Subtitles (movies), none
+// of which needs a key; SubSource (the Subscene archive) and Subdl,
 // each only when its API key file exists; and OpenSubtitles.com, only when its API key and a free user's username and
 // password files exist. Ranking, the file hash, the release name, the ad stripping and the legacy API's download quota
 // are ports of subfetch2.py v8. Every request goes through its provider's pacer: requests a gap apart (1 s; 2 s for
@@ -91,6 +92,9 @@ func (c Candidate) key() string { return c.provider.Name() + ":" + c.ID }
 
 // metered providers ration their downloads (OpenSubtitles: 180 a day per IP), so they come last.
 func metered(p Provider) bool { return p.Name() == "opensubtitles" || p.Name() == "opensubtitles-com" }
+
+// openSubtitles tells whether p is a route to OpenSubtitles' catalog, which matches a file by its hash.
+func openSubtitles(p Provider) bool { return strings.HasPrefix(p.Name(), "opensubtitles") }
 
 // parked is why p would refuse a search now (wrapping errParked), nil when it would not; the legacy API also refuses
 // while its downloads wait out the quota.
@@ -624,6 +628,85 @@ func (o *legacy) Download(ctx context.Context, c Candidate) (string, error) {
 // pyQuote is urllib.parse.quote(s): everything but unreserved characters and "/" percent-encoded.
 func pyQuote(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(url.QueryEscape(s), "+", "%20"), "%2F", "/")
+}
+
+// ---- OpenSubtitles through Stremio's "OpenSubtitles v3" add-on (opensubtitles-v3.strem.io, no key) ----
+
+// The whole OpenSubtitles catalog with no key and no daily cap (its downloads answer a Download-Quota of 999,999,999),
+// so it is the first OpenSubtitles route: the legacy and .com routes are searched only for a title it did not answer
+// (fetch). It is Stremio's own integration, not a published API: requests a second apart, under projectionist's name.
+type stremio struct {
+	base string // https://opensubtitles-v3.strem.io
+	hc   *http.Client
+	pace *pacer // searches and downloads
+}
+
+func (o *stremio) Name() string  { return "opensubtitles-stremio" }
+func (o *stremio) pacer() *pacer { return o.pace }
+
+func (o *stremio) get(ctx context.Context, link string) ([]byte, error) {
+	return o.pace.do(ctx, o.hc, func() (*http.Request, error) {
+		r, err := http.NewRequest(http.MethodGet, link, nil)
+		if err == nil {
+			r.Header.Set("User-Agent", userAgent)
+		}
+		return r, err
+	})
+}
+
+// Search asks once, by the IMDb id (the show's, with season and episode, for an episode) and the file's hash and size;
+// the add-on marks the subtitles whose hash matches ("m": "h").
+func (o *stremio) Search(ctx context.Context, q Query) ([]Candidate, error) {
+	if q.IMDb == 0 {
+		return nil, nil
+	}
+	id := fmt.Sprintf("movie/tt%07d", q.IMDb)
+	if q.Show {
+		id = fmt.Sprintf("series/tt%07d:%d:%d", q.IMDb, q.Season, q.Episode)
+	}
+	link := o.base + "/subtitles/" + id
+	if q.Hash != "" {
+		link += fmt.Sprintf("/videoHash=%s&videoSize=%d", q.Hash, q.Size)
+	}
+	body, err := o.get(ctx, link+".json")
+	if err != nil {
+		return nil, err
+	}
+	var res struct {
+		Subtitles []struct {
+			ID       string `json:"id"`
+			URL      string `json:"url"`
+			Lang     string `json:"lang"`
+			Match    string `json:"m"`
+			FileName string `json:"subtitleFileName"`
+			Release  string `json:"movieReleaseName"`
+			FPSMilli int    `json:"fpsMilli"`
+			Season   int    `json:"season"`
+			Episode  int    `json:"episode"`
+		} `json:"subtitles"`
+	}
+	if err := json.Unmarshal(body, &res); err != nil {
+		return nil, fmt.Errorf("opensubtitles-stremio search: %w", err)
+	}
+	var out []Candidate
+	for _, s := range res.Subtitles {
+		c := Candidate{Source: "opensubtitles-stremio", ID: s.ID, Release: s.Release, FileName: s.FileName, HashMatch: s.Match == "h",
+			FPS: float64(s.FPSMilli) / 1000, Season: strconv.Itoa(s.Season), Episode: strconv.Itoa(s.Episode), link: s.URL, provider: o,
+			openSubtitlesID: s.ID, ours: !q.Show || s.Season == q.Season && s.Episode == q.Episode}
+		if s.Lang == "eng" && c.ours {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// Download fetches the SRT, which the add-on has re-encoded as UTF-8.
+func (o *stremio) Download(ctx context.Context, c Candidate) (string, error) {
+	raw, err := o.get(ctx, c.link)
+	if err != nil {
+		return "", err
+	}
+	return decodeDownload(raw, ""), nil
 }
 
 // ---- OpenSubtitles.com REST (a consumer's API key and a free user's login) ----
