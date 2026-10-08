@@ -149,7 +149,7 @@ func TestExtractWritesTheEmbeddedEnglishTrack(t *testing.T) {
 	ts := cueTimes()
 	sign := "Dialogue: 0,0:00:50.50,0:00:52.50,Default,,0,0,0,,{\\an8\\p1}m 0 0 l 100 0 100 100 0 100{\\p0}\n"
 	heat := f.movie(t, "Heat (1995) {tmdb-949}",
-		subTrack{codec: "srt", title: "English SDH", sdh: true, body: textSRT(ts, "[DOOR CLOSES]", "[PHONE RINGS]")},
+		subTrack{codec: "srt", title: "English SDH", sdh: true, body: textSRT(ts, "[DOOR CLOSES] "+englishLines[0], "[SIGHS] "+englishLines[1])},
 		subTrack{codec: "ass", title: "English", body: assScript(ts, englishLines...) + sign})
 	f.run(t)
 	if got, want := readFile(sidecarOf(heat, ".en.srt")), strings.TrimSuffix(textSRT(ts, englishLines...), "\n"); got != want {
