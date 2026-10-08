@@ -7,7 +7,7 @@ package subtitles
 //
 //	recorded no_candidates, no_aligned_candidate or error, still no English sidecar, and no OCR yet of this very file
 //	  its .en.idx/.en.sub sidecar, else every English image track copied out of the video in one read (ffmpeg)
-//	  each read by subocr in turn, the largest first:
+//	  each read by subocr in turn, in the video's order (the main track first; a commentary can be the largest):
 //	    the first whose text passes ocrRefusal  -> <video>.en.srt (O_EXCL), recorded "ocr"
 //	    none passes                             -> an event rejected_ocr, the record unchanged
 //
@@ -178,16 +178,6 @@ func (r *run) imageTracksFor(ctx context.Context, t *title, dir string) ([][]str
 	if _, err := r.cmd(ctx, t, r.env.FFmpeg.FFmpegPath(), ffmpeg...); err != nil {
 		return nil, err
 	}
-	// The largest first: a track of the forced lines alone, its title the only sign of it, can hold enough English to
-	// pass for the whole subtitle (War for the Planet of the Apes' "Forced only": 192 cues, its apes' signing).
-	size := func(p string) int64 {
-		st, err := os.Stat(p)
-		if err != nil {
-			return 0
-		}
-		return st.Size()
-	}
-	sort.SliceStable(tracks, func(i, j int) bool { return size(tracks[i][1]) > size(tracks[j][1]) })
 	return tracks, nil
 }
 

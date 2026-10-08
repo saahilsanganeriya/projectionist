@@ -846,12 +846,14 @@ func hasEnglishAudio(info probe.Info) bool {
 	return false
 }
 
-// imageTracks are the video's English caption tracks in images (PGS, VobSub): not forced, not commentary.
+// imageTracks are the video's English caption tracks in images (PGS, VobSub): not forced, by its flag or its title
+// (War for the Planet of the Apes' "Forced only" is flagged only there), and not commentary.
 func imageTracks(info probe.Info) []probe.Subtitle {
 	var out []probe.Subtitle
 	for _, s := range info.Subtitles {
+		title := strings.ToLower(s.Title)
 		if (s.Codec == "hdmv_pgs_subtitle" || s.Codec == "dvd_subtitle") && english(s.Language) && !s.Forced &&
-			!strings.Contains(strings.ToLower(s.Title), "comment") {
+			!strings.Contains(title, "comment") && !strings.Contains(title, "forced") {
 			out = append(out, s)
 		}
 	}
