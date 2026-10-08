@@ -32,6 +32,14 @@
 //	  else                             -> alass aligns the candidate to the speech in the audio
 //	accepted                           -> <video>.en.srt, else .eng.srt: created O_EXCL, never overwritten
 //
+// TMDB gives a title its ids before any search (identify). A special is also searched by its own IMDb id (TMDB's
+// episode external_ids) on the routes that search by it: legacy, .com and the OPUS archive (OpenSubtitles files
+// Sherlock's S00E09 as its S04E00). A miniseries that is a film's TV cut (TMDB: the film's original title, released
+// within 3 years, directed by the show's creator) is also searched by the film's id on the legacy route, which lists
+// each part as one CD of the film's set. Neither leaves those titles to Stremio's route, which finds neither. A film
+// whose TMDB runtime and length are more than twice apart (by 20 minutes or more) is recorded "misidentified", with an
+// alert naming it, and not searched: its folder names another film.
+//
 // Careful mode is the rollback: routes a and d only, and the queue aligns at any hour. OpenSubtitles' capped routes
 // (legacy and .com) are searched only once no other provider's release-matched subtitle passed, and only for a title
 // Stremio's route did not answer (it is out, or the title has no IMDb id); only their hash match is downloaded before
@@ -1007,18 +1015,16 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	if t.kind == "movie" || t.kind == "tv" {
 		// OpenSubtitles finds nearly every subtitle by the IMDb id, SITEC only by it, Gestdown by the TheTVDB id: without
 		// TMDB the title waits for it, rather than being searched without them and recorded as having none.
-		id, _ := strconv.Atoi(t.id)
-		d, err := r.env.TMDB.Details(ctx, tmdb.Kind(t.kind), id)
+		why, err := r.identify(ctx, t, &q)
 		switch {
-		case errors.Is(err, tmdb.ErrNotFound): // TMDB has no such title: searched without its ids
 		case err != nil:
 			if ctx.Err() == nil {
 				r.alertOnce("tmdb", "TMDB lookups failing, titles wait for them: %v", err)
 			}
 			return outcome{result: "deferred", detail: err.Error()}
-		default:
-			q.IMDb, _ = strconv.Atoi(strings.TrimPrefix(d.ExternalIDs.IMDb, "tt"))
-			q.TVDB = d.ExternalIDs.TVDB
+		case why != "":
+			r.alertOnce("misidentified:"+t.path, "%s is not searched: %s; fix its folder's TMDB id", t.path, why)
+			return outcome{result: "misidentified", detail: why}
 		}
 	}
 	rejected, err := r.rejected(ctx, t.path, t.key)
@@ -1062,7 +1068,8 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 			switch {
 			case err == nil:
 				cands = append(cands, got...)
-				answered = answered || p.Name() == "opensubtitles-stremio" && q.IMDb != 0
+				// Stremio searches neither a special by its own id nor a TV cut by its film's (it lists no CD set)
+				answered = answered || p.Name() == "opensubtitles-stremio" && q.IMDb != 0 && q.EpisodeIMDb == 0 && q.FilmIMDb == 0
 				continue
 			case ctx.Err() != nil:
 				return outcome{result: "deferred"}
@@ -1142,6 +1149,72 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	}
 	return outcome{result: "queued", detail: fmt.Sprintf("%d candidate(s)", len(pool)), pool: pool,
 		fields: map[string]any{"group": t.origin.group, "candidates": best}}
+}
+
+// identify sets q's ids from TMDB: the IMDb and TheTVDB ids, a special's own IMDb id (TMDB and OpenSubtitles number
+// specials apart: Sherlock's S00E09, "The Abominable Bride", is OpenSubtitles' S04E00) and the film a miniseries is the
+// TV cut of. A title TMDB has no record of is searched without them. It returns why a film's TMDB identity cannot be
+// the file ("" when it can): a runtime and a length more than twice apart and 20 minutes or more (Pleasure (2021), a
+// 2-hour file, was filed as TMDB's 10-minute short of that name).
+func (r *run) identify(ctx context.Context, t *title, q *Query) (string, error) {
+	id, _ := strconv.Atoi(t.id)
+	d, err := r.env.TMDB.Details(ctx, tmdb.Kind(t.kind), id)
+	if errors.Is(err, tmdb.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	q.IMDb, _ = strconv.Atoi(strings.TrimPrefix(d.ExternalIDs.IMDb, "tt"))
+	q.TVDB = d.ExternalIDs.TVDB
+	if t.kind == "movie" {
+		runtime, length := float64(d.Runtime*60), (t.durLo+t.durHi)/2
+		if d.Runtime > 0 && length > 0 && math.Abs(runtime-length) >= 20*60 && max(runtime, length) > 2*min(runtime, length) {
+			return fmt.Sprintf("TMDB gives its film %d min, the file runs %.0f min", d.Runtime, length/60), nil
+		}
+		return "", nil
+	}
+	if t.season == 0 {
+		ids, err := r.env.TMDB.EpisodeExternalIDs(ctx, id, 0, t.episode)
+		if err != nil && !errors.Is(err, tmdb.ErrNotFound) {
+			return "", err
+		}
+		q.EpisodeIMDb, _ = strconv.Atoi(strings.TrimPrefix(ids.IMDb, "tt"))
+	}
+	if q.FilmIMDb, err = r.filmOf(ctx, d); errors.Is(err, tmdb.ErrNotFound) {
+		err = nil
+	}
+	return "", err
+}
+
+// filmOf is the IMDb id of the film a miniseries is the TV cut of, as far as TMDB links them: a film of the show's
+// original title, released within 3 years of its first episode, directed by one of its creators (Bergman's Fanny and
+// Alexander, the film of 1982 and the miniseries of 1984); 0 when there is none.
+func (r *run) filmOf(ctx context.Context, show tmdb.Details) (int, error) {
+	if show.Type != "Miniseries" || len(show.CreatedBy) == 0 || show.OriginalTitle == "" || show.Date.IsZero() {
+		return 0, nil
+	}
+	films, err := r.env.TMDB.Search(ctx, tmdb.Movie, show.OriginalTitle, 0)
+	if err != nil {
+		return 0, err
+	}
+	for _, f := range films {
+		if !strings.EqualFold(f.OriginalTitle, show.OriginalTitle) || f.Date.IsZero() || max(f.Date.Year()-show.Date.Year(), show.Date.Year()-f.Date.Year()) > 3 {
+			continue
+		}
+		directors, err := r.env.TMDB.Directors(ctx, f.ID)
+		if err != nil {
+			return 0, err
+		}
+		if slices.ContainsFunc(directors, func(p tmdb.Person) bool {
+			return slices.ContainsFunc(show.CreatedBy, func(c tmdb.Person) bool { return c.ID == p.ID })
+		}) {
+			film, err := r.env.TMDB.Details(ctx, tmdb.Movie, f.ID)
+			id, _ := strconv.Atoi(strings.TrimPrefix(film.ExternalIDs.IMDb, "tt"))
+			return id, err
+		}
+	}
+	return 0, nil
 }
 
 // sampleable tells whether a verified route before the queue (.idx or sampled fit) may download c: made for this

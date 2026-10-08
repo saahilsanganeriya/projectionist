@@ -222,15 +222,32 @@ func openOpus(zipPath string) (*opus, error) {
 	return &opus{zip: zipPath, count: int64(h.Count)}, nil
 }
 
-// Search returns the archive's subtitles for the film (its IMDb id) or the episode (its show's id, season and episode).
+// Search returns the archive's subtitles for the film (its IMDb id) or the episode (its show's id, season and episode;
+// a special also by its own id, as OPUS files it under OpenSubtitles' numbers).
 func (o *opus) Search(_ context.Context, q Query) ([]Candidate, error) {
-	if q.IMDb == 0 {
-		return nil, nil
+	var keys []uint64
+	switch {
+	case q.Show && q.IMDb != 0:
+		keys = append(keys, opusKey(uint64(q.IMDb), uint64(q.Season), uint64(q.Episode)))
+	case q.IMDb != 0:
+		keys = append(keys, opusKey(uint64(q.IMDb), opusFilm, opusFilm))
 	}
-	key := opusKey(uint64(q.IMDb), opusFilm, opusFilm)
-	if q.Show {
-		key = opusKey(uint64(q.IMDb), uint64(q.Season), uint64(q.Episode))
+	if q.EpisodeIMDb != 0 {
+		keys = append(keys, opusKey(uint64(q.EpisodeIMDb), opusFilm, opusFilm))
 	}
+	var out []Candidate
+	for _, key := range keys {
+		more, err := o.lookup(key)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, more...)
+	}
+	return out, nil
+}
+
+// lookup is the candidates of one key, at most opusPerKey.
+func (o *opus) lookup(key uint64) ([]Candidate, error) {
 	f, err := os.Open(o.zip + ".idx")
 	if err != nil {
 		return nil, err

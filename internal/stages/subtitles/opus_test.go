@@ -52,10 +52,11 @@ func opusZip(t *testing.T) string {
 	return p
 }
 
-// Catches the archive's index missing a film (by its IMDb id) or an episode (by its show's id, season and episode),
-// mixing them up, or holding entries that are no subtitle of a known title; a download that is not its member as SRT
-// (a block spread over two sentences not one cue, a block whose end mark is the next one's lost, the archive's <meta>
-// or an entity leaking into the text); or an index used once its zip has changed.
+// Catches the archive's index missing a film (by its IMDb id) or an episode (by its show's id, season and episode, or a
+// special by its own id, as TMDB and OpenSubtitles number specials apart), mixing them up, or holding entries that are
+// no subtitle of a known title; a download that is not its member as SRT (a block spread over two sentences not one
+// cue, a block whose end mark is the next one's lost, the archive's <meta> or an entity leaking into the text); or an
+// index used once its zip has changed.
 func TestOpus(t *testing.T) {
 	zp := opusZip(t)
 	if n, err := BuildOpusIndex(zp); err != nil || n != 3 {
@@ -69,7 +70,8 @@ func TestOpus(t *testing.T) {
 		q    Query
 		want string
 	}{{Query{IMDb: 89881}, "111"}, {Query{IMDb: 1475582, Show: true, Season: 4}, "222"}, {Query{IMDb: 1475582, Show: true, Season: 4, Episode: 1}, ""},
-		{Query{IMDb: 1475582}, ""}, {Query{IMDb: 89881, Show: true}, ""}} {
+		{Query{IMDb: 1475582}, ""}, {Query{IMDb: 89881, Show: true}, ""},
+		{Query{IMDb: 1475582, EpisodeIMDb: 3845232, Show: true, Episode: 9}, "222"}} { // a special, by its own id
 		got, err := o.Search(context.Background(), c.q)
 		if err != nil || c.want == "" && len(got) != 0 || c.want != "" && (len(got) != 1 || got[0].ID != c.want || !got[0].ours) {
 			t.Errorf("search %+v: %+v %v; want %q", c.q, got, err, c.want)

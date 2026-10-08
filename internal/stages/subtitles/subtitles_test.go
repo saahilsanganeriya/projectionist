@@ -1094,6 +1094,72 @@ func TestRunStremioIsTheFirstOpenSubtitlesRoute(t *testing.T) {
 	}
 }
 
+// Catches a title searched under an identity OpenSubtitles does not file it by, from what TMDB says: a special (S00E09)
+// not searched by its own IMDb id from TMDB's episode external_ids (OpenSubtitles files Sherlock's "The Abominable
+// Bride" as its S04E00, under tt3845232), or a result under that id for another title kept; a miniseries that is the
+// TV cut of a film (same original title, released within 3 years, directed by the show's creator) not searched by
+// the film's id, or the film's subtitles other than the parts that could be this episode (one CD of the film's set
+// each, numbered within one of it) kept; either left to Stremio's route alone, which finds neither; and a film whose
+// TMDB runtime is a fifth of its file's (Pleasure (2021) filed as a 10-minute short) searched blind instead of
+// recorded with an alert naming it.
+func TestRunIdentityFromTMDB(t *testing.T) {
+	f := newFixture(t)
+	special, cut := "TV/Show (2008) {tmdb-1}/Season 00/Show (2008) - S00E09 - Bride.mkv", "TV/Show (1984) {tmdb-2}/Season 01/Show (1984) - S01E01 - Jul.mkv"
+	for _, rel := range []string{special, cut} {
+		os.MkdirAll(filepath.Dir(f.path(rel)), 0o755)
+		os.WriteFile(f.path(rel), []byte(rel), 0o644)
+	}
+	f.h.TMDB.Handle("GET", "/tv/1", 200, `{"id":1,"type":"Scripted","external_ids":{"imdb_id":"tt0000001"}}`)
+	f.h.TMDB.Handle("GET", "/tv/1/season/0/episode/9/external_ids", 200, `{"imdb_id":"tt3845232"}`)
+	f.h.TMDB.Handle("GET", "/tv/2", 200, `{"id":2,"type":"Miniseries","original_name":"Fanny och Alexander","first_air_date":"1984-12-25",`+
+		`"created_by":[{"id":6648}],"external_ids":{"imdb_id":"tt6725158"}}`)
+	f.h.TMDB.Handle("GET", "/search/movie", 200, `{"results":[{"id":9,"original_title":"Fanny och Alexander","release_date":"2025-01-24"},`+
+		`{"id":7,"original_title":"Fanny och Alexander","release_date":"1983-01-01"},{"id":5961,"original_title":"Fanny och Alexander","release_date":"1982-12-17"}]}`)
+	f.h.TMDB.Handle("GET", "/movie/7/credits", 200, `{"crew":[{"id":1,"job":"Director"}]}`)
+	f.h.TMDB.Handle("GET", "/movie/5961/credits", 200, `{"crew":[{"id":6648,"job":"Director"}]}`)
+	f.h.TMDB.Handle("GET", "/movie/5961", 200, `{"id":5961,"external_ids":{"imdb_id":"tt0083922"}}`)
+	f.h.TMDB.Handle("GET", "/movie/2292", 200, `{"id":2292,"runtime":10,"external_ids":{"imdb_id":"tt0109445"}}`)
+	var mu sync.Mutex
+	var asked []string
+	row := func(id, imdb, season, episode, cds, cd string) string {
+		return `{"IDSubtitleFile":"` + id + `","SubFormat":"srt","IDMovieImdb":"` + imdb + `","SeriesSeason":"` + season + `","SeriesEpisode":"` + episode +
+			`","SubSumCD":"` + cds + `","SubActualCD":"` + cd + `","SubDownloadLink":"http://x/` + id + `.gz"}`
+	}
+	ask := func(r *http.Request) {
+		mu.Lock()
+		asked = append(asked, r.URL.Path)
+		mu.Unlock()
+	}
+	legacy, _ := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+		ask(r)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/imdbid-3845232/sublanguageid-eng"):
+			w.Write([]byte("[" + row("bride", "3845232", "4", "0", "1", "1") + "," + row("other", "1234", "4", "0", "1", "1") + "]"))
+		case strings.HasSuffix(r.URL.Path, "/imdbid-0083922/sublanguageid-eng"):
+			w.Write([]byte("[" + row("part1", "83922", "0", "0", "4", "1") + "," + row("part2", "83922", "0", "0", "4", "2") + "," +
+				row("part3", "83922", "0", "0", "4", "3") + "," + row("film", "83922", "0", "0", "1", "1") + "]"))
+		default:
+			w.Write([]byte("[]"))
+		}
+	})
+	stremio, _ := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) { ask(r); w.Write([]byte(`{"subtitles":[]}`)) })
+	f.st.openSubtitles, f.st.stremioAPI = legacy.URL+"/search/", stremio.URL
+	f.options(`providers = ["opensubtitles-stremio", "opensubtitles"]` + "\nalign_per_day = 0")
+	rep := f.run(t)
+	o := f.outcomes()
+	paths := strings.Join(asked, " ")
+	if o[f.path(special)] != "queued" || f.verdict(special, "queued")["detail"] != "1 candidate(s)" {
+		t.Errorf("the special: %q, %v; want queued with the one subtitle under its own id (asked %s)", o[f.path(special)], f.verdict(special, "queued"), paths)
+	}
+	if o[f.path(cut)] != "queued" || f.verdict(cut, "queued")["detail"] != "2 candidate(s)" {
+		t.Errorf("the TV cut's first episode: %q, %v; want queued with the film's parts 1 and 2 (asked %s)", o[f.path(cut)], f.verdict(cut, "queued"), paths)
+	}
+	if o[f.path(clerks)] != "misidentified" || strings.Contains(paths, "0109445") || len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "Clerks") {
+		t.Errorf("Clerks, TMDB's 10 minutes for its 50: %q, searched %v, alerts %q; want misidentified, not searched, one alert naming it",
+			o[f.path(clerks)], strings.Contains(paths, "0109445"), rep.Alerts)
+	}
+}
+
 // Catches the queue not trying a title's candidates by tier across providers, or stopping at the first that fails:
 // OpenSubtitles' Blu-ray subtitle (the file's source: tier 2) must come before Gestdown's five WEB ones (tier 3)
 // though OpenSubtitles is searched last; it is another film's, so the queue goes on to Gestdown's first maxTries

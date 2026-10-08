@@ -415,8 +415,12 @@ func TestDotCom(t *testing.T) {
 		query != "languages=en&moviehash=00ff&tmdb_id=949" {
 		t.Errorf("film without an IMDb id: query %q, %+v %v; want it asked by its TMDB id", query, got, err)
 	}
+	if got, err := o.Search(context.Background(), Query{Hash: "00ff", IMDb: 1400, EpisodeIMDb: 3845232, Show: true, Episode: 9}); err != nil ||
+		len(got) != 1 || !got[0].ours || query != "imdb_id=3845232&languages=en&moviehash=00ff" {
+		t.Errorf("a special: query %q, %+v %v; want it asked by its own IMDb id, whatever season and episode OpenSubtitles files it as", query, got, err)
+	}
 	if n := logins("/api/v1/login"); n != 1 {
-		t.Errorf("%d logins for two searches; want 1", n)
+		t.Errorf("%d logins for three searches; want 1", n)
 	}
 	reset := time.Date(2026, 10, 6, 13, 3, 15, 0, time.UTC)
 	if txt, err := o.Download(context.Background(), Candidate{ID: "4"}); err != nil || txt != "1\n00:00:01,000 --> 00:00:02,000\nHi\n" || o.pace.parkedErr() != nil {
