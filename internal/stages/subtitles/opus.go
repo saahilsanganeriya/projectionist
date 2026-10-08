@@ -16,6 +16,7 @@ package subtitles
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"compress/flate"
 	"context"
 	"encoding/binary"
@@ -131,7 +132,7 @@ func BuildOpusIndex(zipPath string) (int, error) {
 			entries = append(entries, opusEntries(string(name), offset, uint32(csize))...)
 		}
 	}
-	slices.SortStableFunc(entries, func(a, b opusEntry) int { return compareUint(a.key, b.key) })
+	slices.SortStableFunc(entries, func(a, b opusEntry) int { return cmp.Compare(a.key, b.key) })
 	tmp := zipPath + ".idx.tmp"
 	out, err := os.Create(tmp)
 	if err != nil {
@@ -153,16 +154,6 @@ func BuildOpusIndex(zipPath string) (int, error) {
 		return 0, err
 	}
 	return len(entries), os.Rename(tmp, zipPath+".idx")
-}
-
-func compareUint(a, b uint64) int {
-	switch {
-	case a < b:
-		return -1
-	case a > b:
-		return 1
-	}
-	return 0
 }
 
 // centralDirectory finds the zip's central directory from its end record, the zip64 one when the archive has it.

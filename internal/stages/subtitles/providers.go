@@ -2,9 +2,9 @@ package subtitles
 
 // Subtitle providers, called directly (never through Plex): OpenSubtitles through Stremio's add-on (uncapped, the first
 // OpenSubtitles route) and its legacy REST API, Gestdown (Addic7ed's TV subtitles) and SITEC Subtitles (movies), none
-// of which needs a key; SubSource (the Subscene archive) and Subdl,
-// each only when its API key file exists; and OpenSubtitles.com, only when its API key and a free user's username and
-// password files exist. Ranking, the file hash, the release name, the ad stripping and the legacy API's download quota
+// of which needs a key; SubSource (the Subscene archive) and Subdl, each only when its API key file exists;
+// OpenSubtitles.com, only when its API key and a free user's username and password files exist; and the offline OPUS
+// archive (opus.go). Ranking, the file hash, the release name, the ad stripping and the legacy API's download quota
 // are ports of subfetch2.py v8. Every request goes through its provider's pacer: requests a gap apart (1 s; 2 s for
 // Gestdown, SITEC and SubSource), exponential backoff on 429/5xx/network errors, and parking for the rest of the run
 // once the provider keeps failing, refuses a search or spends its download quota, so the titles that need it wait for
@@ -200,8 +200,10 @@ func cleanSRT(txt string) string {
 	var cs []cue
 	for _, line := range strings.Split(strings.ReplaceAll(txt, "\r\n", "\n"), "\n") {
 		if m := cueRe.FindStringIndex(line); m != nil {
-			if n := len(cs); n > 0 && len(cs[n-1].text) > 0 && strings.Trim(cs[n-1].text[len(cs[n-1].text)-1], "0123456789 \t") == "" {
-				cs[n-1].text = cs[n-1].text[:len(cs[n-1].text)-1] // this cue's index
+			if n := len(cs); n > 0 {
+				if text := cs[n-1].text; len(text) > 0 && strings.Trim(text[len(text)-1], "0123456789 \t") == "" {
+					cs[n-1].text = text[:len(text)-1] // this cue's index
+				}
 			}
 			cs = append(cs, cue{timing: line[m[0]:m[1]]})
 			continue

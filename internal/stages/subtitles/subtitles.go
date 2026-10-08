@@ -44,8 +44,9 @@
 // (legacy and .com) are searched only once no other provider's release-matched subtitle passed, and only for a title
 // Stremio's route did not answer (it is out, or the title has no IMDb id); only their hash match is downloaded before
 // the queue, which tries their others by tier among the others', last within a tier. Stremio's route is not capped:
-// its hash match is release-matched as theirs is, and its other candidates go every route a free provider's go. A provider that is out (its day's quota spent,
-// failing, or refusing) holds back only a title nothing the others found is written for, which waits for it unrecorded.
+// its hash match is release-matched as theirs is, and its other candidates go every route a free provider's go. A
+// provider that is out (its day's quota spent, failing, or refusing) holds back only a title nothing the others found
+// is written for, which waits for it unrecorded.
 // No title waits for OpenSubtitles' download slot (one every 8 min): a title that finds it taken goes on as if
 // OpenSubtitles were out, and the next title to ask once it is free, in this run or the next, takes it.
 // The duration, frame rate and tracks come from the probe cache,
@@ -59,11 +60,13 @@
 // times it, and a queued title is searched again on the same schedule. A title is recorded only once TMDB and every
 // provider it needs answered (and alass ran, where it is needed); else it is deferred, not recorded, and an alert names
 // the cause (a spent quota, OpenSubtitles' downloads, OpenSubtitles.com's, or Subdl's or SubSource's daily limit, is
-// routine and only logged, and waits for its reset across runs). alass exiting non-zero on a candidate (one it cannot
-// parse, say) fails that title alone: recorded alass_failed, with the last lines alass printed, and tried again on the
-// same schedule, its candidate never refused for it. Only alass failing on alassTrip titles in a row, alass not starting
-// at all, or a title's audio not heard, makes the titles behind them that need alass wait for the next run, with one
-// alert. Each run also refreshes sub_stats.py's TSV over the whole library. Jellyfin hears of each new sidecar, and
+// routine and only logged, and waits for its reset across runs). Every subtitle a route reads is cleaned first
+// (cleanSRT: renumbered, without the blank and separator lines inside cues alass cannot parse). alass exiting
+// non-zero on a candidate (one it still cannot parse, say) fails that title alone: recorded alass_failed, with the
+// last lines alass printed, and tried again on the same schedule, its candidate never refused for it. Only alass
+// failing on alassTrip titles in a row, alass not starting at all, or a title's audio not heard, makes the titles
+// behind them that need alass wait for the next run, with one alert. Each run also refreshes sub_stats.py's TSV over
+// the whole library. Jellyfin hears of each new sidecar, and
 // Plex of its video, through queues kept in the store: Plex refreshes the item(s) whose media part the video is (PUT
 // /library/metadata/<ratingKey>/refresh, the ratingKey read from Plex's own database, plex_db, opened read-only), as
 // neither its watcher nor a partial scan of the folder attaches a new sidecar beside a video it holds already; a push
@@ -177,13 +180,14 @@ type Options struct {
 
 func defaults() Options {
 	return Options{
-		Roots:         []string{"/volume1/media/Movies", "/volume1/media/TV"},
-		StatsFile:     "/state/sub_stats.tsv",
-		RetryAfter:    7 * 24 * time.Hour,
-		Workers:       3,
-		SecretsDir:    "/run/secrets",
-		Alass:         "/usr/local/bin/alass",
-		Providers:     []string{"gestdown", "subsource", "sitec", "subdl", "opensubtitles-stremio", "opensubtitles", "opensubtitles-com"},
+		Roots:      []string{"/volume1/media/Movies", "/volume1/media/TV"},
+		StatsFile:  "/state/sub_stats.tsv",
+		RetryAfter: 7 * 24 * time.Hour,
+		Workers:    3,
+		SecretsDir: "/run/secrets",
+		Alass:      "/usr/local/bin/alass",
+		Providers: []string{"gestdown", "subsource", "sitec", "subdl", "opensubtitles-stremio", "opensubtitles",
+			"opensubtitles-com"},
 		LegacyQuota:   "/volume1/PlexMediaServer/subtitle-downloads",
 		AlignPerDay:   20,
 		Mode:          "sampled",
@@ -202,10 +206,11 @@ func defaults() Options {
 // Stage's fields are test hooks; the zero value talks to the real services.
 type Stage struct {
 	openSubtitles, openSubtitlesCom, subdlAPI, subdlDL, gestdownAPI, sitecSite, subsourceAPI, stremioAPI string
-	sleep                                                                                               func(context.Context, time.Duration) error
-	remote                                                                                              *broker // nil: the process's own
-	ocr                                                                                                 string  // the OCR helper; "": the image's subocr
-	opusZip                                                                                             string  // "": opusZipPath
+
+	sleep   func(context.Context, time.Duration) error
+	remote  *broker // nil: the process's own
+	ocr     string  // the OCR helper; "": the image's subocr
+	opusZip string  // "": opusZipPath
 }
 
 func (Stage) Name() string { return name }
@@ -464,7 +469,8 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 			o.pace = newPacer(0)
 			r.providers = append(r.providers, o)
 		case "opensubtitles-stremio":
-			r.providers = append(r.providers, &stremio{base: or(s.stremioAPI, "https://opensubtitles-v3.strem.io"), hc: hc, pace: newPacer(time.Second)})
+			r.providers = append(r.providers, &stremio{base: or(s.stremioAPI, "https://opensubtitles-v3.strem.io"), hc: hc,
+				pace: newPacer(time.Second)})
 		case "gestdown": // free community services: half the rate
 			r.providers = append(r.providers, &gestdown{base: or(s.gestdownAPI, "https://api.gestdown.info"), hc: hc,
 				pace: newPacer(2 * time.Second), shows: map[string]string{}})
@@ -1045,7 +1051,7 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	// not one) is recorded with the refusal once every other provider answered, so a refusal of that title alone cannot
 	// hold up every run.
 	out, meteredOut, refusal, found, tried, busy := false, false, "", 0, 0, 0
-	answered := false // Stremio's OpenSubtitles route answered for this title: the capped OpenSubtitles routes are its fallbacks
+	answered := false // Stremio's route answered for this title: the capped OpenSubtitles routes are its fallbacks
 	var pool []Candidate
 	missing := func(p Provider) { // p could not search or serve this title
 		out, meteredOut = out || !metered(p), meteredOut || metered(p)
@@ -1201,7 +1207,8 @@ func (r *run) filmOf(ctx context.Context, show tmdb.Details) (int, error) {
 		return 0, err
 	}
 	for _, f := range films {
-		if !strings.EqualFold(f.OriginalTitle, show.OriginalTitle) || f.Date.IsZero() || max(f.Date.Year()-show.Date.Year(), show.Date.Year()-f.Date.Year()) > 3 {
+		apart := max(f.Date.Year()-show.Date.Year(), show.Date.Year()-f.Date.Year())
+		if !strings.EqualFold(f.OriginalTitle, show.OriginalTitle) || f.Date.IsZero() || apart > 3 {
 			continue
 		}
 		directors, err := r.env.TMDB.Directors(ctx, f.ID)
