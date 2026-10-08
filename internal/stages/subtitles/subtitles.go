@@ -1596,14 +1596,15 @@ func (r *run) waitIdle(ctx context.Context) bool {
 	}
 }
 
-// wake is when the scheduler should run the stage again for the queue, sooner than its cadence (zero: no need). In
-// sampled mode, with titles waiting: outside the window, its opening; inside it with the day's cap spent, the moment the
-// oldest alignment counted leaves the 24 h, if the window is still open then. The cadence alone (6 h) may land after
-// the window closes and lose the night.
+// wake is when the scheduler should run the stage again for the extraction pass or the queue, sooner than its cadence
+// (zero: no need). With titles left to extract: now, or outside the window its opening. In sampled mode, with titles
+// waiting in the queue: outside the window, its opening; inside it with the day's cap spent, the moment the oldest
+// alignment counted leaves the 24 h, if the window is still open then. The cadence alone (6 h) may land after the
+// window closes and lose the night.
 func (r *run) wake(ctx context.Context) time.Time {
 	ctx = context.WithoutCancel(ctx)
 	now := r.env.Now()
-	if r.rep.Counts["extract_waiting"] > 0 { // the extraction pass stopped on its budget, or at the window's close
+	if r.rep.Counts["extract_waiting"] > 0 {
 		if r.alignNow() {
 			return now
 		}
