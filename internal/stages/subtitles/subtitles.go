@@ -34,6 +34,8 @@
 // once no other provider's release-matched subtitle passed, and only its hash match is downloaded before the queue,
 // which tries its others by tier among the others', last within a tier. A provider that is out (its day's quota spent,
 // failing, or refusing) holds back only a title nothing the others found is written for, which waits for it unrecorded.
+// No title waits for OpenSubtitles' download slot (one every 8 min): a title that finds it taken goes on as if
+// OpenSubtitles were out, and the next title to ask once it is free, in this run or the next, takes it.
 // The duration, frame rate and tracks come from the probe cache,
 // else the .details note (ffprobe runs only for a video that has neither, or once the sampled fit needs its stream
 // indexes); the original release name from that note, else the rename logs. Three titles at a time look for a subtitle,
@@ -382,7 +384,7 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 		case "opensubtitles":
 			l := &legacy{base: or(s.openSubtitles, "https://rest.opensubtitles.org/search/"), userAgent: userAgent, hc: noRedirect,
 				pace: newPacer(time.Second), dl: newPacer(dlGap), keep: keeper("opensubtitles_quota")}
-			l.dl.quota429 = true
+			l.dl.quota429, l.dl.slot = true, true
 			var st quotaState
 			found, err := env.Store.GetJSON(ctx, name, "opensubtitles_quota", &st)
 			if err == nil && !found && opt.LegacyQuota != "" {
@@ -997,10 +999,12 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	// A title gets no subtitle on record only once every provider has answered its search and let its candidates be
 	// tried. A provider that is out (an outage, the day's quota, a refusal earlier in the run) holds back only a title
 	// the others have no candidate for: theirs go through every route, and the title waits for the next run, which skips
-	// the candidates already rejected for this file, only if none is written (align). A title a provider refuses (a
-	// status no retry changes, or an answer that is not one) is recorded with the refusal once every other provider
-	// answered, so a refusal of that title alone cannot hold up every run.
-	out, meteredOut, refusal, found, tried := false, false, "", 0, 0
+	// the candidates already rejected for this file, only if none is written (align). A candidate whose download slot is
+	// taken (OpenSubtitles') stays in the pool, so the queue asks for it again and waits for it if nothing else aligns;
+	// one with nothing else waits unrecorded. A title a provider refuses (a status no retry changes, or an answer that is
+	// not one) is recorded with the refusal once every other provider answered, so a refusal of that title alone cannot
+	// hold up every run.
+	out, meteredOut, refusal, found, tried, busy := false, false, "", 0, 0, 0
 	var pool []Candidate
 	missing := func(p Provider) { // p could not search or serve this title
 		out, meteredOut = out || !metered(p), meteredOut || metered(p)
@@ -1052,6 +1056,11 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 				attempt := map[string]any{"provider": c.Source, "candidate": c.Release + " " + c.FileName, "id": c.key(), "file": t.key}
 				txt, err := r.download(ctx, c)
 				switch {
+				case errors.Is(err, errBusy):
+					missing(c.provider)
+					busy++
+					pool = append(pool, c)
+					continue
 				case errors.Is(err, errParked):
 					missing(c.provider)
 					r.alertParked(c.provider, t.path, err)
@@ -1079,7 +1088,7 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 	}
 	pool = t.arrange(pool, r.providers) // OpenSubtitles' (searched last) by tier among the others'
 	switch {
-	case (out || meteredOut) && len(pool) == 0, out && refusal != "": // a provider that was out might have had what this title needs
+	case (out || meteredOut) && len(pool) == busy, out && refusal != "": // a provider that was out might have had what this title needs
 		return outcome{result: "deferred", detail: "a provider was out"}
 	case refusal != "":
 		return outcome{result: "error", detail: refusal}
@@ -1505,9 +1514,9 @@ func (r *run) alignments(ctx context.Context) ([]time.Time, error) {
 // align is the queue's work on one title: its candidates downloaded one at a time in the pool's order, the first
 // maxTries of each provider, each only once the one before it failed (an OpenSubtitles download is quota); the
 // reference read from the video once the first arrives (a refused download costs no read); each fitted to it, and one
-// the captions reject given to alass (the rescue). None aligning while a provider is out (providerOut) leaves the title
-// waiting for it, not refused. An aligned subtitle is returned, not written: an align worker runs this too, and the NAS
-// writes what it returns (finish).
+// the captions reject given to alass (the rescue). None aligning while a provider is out (providerOut), or refused a
+// download here (OpenSubtitles' slot taken, say), leaves the title waiting for it, not refused. An aligned subtitle is
+// returned, not written: an align worker runs this too, and the NAS writes what it returns (finish).
 func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 	var ref *reference
 	defer func() {
@@ -2116,6 +2125,9 @@ func (r *run) alertOnce(key, format string, args ...any) {
 // alertParked raises an alert, once a run, when a provider kept failing or refused; a spent quota is routine and only
 // logged, once.
 func (r *run) alertParked(p Provider, item string, err error) {
+	if errors.Is(err, errBusy) { // routine: the slot goes to the next title that asks
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.alerted[p.Name()] {

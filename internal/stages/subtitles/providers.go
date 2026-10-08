@@ -5,11 +5,12 @@ package subtitles
 // each only when its API key file exists; and OpenSubtitles.com, only when its API key and a free user's username and
 // password files exist. Ranking, the file hash, the release name, the ad stripping and the legacy API's download quota
 // are ports of subfetch2.py v8. Every request goes through its provider's pacer: requests a gap apart (1 s; 2 s for
-// Gestdown, SITEC and SubSource; 8 min for legacy downloads), exponential backoff on 429/5xx/network errors, and parking
-// for the rest of the run once the provider keeps failing, refuses a search or spends its download quota, so the
-// titles that need it wait for the next run. The legacy API's quota, Subdl's and SubSource's daily limits (a 429,
-// answered at once) and OpenSubtitles.com's day of downloads park the provider until they reset, a time the store
-// keeps, so later runs wait too.
+// Gestdown, SITEC and SubSource), exponential backoff on 429/5xx/network errors, and parking for the rest of the run
+// once the provider keeps failing, refuses a search or spends its download quota, so the titles that need it wait for
+// the next run. Legacy downloads take a slot every 8 min that no title waits for: one that finds it taken goes on
+// without OpenSubtitles (errBusy), and the next to ask once it is free takes it. The legacy API's quota, Subdl's and
+// SubSource's daily limits (a 429, answered at once) and OpenSubtitles.com's day of downloads park the provider until
+// they reset, a time the store keeps, so later runs wait too.
 
 import (
 	"archive/zip"
@@ -81,6 +82,9 @@ var (
 	// errParked: the provider is out for now (quota spent, failing, or refusing), so titles that need it wait.
 	errParked = errors.New("provider parked")
 	errQuota  = errors.New("download quota spent")
+	// errBusy: a metered download slot is taken (OpenSubtitles': one download every dlGap). The title asking takes the
+	// provider as out for this look rather than wait, which would hold up every title behind it.
+	errBusy = fmt.Errorf("%w: its download slot is taken", errParked)
 )
 
 func (c Candidate) key() string { return c.provider.Name() + ":" + c.ID }
@@ -202,6 +206,8 @@ type pacer struct {
 	next     time.Time
 	gap      time.Duration
 	quota429 bool // a 429 is the download quota, answered at once rather than retried (legacy downloads)
+	slot     bool // a request before next is refused (errBusy), not waited for; the next slot's caller retries a failure
+	failed   int  // slot: requests in a row that failed, across callers
 	parked   error
 	until    time.Time // when parked ends; zero: at the end of the run
 	now      func() time.Time
@@ -293,7 +299,8 @@ func (p *pacer) do(ctx context.Context, hc *http.Client, req func() (*http.Reque
 // doH sends req (rebuilt per attempt) at most once per gap across all workers. 429 (unless quota429), 5xx and network
 // errors back off exponentially with jitter (Retry-After wins), six attempts in all (subfetch2.py tries ten); after
 // that the provider is parked. A 2xx response's body and header are returned to the caller, any other status as a
-// *statusError.
+// *statusError. A slot pacer sleeps neither for its gap nor to retry: each caller makes one attempt, and the six count
+// across callers.
 func (p *pacer) doH(ctx context.Context, hc *http.Client, req func() (*http.Request, error)) ([]byte, http.Header, error) {
 	const attempts = 6
 	var last error
@@ -304,6 +311,10 @@ func (p *pacer) doH(ctx context.Context, hc *http.Client, req func() (*http.Requ
 			return nil, nil, fmt.Errorf("%w: %w", errParked, err)
 		}
 		wait := p.next.Sub(p.now())
+		if p.slot && wait > 0 {
+			p.mu.Unlock()
+			return nil, nil, errBusy
+		}
 		p.next = p.now().Add(max(wait, 0) + p.gap)
 		p.mu.Unlock()
 		if wait > 0 {
@@ -334,6 +345,9 @@ func (p *pacer) doH(ctx context.Context, hc *http.Client, req func() (*http.Requ
 			case rerr != nil:
 				last = rerr
 			case resp.StatusCode/100 == 2:
+				p.mu.Lock()
+				p.failed = 0
+				p.mu.Unlock()
 				return body, resp.Header, nil
 			case resp.StatusCode == 429 && !p.quota429 || resp.StatusCode/100 == 5:
 				last = fmt.Errorf("HTTP %d", resp.StatusCode)
@@ -343,6 +357,16 @@ func (p *pacer) doH(ctx context.Context, hc *http.Client, req func() (*http.Requ
 			default:
 				return nil, nil, &statusError{resp.StatusCode, body, resp.Header}
 			}
+		}
+		if p.slot {
+			p.mu.Lock()
+			p.failed++
+			failed := p.failed
+			p.mu.Unlock()
+			if failed < attempts {
+				return nil, nil, fmt.Errorf("%w: %w", errBusy, last)
+			}
+			break
 		}
 		if attempt < attempts-1 {
 			if err := p.sleep(ctx, backoff); err != nil {
@@ -429,9 +453,9 @@ type legacy struct {
 	userAgent string
 	hc        *http.Client
 	pace      *pacer // searches
-	dl        *pacer // downloads: dlGap apart, parked until ResumeAfter
+	dl        *pacer // downloads: a slot each dlGap, parked until ResumeAfter
 	mu        sync.Mutex
-	st        quotaState       // guarded by mu, which also runs downloads one at a time (subfetch2.py's DL_LOCK)
+	st        quotaState       // guarded by mu, held by the one download under way (subfetch2.py's DL_LOCK)
 	keep      func(quotaState) // saves st after every download
 }
 
@@ -553,7 +577,8 @@ func (o *legacy) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	return kept, nil
 }
 
-// Download is fetch() of subfetch2.py v8: one download at a time, dlGap apart, within dlPerDay per 24 h; a refusal
+// Download is fetch() of subfetch2.py v8: one download at a time, dlGap apart, within dlPerDay per 24 h, except that
+// no caller waits for the gap: before it has passed since the last download it answers errBusy at once. A refusal
 // (407, 429, the 404 "exceeded" deny page, or a page instead of gzip) or a Download-Quota header at quotaFloor stops
 // downloads for quotaWait (the download that reported the floor is still used).
 func (o *legacy) Download(ctx context.Context, c Candidate) (string, error) {

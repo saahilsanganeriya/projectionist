@@ -233,6 +233,7 @@ func TestRemoteLeaseRunsOut(t *testing.T) {
 	}
 	rm.clock.Store(0)
 	rm.worker(t, f)
+	f.h.Now = f.h.Now.Add(dlGap) // Clerks, aligned here as the lease ran out, took OpenSubtitles' slot
 	if f.run(t); f.outcomes()[f.path(ran)] != "retimed" {
 		t.Errorf("next run: Ran %q; want leased again and retimed", f.outcomes()[f.path(ran)])
 	}

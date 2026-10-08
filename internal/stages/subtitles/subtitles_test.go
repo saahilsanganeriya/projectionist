@@ -54,8 +54,9 @@ type fixture struct {
 	hashIMDb string // when set, Ran's file hash finds a subtitle labelled with this IMDb id
 	hashText string // that subtitle (default: another film's timing)
 	ranHash  string
-	mode     string // the stage's mode; the tests of the routes careful mode shares run careful mode
-	verify   int    // verify_per_run: 0, the verify pass off, but in the tests of it
+	mode     string       // the stage's mode; the tests of the routes careful mode shares run careful mode
+	verify   int          // verify_per_run: 0, the verify pass off, but in the tests of it
+	elapsed  atomic.Int64 // ns added to h.Now: each OpenSubtitles download takes dlGap, so the next title's slot is free
 }
 
 func (f *fixture) path(rel string) string { return filepath.Join(f.lib, rel) }
@@ -96,6 +97,7 @@ func gz(s string) []byte {
 
 func newFixture(t *testing.T) *fixture {
 	f := &fixture{h: fake.NewEnv(t, nil), lib: t.TempDir(), dir: t.TempDir(), ts: captionTimes(), mode: "careful"}
+	f.h.Env.Now = func() time.Time { return f.h.Now.Add(time.Duration(f.elapsed.Load())) }
 	for i, rel := range []string{ran, heat, clerks, dune, show} {
 		os.MkdirAll(filepath.Dir(f.path(rel)), 0o755)
 		os.WriteFile(f.path(rel), bytes.Repeat([]byte{byte(i + 1)}, 4096), 0o644)
@@ -132,6 +134,9 @@ cp "`+ff+`/realign.srt" "$3" 2>/dev/null || cp "$2" "$3"; echo "info: 'reference
 		f.requests = append(f.requests, r.URL.Path)
 		quota := f.quota
 		f.mu.Unlock()
+		if strings.HasPrefix(r.URL.Path, "/dl/") {
+			f.elapsed.Add(int64(dlGap))
+		}
 		cand := func(id, release string) string {
 			return `[{"IDSubtitleFile":"` + id + `","SubFormat":"srt","MovieReleaseName":"` + release + `","SubDownloadLink":"` + osSrv.URL + `/dl/` + id + `.gz"}]`
 		}
@@ -1083,6 +1088,9 @@ func TestRunQueueFallsThrough(t *testing.T) {
 		quota.Store(c == "quota spent at its download")
 		var opensubs *httptest.Server
 		opensubs, osCalls := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+			if strings.HasPrefix(r.URL.Path, "/dl/") {
+				f.elapsed.Add(int64(dlGap))
+			}
 			cand := func(id, release string, downloads int) string {
 				return fmt.Sprintf(`{"IDSubtitleFile":"%s","SubFormat":"srt","MovieReleaseName":"%s","SubDownloadsCnt":"%d","SeriesSeason":"1",`+
 					`"SeriesEpisode":"1","SubDownloadLink":"%s/dl/%s.gz"}`, id, release, downloads, opensubs.URL, id)
@@ -1218,6 +1226,79 @@ func TestRunQueueDrainsDuringTheSearch(t *testing.T) {
 	if o := f.outcomes(); late.Load() || o[f.path(clerks)] != "retimed" || o[f.path(ran)] != "retimed" {
 		t.Errorf("Ran's search held open: nothing aligned meanwhile %v; Clerks %q, Ran %q; want Clerks aligned during the search, "+
 			"Ran after it, both retimed", late.Load(), o[f.path(clerks)], o[f.path(ran)])
+	}
+}
+
+// Catches the queue waiting for OpenSubtitles' download slot (one download every 8 min): live, it finished one title
+// every 8 min for hours while the align worker sat idle with 352 titles queued. With the slot taken a minute ago, Ran
+// and Clerks, which only OpenSubtitles serves, must stay queued without a download or a verdict, and Show, behind them,
+// be aligned from Gestdown's candidates, with no wait asked of the clock and no alert.
+func TestRunQueueGoesOnWhileTheSlotIsTaken(t *testing.T) {
+	f := newFixture(t)
+	f.gestdownNTb(t)
+	f.options(`providers = ["opensubtitles", "gestdown"]` + "\nalign_per_day = 0")
+	f.run(t)
+	rec := &recorder{}
+	f.st.sleep = rec.sleep
+	f.h.Env.Store.PutJSON(context.Background(), name, "opensubtitles_quota", quotaState{Downloads: []time.Time{f.h.Now.Add(-time.Minute)}})
+	f.options(`providers = ["opensubtitles", "gestdown"]` + "\nalign_per_day = 20")
+	rep := f.run(t)
+	var waited time.Duration
+	for _, d := range rec.slept {
+		if d >= time.Minute {
+			waited += d
+		}
+	}
+	o, downloads := f.outcomes(), strings.Count(strings.Join(f.requests, " "), "/dl/")
+	if waited > 0 || o[f.path(show)] != "retimed" || o[f.path(ran)] != "queued" || o[f.path(clerks)] != "queued" || downloads != 0 || len(rep.Alerts) != 0 {
+		t.Errorf("slot taken: the queue waited %v for it; Show %q, Ran %q, Clerks %q, %d OpenSubtitles downloads, alerts %q; "+
+			"want no wait, Show retimed, Ran and Clerks still queued, none, none", waited, o[f.path(show)], o[f.path(ran)],
+			o[f.path(clerks)], downloads, rep.Alerts)
+	}
+}
+
+// Catches a title recorded with no subtitle, or its only candidate lost, because OpenSubtitles' download slot was taken
+// when it asked: Ran, whose one candidate is OpenSubtitles' hash match, must wait unrecorded (searched again next run),
+// and Show, whose hash match found the slot taken and whose Gestdown candidates do not align, must stay queued, not be
+// refused; once the slot is free, Ran asking takes it.
+func TestRunTitleWaitsUnrecordedForATakenSlot(t *testing.T) {
+	f := newFixture(t)
+	os.Remove(filepath.Join(f.h.Env.FFmpeg.Dir, "realign.srt")) // alass keeps each candidate's timing: Gestdown's do not fit
+	f.gestdownNTb(t)
+	showHash, _, _ := openSubtitlesHash(f.path(show))
+	var opensubs *httptest.Server
+	opensubs, osCalls := counter(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+		match := func(id, labels string) []byte {
+			return []byte(`[{"IDSubtitleFile":"` + id + `","MatchedBy":"moviehash","SubFormat":"srt",` + labels + `,"SubDownloadLink":"` +
+				opensubs.URL + `/dl/` + id + `.gz"}]`)
+		}
+		switch {
+		case strings.Contains(r.URL.Path, "moviehash-"+f.ranHash):
+			w.Write(match("ran", `"IDMovieImdb":"89881"`))
+		case strings.Contains(r.URL.Path, "moviehash-"+showHash):
+			w.Write(match("show", `"SeriesSeason":"1","SeriesEpisode":"1"`))
+		case strings.HasPrefix(r.URL.Path, "/dl/"):
+			f.elapsed.Add(int64(dlGap))
+			w.Write(gz(srt(f.ts, 0)))
+		default:
+			w.Write([]byte("[]"))
+		}
+	})
+	f.st.openSubtitles = opensubs.URL + "/search/"
+	f.options(`providers = ["opensubtitles", "gestdown"]`)
+	f.note(ran, "Ran.1985.1080p.BluRay.x264-GRP.mkv", "none", "0h 45m")
+	f.h.Env.Store.PutJSON(context.Background(), name, "opensubtitles_quota", quotaState{Downloads: []time.Time{f.h.Now.Add(-time.Minute)}})
+	f.run(t)
+	var refused int
+	f.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM events WHERE item=? AND status='no_aligned_candidate'`, f.path(show)).Scan(&refused)
+	if o := f.outcomes(); o[f.path(ran)] != "" || f.queued()[0] != f.path(show) || o[f.path(show)] != "queued" || refused != 0 ||
+		osCalls("/dl/ran.gz")+osCalls("/dl/show.gz") != 0 {
+		t.Errorf("slot taken: Ran %q, Show %q (%d refusals), queue %v, %d OpenSubtitles downloads; want Ran unrecorded, Show "+
+			"queued alone, unrefused, none", o[f.path(ran)], o[f.path(show)], refused, f.queued(), osCalls("/dl/ran.gz")+osCalls("/dl/show.gz"))
+	}
+	f.h.Now = f.h.Now.Add(dlGap)
+	if f.run(t); f.outcomes()[f.path(ran)] != "release_matched" || osCalls("/dl/ran.gz") != 1 {
+		t.Errorf("slot free: Ran %q, downloaded %d times; want its hash match taken and written", f.outcomes()[f.path(ran)], osCalls("/dl/ran.gz"))
 	}
 }
 
