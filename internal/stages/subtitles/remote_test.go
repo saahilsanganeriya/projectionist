@@ -44,7 +44,7 @@ func (f *fixture) remote(t *testing.T, lanes int) *remote {
 	// The NAS's ffmpeg streams a lease's tracks; the worker's (the same script) reads them as it would the video.
 	ff := f.h.Env.FFmpeg.Dir
 	f.h.Script(t, "ffmpeg", `echo "$*" >> "`+ff+`/helper.calls"
-case "$*" in *matroska*) printf media;; *framecrc*) cat "`+ff+`/ran.framecrc";; *s16le*) cat "`+ff+`/speech.pcm";; *) exit 1;; esac
+case "$*" in *matroska*) printf media;; *framecrc*) cat "`+ff+`/ran.framecrc";; *s16le*) cat "`+ff+`/speech.pcm";; *"-f sup"*) for a; do out=$a; done; : > "$out";; *) exit 1;; esac
 `)
 	return rm
 }
@@ -176,8 +176,8 @@ func TestRemoteAlignmentMatchesLocal(t *testing.T) {
 			}
 		}
 		calls, _ := os.ReadFile(filepath.Join(f.h.Env.FFmpeg.Dir, "helper.calls"))
-		for _, line := range strings.Split(strings.TrimSpace(string(calls)), "\n") {
-			if strings.Contains(line, f.lib) && !strings.Contains(line, "-c copy -f matroska -") {
+		for _, line := range strings.Split(strings.TrimSpace(string(calls)), "\n") { // OCR's copy of a refused title's image track is the NAS's own
+			if strings.Contains(line, f.lib) && !strings.Contains(line, "-c copy -f matroska -") && !strings.Contains(line, "-c copy -f sup ") {
 				t.Errorf("%q: the NAS read more than a stream copy: %s", c, line)
 			}
 		}

@@ -120,7 +120,7 @@ func newFixture(t *testing.T) *fixture {
 for n in Ran Heat Clerks Show; do case "$*" in *"/$n "*) cat "`+ff+`/$n.json"; exit 0;; esac; done; exit 1
 `)
 	f.h.Script(t, "ffmpeg", `echo "$*" >> "`+ff+`/helper.calls"
-case "$*" in *framecrc*) cat "`+ff+`/ran.framecrc";; *s16le*) cat "`+ff+`/speech.pcm";; *) exit 1;; esac
+case "$*" in *framecrc*) cat "`+ff+`/ran.framecrc";; *s16le*) cat "`+ff+`/speech.pcm";; *"-f sup"*) for a; do out=$a; done; : > "$out";; *) exit 1;; esac
 `)
 	// alass's real CLI: <reference> <incorrect> <output>.
 	f.h.Script(t, "alass", `echo "$*" >> "`+ff+`/helper.calls"
@@ -171,7 +171,8 @@ cp "`+ff+`/realign.srt" "$3" 2>/dev/null || cp "$2" "$3"; echo "info: 'reference
 		}
 	}))
 	t.Cleanup(osSrv.Close)
-	f.st = Stage{openSubtitles: osSrv.URL + "/search/", sleep: func(context.Context, time.Duration) error { return nil }}
+	f.st = Stage{openSubtitles: osSrv.URL + "/search/", sleep: func(context.Context, time.Duration) error { return nil },
+		ocr: f.h.Script(t, "subocr", `echo "$*" >> "`+ff+`/ocr.calls"`)} // reads nothing: a title it reads gets no sidecar
 	f.options(`providers = ["opensubtitles"]`)
 	f.h.Jellyfin.Handle("POST", "/Library/Media/Updated", 204, "")
 	return f
