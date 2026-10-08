@@ -39,9 +39,10 @@ const (
 	keptWithin     = 0.1 // s: a sidecar no cue of which the fit would move further is kept as it is
 )
 
-// verifiedOutcomes are the outcomes the stage records only once a subtitle's timing was checked against this very file.
+// verifiedOutcomes are the outcomes the stage records only once a subtitle's timing was checked against this very file;
+// an OCR'd one has the timing of the file's own image track.
 var verifiedOutcomes = map[string]bool{"sampled": true, "retimed": true, "release_matched": true, "idx_retimed": true,
-	"rescued": true, "kept": true, "idx_kept": true}
+	"rescued": true, "kept": true, "idx_kept": true, "ocr": true}
 
 // archiveReady tells whether archive_dir exists, alerting once when not: unmounted, a sidecar moved there would live in
 // the container's own layer and go with it.

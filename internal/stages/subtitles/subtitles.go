@@ -66,6 +66,12 @@
 // is archived and created again retimed under its own name, one that cannot fit is archived (and its video searched
 // for anew), and one the windows cannot judge waits in the queue, behind every title lacking a subtitle, for a full
 // alignment of its own. A sidecar leaves the library only by a move into archive_dir, never overwriting there.
+//
+// The OCR pass (ocr.go), after the queue and inside align_window, reads the English image track (PGS or VobSub, in
+// the video or as a .en.idx/.en.sub sidecar) of a title no provider subtitle could be written for (no candidates, none
+// fitted, or refused) with subocr (PP-OCRv6 small, the bake-off's most accurate engine), and writes it with the track's
+// own timing as <video>.en.srt, recorded "ocr"; a track that is not a full English subtitle (sane, and guessLang "en")
+// is not written. Each file is read once, written or refused, and a run starts no title once its OCR has taken an hour.
 package subtitles
 
 import (
@@ -182,6 +188,7 @@ type Stage struct {
 	openSubtitles, openSubtitlesCom, subdlAPI, subdlDL, gestdownAPI, sitecSite, subsourceAPI string
 	sleep                                                                                   func(context.Context, time.Duration) error
 	remote                                                                                  *broker // nil: the process's own
+	ocr                                                                                     string  // the OCR helper; "": the image's subocr
 }
 
 func (Stage) Name() string { return name }
@@ -250,6 +257,7 @@ type run struct {
 	pools      map[string][]Candidate      // titles queued this run: their candidates, so the queue need not search again
 	reading    sync.Mutex                  // one title at a time reads its windows
 	remote     *broker                     // align_remote_lanes set: the align workers
+	ocrBin     string                      // subocr (ocr.go)
 	media      func(context.Context) error // an align worker: streams the title's tracks from the NAS, where it reads the video
 
 	apps   sync.Mutex // the Jellyfin and Plex queues
@@ -321,7 +329,9 @@ feed:
 	close(queue)
 	wg.Wait()
 	close(searched)
-	err = <-worked
+	if err = <-worked; err == nil {
+		r.ocrPass(ctx, titles)
+	}
 	for _, p := range r.providers {
 		if o, ok := p.(*dotCom); ok {
 			o.logout(ctx)
@@ -356,7 +366,8 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 		}
 		return def
 	}
-	r := &run{env: env, opt: opt, rep: rep, alerted: map[string]bool{}, pools: map[string][]Candidate{}}
+	r := &run{env: env, opt: opt, rep: rep, alerted: map[string]bool{}, pools: map[string][]Candidate{},
+		ocrBin: cmp.Or(s.ocr, "/usr/local/bin/subocr")}
 	r.undo = sync.OnceValue(func() map[string]string {
 		orig, _, err := library.Originals(opt.UndoLogs)
 		if err != nil {
@@ -915,6 +926,8 @@ func (r *run) record(ctx context.Context, t *title, o outcome) {
 		r.count("written_sampled")
 	case o.result == "kept" || o.result == "retimed" || o.result == "rescued":
 		r.count("written_aligned")
+	case o.result == "ocr":
+		r.count("written_ocr")
 	}
 	if o.fields == nil {
 		o.fields = map[string]any{}
@@ -1626,11 +1639,11 @@ func (r *run) summarise(ctx context.Context, lacking, due, verifying int) {
 	}
 	slices.Sort(hits)
 	r.rep.Summary = fmt.Sprintf("%s mode: %d sidecar(s) written: %d release-matched, %d fitted to a VobSub sidecar, "+
-		"%d by the sampled fit, %d aligned; %d queued, %d waiting in the queue; alignments %d of %d in 24 h; "+
+		"%d by the sampled fit, %d aligned, %d read from an image track by OCR (%d refused); %d queued, %d waiting in the queue; alignments %d of %d in 24 h; "+
 		"provider hits %s; %d title(s) lacked a sidecar, %d of them carry an English text track, %d were due; "+
 		"verify pass: %d title(s), their sidecars %d kept, %d retimed, %d archived, %d left to a full alignment",
 		r.opt.Mode, r.written, c["written_release_matched"], c["written_idx"], c["written_sampled"], c["written_aligned"],
-		c["queued"], waiting, len(starts), r.opt.AlignPerDay, cmp.Or(strings.Join(hits, " "), "none"), lacking, c["embedded_text"], due,
+		c["written_ocr"], c["rejected_ocr"], c["queued"], waiting, len(starts), r.opt.AlignPerDay, cmp.Or(strings.Join(hits, " "), "none"), lacking, c["embedded_text"], due,
 		verifying, c["sidecars_kept"], c["sidecars_retimed"], c["sidecars_refused"], c["sidecars_undecided"])
 }
 
