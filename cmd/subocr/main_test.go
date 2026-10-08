@@ -129,9 +129,9 @@ func TestWriteSRTKeepsEachCaptionsOwnTiming(t *testing.T) {
 	}
 }
 
-// Catches the real engine misreading a clean caption: the model or ONNX Runtime missing from the image (subocr fails
-// at its first title), a dictionary out of step with the model, or a two-line caption read as one line. Skips where
-// the model and ONNX Runtime are absent (SUBOCR_MODEL, SUBOCR_LIB name them elsewhere than the image's paths).
+// Catches the real engine misreading a clean caption: a dictionary out of step with the model, input the model was not
+// trained on (polarity, height, normalisation), or a two-line caption read as one line. Skips where the model and ONNX
+// Runtime are absent (SUBOCR_MODEL, SUBOCR_LIB name them elsewhere than the image's paths).
 func TestRealEngineReadsASyntheticTrack(t *testing.T) {
 	model := envOr("SUBOCR_MODEL", "/usr/local/share/subocr/PP-OCRv6_rec_small.onnx")
 	lib := envOr("SUBOCR_LIB", "/usr/local/lib/libonnxruntime.so")
