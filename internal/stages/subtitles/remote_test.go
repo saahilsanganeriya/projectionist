@@ -189,22 +189,25 @@ func TestRemoteAlignmentMatchesLocal(t *testing.T) {
 	}
 }
 
-// lateAudio gives f a fake ffmpeg for videos whose audio starts 8.4 s in, as Lord of War's does. Read from the library,
-// the captions are where they are; read from an align worker's media they come 8.4 s early unless -copyts keeps the
-// media's own timestamps, as ffmpeg counts a file's time from its first packet (there the audio's); and the speech
-// starts at the first audio sample unless aresample pads it to the start (first_pts=0) on the video's time base.
+// lateAudio gives f a fake ffmpeg for videos whose audio starts 8.4 s in, as Lord of War's does, and whose timestamps
+// start 1.4 s in, as an MPEG-TS's do. Read from the library, the captions are where they are (ffmpeg counts from the
+// file's start), or 1.4 s late with -copyts (its raw timestamps); read from an align worker's media they come 8.4 s
+// early unless -copyts keeps the media's own timestamps (the video's), as ffmpeg counts a file's time from its first
+// packet (there the audio's); and the speech starts at the first audio sample unless aresample pads it to the start
+// (first_pts=0) on the video's time base.
 func lateAudio(t *testing.T, f *fixture) {
 	ff := f.h.Env.FFmpeg.Dir
-	early := make([]float64, len(f.ts))
+	early, late := make([]float64, len(f.ts)), make([]float64, len(f.ts))
 	for i, s := range f.ts {
-		early[i] = s - 8.4
+		early[i], late[i] = s-8.4, s+1.4
 	}
 	os.WriteFile(filepath.Join(ff, "early.framecrc"), []byte(framecrc(early)), 0o644)
+	os.WriteFile(filepath.Join(ff, "late.framecrc"), []byte(framecrc(late)), 0o644)
 	f.h.Script(t, "ffmpeg", `echo "$*" >> "`+ff+`/helper.calls"
-base=; case "$*" in *"`+f.lib+`"*|*-copyts*) base=video;; esac
+base=; case "$*" in *-copyts*"`+f.lib+`"*) base=raw;; *"`+f.lib+`"*|*-copyts*) base=video;; esac
 case "$*" in
 *matroska*) printf media;;
-*framecrc*) if [ "$base" = video ]; then cat "`+ff+`/ran.framecrc"; else cat "`+ff+`/early.framecrc"; fi;;
+*framecrc*) case $base in video) cat "`+ff+`/ran.framecrc";; raw) cat "`+ff+`/late.framecrc";; *) cat "`+ff+`/early.framecrc";; esac;;
 *s16le*) case "$base $*" in "video "*first_pts=0*) cat "`+ff+`/speech.pcm";; *) tail -c +268801 "`+ff+`/speech.pcm";; esac;;
 *"-f sup"*) p=; for a; do [ "$p" = sup ] && : > "$a"; p=$a; done;;
 *) exit 1;;
