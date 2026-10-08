@@ -59,7 +59,6 @@ func PGS(r io.Reader) ([]Event, error) {
 		pending  bool   // a composition was read whose drawing waits for the end of its display set
 		pts      time.Duration
 		header   [13]byte
-		sawStart bool
 	)
 	draw := func() {
 		pending = false
@@ -106,7 +105,6 @@ func PGS(r io.Reader) ([]Event, error) {
 			if len(seg) < 11 {
 				return nil, errors.New("pgs: short composition segment")
 			}
-			sawStart = true
 			pts = ticks(int64(binary.BigEndian.Uint32(header[2:6])))
 			palette = seg[9]
 			if seg[7]&0x80 != 0 { // an epoch start forgets every object
@@ -158,9 +156,6 @@ func PGS(r io.Reader) ([]Event, error) {
 				draw()
 			}
 		}
-	}
-	if !sawStart {
-		return nil, errors.New("pgs: no composition in the stream")
 	}
 	closeLast(out)
 	return out, nil

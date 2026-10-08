@@ -6,10 +6,13 @@
 //	subocr [-lib FILE] [-model FILE] vobsub TRACK.sub TRACK.idx  a DVD VobSub program stream, read with the palette
 //	                                                             of the .idx text (its first English stream, else its
 //	                                                             only one: a track copied out of a video)
+//
+// It exits 3 when the track cannot be decoded (the stage refuses that track for good), 1 on any other failure.
 package main
 
 import (
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"image"
@@ -29,14 +32,19 @@ func main() {
 	flag.Parse()
 	if err := run(*lib, *model, flag.Args(), os.Stdout); err != nil {
 		fmt.Fprintln(os.Stderr, "subocr:", err)
+		if errors.Is(err, errUndecodable) {
+			os.Exit(3)
+		}
 		os.Exit(1)
 	}
 }
 
+var errUndecodable = errors.New("the track cannot be decoded")
+
 func run(lib, model string, args []string, w io.Writer) error {
 	events, err := decode(args)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %v", errUndecodable, err)
 	}
 	r, err := ocr.Open(lib, model)
 	if err != nil {

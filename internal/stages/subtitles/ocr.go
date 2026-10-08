@@ -10,10 +10,11 @@ package subtitles
 //	  each read by subocr in turn; the first whose text passes ocrRefusal -> <video>.en.srt (O_EXCL), recorded "ocr"
 //	  none passes                                                      -> an event rejected_ocr, the record unchanged
 //
-// A file (size:mtime) is read at most once, written or refused: only a changed video is read again. A provider subtitle
-// still wins: a queued title waits for its alignment, and only a verdict of none leads here. A run starts no title once
-// its OCR has taken ocrBudget (a film is about 15 minutes of one J4125 core). subocr or ffmpeg failing stops the pass
-// for the run with one alert, and records nothing.
+// A file (size:mtime) is read at most once, written or refused (a track subocr cannot decode is refused): only a changed
+// video is read again. A provider subtitle still wins: a queued title waits for its alignment, and only a verdict of
+// none leads here. A run starts no title once its OCR has taken ocrBudget (a film is about 15 minutes of one J4125
+// core). Any other failure of subocr or ffmpeg records nothing for that title, which waits for the next run, with one
+// alert a run.
 
 import (
 	"context"
@@ -22,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -70,13 +72,14 @@ func (r *run) ocrPass(ctx context.Context, lacking []*title) {
 			return
 		}
 		o, err := r.ocr(ctx, t)
-		if err != nil {
-			if ctx.Err() == nil {
-				r.alertOnce("ocr", "OCR of image subtitles could not run (the rest wait for the next run); at %s: %v", t.path, err)
-			}
+		switch {
+		case ctx.Err() != nil:
 			return
-		}
-		if o.result == "rejected_ocr" {
+		case err != nil:
+			r.alertOnce("ocr", "OCR of image subtitles failed (those titles wait for the next run); at %s: %v", t.path, err)
+			continue
+		case o.result == "rejected_ocr":
+			o.fields["video_bytes"], o.fields["disk_bytes"] = t.read, t.disk
 			r.count(o.result)
 			r.event(ctx, t.path, o)
 			continue
@@ -121,7 +124,11 @@ func (r *run) ocr(ctx context.Context, t *title) (outcome, error) {
 	for _, args := range tracks {
 		started := r.env.Now()
 		out, err := r.cmd(ctx, nil, r.ocrBin, args...)
-		if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 3 { // subocr: this track cannot be decoded
+			why = append(why, err.Error())
+			continue
+		} else if err != nil {
 			return outcome{}, err
 		}
 		fields["track"], fields["ocr_ms"] = filepath.Base(args[1]), r.env.Now().Sub(started).Milliseconds()
