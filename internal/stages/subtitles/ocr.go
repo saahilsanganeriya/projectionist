@@ -7,9 +7,9 @@ package subtitles
 //
 //	recorded no_candidates, no_aligned_candidate or error, still no English sidecar, and no OCR yet of this very file
 //	  its .en.idx/.en.sub sidecar, else every English image track copied out of the video in one read (ffmpeg)
-//	  each read by subocr in turn, the largest first; the first whose text passes ocrRefusal -> <video>.en.srt (O_EXCL),
-//	                                                                                              recorded "ocr"
-//	  none passes                                                      -> an event rejected_ocr, the record unchanged
+//	  each read by subocr in turn, the largest first:
+//	    the first whose text passes ocrRefusal  -> <video>.en.srt (O_EXCL), recorded "ocr"
+//	    none passes                             -> an event rejected_ocr, the record unchanged
 //
 // A file (size:mtime) is read at most once, written or refused (a track subocr cannot decode is refused): only a changed
 // video is read again. A provider subtitle still wins: a queued title waits for its alignment, and only a verdict of
