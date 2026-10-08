@@ -92,23 +92,27 @@ func TestOCRRefusesATrackThatIsNotTheEnglishSubtitle(t *testing.T) {
 	}
 }
 
-// Catches the forced lines read first and written as the whole subtitle: a track of them alone, tagged only in its
-// title, can hold enough English to pass (War for the Planet of the Apes' "Forced only": 192 cues of its apes' signing).
-// It is the smaller track: Show's track 2 here, copied out at 10 bytes beside track 3's 1000.
-func TestOCRReadsTheLargestTrackFirst(t *testing.T) {
-	forced, full := textSRT(captionTimes(), englishLines[:2]...), textSRT(captionTimes(), englishLines...) // both pass
+// Catches the wrong English track written: the forced lines, flagged only in the track's title (War for the Planet of
+// the Apes' "Forced only" reads as 192 English cues, enough to pass), or a larger untitled track after the main one (The
+// Haunting's director's commentary: 1,073 cues against the episode's 1,002). Show's tracks 2-4 here, copied out at 10,
+// 500 and 1000 bytes, each reading as a full English subtitle.
+func TestOCRReadsTheFirstTrackThatIsNotForced(t *testing.T) {
 	f := ocrFixture(t, "")
 	ff := f.h.Env.FFmpeg.Dir
 	eng := `"tags":{"language":"eng"},"disposition":{"default":1}`
-	os.WriteFile(filepath.Join(ff, "Show.json"), []byte(probeJSON(`{"index":1,"codec_type":"audio","codec_name":"aac",`+eng+
-		`},{"index":2,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle",`+eng+`},{"index":3,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle",`+eng+`}`)), 0o644)
-	f.h.Script(t, "ffmpeg", `p=; for a; do [ "$p" = sup ] && case "$a" in */2.sup) head -c 10 /dev/zero > "$a";; *) head -c 1000 /dev/zero > "$a";; esac; p=$a; done
+	os.WriteFile(filepath.Join(ff, "Show.json"), []byte(probeJSON(`{"index":1,"codec_type":"audio","codec_name":"aac",`+eng+`},`+
+		`{"index":2,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle","tags":{"language":"eng","title":"Forced only"}},`+
+		`{"index":3,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle",`+eng+`},`+
+		`{"index":4,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle",`+eng+`}`)), 0o644)
+	f.h.Script(t, "ffmpeg", `p=; for a; do [ "$p" = sup ] && case "$a" in */2.sup) n=10;; */3.sup) n=500;; *) n=1000;; esac && head -c $n /dev/zero > "$a"; p=$a; done
 `)
-	os.WriteFile(filepath.Join(ff, "forced.srt"), []byte(forced), 0o644)
-	os.WriteFile(filepath.Join(ff, "full.srt"), []byte(full), 0o644)
-	f.h.Script(t, "subocr", `case "$2" in */2.sup) cat "`+ff+`/forced.srt";; *) cat "`+ff+`/full.srt";; esac`)
+	for i, lines := range [][]string{englishLines[:1], englishLines, englishLines[2:]} {
+		os.WriteFile(filepath.Join(ff, fmt.Sprintf("%d.srt", i+2)), []byte(textSRT(captionTimes(), lines...)), 0o644)
+	}
+	f.h.Script(t, "subocr", `n=$(basename "$2" .sup); cat "`+ff+`/$n.srt"`)
 	f.run(t)
-	if got := f.sidecar(t, show); got != full {
-		t.Errorf("Show's sidecar is the forced track's reading %v; want the full track's", got == forced)
+	if got, want := f.sidecar(t, show), textSRT(captionTimes(), englishLines...); got != want {
+		t.Errorf("Show's sidecar is track 2's reading %v, track 4's %v; want track 3's", got == textSRT(captionTimes(), englishLines[:1]...),
+			got == textSRT(captionTimes(), englishLines[2:]...))
 	}
 }
