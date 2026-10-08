@@ -5,12 +5,12 @@ package subtitles
 // each only when its API key file exists; and OpenSubtitles.com, only when its API key and a free user's username and
 // password files exist. Ranking, the file hash, the release name, the ad stripping and the legacy API's download quota
 // are ports of subfetch2.py v8. Every request goes through its provider's pacer: requests a gap apart (1 s; 2 s for
-// Gestdown, SITEC and SubSource), exponential backoff on 429/5xx/network errors, and parking for the rest of the run once
-// the provider keeps failing, refuses a search or spends its download quota, so the titles that need it wait for the
-// next run. Legacy downloads take a slot every 8 min that no title waits for: one that finds it taken goes on without
-// OpenSubtitles (errBusy), and the next to ask once it is free takes it. The legacy API's quota, Subdl's and SubSource's
-// daily limits (a 429, answered at once) and OpenSubtitles.com's day of downloads park the provider until they reset, a
-// time the store keeps, so later runs wait too.
+// Gestdown, SITEC and SubSource), exponential backoff on 429/5xx/network errors, and parking for the rest of the run
+// once the provider keeps failing, refuses a search or spends its download quota, so the titles that need it wait for
+// the next run. Legacy downloads take a slot every 8 min that no title waits for: one that finds it taken goes on
+// without OpenSubtitles (errBusy), and the next to ask once it is free takes it. The legacy API's quota, Subdl's and
+// SubSource's daily limits (a 429, answered at once) and OpenSubtitles.com's day of downloads park the provider until
+// they reset, a time the store keeps, so later runs wait too.
 
 import (
 	"archive/zip"
@@ -206,7 +206,7 @@ type pacer struct {
 	next     time.Time
 	gap      time.Duration
 	quota429 bool // a 429 is the download quota, answered at once rather than retried (legacy downloads)
-	slot     bool // a request before next is refused (errBusy), never waited for, and the caller next given the slot retries a failure (legacy downloads)
+	slot     bool // a request before next is refused (errBusy), not waited for; the next slot's caller retries a failure
 	failed   int  // slot: requests in a row that failed, across callers
 	parked   error
 	until    time.Time // when parked ends; zero: at the end of the run
