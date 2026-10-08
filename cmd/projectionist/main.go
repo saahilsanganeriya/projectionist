@@ -5,6 +5,7 @@
 //	projectionist stages                        list the stages this binary knows
 //	projectionist align-worker [-server URL] [-via CMD] [-lanes N] [-ffmpeg DIR] [-alass FILE] [-work DIR]
 //	                                            on another machine: align the subtitles queue's titles until Ctrl-C
+//	projectionist opus-index ZIP                index the OPUS OpenSubtitles archive for the subtitles stage: ZIP.idx
 package main
 
 import (
@@ -80,13 +81,23 @@ func main() {
 		os.Exit(run(*cfgPath, fs.Arg(0)))
 	case "align-worker":
 		os.Exit(alignWorker(worker))
+	case "opus-index":
+		if fs.NArg() != 1 {
+			usage()
+		}
+		n, err := subtitles.BuildOpusIndex(fs.Arg(0))
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "opus-index:", err)
+			os.Exit(1)
+		}
+		fmt.Printf("%s.idx: %d records\n", fs.Arg(0), n)
 	default:
 		usage()
 	}
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: projectionist serve|run STAGE|stages|version [-config FILE] | align-worker [flags]")
+	fmt.Fprintln(os.Stderr, "usage: projectionist serve|run STAGE|stages|version [-config FILE] | align-worker [flags] | opus-index ZIP")
 	os.Exit(2)
 }
 

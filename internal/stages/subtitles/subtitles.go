@@ -6,12 +6,13 @@
 //
 //	embedded English text track       -> skipped: the players show it, so nothing is fetched and nothing read
 //	else candidates from the providers (Gestdown, SubSource with a key, SITEC, Subdl with a key, OpenSubtitles through
-//	Stremio's add-on; OpenSubtitles legacy and .com, with a key and a user's login, searched last and only for a title
-//	Stremio's route did not answer; one subtitle two OpenSubtitles routes find is one candidate),
+//	Stremio's add-on, the offline OPUS archive (opus.go); OpenSubtitles legacy and .com, with a key and a user's
+//	login, searched last and only for a title Stremio's route did not answer; one subtitle two OpenSubtitles routes
+//	find is one candidate),
 //	by tier across providers: 1 made for this file (release-matched), 2 of its source (BluRay for BluRay, WEB from
 //	the same service) at its frame rate, 3 the rest (a commentary's or another language's file too); within a tier
-//	the free providers first, in the providers' order; skipping any already rejected for this file, and per title the
-//	first route that succeeds:
+//	the free providers first, in the providers' order, the OPUS archive last; skipping any already rejected for this
+//	file, and per title the first route that succeeds:
 //	  a. release-matched               -> written WITHOUT reading the video once cheapCheck passes: an OpenSubtitles
 //	                                      file-hash match its name does not contradict (source, edition, episode),
 //	                                      or a subtitle naming the file's original release group
@@ -194,6 +195,7 @@ type Stage struct {
 	sleep                                                                                               func(context.Context, time.Duration) error
 	remote                                                                                              *broker // nil: the process's own
 	ocr                                                                                                 string  // the OCR helper; "": the image's subocr
+	opusZip                                                                                             string  // "": opusZipPath
 }
 
 func (Stage) Name() string { return name }
@@ -443,6 +445,14 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 				}
 				r.providers = append(r.providers, o)
 			}
+		case "opus":
+			o, err := openOpus(cmp.Or(s.opusZip, opusZipPath))
+			if err != nil {
+				r.alertOnce("opus", "the OPUS archive is not used: %v", err)
+				continue
+			}
+			o.pace = newPacer(0)
+			r.providers = append(r.providers, o)
 		case "opensubtitles-stremio":
 			r.providers = append(r.providers, &stremio{base: or(s.stremioAPI, "https://opensubtitles-v3.strem.io"), hc: hc, pace: newPacer(time.Second)})
 		case "gestdown": // free community services: half the rate
