@@ -17,7 +17,8 @@ import (
 )
 
 // extractFixture is a library of real Matroska files, each 100 s of a 16x16 picture with English subtitle tracks, read
-// by the real ffprobe and ffmpeg (ffmpeg's command lines kept in calls), and no subtitle provider.
+// by the real ffprobe and ffmpeg (ffmpeg's command lines kept in calls), no subtitle provider, and an alass, so a queued
+// title is searched again rather than left waiting for one.
 type extractFixture struct {
 	h       *fake.Harness
 	lib, ff string
@@ -44,6 +45,7 @@ func newExtractFixture(t *testing.T) *extractFixture {
 stats_file = "` + dir + `/sub_stats.tsv"
 secrets_dir = "` + dir + `"
 plex_db = "` + dir + `/plex.db"
+alass = "` + f.h.Script(t, "alass", "exit 1\n") + `"
 providers = []
 mode = "careful"
 verify_per_run = 0`)
