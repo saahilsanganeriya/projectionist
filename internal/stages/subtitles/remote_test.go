@@ -176,8 +176,10 @@ func TestRemoteAlignmentMatchesLocal(t *testing.T) {
 			}
 		}
 		calls, _ := os.ReadFile(filepath.Join(f.h.Env.FFmpeg.Dir, "helper.calls"))
-		for _, line := range strings.Split(strings.TrimSpace(string(calls)), "\n") { // OCR's copy of a refused title's image track is the NAS's own
-			if strings.Contains(line, f.lib) && !strings.Contains(line, "-c copy -f matroska -") && !strings.Contains(line, "-c copy -f sup ") {
+		// OCR's copy of a refused title's image track and the extraction of an embedded text track are the NAS's own
+		for _, line := range strings.Split(strings.TrimSpace(string(calls)), "\n") {
+			if strings.Contains(line, f.lib) && !strings.Contains(line, "-c copy -f matroska -") && !strings.Contains(line, "-c copy -f sup ") &&
+				!strings.Contains(line, " -f srt ") {
 				t.Errorf("%q: the NAS read more than a stream copy: %s", c, line)
 			}
 		}
