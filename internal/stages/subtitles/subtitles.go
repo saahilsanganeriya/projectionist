@@ -70,8 +70,10 @@
 // Plex does not take is retried at the next push, never failing a run.
 //
 // With align_remote_lanes set, the queue hands its titles to align workers on another machine while one has called in
-// the last minute (remote.go): the NAS streams only the tracks the alignment reads, serves the candidates under the
-// same quotas, and writes and records the worker's result as its own; with none connected it aligns here.
+// the last minute (remote.go): the NAS streams only the tracks the alignment reads, which the worker reads on the
+// video's own time base (its first packet need not be the video's start), serves the candidates under the same quotas,
+// and writes and records the worker's result as its own; with none connected it aligns here. Every reference counts
+// from the video's start: speech from an audio track that starts late is padded to it.
 //
 // The verify pass (verify.go, sampled mode) judges, verify_per_run videos a run, the English .srt sidecars no record
 // shows verified, each fitted to its video's windows as a download is: one in sync is kept, one consistently shifted
@@ -1783,8 +1785,8 @@ func (r *run) reference(ctx context.Context, t *title) (reference, error) {
 		return reference{why: err.Error(), deferred: true}, nil
 	}
 	for _, s := range images {
-		out, err := r.cmd(ctx, t, r.env.FFmpeg.FFmpegPath(), "-nostdin", "-hide_banner", "-loglevel", "error", "-i", t.path,
-			"-map", fmt.Sprintf("0:%d", s.Index), "-c", "copy", "-f", "framecrc", "-")
+		out, err := r.cmd(ctx, t, r.env.FFmpeg.FFmpegPath(), append(r.input(t), "-map", fmt.Sprintf("0:%d", s.Index), "-c", "copy",
+			"-f", "framecrc", "-")...)
 		if err != nil {
 			if ctx.Err() != nil {
 				return reference{}, ctx.Err()
@@ -1815,6 +1817,17 @@ func (r *run) reference(ctx context.Context, t *title) (reference, error) {
 	return ref, nil
 }
 
+// input is ffmpeg's options up to its input, t's video. An align worker's is the media the NAS streamed, whose time ffmpeg
+// would count from its first packet, not the video's start (Lord of War's audio starts 8.4 s in: its captions came
+// 8.4 s early, and a sidecar 8.2 s early was kept): -copyts keeps the video's timestamps, which the stream carries.
+func (r *run) input(t *title) []string {
+	in := []string{"-nostdin", "-hide_banner", "-loglevel", "error"}
+	if r.media != nil {
+		in = append(in, "-copyts")
+	}
+	return append(in, "-i", t.path)
+}
+
 // alassOut is why alass cannot run now ("" when it can): missing (alerted once), or alassDown.
 func (r *run) alassOut() string {
 	r.mu.Lock()
@@ -1840,9 +1853,8 @@ func (r *run) hear(ctx context.Context, t *title, ref *reference) error {
 	ref.dir, ref.speech = dir, filepath.Join(dir, "speech.srt")
 	audio := speechTrack(t.info.Audio)
 	var heard voicing
-	d := dialogue(audio)
-	if err := r.cmdTo(ctx, t, 0, &heard, r.env.FFmpeg.FFmpegPath(), "-nostdin", "-hide_banner", "-loglevel", "error", "-i", t.path,
-		"-map", fmt.Sprintf("0:%d", audio.Index), d[0], d[1], "-ar", "16000", "-f", "s16le", "-"); err != nil {
+	args := append(append(r.input(t), "-map", fmt.Sprintf("0:%d", audio.Index)), dialogue(audio)...)
+	if err := r.cmdTo(ctx, t, 0, &heard, r.env.FFmpeg.FFmpegPath(), append(args, "-ar", "16000", "-f", "s16le", "-")...); err != nil {
 		return err
 	}
 	spans := heard.spans()

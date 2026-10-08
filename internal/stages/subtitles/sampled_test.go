@@ -472,12 +472,13 @@ func TestNewSampler(t *testing.T) {
 	}
 }
 
-// Catches the dialogue taken from a mix where a centre channel holds it, or a pan asked of a layout without one (ffmpeg
-// would fail the read).
+// Catches the dialogue taken from a mix where a centre channel holds it, a pan asked of a layout without one (ffmpeg
+// would fail the read), or either not padded to the start (a track that starts late heard early).
 func TestDialogue(t *testing.T) {
-	for layout, want := range map[string]string{"5.1(side)": "-af pan=mono|c0=FC", "7.1": "-af pan=mono|c0=FC",
-		"stereo": "-ac 1", "mono": "-ac 1", "": "-ac 1", "quad": "-ac 1"} {
-		if got := dialogue(probe.Audio{Layout: layout}); got[0]+" "+got[1] != want {
+	pad := "aresample=async=1:first_pts=0"
+	for layout, want := range map[string]string{"5.1(side)": "-af pan=mono|c0=FC," + pad, "7.1": "-af pan=mono|c0=FC," + pad,
+		"stereo": "-ac 1 -af " + pad, "mono": "-ac 1 -af " + pad, "": "-ac 1 -af " + pad, "quad": "-ac 1 -af " + pad} {
+		if got := dialogue(probe.Audio{Layout: layout}); strings.Join(got, " ") != want {
 			t.Errorf("%q: %v, want %s", layout, got, want)
 		}
 	}
