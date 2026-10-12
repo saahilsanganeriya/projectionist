@@ -1,7 +1,8 @@
-# Skeleton ready — projectionist
+# Adding a stage — projectionist
 
-Module `projectionist` (Go 1.26, no remote). Branch `main`; the skeleton is the commit titled
-"Skeleton: stage interface, scheduler, SQLite state, clients, probe, image". `go test ./...` passes on macOS.
+The developer guide: the stage interface, the shared packages and the conventions every stage follows. Module
+`projectionist` (Go 1.26). The skeleton is the commit titled "Skeleton: stage interface, scheduler, SQLite state,
+clients, probe, image". The [README](../README.md) gives the overview; [architecture.md](architecture.md) gives the design.
 
 ## Adding a stage (what each builder does)
 
