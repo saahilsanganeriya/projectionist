@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"projectionist/internal/probe"
+	"projectionist/internal/releasesites"
 )
 
 // render is the note's text. The first ten lines match write_details_files.py field for field (so the notes it
@@ -205,10 +206,10 @@ var (
 		re   *regexp.Regexp
 	}{{"Remux", regexp.MustCompile("remux")}, {"BluRay", regexp.MustCompile("blu-?ray|bdrip|brrip")}, {"WEB-DL", regexp.MustCompile("web-?dl")},
 		{"WEBRip", regexp.MustCompile("webrip")}, {"HDTV", regexp.MustCompile("hdtv")}, {"DVD", regexp.MustCompile("dvd")}}
-	groupPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`-([A-Za-z0-9]+)(?:\[[^\]]+\])?(?:\.\w{2,4})?$`),
-		regexp.MustCompile(`\[([A-Za-z0-9.]+)\]`),
-		regexp.MustCompile(`(?i)\b(SITEA|SITEB|SITEC|Tigole|QxR|Silence)\b`),
+	groupPatterns = []*releasesites.Pattern{
+		releasesites.New(`-([A-Za-z0-9]+)(?:\[[^\]]+\])?(?:\.\w{2,4})?$`),
+		releasesites.New(`\[([A-Za-z0-9.]+)\]`),
+		releasesites.New(`(?i)\b({sites}|Tigole|QxR|Silence)\b`),
 	}
 )
 
@@ -223,7 +224,7 @@ func sourceGroup(name string) (source, group string) {
 		}
 	}
 	for _, re := range groupPatterns {
-		if m := re.FindStringSubmatch(name); m != nil {
+		if m := re.Re().FindStringSubmatch(name); m != nil {
 			group = m[1]
 			break
 		}

@@ -127,15 +127,15 @@ func TestNames(t *testing.T) {
 // Python's own output for these names).
 func TestSourceGroup(t *testing.T) {
 	for name, want := range map[string][2]string{
-		"Heat.1995.1080p.BluRay.x264-SPARKS[sitea].mkv":            {"BluRay", "SPARKS"},
+		"Heat.1995.1080p.BluRay.x264-SPARKS[sitea].mkv":              {"BluRay", "SPARKS"},
 		"Atropia.2025.2160p.4K.WEB.x265.10bit.AAC5.1-[SITEB.BZ].mkv": {"unknown", "SITEB.BZ"},
-		"The.Movie.2010.BluRay.REMUX.1080p-FraMeSToR.mkv":          {"Remux", "FraMeSToR"},
-		"Show S01E01 (1080p BluRay x265 Silence).mkv":              {"BluRay", "Silence"},
-		"show.s01e02.720p.hdtv.x264-killers.mkv":                   {"HDTV", "killers"},
-		"Movie (2001) DVDRip XviD.avi":                             {"DVD", "unknown"},
-		"Movie.2019.WEB-DL.1080p.H264-NTb.mkv":                     {"WEB-DL", "NTb"},
-		"Amélie.2001.1080p.BRRip-ÉQUIPE.mkv":                       {"BluRay", "unknown"},
-		"movie.2012.1080p.webrip.x264.sitec.mp4":                    {"WEBRip", "sitec"},
+		"The.Movie.2010.BluRay.REMUX.1080p-FraMeSToR.mkv":            {"Remux", "FraMeSToR"},
+		"Show S01E01 (1080p BluRay x265 Silence).mkv":                {"BluRay", "Silence"},
+		"show.s01e02.720p.hdtv.x264-killers.mkv":                     {"HDTV", "killers"},
+		"Movie (2001) DVDRip XviD.avi":                               {"DVD", "unknown"},
+		"Movie.2019.WEB-DL.1080p.H264-NTb.mkv":                       {"WEB-DL", "NTb"},
+		"Amélie.2001.1080p.BRRip-ÉQUIPE.mkv":                         {"BluRay", "unknown"},
+		"movie.2012.1080p.webrip.x264.sitec.mp4":                     {"WEBRip", "sitec"},
 	} {
 		if src, group := sourceGroup(name); src != want[0] || group != want[1] {
 			t.Errorf("sourceGroup(%q) = %s, %s; want %s, %s", name, src, group, want[0], want[1])

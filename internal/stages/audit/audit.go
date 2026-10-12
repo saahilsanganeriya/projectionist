@@ -32,6 +32,7 @@ import (
 
 	"projectionist/internal/library"
 	"projectionist/internal/probe"
+	"projectionist/internal/releasesites"
 	"projectionist/internal/stage"
 )
 
@@ -92,7 +93,7 @@ var (
 	extrasDirs = set("Behind The Scenes", "Deleted Scenes", "Featurettes", "Interviews", "Scenes", "Shorts", "Trailers", "Other")
 	ignored    = set("Thumbs.db", "desktop.ini") // dot files are skipped too
 	// The rename engine's sample rule, applied to the file name.
-	sampleName = regexp.MustCompile(`(?i)(^|[ ._\-\[(])sample([ ._\-\])]|$)|^sitea\.com|^sitee\.|^main menu`)
+	sampleName = releasesites.New(`(?i)(^|[ ._\-\[(])sample([ ._\-\])]|$)|^(?:{junk})|^main menu`)
 	// What may sit between a video's base name and a subtitle's extension.
 	sidecarSuffix = regexp.MustCompile(`^\.([a-z]{2,3})(\.sdh|\.forced)?$`)
 )
@@ -311,7 +312,7 @@ func (s *scan) dir(ctx context.Context, dir string, at place, show string) error
 		case seasonDir:
 			_, named = library.ParseEpisode(p)
 		}
-		sample := !named && sampleName.MatchString(n) // a name in the scheme is never a sample
+		sample := !named && sampleName.Re().MatchString(n) // a name in the scheme is never a sample
 		episode := show
 		if sample || at == extrasDir || at == misplaced {
 			episode = ""

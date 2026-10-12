@@ -261,7 +261,7 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 // The Home: the owner (the server's token), Aurelia as the managed user "roger" (no username), Aaron by username, and
 // a child profile behind a PIN.
 const (
-	rogerToken  = "test-token-roger"
+	rogerToken = "test-token-roger"
 	aaronToken = "test-token-aaron"
 )
 
@@ -1210,7 +1210,7 @@ func TestEachMembersOwnPlexWatchlist(t *testing.T) {
 	}
 	step("first run", 0, "his m18,m565,show565; hers m18,m387426,m565,m999; Aaron's m387426,m718032", 1)
 
-	w.lb.serve("/zaurelia/watchlist/", watchlistPage(okja, prime))     // she takes The Ring and What Happened Was off it, adds Primetime,
+	w.lb.serve("/zaurelia/watchlist/", watchlistPage(okja, prime))    // she takes The Ring and What Happened Was off it, adds Primetime,
 	w.pt.set(rogerToken, "m18", "m999", "m387426", "m565", "m999001") // which she also puts on her Plex watchlist by hand
 	hits := w.lb.hits["/zaurelia/watchlist/"]
 	step("an hour later", time.Hour, "his m18,m565,show565; hers m18,m387426,m565,m999,m999001; Aaron's m387426,m718032", 1)

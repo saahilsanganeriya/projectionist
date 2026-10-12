@@ -30,6 +30,7 @@ import (
 	"projectionist/internal/obs"
 	"projectionist/internal/plex"
 	"projectionist/internal/probe"
+	"projectionist/internal/releasesites"
 	"projectionist/internal/scheduler"
 	"projectionist/internal/server"
 	"projectionist/internal/stage"
@@ -130,6 +131,7 @@ func run(cfgPath, only string) int {
 		return 2
 	}
 	log := obs.NewLogger(os.Stderr, cfg.Log.Format, cfg.Log.Level).With("version", version)
+	releasesites.Set(cfg.ReleaseSites.Names, cfg.ReleaseSites.JunkFilePrefixes)
 
 	st, err := store.Open(cfg.StateDB)
 	if err != nil {

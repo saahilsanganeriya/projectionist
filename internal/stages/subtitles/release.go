@@ -128,7 +128,7 @@ func sxe(season, episode int) string { return "s" + strconv.Itoa(season) + "e" +
 
 var (
 	groupSuffixRe  = regexp.MustCompile(`-([a-z0-9]+)(?:\[[^\]]*\])?$`)      // scene: ...x264-GROUP[tracker]
-	groupBracketRe = regexp.MustCompile(`\[([a-z0-9]+)(?:\.[a-z]{2,3})?\]$`) // ... [SITEB.MX], [SkyLake]
+	groupBracketRe = regexp.MustCompile(`\[([a-z0-9]+)(?:\.[a-z]{2,3})?\]$`) // ... [SITE.MX], [SkyLake]
 	groupParenRe   = regexp.MustCompile(`\(([^()]*)\)$`)                     // re-encoders: (1080p BluRay x265 Silence)
 	notGroup       = map[string]bool{"x264": true, "x265": true, "h264": true, "h265": true, "hevc": true, "avc": true, "av1": true,
 		"aac": true, "ac3": true, "eac3": true, "dts": true, "opus": true, "flac": true, "truehd": true, "atmos": true, "hdr": true,

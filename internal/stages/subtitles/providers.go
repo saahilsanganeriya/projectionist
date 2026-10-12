@@ -1,12 +1,12 @@
 package subtitles
 
 // Subtitle providers, called directly (never through Plex): OpenSubtitles through Stremio's add-on (uncapped, the first
-// OpenSubtitles route) and its legacy REST API, Gestdown (Addic7ed's TV subtitles) and SITEC Subtitles (movies), none
+// OpenSubtitles route) and its legacy REST API, Gestdown (Addic7ed's TV subtitles) and a film site (movies), none
 // of which needs a key; SubSource (the Subscene archive) and Subdl, each only when its API key file exists;
 // OpenSubtitles.com, only when its API key and a free user's username and password files exist; and the offline OPUS
 // archive (opus.go). Ranking, the file hash, the release name, the ad stripping and the legacy API's download quota
 // are ports of subfetch2.py v8. Every request goes through its provider's pacer: requests a gap apart (1 s; 2 s for
-// Gestdown, SITEC and SubSource), exponential backoff on 429/5xx/network errors, and parking for the rest of the run
+// Gestdown, the film site and SubSource), exponential backoff on 429/5xx/network errors, and parking for the rest of the run
 // once the provider keeps failing, refuses a search or spends its download quota, so the titles that need it wait for
 // the next run. Legacy downloads take a slot every 8 min that no title waits for: one that finds it taken goes on
 // without OpenSubtitles (errBusy), and the next to ask once it is free takes it. The legacy API's quota, Subdl's and
@@ -63,7 +63,7 @@ type Candidate struct {
 	HashMatch       bool
 	HearingImpaired bool
 	Downloads       int
-	Rating          float64 // OpenSubtitles' SubRating (0-10), SITEC's vote score: rank() adds 100 a point
+	Rating          float64 // OpenSubtitles' SubRating (0-10), the film site's vote score: rank() adds 100 a point
 	FPS             float64 // the frame rate it was timed for, where the provider says (OpenSubtitles); 0 otherwise
 	Encoding        string
 	Season, Episode string
@@ -1229,26 +1229,27 @@ func (o *gestdown) Download(ctx context.Context, c Candidate) (string, error) {
 	return decodeDownload(raw, ""), nil
 }
 
-// ---- SITEC Subtitles: films by IMDb id (subtitles.example.com, no key) ----
+// ---- the film site (FilmSite): films by IMDb id, no key ----
 
 var (
-	sitecRowRe    = regexp.MustCompile(`(?s)<tr data-id="\d+">.*?</tr>`)
-	sitecLinkRe   = regexp.MustCompile(`<a href="/subtitles/([^"]+)"><span class="text-muted">subtitle</span>([^<]*)</a>`)
-	sitecRatingRe = regexp.MustCompile(`class="label[^"]*">(-?\d+)<`)
-	sitecZipRe    = regexp.MustCompile(`href="(/subtitle/[^"]+\.zip)"`)
+	filmRowRe    = regexp.MustCompile(`(?s)<tr data-id="\d+">.*?</tr>`)
+	filmLinkRe   = regexp.MustCompile(`<a href="/subtitles/([^"]+)"><span class="text-muted">subtitle</span>([^<]*)</a>`)
+	filmRatingRe = regexp.MustCompile(`class="label[^"]*">(-?\d+)<`)
+	filmZipRe    = regexp.MustCompile(`href="(/subtitle/[^"]+\.zip)"`)
 )
 
-type sitec struct {
-	base string // https://subtitles.example.com
+type filmSite struct {
+	name string
+	base string
 	hc   *http.Client
 	pace *pacer
 }
 
-func (o *sitec) Name() string  { return "sitec" }
-func (o *sitec) pacer() *pacer { return o.pace }
+func (o *filmSite) Name() string  { return o.name }
+func (o *filmSite) pacer() *pacer { return o.pace }
 
 // Search reads the film's page: one table row per subtitle, of every language.
-func (o *sitec) Search(ctx context.Context, q Query) ([]Candidate, error) {
+func (o *filmSite) Search(ctx context.Context, q Query) ([]Candidate, error) {
 	if q.Show || q.IMDb == 0 {
 		return nil, nil
 	}
@@ -1263,15 +1264,15 @@ func (o *sitec) Search(ctx context.Context, q Query) ([]Candidate, error) {
 		return nil, err
 	}
 	var out []Candidate
-	for _, row := range sitecRowRe.FindAllString(string(body), -1) {
-		link := sitecLinkRe.FindStringSubmatch(row)
+	for _, row := range filmRowRe.FindAllString(string(body), -1) {
+		link := filmLinkRe.FindStringSubmatch(row)
 		if link == nil || !strings.Contains(row, `class="sub-lang">English<`) {
 			continue
 		}
-		c := Candidate{Source: "sitec", ID: link[1], Release: html.UnescapeString(strings.TrimSpace(link[2])),
+		c := Candidate{Source: o.name, ID: link[1], Release: html.UnescapeString(strings.TrimSpace(link[2])),
 			HearingImpaired: strings.Contains(row, `class="hi-subtitle"`), link: o.base + "/subtitles/" + link[1], provider: o,
 			ours: true} // the film's own page
-		if m := sitecRatingRe.FindStringSubmatch(row); m != nil {
+		if m := filmRatingRe.FindStringSubmatch(row); m != nil {
 			c.Rating, _ = strconv.ParseFloat(m[1], 64)
 		}
 		out = append(out, c)
@@ -1282,7 +1283,7 @@ func (o *sitec) Search(ctx context.Context, q Query) ([]Candidate, error) {
 // Download reads the subtitle's page for its zip (whose name can differ from the page's: Amélie's page is
 // le-fabuleux-destin-damelie-poulain-2001-..., its zip amelie-2001-...), then fetches it from that page as a browser
 // would: without the Referer the site answers a challenge page, which parks the provider, as a 403 does.
-func (o *sitec) Download(ctx context.Context, c Candidate) (string, error) {
+func (o *filmSite) Download(ctx context.Context, c Candidate) (string, error) {
 	get := func(link, referer string) ([]byte, error) {
 		body, err := o.pace.do(ctx, o.hc, func() (*http.Request, error) {
 			r, err := http.NewRequest(http.MethodGet, link, nil)
@@ -1292,7 +1293,7 @@ func (o *sitec) Download(ctx context.Context, c Candidate) (string, error) {
 			return r, err
 		})
 		if se := (*statusError)(nil); errors.As(err, &se) && se.code == http.StatusForbidden {
-			o.pace.park(errors.New("sitec answered 403"))
+			o.pace.park(errors.New(o.name + " answered 403"))
 			return nil, o.pace.parkedErr()
 		}
 		return body, err
@@ -1301,16 +1302,16 @@ func (o *sitec) Download(ctx context.Context, c Candidate) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	zipLink := sitecZipRe.FindSubmatch(page)
+	zipLink := filmZipRe.FindSubmatch(page)
 	if zipLink == nil {
-		return "", errors.New("sitec: no zip on the subtitle's page")
+		return "", errors.New(o.name + ": no zip on the subtitle's page")
 	}
 	body, err := get(o.base+string(zipLink[1]), c.link)
 	if err != nil {
 		return "", err
 	}
 	if !bytes.HasPrefix(body, []byte("PK")) {
-		o.pace.park(errors.New("sitec answered a challenge page instead of the zip"))
+		o.pace.park(errors.New(o.name + " answered a challenge page instead of the zip"))
 		return "", o.pace.parkedErr()
 	}
 	return zipSRT(body)

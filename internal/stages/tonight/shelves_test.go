@@ -30,7 +30,7 @@ func TestRestrictionsAreMergedNotReplaced(t *testing.T) {
 	}
 	for name, want := range map[string]string{"roger": "contentRating=G,PG&label!=Tonight-saahil,Tonight-aaron",
 		"aarontest941": "contentRating=R|label!=Gore&label!=Kids,Horror,Tonight-roger,Tonight-saahil",
-		"adam7":    "label!=Tonight-aaron,tonight-roger,Tonight-saahil"} {
+		"adam7":        "label!=Tonight-aaron,tonight-roger,Tonight-saahil"} {
 		if got := w.tv.filter(name); got != want {
 			t.Errorf("%s's Movies restrictions %q, want %q", name, got, want)
 		}

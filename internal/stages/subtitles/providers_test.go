@@ -675,11 +675,11 @@ func TestStremio(t *testing.T) {
 	}
 }
 
-// Catches SITEC asked by anything but the film's IMDb id, another language's row kept, the hearing-impaired mark or
-// the vote score lost, the zip guessed from the page's name instead of read from the page (Amélie's differ), the zip
-// fetched without its page as Referer, or the challenge page (what SITEC answers without it) or a 403 taken for a
-// subtitle instead of parking SITEC.
-func TestSitec(t *testing.T) {
+// Catches the film site asked by anything but the film's IMDb id, its candidates recorded under any name but the
+// configured one, another language's row kept, the hearing-impaired mark or the vote score lost, the zip guessed from
+// the page's name instead of read from the page (Amélie's differ), the zip fetched without its page as Referer, or the
+// challenge page (what the site answers without it) or a 403 taken for a subtitle instead of parking the site.
+func TestFilmSite(t *testing.T) {
 	row := func(id, lang, release, extra string) string {
 		return `<tr data-id="` + id + `"><td class="rating-cell"><span class="label label-success">3</span></td><td class="flag-cell">` +
 			`<span class="sub-lang">` + lang + `</span></td><td><a href="/subtitles/destin-` + id + `"><span class="text-muted">subtitle</span> ` +
@@ -702,9 +702,10 @@ func TestSitec(t *testing.T) {
 		}
 	})
 	now := time.Unix(0, 0)
-	o := &sitec{base: srv.URL, hc: srv.Client(), pace: testPacer(&recorder{}, &now)}
+	o := &filmSite{name: "filmsite", base: srv.URL, hc: srv.Client(), pace: testPacer(&recorder{}, &now)}
 	got, err := o.Search(context.Background(), Query{IMDb: 211915})
-	if err != nil || len(got) != 1 || got[0].Release != "Amelie.2001.720p.BluRay.x264.[SITEB.AG] & more" || !got[0].HearingImpaired || got[0].Rating != 3 {
+	if err != nil || len(got) != 1 || got[0].Source != "filmsite" || got[0].Release != "Amelie.2001.720p.BluRay.x264.[SITEB.AG] & more" ||
+		!got[0].HearingImpaired || got[0].Rating != 3 {
 		t.Fatalf("search: %+v %v", got, err)
 	}
 	if txt, err := o.Download(context.Background(), got[0]); err != nil || txt != "1\n00:00:01,000 --> 00:00:02,000\nHi\n" {
@@ -713,7 +714,7 @@ func TestSitec(t *testing.T) {
 	for _, page := range []string{"destin-x", "destin-403"} {
 		o.pace = testPacer(&recorder{}, &now)
 		if _, err := o.Download(context.Background(), Candidate{ID: page, link: srv.URL + "/subtitles/" + page}); !errors.Is(err, errParked) {
-			t.Errorf("%s: %v; want SITEC parked", page, err)
+			t.Errorf("%s: %v; want the site parked", page, err)
 		}
 	}
 }

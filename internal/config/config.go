@@ -25,11 +25,20 @@ type Config struct {
 	Fanart   Fanart     `toml:"fanart"`
 	LLM      llm.Config `toml:"llm"` // the AI gateway and each task's model (or API of its own); unset keys take llm.Defaults
 
+	ReleaseSites ReleaseSites `toml:"release_sites"`
+
 	Stages map[string]toml.Primitive `toml:"stages"`
 
 	md       toml.MetaData
 	mdMu     sync.Mutex // toml.MetaData is not safe for concurrent decodes; stages decode their options as they start
 	location *time.Location
+}
+
+// ReleaseSites names the trackers and indexers whose tags ride on the library's release names and subtitle files
+// (releasesites.Set takes them at startup). Empty: none are known, and no name is read as a site's.
+type ReleaseSites struct {
+	Names            []string `toml:"names"`              // a release's site tag and a subtitle's advert line
+	JunkFilePrefixes []string `toml:"junk_file_prefixes"` // a file named so is a site's bundled clip, never the title's video
 }
 
 type Log struct {

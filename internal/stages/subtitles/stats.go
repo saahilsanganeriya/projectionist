@@ -16,13 +16,15 @@ import (
 	"strconv"
 	"strings"
 	"unicode"
+
+	"projectionist/internal/releasesites"
 )
 
 const statsHeader = "path\tsize\tsha1\tcues\tsdh_share\tad_only\tscript\tidx_langs\tsample\tlang_guess\n"
 
 var (
 	subtitleExt = map[string]bool{".srt": true, ".ass": true, ".ssa": true, ".vtt": true, ".sub": true, ".idx": true, ".smi": true}
-	adRe        = regexp.MustCompile(`(?i)(siteb|sitec|opensubtitles|subscene|provided by|downloaded from|advertise|www\.|\.com|\.org|sitea|sync(ed)? by|subtitles? by|resync)`)
+	adRe        = releasesites.New(`(?i)({sites}|opensubtitles|subscene|provided by|downloaded from|advertise|www\.|\.com|\.org|sync(ed)? by|subtitles? by|resync)`)
 	timeRe      = regexp.MustCompile(`^` + pyDigit + pyDigit + `:` + pyDigit + pyDigit + `:` + pyDigit + pyDigit + `[,.]` + pyDigit + `+` + pySpace + `*-->`)
 	sdhRe       = regexp.MustCompile(`^` + pySpace + `*([\[(♪]|[A-Z][A-Z .'\-]{2,}:)`)
 	idxLangRe   = regexp.MustCompile(`(?m)^id:` + pySpace + `*([a-z]{2})`)
@@ -194,7 +196,7 @@ func statsRow(ext string, raw []byte) string {
 				if sdhRe.MatchString(l) {
 					sdhLines++
 				}
-				if adRe.MatchString(l) {
+				if adRe.Re().MatchString(l) {
 					adLines++
 				}
 			}

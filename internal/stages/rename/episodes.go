@@ -54,7 +54,7 @@ func fileEpisode(name string) (fileEp, bool) {
 	if i := titleCut.FindStringIndex(rest); i != nil {
 		rest = rest[:i[0]]
 	}
-	if q := quality.FindStringIndex(rest); q != nil {
+	if q := quality.Re().FindStringIndex(rest); q != nil {
 		rest = rest[:q[0]]
 	}
 	return fileEp{atoi(s[loc[2]:loc[3]]), first, last, strings.TrimFunc(rest, func(r rune) bool { return isPySpace(r) || r == '-' || r == '–' })}, true

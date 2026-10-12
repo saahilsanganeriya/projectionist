@@ -6,6 +6,13 @@ state_db = "/state/projectionist.db" # SQLite on the btrfs volume (never on SMB/
 timezone = "America/Los_Angeles"     # used only for stage windows; logs and the DB are UTC
 owners   = ["saahilsanganeriya", "saahil"] # Plex, Jellyfin accounts whose viewing never pauses a job
 
+# Trackers and indexers whose tags ride on the library's release names ('[SITE.MX]', 'x264-SITE') and whose adverts sit
+# in subtitle files: a name here is never read as part of a title, and a subtitle line naming one is an advert. A file
+# whose name starts with a junk_file_prefixes entry is a site's bundled clip or notice, never the title's video.
+[release_sites]
+names              = [] # e.g. ["SITE"]
+junk_file_prefixes = [] # e.g. ["site.com", "group."]
+
 [log]
 format = "text" # key=value lines; "json" for JSON lines
 level  = "info"
@@ -189,7 +196,7 @@ webhook_url    = "http://127.0.0.1:8097/hooks/plex" # registered on the owner's 
 users = [
   { name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" },
   { name = "roger",  plex = "roger",             jellyfin = "roger" },
-  { name = "aaron", plex = "Aaron Test",      jellyfin = "aaron" },
+  { name = "aaron",  plex = "Aaron Test",        jellyfin = "aaron" },
 ]
 
 # Keeps "<dir>/.details/<video>.txt" true for every video in the scheme, from ffprobe and the rename logs;
@@ -239,7 +246,7 @@ quiet        = "10m" # a folder written to more recently is still arriving
 # English image track's caption starts, else the voice band of its audio), written retimed only when every window has
 # evidence and agrees. Anything else waits in the alignment queue, worked while nobody but the owner watches, at most
 # align_per_day titles in any 24 h (sampled mode: only inside align_window). Providers are called
-# directly, never through Plex: Gestdown (Addic7ed, episodes) and SITEC Subtitles (films) need no key; SubSource (the
+# directly, never through Plex: Gestdown (Addic7ed, episodes) and a film site (film_site) need no key; SubSource (the
 # Subscene archive; a free key, 7,200 requests a day) and Subdl join only when <secrets_dir>/subsource_api_key,
 # subdl_api_key exists. OpenSubtitles' legacy REST API (180 downloads a day) and OpenSubtitles.com (20 a day for a
 # free user) come last whatever this list's order, and are used for a hash match, or when no other provider has a
@@ -259,7 +266,8 @@ workers       = 3                      # titles searched at once; the queue alig
 max_titles    = 0                      # per run; 0 = every due title
 secrets_dir   = "/run/secrets"
 alass         = "/usr/local/bin/alass" # the queue: aligns to the audio when there is no English image track, and rescues misfits
-providers     = ["gestdown", "subsource", "sitec", "subdl", "opensubtitles", "opensubtitles-com"]
+providers     = ["gestdown", "subsource", "subdl", "opensubtitles", "opensubtitles-com"]
+# film_site   = { name = "filmsite", url = "https://subtitles.example.com" } # pages at /movie-imdb/tt<id>; add its name to providers
 align_per_day = 20                     # queued titles aligned in any 24 h, counted as each starts reading its video; 0 = none
 mode          = "sampled"              # sampled: the routes above. careful, the rollback: only a release match before
                                        # the queue, which aligns at any hour
@@ -333,8 +341,8 @@ plex_map_timeout = "10m"                         # the daily TMDB id → ratingK
 # cached, and the day's picks raise one alert naming them. Unset: him alone.
 people = [
   { person = "saahil", user = "saahilsan",  plex_user = "saahilsanganeriya", export_dir = "/volume1/docker/projectionist/data/letterboxd" },
-  { person = "roger",  user = "auralb", plex_user = "roger", name = "Aurelia" },
-  { person = "aaron", user = "aaron1009", plex_user = "aarontest941" },
+  { person = "roger",  user = "auralb",    plex_user = "roger", name = "Aurelia" },
+  { person = "aaron",  user = "aaron1009", plex_user = "aarontest941" },
 ]
 
 # Real-time trigger: inotify on the library and finished downloads. A top-level folder (a movie, a show, a download)

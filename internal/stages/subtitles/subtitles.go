@@ -8,7 +8,7 @@
 //	an English text track inside      -> not searched: the extraction pass reads it and writes it as the sidecar once
 //	(tagged English, or undetermined)    its text reads as English; a title whose tracks it refused is searched
 //	                                     (extract.go)
-//	else candidates from the providers (Gestdown, SubSource with a key, SITEC, Subdl with a key, OpenSubtitles through
+//	else candidates from the providers (Gestdown, SubSource with a key, a film site, Subdl with a key, OpenSubtitles through
 //	Stremio's add-on, the offline OPUS archive (opus.go); OpenSubtitles legacy and .com, with a key and a user's
 //	login, searched last and only for a title Stremio's route did not answer; one subtitle two OpenSubtitles routes
 //	find is one candidate),
@@ -165,8 +165,9 @@ type Options struct {
 	// subsource and subdl also need subsource_api_key, subdl_api_key in secrets_dir; opensubtitles-com needs
 	// opensubtitles_api_key, opensubtitles_username and opensubtitles_password. A provider without them is skipped.
 	// opensubtitles-stremio (no key) is the first OpenSubtitles route: opensubtitles and opensubtitles-com are searched
-	// only for a title it did not answer.
+	// only for a title it did not answer. film_site's name, when it is set, is one more.
 	Providers []string `toml:"providers"`
+	FilmSite  FilmSite `toml:"film_site"`
 	// subfetch2.py's OUT folder: its quota.csv and downloads.csv seed the OpenSubtitles quota once, at cutover.
 	LegacyQuota string `toml:"legacy_quota"`
 	AlignPerDay int    `toml:"align_per_day"` // queued titles aligned in any 24 h; each reads its video once or twice
@@ -195,14 +196,13 @@ type Options struct {
 
 func defaults() Options {
 	return Options{
-		Roots:      []string{"/volume1/media/Movies", "/volume1/media/TV"},
-		StatsFile:  "/state/sub_stats.tsv",
-		RetryAfter: 7 * 24 * time.Hour,
-		Workers:    3,
-		SecretsDir: "/run/secrets",
-		Alass:      "/usr/local/bin/alass",
-		Providers: []string{"gestdown", "subsource", "sitec", "subdl", "opensubtitles-stremio", "opensubtitles",
-			"opensubtitles-com"},
+		Roots:         []string{"/volume1/media/Movies", "/volume1/media/TV"},
+		StatsFile:     "/state/sub_stats.tsv",
+		RetryAfter:    7 * 24 * time.Hour,
+		Workers:       3,
+		SecretsDir:    "/run/secrets",
+		Alass:         "/usr/local/bin/alass",
+		Providers:     []string{"gestdown", "subsource", "subdl", "opensubtitles-stremio", "opensubtitles", "opensubtitles-com"},
 		LegacyQuota:   "/volume1/PlexMediaServer/subtitle-downloads",
 		AlignPerDay:   20,
 		Mode:          "sampled",
@@ -218,9 +218,16 @@ func defaults() Options {
 	}
 }
 
+// FilmSite is a subtitle website with a page per film at /movie-imdb/tt<id>, a row per subtitle and a zip per
+// subtitle page; it needs no key. The name is how providers lists it and what its candidates are recorded under.
+type FilmSite struct {
+	Name string `toml:"name"`
+	URL  string `toml:"url"`
+}
+
 // Stage's fields are test hooks; the zero value talks to the real services.
 type Stage struct {
-	openSubtitles, openSubtitlesCom, subdlAPI, subdlDL, gestdownAPI, sitecSite, subsourceAPI, stremioAPI string
+	openSubtitles, openSubtitlesCom, subdlAPI, subdlDL, gestdownAPI, filmSiteURL, subsourceAPI, stremioAPI string
 
 	sleep   func(context.Context, time.Duration) error
 	remote  *broker // nil: the process's own
@@ -492,8 +499,12 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 		case "gestdown": // free community services: half the rate
 			r.providers = append(r.providers, &gestdown{base: or(s.gestdownAPI, "https://api.gestdown.info"), hc: hc,
 				pace: newPacer(2 * time.Second), shows: map[string]string{}})
-		case "sitec":
-			r.providers = append(r.providers, &sitec{base: or(s.sitecSite, "https://subtitles.example.com"), hc: hc, pace: newPacer(2 * time.Second)})
+		case opt.FilmSite.Name:
+			if p == "" || opt.FilmSite.URL == "" {
+				return nil, fmt.Errorf("subtitles: provider %q: film_site needs a name and a url", p)
+			}
+			r.providers = append(r.providers, &filmSite{name: p, base: or(s.filmSiteURL, opt.FilmSite.URL), hc: hc,
+				pace: newPacer(2 * time.Second)})
 		default:
 			return nil, fmt.Errorf("subtitles: unknown provider %q", p)
 		}
@@ -1066,7 +1077,7 @@ func (r *run) fetch(ctx context.Context, t *title) outcome {
 		return outcome{result: "error", detail: err.Error()}
 	}
 	if t.kind == "movie" || t.kind == "tv" {
-		// OpenSubtitles finds nearly every subtitle by the IMDb id, SITEC only by it, Gestdown by the TheTVDB id: without
+		// OpenSubtitles finds nearly every subtitle by the IMDb id, a film site only by it, Gestdown by the TheTVDB id: without
 		// TMDB the title waits for it, rather than being searched without them and recorded as having none.
 		why, err := r.identify(ctx, t, &q)
 		switch {

@@ -14,6 +14,8 @@ import (
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
+
+	"projectionist/internal/releasesites"
 )
 
 // pyS is Python's \s for str patterns (Unicode whitespace); Go's \s is ASCII-only.
@@ -36,9 +38,9 @@ var (
 	extraFolder = regexp.MustCompile(`(?i)^[^\pL\pN]*(extras?|bonus( features)?|special features|featurettes?|making[ .-]of|` +
 		`behind the scenes|deleted scenes|interviews|scenes|shorts|trailers|other|criterion extras|plex versions? extras?)` +
 		`( ?[-–] ?season \d+| season \d+| season [a-z]+)?$`)
-	sampleRe = regexp.MustCompile(`(?i)(^|[ ._\-\[(])sample([ ._\-\])]|$)|^sitea\.com|^sitee\.|^main menu`)
-	quality  = regexp.MustCompile(`(?i)\b(\d{3,4}p|web[ .-]?(dl|rip)?|blu[ .-]?ray|bdrip|brrip|hdtv|x26[45]|h[ .]?26[45]|hevc|avc|aac|ac3|` +
-		`dts|ddp?\d|atmos|remux|10bit|amzn|nf|dsnp|hmax|atvp|repack|proper|internal|sitea)\b`)
+	sampleRe = releasesites.New(`(?i)(^|[ ._\-\[(])sample([ ._\-\])]|$)|^(?:{junk})|^main menu`)
+	quality  = releasesites.New(`(?i)\b(\d{3,4}p|web[ .-]?(dl|rip)?|blu[ .-]?ray|bdrip|brrip|hdtv|x26[45]|h[ .]?26[45]|hevc|avc|aac|ac3|` +
+		`dts|ddp?\d|atmos|remux|10bit|amzn|nf|dsnp|hmax|atvp|repack|proper|internal|{sites})\b`)
 	genericWords = set("the", "a", "an", "of", "and", "version", "cut", "edition", "bluray", "web", "dl", "x264", "x265", "hevc", "h264",
 		"1080p", "720p", "2160p", "4k", "uhd", "en", "eng", "english", "srt", "sub", "subs", "mkv", "mp4")
 	cuts = []struct {

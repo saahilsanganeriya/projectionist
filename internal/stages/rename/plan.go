@@ -319,7 +319,7 @@ func (p *planner) planMovies() (*videoPlan, []Op, []Review) {
 			isMain := size == largest && size > bigFile // never treat the film itself as a sample
 			small := len(files) > 1 && float64(size) < 0.05*float64(largest) && size < bigFile
 			switch {
-			case !isMain && (sampleRe.MatchString(name) || small):
+			case !isMain && (sampleRe.Re().MatchString(name) || small):
 				ops = append(ops, Op{unit, "archive", f, p.archive + "/samples/Movies/" + strings.Join(rel, "/"), "sample/ad clip filed as a version"})
 			case len(rel) >= 3 && rel[0] != "Remote Versions" && extraFolder.MatchString(rel[len(rel)-2]):
 				videos.set(f, planned{unit, folder + "/" + extraCategory(rel[:len(rel)-1]), component(clean(stem(name))), lowerExt(f), "extra"})
@@ -762,7 +762,7 @@ func (p *planner) planRoot(root string, videos *videoPlan, files []string, speci
 				}
 			}
 			switch home := unitHome[ownerUnit]; {
-			case sampleRe.MatchString(name) && size < 600_000_000:
+			case sampleRe.Re().MatchString(name) && size < 600_000_000:
 				ops = append(ops, Op{unitOrMisc, "archive", f, p.archive + "/samples/" + rootName + "/" + strings.Join(rel, "/"), "sample clip"})
 			case extraDir != "" && ownerUnit != "" && home != "":
 				cat := extraCategory(rel[:len(rel)-1])

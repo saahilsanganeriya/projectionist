@@ -22,11 +22,12 @@ import (
 	"golang.org/x/text/encoding/charmap"
 	xunicode "golang.org/x/text/encoding/unicode"
 
+	"projectionist/internal/releasesites"
 	"projectionist/internal/stage"
 )
 
 var (
-	adLine     = regexp.MustCompile(`(?i)(siteb|sitec|opensubtitles|subscene|provided by|downloaded from|advertise|www\.|\.com|\.org|sitea|sync(ed)? by|subtitles? by|resync)`)
+	adLine     = releasesites.New(`(?i)({sites}|opensubtitles|subscene|provided by|downloaded from|advertise|www\.|\.com|\.org|sync(ed)? by|subtitles? by|resync)`)
 	cueTime    = regexp.MustCompile(`^\d\d:\d\d:\d\d[,.]\d+` + pyS + `*-->`)
 	sdhLine    = regexp.MustCompile(`^` + pyS + `*([\[(♪]|[A-Z][A-Z .'\-]{2,}:)`)
 	idxLang    = regexp.MustCompile(`(?m)^id:` + pyS + `*([a-z]{2})`)
@@ -156,7 +157,7 @@ func readSubFacts(raw []byte, ext string) SubFacts {
 			if sdhLine.MatchString(l) {
 				sdh++
 			}
-			if adLine.MatchString(l) {
+			if adLine.Re().MatchString(l) {
 				ads++
 			}
 		}

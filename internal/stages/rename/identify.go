@@ -207,8 +207,8 @@ var (
 	releaseCut      = regexp.MustCompile(`(?i)(?:^|[ \[(])(?:S\d{1,2}(?:E\d+)?|season|series|complete|\d{3,4}p|web[ -]?(?:dl|rip)?|blu[ -]?ray|bdrip|brrip|hdtv|dvdrip|x26[45]|h[ .]?26[45]|hevc|remux|uhd|imax|extended|unrated|proper|repack)(?:$|[ \])\-])`)
 	yearToken       = regexp.MustCompile(`\b((?:19|20)\d\d)\b`)
 	bracketOpen     = regexp.MustCompile(`[\[(]`)
-	// a torrent site's tag in front of the release: a www. host, or any host in brackets ('www.SiteF.org  -  ',
-	// '[ www.SiteH.com ] - ', '[SITEB.MX]'). A bracket with no host in it is a title ('[REC]').
+	// a torrent site's tag in front of the release: a www. host, or any host in brackets ('www.site.org  -  ',
+	// '[ www.site.com ] - ', '[SITE.MX]'). A bracket with no host in it is a title ('[REC]').
 	siteTag = regexp.MustCompile(`(?i)^(?:www\.[\w-]+\.[a-z]{2,}|\[ *(?:www\.)?[\w-]+\.[a-z]{2,} *\])[ ._\-–]*`)
 )
 
