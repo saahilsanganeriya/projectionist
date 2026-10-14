@@ -380,7 +380,7 @@ three keys (`enabled`, `every`, `window`).
 | stages.posters | `director_min_score` | number |  | 4 | 4 | a director's photo needs this judge score or no poster |
 | stages.posters | `commons_api` | string |  | "https://commons.wikimedia.org/w/api.php" | "https://commons.wikimedia.org/w/api.php" | Wikimedia Commons' API (directors' photos) |
 | stages.posters | `commons_contact` | string |  | none | "you@example.com" | a URL or e-mail for the User-Agent: Wikimedia then allows 20× the rate |
-| stages.posters | `taste_references` | list of strings |  | none |  | title keys of posters you chose, shown to the judge as your taste |
+| stages.posters | `taste_references` | list of strings |  | none |  | title keys of posters you chose, shown to the judge as your taste; with taste_references_current at most 26 are sent (a call takes 32 images, a pool 6), the list's tail left out |
 | stages.posters | `taste_references_current` | list of strings |  | none |  | titles whose current Plex poster is your taste: fetched once and cached |
 | stages.posters | `criterion` | boolean |  | true | true | a film the Criterion Collection released gets its cover art as a candidate |
 | stages.posters | `wikidata_sparql` | string |  | "https://query.wikidata.org/sparql" | "https://query.wikidata.org/sparql" | Wikidata's SPARQL endpoint (Criterion releases) |
