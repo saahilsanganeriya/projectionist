@@ -269,7 +269,8 @@ func TestPlanSubtitles(t *testing.T) {
 
 // Catches the safety checks that block a unit: two files onto one name (case-insensitively, as SMB sees them), a
 // target that already exists, one video stem prefixing another in a folder, and a name component the share cannot
-// hold (over 255 bytes, or ending in a dot or a space, which SMB clients cannot open).
+// hold (over 255 bytes, or ending in a dot or a space, which SMB clients cannot open). An empty file at a video's
+// target (a copy that never finished) is no problem: the executor archives it.
 func TestCheckProblems(t *testing.T) {
 	long := strings.Repeat("é", 128) // 256 bytes, 128 characters
 	ops := []Op{
@@ -281,8 +282,12 @@ func TestCheckProblems(t *testing.T) {
 		{"movie:e", "move", "/x/5.mkv", "/lib/Movies/E/" + long + ".mkv", ""},
 		{"movie:f", "move", "/x/6.mkv", "/lib/Movies/F Jr./F.mkv", ""},
 		{"movie:g", "archive", "/x/7.nfo", "/lib/_archive/junk/G /7.nfo", ""},
+		{"movie:h", "move", "/x/8.mkv", "/lib/Movies/H/H.mkv", ""},
 	}
-	problems := check(ops, map[string]int64{"/lib/Movies/C/C.mkv": 1})
+	problems := check(ops, map[string]int64{"/lib/Movies/C/C.mkv": 1, "/lib/Movies/H/H.mkv": 0, "/x/8.mkv": 9})
+	if len(problems["movie:h"]) > 0 {
+		t.Errorf("movie:h: problems %q; want none for an empty file at the target", problems["movie:h"])
+	}
 	want := map[string]string{"movie:a": "collision", "movie:b": "collision", "movie:c": "target exists", "movie:d": "stem prefix clash",
 		"movie:e": "bad component", "movie:f": "bad component", "movie:g": "bad component"}
 	for unit, w := range want {

@@ -845,8 +845,8 @@ func check(ops []Op, files map[string]int64) map[string][]string {
 			if dsts[casefold.String(o.Dst)] > 1 {
 				add(o.Unit, "collision: "+o.Dst)
 			}
-			if _, exists := files[o.Dst]; exists && o.Dst != o.Src {
-				add(o.Unit, "target exists: "+o.Dst)
+			if size, exists := files[o.Dst]; exists && o.Dst != o.Src && !(size == 0 && files[o.Src] > 0 && videoExt[lowerExt(o.Src)]) {
+				add(o.Unit, "target exists: "+o.Dst) // an empty file there is a copy that never finished: the executor archives it
 			}
 			for _, c := range strings.Split(o.Dst, "/")[1:] {
 				if len(c) > maxName || c != strings.TrimRight(c, " .") {
