@@ -146,17 +146,17 @@ func TestRecommendedFollowsTaste(t *testing.T) {
 		return film{TMDB: id, Title: title, Year: 2010, Genres: []string{genre}, Keywords: keywords, Recs: recs, Votes: 900}
 	}
 	lib := map[int]film{
-		1:  f(1, "Space One", "Science Fiction", []string{"space", "astronaut"}, 20),
+		1:  f(1, "Space One", "Science Fiction", []string{"space", "astronaut"}, 90),
 		2:  f(2, "Space Two", "Science Fiction", []string{"space", "alien"}),
 		3:  f(3, "Space Three", "Science Fiction", []string{"space"}),
 		4:  f(4, "Weepie", "Romance", []string{"romance", "wedding"}),
 		10: f(10, "Space Four", "Science Fiction", []string{"space", "astronaut"}),
-		20: f(20, "Quiet Drama", "Drama", []string{"family"}, 2),
+		90: f(90, "Quiet Drama", "Drama", []string{"family"}, 2), // after the fillers: only the crowd lifts it
 		30: f(30, "Wedding Two", "Romance", []string{"romance", "wedding"}),
 		40: f(40, "Space Five", "Science Fiction", []string{"space"}), // under the bars
 		50: {TMDB: 50, Missing: true},
 	}
-	ratings := map[int]rating{10: {80, 90}, 20: {80, 90}, 30: {80, 90}, 40: {60, 90}, 50: {95, 99}}
+	ratings := map[int]rating{10: {80, 90}, 90: {80, 90}, 30: {80, 90}, 40: {60, 90}, 50: {95, 99}}
 	for i, genre := range []string{"Comedy", "Western", "Horror", "Music", "War", "History"} { // like nothing else
 		lib[60+i] = f(60+i, genre+" Film", genre, []string{strings.ToLower(genre)})
 		ratings[60+i] = rating{80, 90}
@@ -167,7 +167,7 @@ func TestRecommendedFollowsTaste(t *testing.T) {
 	opt := defaults()
 	opt.Picks = 100
 	got := tmdbIDs(recommended(lib, ratings, w, nil, opt))
-	if len(got) != 9 || !slices.Equal(slices.Sorted(slices.Values(got[:2])), []int{10, 20}) || got[len(got)-1] != 30 {
+	if len(got) != 9 || !slices.Equal(slices.Sorted(slices.Values(got[:2])), []int{10, 90}) || got[len(got)-1] != 30 {
 		t.Errorf("ranking %v; want Space Four and Quiet Drama first, Wedding Two last, of the 9 unseen films over the bars", got)
 	}
 	if again := tmdbIDs(recommended(lib, ratings, w, nil, opt)); !slices.Equal(again, got) {
@@ -179,8 +179,8 @@ func TestRecommendedFollowsTaste(t *testing.T) {
 		top[i].Reason != "Because you watched Space One · Letterboxd ★4.0 · Rotten Tomatoes 90%" {
 		t.Errorf("top picks %+v; want Space Four among them, because of Space One", top)
 	}
-	recent := map[int]string{10: "2026-10-13", 20: "2026-10-13"}
-	if next := tmdbIDs(recommended(lib, ratings, w, recent, opt)); slices.Contains(next, 10) || slices.Contains(next, 20) {
+	recent := map[int]string{10: "2026-10-13", 90: "2026-10-13"}
+	if next := tmdbIDs(recommended(lib, ratings, w, recent, opt)); slices.Contains(next, 10) || slices.Contains(next, 90) {
 		t.Errorf("the day after: picks %v; want the next best, yesterday's two behind them", next)
 	}
 }
