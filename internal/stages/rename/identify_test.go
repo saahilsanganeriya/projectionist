@@ -41,14 +41,15 @@ func TestParseRelease(t *testing.T) {
 	}
 }
 
-// Catches the acceptance rule letting a guess through: two exact titles within a year (remakes) must be refused,
-// an exact title two years off is not exact, and a lone hit is accepted whatever its title; and the reverse, a film
-// left for review when only punctuation sets another apart (a household member's "Animals.2026" sat in review beside
-// TMDB's "Animals" and "Animals.", both 2026): the one titled exactly as the release is taken.
+// Catches the acceptance rule letting a guess through: two exact titles within a year (remakes) must be refused, also
+// when both are rated, an exact title two years off is not exact, and a lone hit is accepted whatever its title; and the
+// reverse, a film left for review beside namesakes nobody has rated (a household member's "Animals.2026" sat in review
+// beside TMDB's "Animals", 304 votes, and "Animals." and "ANIMALS", none, all 2026): the rated one is taken.
 func TestConfident(t *testing.T) {
 	r := func(id int, name string, year int) tmdb.Result {
 		return tmdb.Result{ID: id, Title: name, Date: tmdb.Date{Time: time.Date(year, 6, 1, 0, 0, 0, 0, time.UTC)}}
 	}
+	rated := func(votes int, h tmdb.Result) tmdb.Result { h.VoteCount = votes; return h }
 	cases := []struct {
 		name  string
 		hits  []tmdb.Result
@@ -62,8 +63,10 @@ func TestConfident(t *testing.T) {
 		{"no year, several hits", []tmdb.Result{r(1, "Friends", 1994), r(2, "Friends", 1979)}, "Friends", 0, 0},
 		{"single hit", []tmdb.Result{r(30983, "Detective Conan", 1996)}, "Case Closed", 0, 30983},
 		{"accents folded", []tmdb.Result{r(126308, "Shōgun", 2024), r(2, "Shogun", 1980)}, "Shogun", 2024, 126308},
-		{"one exact as written", []tmdb.Result{r(1713368, "Animals.", 2026), r(1236045, "Animals", 2026), r(1747444, "The Animals", 2026)},
-			"Animals", 2026, 1236045},
+		{"one rated among namesakes", []tmdb.Result{rated(304, r(1236045, "Animals", 2026)), r(1713368, "Animals.", 2026),
+			rated(2, r(1763498, "ANIMALS", 2026)), r(1747444, "The Animals", 2026)}, "Animals", 2026, 1236045},
+		{"two rated namesakes", []tmdb.Result{rated(900, r(10, "Mystery", 2001)), rated(120, r(11, "Mystery", 2002))}, "Mystery", 2001, 0},
+		{"namesakes too little rated", []tmdb.Result{rated(40, r(10, "Mystery", 2001)), r(11, "Mystery", 2002)}, "Mystery", 2001, 0},
 	}
 	for _, c := range cases {
 		got, ok := confident(c.hits, c.title, c.year)
