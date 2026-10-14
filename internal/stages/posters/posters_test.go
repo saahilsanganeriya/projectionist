@@ -170,10 +170,13 @@ func newWorld(t *testing.T, opts string) *world {
 		}
 		return `{"posters":[` + strings.Join(ps, ",") + `]}`
 	}
-	// Alpha's list also holds a bigger copy of red, a banner and a German poster: none may enter the pool.
+	// Alpha's list also holds a bigger copy of red, a banner, a German poster and two textless ones (TMDB's "no
+	// language": null and "xx"): none may enter the pool, as every poster must show the title (owner 2026-10-14).
 	alpha := strings.Replace(posters("red", "blue", "redbig"), `]}`, `,
  {"file_path":"/yellow.jpg","iso_639_1":"en","width":1000,"height":400,"vote_average":9,"vote_count":50},
- {"file_path":"/yellow.jpg","iso_639_1":"de","width":1000,"height":1500,"vote_average":9,"vote_count":50}]}`, 1)
+ {"file_path":"/yellow.jpg","iso_639_1":"de","width":1000,"height":1500,"vote_average":9,"vote_count":50},
+ {"file_path":"/green.jpg","iso_639_1":null,"width":1000,"height":1500,"vote_average":9,"vote_count":50},
+ {"file_path":"/yellow.jpg","iso_639_1":"xx","width":1000,"height":1500,"vote_average":9,"vote_count":50}]}`, 1)
 	w.tmdb = map[string]string{"/movie/1/images": alpha, "/movie/2/images": posters("red"), "/tv/3/images": posters("blue", "red"),
 		"/tv/3/season/1/images": posters("green"), "/movie/1": `{"id":1,"original_language":"en"}`,
 		"/movie/2": `{"id":2,"original_language":"en"}`, "/tv/3": `{"id":3,"original_language":"en"}`}
@@ -368,7 +371,7 @@ func TestRunEndToEnd(t *testing.T) {
 	w.h.Env.Store.DB().QueryRow(`SELECT cands FROM posters_items WHERE key='movie:tmdb-1'`).Scan(&alphaRaw)
 	json.Unmarshal([]byte(alphaRaw), &alpha)
 	if len(alpha) != 3 {
-		t.Fatalf("Alpha's pool has %d candidates, want 3 (owner, red, blue): a resized copy, a banner and a German poster must stay out", len(alpha))
+		t.Fatalf("Alpha's pool has %d candidates, want 3 (owner, red, blue): a resized copy, a banner, a German poster and textless ones must stay out", len(alpha))
 	}
 	want := map[string][2]string{"movie:tmdb-1": {"/red.jpg", "judged"}, "movie:tmdb-2": {"/movie/12.jpg", "upload"},
 		"show:tmdb-3": {"/red.jpg", "judged"}, "season:tmdb-3:1": {"/green.jpg", "single"}}

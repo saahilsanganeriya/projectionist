@@ -134,7 +134,7 @@ func (r *run) gatherFranchise(ctx context.Context, it *row) error {
 	if err != nil {
 		return err
 	}
-	langs := []string{"", "xx", "00", "en", lang}
+	langs := titledLangs(lang)
 	other := func(c Candidate) bool { return !slices.Contains(langs, c.Lang) }
 	it.Cands = r.fill(ctx, nil, r.setPosters[t.Key], slices.DeleteFunc(own, other), slices.DeleteFunc(fan, other), film)
 	return nil
@@ -172,7 +172,7 @@ func (r *run) filmPoster(ctx context.Context, d tmdb.Details, lang string) ([]Ca
 		return nil, err
 	}
 	for _, c := range r.tmdbCandidates(imgs.Posters) {
-		if slices.Contains([]string{"", "xx", "00", "en", lang}, c.Lang) {
+		if slices.Contains(titledLangs(lang), c.Lang) {
 			c.Source, c.Caption = srcFilm, caption
 			return []Candidate{c}, nil
 		}

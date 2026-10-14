@@ -35,8 +35,11 @@ He especially loves Criterion Collection cover art.
 
 Reward: illustrated, painted, drawn or screen-printed art; fan art and alternative posters; an original, creative idea
 (a striking concept, a scene reimagined, a visual metaphor); a mood true to the title; the title set as part of the
-design, or no text at all. Creative beats plain: a bare minimalist design (one small object on a flat colour) scores
-below an inventive illustrated one.
+design. Creative beats plain: a bare minimalist design (one small object on a flat colour) scores below an inventive
+illustrated one.
+
+Every poster must show the title, his rule: a poster with no text at all, or with the title cropped away, is a heavy
+penalty, however good its art.
 
 Penalise mainstream studio key art: floating heads, a row of star faces, a star posed in front of a backdrop, generic
 photo collages, DVD or Blu-ray cover layouts, and TV network or streaming-service art.
@@ -65,7 +68,8 @@ minimalism, something creative is often good. The only text on the poster should
 
 Reward: art made for the whole series over one film's poster; illustrated, painted or drawn art, fan art, and an
 original, creative idea; a mood true to the series; the series' title (often with the word COLLECTION) set as part of
-the design, or no text at all. Creative beats plain: a bare minimalist design scores below an inventive illustrated one.
+the design. Creative beats plain: a bare minimalist design scores below an inventive illustrated one. Every poster must
+show the title, his rule: one with no text at all is a heavy penalty, however good its art.
 
 Penalise mainstream studio key art: floating heads, a row of star faces, generic photo collages, and DVD or Blu-ray box
 layouts. The series' title is the only text he wants: credit blocks, taglines, review quotes, award banners, dates and
@@ -80,7 +84,8 @@ const referencesHead = "Posters this owner chose for other films in his library,
 	"judge the candidates by the taste these show, never by how much they look like these films."
 
 // promptVersion names the prompts a verdict was judged under: a title's or franchise's verdict under an older one is
-// judged again (the owner's-taste backfill), and a change of model alone judges nothing again. The director prompt has
+// judged again (the owner's-taste backfill; then the title on every poster, 2026-10-14), and a change of model alone
+// judges nothing again. The director prompt has
 // not changed, so its verdicts keep the empty version they were saved with.
 // The Criterion lines (2026-10-06) left it as it was: they can only change the score of a pool holding a Criterion
 // cover, and such a pool is new, so it is judged anyway.
@@ -88,7 +93,7 @@ func promptVersion(k kind) string {
 	if k == director {
 		return ""
 	}
-	return "owner-taste-2026-10"
+	return "titled-2026-10-14" // every poster shows the title: each verdict is judged again
 }
 
 const directorPrompt = `You are the photo editor of a cinephile's film library. You will see candidate photos for one director
