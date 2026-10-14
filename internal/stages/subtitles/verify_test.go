@@ -297,7 +297,7 @@ func TestVerifyUnjudgedSidecarStays(t *testing.T) {
 		os.Remove(filepath.Join(f.h.Env.FFmpeg.Dir, "realign.srt"))
 		key := filepath.Base(f.showBase()+".en.srt") + "@" + fileKey(f.showBase()+".en.srt")
 		f.h.Env.Store.AddEvent(context.Background(), f.h.Now, name, f.path(show), "rejected_misaligned",
-			map[string]any{"id": "sidecar:" + key, "file": "1:1"})
+			map[string]any{"id": "sidecar:" + key, "file": fileKey(f.path(show))})
 		f.queueOptions(onWorker, 5)
 		if onWorker {
 			rm.worker(t, f)
