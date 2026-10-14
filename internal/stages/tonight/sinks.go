@@ -2,7 +2,6 @@ package tonight
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -215,7 +214,7 @@ func plexMembers(ctx context.Context, px *plex.Client, section, index int) ([]st
 	return out, nil
 }
 
-// plexTarget is one collection this stage keeps: the household's, or a person's own shelf.
+// plexTarget is one collection this stage keeps: a person's own shelf.
 type plexTarget struct {
 	Section     int
 	Title       string
@@ -231,8 +230,8 @@ func (t plexTarget) uri(rks []string) string {
 }
 
 // syncPlex converges the collection on the picks: members, summary, labels, the day's poster, and its Home row at
-// the top of the Movies section's hubs (or right after t.After). On his Home only Continue Watching, On Deck and the
-// rows of libraries listed before Movies come above the household's (2026-10-05: Recently Added in Home Videos, while
+// the top of the Movies section's hubs (or right after t.After). On a Home only Continue Watching, On Deck and the
+// rows of libraries listed before Movies come above the first shelf (2026-10-05: Recently Added in Home Videos, while
 // that library has new items).
 // persist saves the state around the create, so a crash or a lost answer never leaves a second collection behind.
 func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarget, m idMap, s *sinkState, day string,
@@ -445,9 +444,8 @@ func hubIdent(section int, id string) string {
 	return fmt.Sprintf("custom.collection.%d.%s", section, id)
 }
 
-// promotePlexHub shows the collection on the Homes t names (the household row on the owner's and on everyone's the
-// library is shared with: its reasons name films, never a viewer, a rating or a review), never on the library's
-// Recommended tab, and places it first in the Movies section's hub order, or right after t.After once that hub is up.
+// promotePlexHub shows the collection on the Homes t names (the owner's own, or that of everyone the library is
+// shared with, whose restrictions keep each shelf to its person), never on the library's Recommended tab, and places it first in the Movies section's hub order, or right after t.After once that hub is up.
 // Plex caches each Home hub answer and keeps it when a collection's members change (2026-10-05: one /hubs/promoted
 // query listed the old picks 27 minutes after the edit); a manage PUT on the hub drops it, so a stale hub gets the
 // flags again, and stale is cleared only once that PUT succeeds.
@@ -566,130 +564,6 @@ func jellyfinWatched(ctx context.Context, jf *jellyfin.Client, m idMap, picks []
 		}
 	}
 	return out, nil
-}
-
-// syncJellyfin converges the "Tonight" BoxSet: members, overview (the reasons) and the day's poster. persist saves
-// the state around the create, as for Plex.
-func syncJellyfin(ctx context.Context, log *slog.Logger, jf *jellyfin.Client, title string, m idMap, s *sinkState,
-	day string, picks []pick, poster func() ([]byte, error), persist func() error) error {
-	if len(m.Items) == 0 || m.UserID == "" {
-		return errors.New("jellyfin: no item map yet")
-	}
-	want := m.desired(picks)
-	members := func(box string) ([]string, error) { return jellyfinMembers(ctx, jf, box, m.UserID) }
-	id, titled, err := findBoxSet(ctx, jf, title, s.ID)
-	if err != nil {
-		return err
-	}
-	if id == "" {
-		if id, err = s.Pending.adopt(titled, members); err != nil {
-			return err
-		}
-		if id != "" {
-			log.Info("adopting the collection a create with a lost answer made", "event", "jellyfin_write", "action", "adopt", "id", id)
-		}
-	}
-	if id == "" {
-		if len(want) == 0 {
-			return nil
-		}
-		s.Pending = &pendingCreate{Before: titled, Items: want}
-		if err := persist(); err != nil {
-			return err
-		}
-		var created struct {
-			ID string `json:"Id"`
-		}
-		if err := jf.PostJSON(ctx, "/Collections?IsLocked=true&Name="+url.QueryEscape(title)+"&Ids="+strings.Join(want, ","), nil, &created); err != nil {
-			return err
-		}
-		if created.ID == "" {
-			return errors.New("jellyfin: collection create returned no id")
-		}
-		id, s.ID, s.Pending, s.PosterOf = created.ID, created.ID, nil, ""
-		if err := persist(); err != nil {
-			return err
-		}
-		log.Info("collection created", "event", "jellyfin_write", "action", "create", "id", id, "items", len(want))
-	}
-	s.ID, s.Pending = id, nil
-	have, err := members(id)
-	if err != nil {
-		return err
-	}
-	add, remove := diff(want, have)
-	if len(add) > 0 {
-		if err := jf.PostJSON(ctx, "/Collections/"+id+"/Items?Ids="+strings.Join(add, ","), nil, nil); err != nil {
-			return err
-		}
-		log.Info("collection items added", "event", "jellyfin_write", "action", "add", "id", id, "items", strings.Join(add, ","))
-	}
-	if len(remove) > 0 {
-		if err := jf.Delete(ctx, "/Collections/"+id+"/Items?Ids="+strings.Join(remove, ",")); err != nil {
-			return err
-		}
-		log.Info("collection items removed", "event", "jellyfin_write", "action", "remove", "id", id, "items", strings.Join(remove, ","))
-	}
-	var item map[string]any
-	if err := jf.GetJSON(ctx, "/Items/"+id+"?userId="+m.UserID, &item); err != nil {
-		return err
-	}
-	tags, _ := item["Tags"].([]any)
-	tagged := slices.Contains(tags, any(marker))
-	if text := summary(picks); item["Overview"] != text || !tagged || item["Name"] != title {
-		renamed := item["Name"] != title
-		item["Overview"], item["Name"] = text, title
-		if !tagged {
-			item["Tags"] = append(tags, marker)
-		}
-		if err := jf.PostJSON(ctx, "/Items/"+id, item, nil); err != nil {
-			return err
-		}
-		log.Info("collection overview set", "event", "jellyfin_write", "action", "overview", "id", id, "tag_added", !tagged, "renamed", renamed)
-	}
-	if s.PosterOf != day && len(picks) > 0 { // the same poster as Plex's
-		img, err := poster()
-		if err != nil {
-			return err
-		}
-		body := []byte(base64.StdEncoding.EncodeToString(img))
-		if err := jf.PostBody(ctx, "/Items/"+id+"/Images/Primary", "image/jpeg", body); err != nil {
-			return err
-		}
-		s.PosterOf = day
-		log.Info("collection poster uploaded", "event", "jellyfin_write", "action", "poster", "id", id, "bytes", len(img))
-	}
-	return nil
-}
-
-// findBoxSet returns the BoxSet this stage made (the remembered one if it still is a BoxSet, whatever its title, else
-// one with our title and our tag); when there is none, the ids of the untagged BoxSets with our title.
-func findBoxSet(ctx context.Context, jf *jellyfin.Client, title, remembered string) (id string, titled []string, err error) {
-	var res jfItems
-	if remembered != "" {
-		if err := jf.GetJSON(ctx, "/Items?EnableImages=false&Ids="+remembered, &res); err != nil {
-			return "", nil, err
-		}
-		for _, it := range res.Items {
-			if it.ID == remembered && it.Type == "BoxSet" {
-				return it.ID, nil, nil
-			}
-		}
-	}
-	res.Items = nil
-	if err := jf.GetJSON(ctx, "/Items?IncludeItemTypes=BoxSet&Recursive=true&EnableImages=false&Fields=Tags&SearchTerm="+url.QueryEscape(title), &res); err != nil {
-		return "", nil, err
-	}
-	for _, it := range res.Items {
-		if it.Name != title {
-			continue
-		}
-		if slices.Contains(it.Tags, marker) {
-			return it.ID, nil, nil
-		}
-		titled = append(titled, it.ID)
-	}
-	return "", titled, nil
 }
 
 func jellyfinMembers(ctx context.Context, jf *jellyfin.Client, box, userID string) ([]string, error) {
