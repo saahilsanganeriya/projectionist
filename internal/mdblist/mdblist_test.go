@@ -12,8 +12,8 @@ import (
 	"testing"
 )
 
-// Catches: a request without a User-Agent of its own (Cloudflare answers error 1010), the ids not sent as a JSON
-// body, the audience score ("popcorn") or Letterboxd's 10-point value taken for the critics' score or the 0-100 score,
+// Catches: a score sent as 78.0 failing the whole batch (MDBList did on 2026-10-14: no film had ratings, so nobody got
+// picks), a request without a User-Agent of its own (Cloudflare answers error 1010), the ids not sent as a JSON body, the audience score ("popcorn") or Letterboxd's 10-point value taken for the critics' score or the 0-100 score,
 // a source with no score read as 0 rather than none, a film MDBList does not know answered as rated, a spent quota not
 // named as such, and the key, which rides in the URL, printed in an error.
 func TestMovies(t *testing.T) {
@@ -33,7 +33,7 @@ func TestMovies(t *testing.T) {
 			asked = body.IDs
 			w.Write([]byte(`[
 			  {"title":"Jaws","ids":{"tmdb":578},"ratings":[{"source":"tomatoes","value":97,"score":97},{"source":"popcorn","value":90,"score":90},
-			     {"source":"letterboxd","value":7.8,"score":78}]},
+			     {"source":"letterboxd","value":7.8,"score":78.0}]},
 			  {"title":"Unrated","ids":{"tmdb":5},"ratings":[{"source":"tomatoes","value":null,"score":null},{"source":"letterboxd","value":6.2,"score":62}]}]`))
 		}
 	}))

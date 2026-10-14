@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"strings"
@@ -71,8 +72,8 @@ func (c *Client) Movies(ctx context.Context, ids []int) (map[int]Ratings, error)
 			TMDB int `json:"tmdb"`
 		} `json:"ids"`
 		Ratings []struct {
-			Source string `json:"source"`
-			Score  *int   `json:"score"`
+			Source string   `json:"source"`
+			Score  *float64 `json:"score"` // 78 or 78.0, both seen
 		} `json:"ratings"`
 	}
 	if err := json.Unmarshal(raw, &films); err != nil {
@@ -85,9 +86,9 @@ func (c *Client) Movies(ctx context.Context, ids []int) (map[int]Ratings, error)
 			switch {
 			case s.Score == nil || *s.Score <= 0:
 			case s.Source == "letterboxd":
-				r.Letterboxd = *s.Score
+				r.Letterboxd = int(math.Round(*s.Score))
 			case s.Source == "tomatoes":
-				r.Tomatoes = *s.Score
+				r.Tomatoes = int(math.Round(*s.Score))
 			}
 		}
 		if f.IDs.TMDB > 0 {
