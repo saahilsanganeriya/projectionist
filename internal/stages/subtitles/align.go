@@ -164,7 +164,8 @@ type fit struct {
 
 // align maps cue time t -> ratio*t + off onto ref, or ok=false if unconvincing. The best whole-file lag must
 // stand out (z), then 8 chunks of the file each find their own lag near it and at least 6 must sit on one line (a
-// cut, an extra scene or another episode scatters them). Already in sync gives (1.0, 0.0).
+// cut, an extra scene or another episode scatters them). Already in sync gives (1.0, 0.0). A refusal still says how
+// far the best lag stood out (Z) and how many chunks agreed.
 func align(spans []span, ref bitset) (fit, bool) {
 	ratio, lag, z := 0.0, 0, math.Inf(-1)
 	for _, r := range fpsRatios {
@@ -173,7 +174,7 @@ func align(spans []span, ref bitset) (fit, bool) {
 		}
 	}
 	if z < zOK {
-		return fit{}, false
+		return fit{Z: z}, false // no lag stands out: nothing here says whether the spans fit
 	}
 	n := len(spans) / chunks
 	type point struct{ t, l float64 }
@@ -227,7 +228,7 @@ func align(spans []span, ref bitset) (fit, bool) {
 	if agree >= minAgree && math.Abs(slope) <= maxSlope {
 		return fit{ratio * (1 + slope), off, z, agree}, true
 	}
-	return fit{}, false
+	return fit{Z: z, Agree: agree}, false
 }
 
 // pgsReference reads `ffmpeg -map 0:<pgs> -c copy -f framecrc -`: the caption start times and the bins within 0.2 s

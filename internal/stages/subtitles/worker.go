@@ -32,6 +32,7 @@ type WorkerOptions struct {
 	Lanes     int    // titles aligned at once
 	FFmpegDir string // holds ffmpeg
 	Alass     string
+	VAD       string // subvad: the speech heard as the NAS hears it (a worker without it would judge fewer titles)
 	Work      string // the media being aligned, one file per lane, deleted as each title ends
 	Log       *slog.Logger
 }
@@ -125,7 +126,7 @@ func (w *worker) align(ctx context.Context, j job) {
 	}
 	opt := defaults()
 	opt.Alass = w.opt.Alass
-	r := &run{env: w.env, opt: opt, rep: &stage.Report{}, alerted: map[string]bool{}, pools: map[string][]Candidate{},
+	r := &run{env: w.env, opt: opt, rep: &stage.Report{}, alerted: map[string]bool{}, pools: map[string][]Candidate{}, vadBin: w.opt.VAD,
 		media: func(ctx context.Context) error { // once a candidate arrived, as align reads the video
 			began := time.Now()
 			defer func() { streamed = time.Since(began) }()

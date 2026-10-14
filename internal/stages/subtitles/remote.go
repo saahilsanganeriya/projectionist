@@ -381,8 +381,8 @@ type attempt struct {
 
 var (
 	verdicts = map[string]bool{"kept": true, "retimed": true, "rescued": true, // true: carries the subtitle
-		"no_reference": false, "no_aligned_candidate": false, "alass_failed": false, "deferred": false, "error": false}
-	attempts = map[string]bool{"download_failed": true, "rejected_misaligned": true, "rejected_length": true}
+		"no_reference": false, "no_aligned_candidate": false, "unjudged": false, "alass_failed": false, "deferred": false, "error": false}
+	attempts = map[string]bool{"download_failed": true, "rejected_offsync": true, "rejected_length": true, "unjudged": true}
 )
 
 // result records a worker's alignment as finish records one done here, once the subtitle passes the length check

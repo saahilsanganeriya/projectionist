@@ -4,7 +4,7 @@
 //	projectionist run [-config FILE] STAGE      one run of one stage; exit 1 on alert or error
 //	projectionist check [-config FILE]          validate the config as serve would, start nothing; exit 2 on any problem
 //	projectionist stages                        list the stages this binary knows
-//	projectionist align-worker [-server URL] [-via CMD] [-lanes N] [-ffmpeg DIR] [-alass FILE] [-work DIR]
+//	projectionist align-worker [-server URL] [-via CMD] [-lanes N] [-ffmpeg DIR] [-alass FILE] [-vad FILE] [-work DIR]
 //	                                            on another machine: align the subtitles queue's titles until Ctrl-C
 //	projectionist opus-index ZIP                index the OPUS OpenSubtitles archive for the subtitles stage: ZIP.idx
 package main
@@ -65,6 +65,7 @@ func main() {
 		fs.IntVar(&worker.Lanes, "lanes", 8, "titles aligned at once")
 		fs.StringVar(&worker.FFmpegDir, "ffmpeg", filepath.Dir(ffmpeg), "directory holding ffmpeg")
 		fs.StringVar(&worker.Alass, "alass", alass, "alass-cli, built from the NAS image's alass commit")
+		fs.StringVar(&worker.VAD, "vad", filepath.Join(filepath.Dir(exe), "subvad"), "subvad, or a script running it with this machine's -lib and -model")
 		fs.StringVar(&worker.Work, "work", filepath.Join(filepath.Dir(exe), "work"), "the media being aligned (deleted as each title ends)")
 	}
 	fs.Parse(args)
@@ -109,7 +110,7 @@ func usage() {
 // alignWorker runs subtitles.Work until SIGINT or SIGTERM; it returns the process exit code.
 func alignWorker(o subtitles.WorkerOptions) int {
 	o.Log = obs.NewLogger(os.Stderr, "text", "info").With("version", version)
-	for _, bin := range []string{filepath.Join(o.FFmpegDir, "ffmpeg"), o.Alass} {
+	for _, bin := range []string{filepath.Join(o.FFmpegDir, "ffmpeg"), o.Alass, o.VAD} {
 		if _, err := os.Stat(bin); err != nil {
 			o.Log.Error("helper missing", "event", "config_error", "err", err)
 			return 2
@@ -117,7 +118,7 @@ func alignWorker(o subtitles.WorkerOptions) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	o.Log.Info("align worker started", "event", "start", "server", o.Server, "via", strings.Join(o.Via, " "), "lanes", o.Lanes, "ffmpeg", o.FFmpegDir, "alass", o.Alass, "work", o.Work)
+	o.Log.Info("align worker started", "event", "start", "server", o.Server, "via", strings.Join(o.Via, " "), "lanes", o.Lanes, "ffmpeg", o.FFmpegDir, "alass", o.Alass, "vad", o.VAD, "work", o.Work)
 	if err := subtitles.Work(ctx, o); err != nil {
 		o.Log.Error("align worker", "event", "align_worker_error", "err", err)
 		return 1

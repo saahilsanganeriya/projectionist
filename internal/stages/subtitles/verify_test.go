@@ -258,11 +258,17 @@ func TestVerifyUndecidedGoesToTheQueue(t *testing.T) {
 	}
 }
 
-// Catches a sidecar the queue's full alignment refuses (here or on an align worker) kept, or its title left waiting in
-// the queue for OpenSubtitles while its quota is spent (the pool is the sidecars alone: no provider could add to it):
-// the sidecar must be archived and its title's record dropped, so the next run searches for it anew.
+// Catches a sidecar the queue's full alignment refuses with evidence (here another cut: in sync to its middle, 20 s
+// late after it, so the speech places it and finds it off) kept, or its title left waiting in the queue for
+// OpenSubtitles while its quota is spent (the pool is the sidecars alone: no provider could add to it): the sidecar
+// must be archived and its title's record dropped, so the next run searches for it anew.
 func TestVerifyRefusedByTheQueueIsArchived(t *testing.T) {
-	other := srtOf(cueSpans(dense(1000, 11), 1, 0)) // another film's: the windows cannot judge it, alass cannot place it
+	truth := dense(1000, 7)
+	cut := cueSpans(truth, 1, 0)
+	for i := len(cut) / 2; i < len(cut); i++ {
+		cut[i] = span{cut[i].start + 20, cut[i].end + 20}
+	}
+	other := srtOf(cut)
 	for _, onWorker := range []bool{false, true} {
 		f, rm := queueFixture(t, onWorker, other)
 		os.Remove(filepath.Join(f.h.Env.FFmpeg.Dir, "realign.srt"))
@@ -276,6 +282,31 @@ func TestVerifyRefusedByTheQueueIsArchived(t *testing.T) {
 		if o, ok := f.outcomes()[f.path(show)]; ok || err == nil || f.archived()[showArchive+".en.srt"] != other || f.queued()[0] != "" {
 			t.Errorf("on a worker %v: Show recorded %q, sidecar still there %v, archived %v, queue %v; want no record, archived, out of the queue",
 				onWorker, o, err == nil, f.archived()[showArchive+".en.srt"] == other, f.queued())
+		}
+	}
+}
+
+// Catches a sidecar archived on no evidence: one the speech cannot place at all (here another film's; in the library,
+// a laugh track heard as speech, so no lag stands out) refused as if it were out of sync, which left 57 titles with no
+// subtitle (Friends, Batman: The Animated Series, New Girl). It must stay as it is, its title recorded unjudged and out
+// of the queue; and a refusal recorded before refusals needed evidence (rejected_misaligned) must not refuse it.
+func TestVerifyUnjudgedSidecarStays(t *testing.T) {
+	other := srtOf(cueSpans(dense(1000, 11), 1, 0))
+	for _, onWorker := range []bool{false, true} {
+		f, rm := queueFixture(t, onWorker, other)
+		os.Remove(filepath.Join(f.h.Env.FFmpeg.Dir, "realign.srt"))
+		key := filepath.Base(f.showBase()+".en.srt") + "@" + fileKey(f.showBase()+".en.srt")
+		f.h.Env.Store.AddEvent(context.Background(), f.h.Now, name, f.path(show), "rejected_misaligned",
+			map[string]any{"id": "sidecar:" + key, "file": "1:1"})
+		f.queueOptions(onWorker, 5)
+		if onWorker {
+			rm.worker(t, f)
+		}
+		f.run(t)
+		got, _ := os.ReadFile(f.showBase() + ".en.srt")
+		if o := f.outcomes()[f.path(show)]; o != "unjudged" || string(got) != other || len(f.archived()) != 0 || f.queued()[0] != "" {
+			t.Errorf("on a worker %v: Show %q, sidecar untouched %v, archive %v, queue %v; want unjudged, untouched, nothing archived, out of the queue",
+				onWorker, o, string(got) == other, f.archived(), f.queued())
 		}
 	}
 }

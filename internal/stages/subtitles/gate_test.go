@@ -191,7 +191,7 @@ func TestGateAlass(t *testing.T) {
 					med = strconv.FormatFloat(medianOffsetMS(cues(aligned), starts), 'f', 0, 64)
 				}
 				// the caption route as fetch runs it, the rescue included (it reuses the speech heard above)
-				pgs := reference{label: "pgs", bits: bits, starts: starts, dir: speech.dir, speech: speech.speech, talk: speech.talk}
+				pgs := reference{label: "pgs", bits: bits, starts: starts, dir: speech.dir, hearings: speech.hearings}
 				p := map[string]any{}
 				pout, presult, pok := r.fit(ctx, &pgs, string(txt), p)
 				if !pok {
