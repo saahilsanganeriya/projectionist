@@ -202,6 +202,35 @@ func TestVerifyRefusedIsArchivedAndSearchedAnew(t *testing.T) {
 	}
 }
 
+// Catches a sidecar beside the video's own English text track archived on the windows' word (34 of them on 2026-10-14
+// once the stage judged its own extracts, House of Gucci's at -100 ms: the release's own track, each extracted again
+// and refused again): beside such a track a sidecar is kept or retimed, never refused, and judged once.
+func TestVerifySparesASidecarBesideItsOwnTrack(t *testing.T) {
+	truth := dense(1000, 7)
+	drift := srtOf(cueSpans(truth, 1.00012, 0)) // the windows disagree, as in the refusal test
+	f := verifyFixture(t, true, map[string]string{".en.srt": drift})
+	f.note(show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", "eng subrip", "0h 50m")
+	os.WriteFile(filepath.Join(f.h.Env.FFmpeg.Dir, "Show.json"), []byte(probeJSON(`{"index":1,"codec_type":"audio","codec_name":"aac",`+
+		`"channels":2,"channel_layout":"stereo","tags":{"language":"eng"}},{"index":2,"codec_type":"subtitle","codec_name":"hdmv_pgs_subtitle",`+
+		`"tags":{"language":"eng"}},{"index":3,"codec_type":"subtitle","codec_name":"subrip","tags":{"language":"eng"}}`)), 0o644)
+	db := f.h.Env.Store.DB()
+	db.Exec(schema)
+	if _, err := db.Exec(`INSERT INTO subtitles_titles(path, outcome, detail, tries, last_try) VALUES (?, 'extracted', '', 1, ?)`,
+		f.path(show), f.h.Now.UTC().Format(store.TimeFormat)); err != nil {
+		t.Fatal(err)
+	}
+	f.run(t)
+	got, err := os.ReadFile(f.showBase() + ".en.srt")
+	if o := f.outcomes()[f.path(show)]; err != nil || string(got) != drift || len(f.archived()) != 0 || o != "kept" {
+		t.Errorf("Show %q, sidecar unchanged %v, archived %v; want kept as it is, nothing archived", o, string(got) == drift, f.archived())
+	}
+	reads := f.windowReads()
+	f.h.Now = f.h.Now.Add(time.Hour)
+	if f.run(t); f.windowReads() != reads {
+		t.Errorf("judged again on the next run: %d window reads, then %d", reads, f.windowReads())
+	}
+}
+
 // queueFixture is verifyFixture with Show's sidecar left to the queue: no dialogue in any window (silence), the whole
 // audio heard as speech on the true timing, and alass answering realign.srt (the true timing) as any alignment, or
 // the candidate unchanged once realign.srt is gone. onWorker gives it an align worker's API (the caller starts the

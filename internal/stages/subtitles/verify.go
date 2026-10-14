@@ -175,6 +175,11 @@ func moved(before, after string) float64 {
 // are told).
 func (r *run) decide(ctx context.Context, t *title, path, verdict, out string, fields map[string]any) (changed bool, err error) {
 	ctx = context.WithoutCancel(ctx) // a file moved is recorded
+	if verdict == "refused" && t.englishText {
+		// beside the video's own English text track a sidecar is its extract or the owner's choice: the windows' word is
+		// not enough to archive the release's own subtitle (and an extract archived is extracted again)
+		verdict, fields["spared"] = "kept", fmt.Sprint(fields["detail"])
+	}
 	if verdict == "retimed" || verdict == "refused" {
 		var to string
 		if to, err = r.archive(t, path); err == nil {
