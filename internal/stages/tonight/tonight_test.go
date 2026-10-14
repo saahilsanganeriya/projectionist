@@ -129,6 +129,9 @@ func TestShuffledFollowsTheFilter(t *testing.T) {
 		slices.ContainsFunc(got, func(id int) bool { return !slices.Contains(pass, id) || id == 11 }) {
 		t.Errorf("with one fresh film over the bars: picks %v; want it and 4 recent ones, none seen", got)
 	}
+	if got := ids(shuffled(lib, map[int]rating{2: {80, -1}, 3: {70, 90}}, w, nil, opt, "2026-10-05", "owner")); !slices.Equal(got, []int{2}) {
+		t.Errorf("a film with no critics score and Letterboxd 4.0: picks %v; want it, Letterboxd alone deciding", got)
+	}
 	if got := shuffled(lib, map[int]rating{3: {70, 90}}, w, nil, opt, "2026-10-05", "owner"); len(got) != 0 {
 		t.Errorf("nothing over the bars: picks %v", ids(got))
 	}
