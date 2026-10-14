@@ -2,8 +2,9 @@
 // with no model call (owner 2026-10-14) by a filter on what critics and Letterboxd's members think of them, then a
 // shuffle: every library film whose Letterboxd average is over min_letterboxd stars and whose Rotten Tomatoes critics
 // score is over min_tomatoes % (a film with no critics score is judged by Letterboxd alone), less those the person has
-// seen and those picked for them in the last two weeks, in an order shuffled by the day and the person. The ratings
-// come from MDBList, 200 films a request, kept for ratings_every.
+// seen and those picked for them in the last two weeks, in an order shuffled by the day and the person; or, with mode
+// "recommend", ranked by the person's taste (recommend.go). The ratings come from MDBList, 200 films a request, kept
+// for ratings_every.
 //
 // In Plex a person's picks fill their shelf, a collection "<playlist> · <name>" labelled Tonight-<person>, on their own
 // Home alone: the owner's (the server's own sign-in) is promoted to his Home, anyone else's to the shared Home, and
@@ -18,7 +19,8 @@
 //
 //	per person: export | feed + films page (cached) ─┐
 //	watch record (jfsync: Plex, Jellyfin plays)      ├─► unseen by them ─► rated over the bars ─► shuffled ─► first 5
-//	library folders {tmdb-N} + TMDB facts (cached)  ─┤                     (MDBList, cached)        (day + person)
+//	library folders {tmdb-N} + TMDB facts (cached)  ─┤                     (MDBList, cached)        (day + person,
+//	                                                 │                                              or by taste)
 //	                                                 └─► that person: own Plex shelf, private Jellyfin playlist
 //
 // An earlier build also kept a household row ("Tonight · Household": a Plex collection with its Home row, and a

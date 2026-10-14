@@ -41,7 +41,7 @@ key_file = "/run/secrets/jellyfin_key"  # API key file, mounted read-only
 # api_key_file = "/run/secrets/fanart_api_key"  # fanart.tv API key file, read on every request
 # cache_ttl    = "24h"  # how long a fanart.tv answer is reused from state_db
 
-# The AI gateway every model call goes through (posters, collections, tonight); unset keys take the built-in models.
+# The AI gateway every model call goes through (posters, collections); unset keys take the built-in models.
 [llm]
 api        = "https://ai-gateway.vercel.sh/v1"  # the AI gateway's OpenAI-compatible base URL
 key_file   = "/run/secrets/ai_gateway_api_key"  # the gateway's API key file, read on every request
@@ -313,10 +313,11 @@ align_window       = "01:00-07:00"  # the hours the queue may read whole videos,
 archive_dir        = "/volume1/projectionist/subtitle-archive"  # where sidecars the verify pass replaces or refuses are kept; must exist (required when verify_per_run > 0 (the default))
 # plex_db            = "/volume1/PlexMediaServer/AppData/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"  # Plex's library database, read-only: the item a video with a new sidecar belongs to
 
-# Each day's film picks for the household and for each person, as shelves in Plex and Jellyfin.
+# Each person's film picks for the day, as their own shelf in Plex and a playlist in Jellyfin.
 [stages.tonight]
 every            = "30m"  # how often the stage runs
 # window           = "01:00-07:00"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
+# mode             = "shuffle"  # shuffle: the films over the bars, shuffled | recommend: ranked by each person's taste
 # picks            = 5  # films picked each day, per person
 pick_after       = "05:00"  # the local time (HH:MM, config time zone) after which a new day's picks are made
 section          = 1  # the id of the Plex Movies library

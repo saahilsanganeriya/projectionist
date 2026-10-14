@@ -79,17 +79,19 @@ func recommended(lib map[int]film, ratings map[int]rating, w watchedSets, recent
 			score[cands[i]] += z
 		}
 	}
-	again := func(id int) int { return len(recent[id]) } // 0 for a film not picked lately
+	lately := func(id int) int { // 1 for a film picked in the last two weeks
+		if recent[id] != "" {
+			return 1
+		}
+		return 0
+	}
 	slices.SortFunc(cands, func(a, b int) int {
-		return cmp.Or(cmp.Compare(min(again(a), 1), min(again(b), 1)), cmp.Compare(score[b], score[a]), a-b)
+		return cmp.Or(cmp.Compare(lately(a), lately(b)), cmp.Compare(score[b], score[a]), a-b)
 	})
 	var picks []pick
 	for _, id := range cands[:min(opt.Picks, len(cands))] {
-		f, r := lib[id], ratings[id]
-		reason := fmt.Sprintf("Letterboxd ★%.1f", float64(r.Letterboxd)/20)
-		if r.Tomatoes >= 0 {
-			reason += fmt.Sprintf(" · Rotten Tomatoes %d%%", r.Tomatoes)
-		}
+		f := lib[id]
+		reason := scoreLine(ratings[id])
 		if like := closest(vec, weight, id); like != 0 {
 			reason = "Because you watched " + lib[like].Title + " · " + reason
 		}

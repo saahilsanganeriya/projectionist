@@ -51,14 +51,19 @@ func shuffled(lib map[int]film, ratings map[int]rating, w watchedSets, recent ma
 	}
 	var picks []pick
 	for _, id := range append(fresh, again...)[:min(opt.Picks, len(fresh)+len(again))] {
-		f, r := lib[id], ratings[id]
-		reason := fmt.Sprintf("Letterboxd ★%.1f", float64(r.Letterboxd)/20)
-		if r.Tomatoes >= 0 {
-			reason += fmt.Sprintf(" · Rotten Tomatoes %d%%", r.Tomatoes)
-		}
-		picks = append(picks, pick{TMDB: id, Title: f.Title, Year: f.Year, Reason: reason, PosterPath: f.PosterPath})
+		f := lib[id]
+		picks = append(picks, pick{TMDB: id, Title: f.Title, Year: f.Year, Reason: scoreLine(ratings[id]), PosterPath: f.PosterPath})
 	}
 	return picks
+}
+
+// scoreLine is a pick's scores as its shelf shows them.
+func scoreLine(r rating) string {
+	line := fmt.Sprintf("Letterboxd ★%.1f", float64(r.Letterboxd)/20)
+	if r.Tomatoes >= 0 {
+		line += fmt.Sprintf(" · Rotten Tomatoes %d%%", r.Tomatoes)
+	}
+	return line
 }
 
 // pickAll makes the day's picks for every shelf that has none for day yet.
