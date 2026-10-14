@@ -118,7 +118,7 @@ func TestVerifyRetimed(t *testing.T) {
 
 // Catches a sidecar the stage wrote without fitting it left unjudged: one it wrote as downloaded because its release
 // matched (release_matched: The Game sat 15.7 s off), or one it extracted from the video's own English text track
-// (extracted: Colin from Accounts S01E05's runs 1.2 s early), or one judged only after the retry wait a failed search
+// (extracted: Colin from Accounts S01E05's ran 1.3 s late), or one judged only after the retry wait a failed search
 // gets (a week): it was written, so the verify pass judges it on the next run.
 func TestVerifyJudgesAReleaseMatch(t *testing.T) {
 	truth := dense(1000, 7)

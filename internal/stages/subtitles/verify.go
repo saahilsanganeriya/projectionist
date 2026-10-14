@@ -50,7 +50,7 @@ var verifiedOutcomes = map[string]bool{"sampled": true, "retimed": true, "idx_re
 // unfitted are the outcomes of a subtitle the stage wrote without fitting it, which the verify pass judges on its next
 // run, not after a failed search's retry wait: one written as downloaded before a release match was fitted like any
 // other (The Game sat 15.7 s off), and one extracted from the video's own English text track, whose timing a release can
-// get wrong too (Colin from Accounts S01E05's runs 1.2 s early).
+// get wrong too (Colin from Accounts S01E05's ran 1.3 s late).
 var unfitted = map[string]bool{"release_matched": true, "extracted": true}
 
 // misaligned are sidecars (by their path below a root) an alignment kept against a reference on the wrong time base:
