@@ -298,7 +298,7 @@ func syncPlex(ctx context.Context, log *slog.Logger, px *plex.Client, t plexTarg
 	}
 	id := c.RatingKey
 	s.ID, s.Pending = id, nil
-	if c.Title != t.Title { // renamed in place (2026-10-06: "Tonight" became "Tonight · Household"), never made anew
+	if c.Title != t.Title { // the config renamed it: renamed in place, never made anew
 		if err := px.Do(ctx, "PUT", fmt.Sprintf("/library/sections/%d/all?type=18&id=%s&title.value=%s&title.locked=1",
 			t.Section, id, url.QueryEscape(t.Title))); err != nil {
 			return err

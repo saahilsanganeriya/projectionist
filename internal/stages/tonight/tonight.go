@@ -1,4 +1,4 @@
-// Package tonight fills a household "Tonight · Household" row, first of the Movies rows on the Plex Home of everyone
+// Package tonight fills the household's row (the collection the config names), first of the Movies rows on the Plex Home of everyone
 // the library is shared with: five films from the library that no one in the household (people) has seen, picked once a
 // day by one model call that reads each person's Letterboxd ratings and reviews, each with a one-line reason tied to a
 // film one of them rated highly. Nothing personal reaches the row: the model sees the people only as "viewer A, B, ...";

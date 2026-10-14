@@ -391,8 +391,8 @@ type homeUser struct {
 
 // plexToken is the member's plex.tv token: the owner's is the server's own sign-in (Preferences.xml), a person's the
 // owner's Plex Home switched to their Home user (POST /api/v2/home/users/<uuid>/switch, as Plex Web does), once per
-// run and never stored. A managed user (no plex.tv account of their own) has a watchlist of their own too: Aurelia's
-// held 137 items on 2026-10-05.
+// run and never stored. A managed user (no plex.tv account of their own) has a watchlist of their own too (one held
+// 137 items on 2026-10-05).
 func (r *run) plexToken(ctx context.Context, b *breaker) (string, error) {
 	if r.token != "" {
 		return r.token, nil

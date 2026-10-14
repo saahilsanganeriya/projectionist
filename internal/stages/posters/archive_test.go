@@ -96,7 +96,7 @@ func TestArchiveNeverOnNVMe(t *testing.T) {
 		{"/volume2", true},
 		{"/state/posters/archive", true},
 		{"/volume1/../volume2/x", true},
-		{"/volume1/PlexMediaServer/poster-archive", false},
+		{"/volume1/projectionist/poster-archive", false},
 		{"/volume22/x", false},
 	} {
 		if got := onNVMe(c.dir, "/volume2"); got != c.nvme {

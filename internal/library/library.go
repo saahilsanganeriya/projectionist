@@ -29,7 +29,7 @@ type Movie struct {
 	Title string
 	Year  int
 	ID    ID
-	Label string // version label after " - ", e.g. "2160p 14Mbps"; "" for the main file
+	Label string // version label after " - ", e.g. "2160p small"; "" for the main file
 	Ext   string // with the dot
 }
 

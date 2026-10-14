@@ -1,4 +1,4 @@
-// Package remote4k makes ~14 Mbps 4K copies of the films the owner lists as "Remote 4K", so 4K fits the home
+// Package remote4k makes ~14 Mbps 4K copies of the films the owner lists in one playlist (playlist), so 4K fits the home
 // upload (port of scripts/remote4k.py).
 //
 // The request list is the union of the Plex playlist and any Jellyfin playlist or collection of that name. The apps
@@ -8,7 +8,7 @@
 //
 // One film at a time on the GPU (jellyfin-ffmpeg, hevc_qsv, the source's colour tags and HDR10 metadata kept),
 // paused while anyone but the owner is watching. The copy lands beside the original as
-// "<folder name> - 2160p 14Mbps.mkv", which Plex and Jellyfin list as another version of the film. Skipped:
+// "<folder name> - <label>.mkv", which Plex and Jellyfin list as another version of the film. Skipped:
 // non-movies, films that already have a 4K version at or under 20 Mbps, and Dolby Vision profile 5 sources (no
 // HDR10 base layer to keep). Never overwrites. Progress: STATUS.txt; history: the events table. Plex notices the
 // copy through its filesystem events; Jellyfin is told, best effort (its own scheduled scan is the fallback).

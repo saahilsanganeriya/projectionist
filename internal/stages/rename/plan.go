@@ -379,7 +379,7 @@ func (p *planner) movieLabels(keep []string, folder, base string) (labels []stri
 	labels = make([]string, len(keep))
 	for i, f := range keep {
 		if s := stem(path.Base(f)); path.Dir(f) == folder && strings.HasPrefix(s, base+" - ") {
-			labels[i] = s[len(base)+3:] // already named by this scheme ('1080p Remote', '2160p 14Mbps'): re-runs keep it
+			labels[i] = s[len(base)+3:] // already named by this scheme ('1080p Remote', '2160p small'): re-runs keep it
 		} else if l := manualLabel[strings.TrimPrefix(f, p.movies+"/")]; l != "" {
 			labels[i] = l
 		} else {
