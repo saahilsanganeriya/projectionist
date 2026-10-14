@@ -1566,11 +1566,15 @@ func (r *run) workQueue(ctx context.Context, lacking, sidecarred, due []*title, 
 				o = r.fetch(ctx, t)
 				pool = o.pool
 			}
-			if o.result == "queued" {
-				if r.remote.handOff(ctx, r, t, pool) {
+			if o.result == "queued" { // probed first: a worker cannot, and hears nothing in a title with no tracks
+				switch err := r.probe(ctx, t); {
+				case err != nil:
+					o = outcome{result: "error", detail: err.Error()}
+				case r.remote.handOff(ctx, r, t, pool):
 					continue
+				default:
+					o = r.align(ctx, t, pool)
 				}
-				o = r.align(ctx, t, pool)
 			}
 			r.finish(ctx, t, o)
 			if ctx.Err() != nil {
