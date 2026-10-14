@@ -434,7 +434,10 @@ func TestRunProviderTrouble(t *testing.T) {
 		t.Errorf("Ran: %d failed downloads recorded, want %d", failed, maxTries)
 	}
 	downloads := strings.Count(strings.Join(dead.requests, " "), "/dl/ran")
-	dead.h.Env.Store.DB().Exec(`DELETE FROM subtitles_titles WHERE path=?`, dead.path(ran)) // searched again
+	db := dead.h.Env.Store.DB() // two of the four as SubSource's zips fail, for good too
+	db.Exec(`UPDATE events SET fields=json_set(fields, '$.detail', 'zip holds 2 SRT files') WHERE json_extract(fields, '$.id')='opensubtitles:ran2'`)
+	db.Exec(`UPDATE events SET fields=json_set(fields, '$.detail', 'zip: not a valid zip file') WHERE json_extract(fields, '$.id')='opensubtitles:ran3'`)
+	db.Exec(`DELETE FROM subtitles_titles WHERE path=?`, dead.path(ran)) // searched again
 	dead.run(t)
 	if again := strings.Count(strings.Join(dead.requests, " "), "/dl/ran") - downloads; again != 0 || dead.outcomes()[dead.path(ran)] != "no_aligned_candidate" {
 		t.Errorf("Ran searched again: %d dead links downloaded again, recorded %q; want 0, no_aligned_candidate", again, dead.outcomes()[dead.path(ran)])
