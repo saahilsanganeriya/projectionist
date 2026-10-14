@@ -114,7 +114,6 @@ archive_dir  = "/volume1/projectionist/subtitle-archive"
 every         = "1h"
 pick_after    = "05:00"
 section       = 4
-collection    = "Tonight · Household"
 playlist      = "Tonight"
 movies_dir    = "/volume1/media/Movies"
 jellyfin_user = "owner"

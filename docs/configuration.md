@@ -51,7 +51,8 @@ restart. In `compose.yaml` each one is a Docker secret, mounted at `/run/secrets
 | `jellyfin_key` | every Jellyfin call | `jellyfin.key_file` |
 | `tmdb_read_token`, else `tmdb_api_key` | TMDB | `tmdb.read_token_file`, `tmdb.api_key_file` |
 | `fanart_api_key` | fanart.tv | `fanart.api_key_file` |
-| `ai_gateway_api_key` | every model call (posters, collections, tonight) | `llm.key_file` (a task with its own API: `llm.tasks.<task>.key_file`) |
+| `ai_gateway_api_key` | every model call (posters, collections) | `llm.key_file` (a task with its own API: `llm.tasks.<task>.key_file`) |
+| `mdblist_api_key` | tonight: each film's Letterboxd and Rotten Tomatoes scores (MDBList) | `stages.tonight.mdblist_key_file` |
 | `subsource_api_key`, `subdl_api_key` | subtitles: SubSource, SubDL (a provider without its key is skipped) | in `stages.subtitles.secrets_dir` |
 | `opensubtitles_api_key`, `opensubtitles_username`, `opensubtitles_password` | subtitles: OpenSubtitles.com | in `stages.subtitles.secrets_dir` |
 
@@ -141,7 +142,7 @@ three keys (`enabled`, `every`, `window`).
 
 | Section | Key | Type | Required | Default | Example | What it does |
 |---|---|---|---|---|---|---|
-| llm.tasks.<task> | `model` | string |  | none | "provider/model-name" | the model a task (posters, collections, tonight) calls |
+| llm.tasks.<task> | `model` | string |  | none | "provider/model-name" | the model a task (posters, collections) calls |
 | llm.tasks.<task> | `fallbacks` | list of strings |  | none | ["provider/other-model"] | models the gateway tries, in order, when the first fails |
 | llm.tasks.<task> | `reasoning` | string |  | none | "low" | reasoning effort sent with the call ("off", "none", "low", ...) |
 | llm.tasks.<task> | `api` | string |  | none | "https://api.example.com/v1" | an API of the task's own instead of the gateway; then price_in and price_out are required |
@@ -461,18 +462,14 @@ three keys (`enabled`, `every`, `window`).
 | stages.tonight | `enabled` | boolean |  | true | true | false turns the stage off; a stage with no table is off |
 | stages.tonight | `every` | duration | when the stage is enabled |  | "30m" | how often the stage runs |
 | stages.tonight | `window` | string |  | none (any time) |  | HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it |
-| stages.tonight | `max_tokens` | integer |  | 4000 | 4000 | reasoning included |
-| stages.tonight | `daily_cap_usd` | number |  | 0.15 | 0.15 | every call of the day together: the household's and each person's |
-| stages.tonight | `picks` | integer |  | 5 | 5 | films picked each day |
+| stages.tonight | `picks` | integer |  | 5 | 5 | films picked each day, per person |
 | stages.tonight | `pick_after` | string | when the stage is enabled | — | "05:00" | the local time (HH:MM, config time zone) after which a new day's picks are made |
-| stages.tonight | `max_candidates` | integer |  | 400 | 400 | unseen films shown to the model, best-ranked first |
 | stages.tonight | `section` | integer | when the stage is enabled | — | 1 | the id of the Plex Movies library |
-| stages.tonight | `collection` | string | when the stage is enabled | — | "Tonight" | the name of the household's Plex collection and Jellyfin BoxSet |
-| stages.tonight | `playlist` | string |  | none | "Tonight" | each person's own: this Jellyfin playlist, and the Plex shelf "<playlist> · <name>"; "" = none |
+| stages.tonight | `playlist` | string | when the stage is enabled | — | "Tonight" | each person's own: this Jellyfin playlist, and the Plex shelf "<playlist> · <name>" |
 | stages.tonight | `movies_dir` | string | when the stage is enabled | — | "/volume1/media/Movies" | the folder that holds the films |
 | stages.tonight | `image_base` | string |  | "https://image.tmdb.org/t/p" | "https://image.tmdb.org/t/p" | TMDB's image host |
 | stages.tonight | `jellyfin_user` | string | when the stage is enabled | — | "your-jellyfin-username" | your Jellyfin user name, whose played flags count |
-| stages.tonight | `people` | list of tables | when the stage is enabled | none | [{ person = "you", user = "your-letterboxd-username", plex_user = "your-plex-username", name = "Your Name" }] | one entry per person in the household (person, user, and plex_user, export_dir, name as needed) |
+| stages.tonight | `people` | list of tables | when the stage is enabled | none | [{ person = "you", user = "your-letterboxd-username", plex_user = "your-plex-username", name = "Your Name" }] | one entry per person with a shelf (person, user, and plex_user, export_dir, name as needed) |
 | stages.tonight | `people[].person` | string | in each entry | — |  | their name in the watch record: the name of their entry in stages.jfsync.users |
 | stages.tonight | `people[].user` | string | in each entry | — |  | their Letterboxd username |
 | stages.tonight | `people[].plex_user` | string |  | none |  | their Plex Home user: its username, or its title for a managed user (no username); "" = none |
@@ -485,6 +482,11 @@ three keys (`enabled`, `every`, `window`).
 | stages.tonight | `sink_timeout` | duration |  | "3m" | "3m" | per sink per run; what is left over waits for the next run |
 | stages.tonight | `plex_map_timeout` | duration |  | "10m" | "10m" | the once-a-day Movies listing; minutes during a scan |
 | stages.tonight | `map_every` | duration |  | "24h" | "24h" | how often the TMDB → Plex/Jellyfin item maps are re-read |
+| stages.tonight | `min_letterboxd` | number |  | 3.5 | 3.5 | stars: a pick's Letterboxd average is over this |
+| stages.tonight | `min_tomatoes` | integer |  | 75 | 75 | %: and its Rotten Tomatoes critics score, where it has one (none: Letterboxd alone decides) |
+| stages.tonight | `mdblist_url` | string |  | "https://api.mdblist.com" | "https://api.mdblist.com" | where the ratings come from, 200 films a request |
+| stages.tonight | `mdblist_key_file` | string |  | "/run/secrets/mdblist_api_key" | "/run/secrets/mdblist_api_key" | an MDBList API key (free: 1,000 requests a day) |
+| stages.tonight | `ratings_every` | duration |  | "720h" | "720h" | a film's ratings are asked for again once this old |
 
 ### `[stages.watcher]`
 

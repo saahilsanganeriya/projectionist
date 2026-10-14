@@ -78,7 +78,7 @@ var rules = []rule{
 	{problem: "stages.tonight.people[1].person"},
 	{problem: "stages.tonight.pick_after"},
 	{problem: "stages.tonight.section"},
-	{problem: "stages.tonight.collection"},
+	{problem: "stages.tonight.playlist"},
 	{problem: "stages.tonight.movies_dir"},
 	{problem: "stages.tonight.jellyfin_user"},
 	{problem: "stages.watcher.roots"},

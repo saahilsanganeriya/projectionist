@@ -62,11 +62,6 @@ model     = "openai/gpt-5.6-luna"  # the model this task calls
 fallbacks = ["alibaba/qwen3-vl-instruct"]  # tried by the gateway, in order, when the first fails
 reasoning = "none"  # reasoning effort sent with the call
 
-[llm.tasks.tonight] # the daily picks
-model     = "deepseek/deepseek-v4.1-flash"  # the model this task calls
-fallbacks = ["alibaba/qwen3.7-flash"]  # tried by the gateway, in order, when the first fails
-reasoning = "off"  # reasoning effort sent with the call
-
 # Nightly versions of the app data (Plex, Jellyfin, projectionist databases) on another volume.
 [stages.appbackup]
 every     = "24h"  # how often the stage runs
@@ -322,18 +317,19 @@ archive_dir        = "/volume1/projectionist/subtitle-archive"  # where sidecars
 [stages.tonight]
 every            = "30m"  # how often the stage runs
 # window           = "01:00-07:00"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
-# max_tokens       = 4000  # reasoning included
-# daily_cap_usd    = 0.15  # every call of the day together: the household's and each person's
-# picks            = 5  # films picked each day
+# picks            = 5  # films picked each day, per person
 pick_after       = "05:00"  # the local time (HH:MM, config time zone) after which a new day's picks are made
-# max_candidates   = 400  # unseen films shown to the model, best-ranked first
 section          = 1  # the id of the Plex Movies library
-collection       = "Tonight"  # the name of the household's Plex collection and Jellyfin BoxSet
-playlist         = "Tonight"  # each person's own: this Jellyfin playlist, and the Plex shelf "<playlist> · <name>"; "" = none
+playlist         = "Tonight"  # each person's own: this Jellyfin playlist, and the Plex shelf "<playlist> · <name>"
+# min_letterboxd   = 3.5  # stars: a pick's Letterboxd average is over this
+# min_tomatoes     = 75  # %: and its Rotten Tomatoes critics score, where it has one (none: Letterboxd alone decides)
+# mdblist_url      = "https://api.mdblist.com"  # where the ratings come from, 200 films a request
+# mdblist_key_file = "/run/secrets/mdblist_api_key"  # an MDBList API key (free: 1,000 requests a day)
+# ratings_every    = "720h"  # a film's ratings are asked for again once this old
 movies_dir       = "/volume1/media/Movies"  # the folder that holds the films
 # image_base       = "https://image.tmdb.org/t/p"  # TMDB's image host
 jellyfin_user    = "your-jellyfin-username"  # your Jellyfin user name, whose played flags count
-people           = [{ person = "you", user = "your-letterboxd-username", plex_user = "your-plex-username", name = "Your Name" }]  # one entry per person in the household (person, user, and plex_user, export_dir, name as needed)
+people           = [{ person = "you", user = "your-letterboxd-username", plex_user = "your-plex-username", name = "Your Name" }]  # one entry per person with a shelf (person, user, and plex_user, export_dir, name as needed)
 # plex_tv          = "https://clients.plex.tv"  # plex.tv's clients API
 # letterboxd_url   = "https://letterboxd.com"  # Letterboxd's site
 # sink_timeout     = "3m"  # per sink per run; what is left over waits for the next run
