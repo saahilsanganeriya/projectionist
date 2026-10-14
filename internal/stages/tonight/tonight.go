@@ -48,6 +48,7 @@ import (
 const name = "tonight"
 
 type Options struct {
+	Mode      string `toml:"mode"` // shuffle (default): the films over the bars, shuffled | recommend: ranked by taste (recommend.go)
 	Picks     int    `toml:"picks"`
 	PickAfter string `toml:"pick_after" required:"the local time (HH:MM, config time zone) after which a new day's picks are made"`
 	Section   int    `toml:"section" required:"the id of the Plex Movies library"`
@@ -76,7 +77,7 @@ type Options struct {
 
 func defaults() Options {
 	return Options{
-		Picks: 5, PlexTVURL: "https://clients.plex.tv", LetterboxdURL: "https://letterboxd.com", ImageBase: "https://image.tmdb.org/t/p",
+		Mode: "shuffle", Picks: 5, PlexTVURL: "https://clients.plex.tv", LetterboxdURL: "https://letterboxd.com", ImageBase: "https://image.tmdb.org/t/p",
 		SinkTimeout: 3 * time.Minute, PlexMapTimeout: 10 * time.Minute, MapEvery: 24 * time.Hour,
 		MinLetterboxd: 3.5, MinTomatoes: 75, MDBListURL: "https://api.mdblist.com", MDBListKeyFile: "/run/secrets/mdblist_api_key",
 		RatingsEvery: 30 * 24 * time.Hour,
@@ -95,7 +96,17 @@ func (Stage) Check(decode func(any) error) []config.Problem {
 	if _, err := clock(opt.PickAfter); opt.PickAfter != "" && err != nil {
 		ps = append(ps, config.Problem{Key: "stages.tonight.pick_after", Want: "want HH:MM"})
 	}
+	if err := checkMode(opt.Mode); err != nil {
+		ps = append(ps, config.Problem{Key: "stages.tonight.mode", Want: err.Error()})
+	}
 	return ps
+}
+
+func checkMode(mode string) error {
+	if mode != "shuffle" && mode != "recommend" {
+		return fmt.Errorf("%q: want shuffle or recommend", mode)
+	}
+	return nil
 }
 
 // options decodes the stage's keys and checks them; after is pick_after as an offset from local midnight.
@@ -109,6 +120,9 @@ func options(env *stage.Env) (opt Options, after time.Duration, err error) {
 	}
 	if err := uniquePeople(opt.People); err != nil {
 		return opt, 0, err
+	}
+	if err := checkMode(opt.Mode); err != nil {
+		return opt, 0, fmt.Errorf("tonight mode: %w", err)
 	}
 	after, err = clock(opt.PickAfter)
 	return opt, after, err

@@ -3,6 +3,7 @@ package tmdb
 import (
 	"context"
 	"fmt"
+	"net/url"
 )
 
 // Person is someone TMDB credits: a film's crew member, a show's creator.
@@ -29,6 +30,55 @@ func (c *Client) Directors(ctx context.Context, movieID int) ([]Person, error) {
 		}
 	}
 	return out, nil
+}
+
+// Taste is what a film is made of, and what TMDB's users watch with it: its details, its cast in billing order, its
+// crew, its keywords, and the films TMDB recommends from it (the first page, best first).
+type Taste struct {
+	Details
+	Cast            []Person
+	Crew            []Credit
+	Keywords        []string
+	Recommendations []int
+}
+
+type Credit struct {
+	Person
+	Job string `json:"job"`
+}
+
+// MovieTaste is a film's Taste, in one request.
+func (c *Client) MovieTaste(ctx context.Context, movieID int) (Taste, error) {
+	var raw struct {
+		Details
+		Credits struct {
+			Cast []Person `json:"cast"`
+			Crew []Credit `json:"crew"`
+		} `json:"credits"`
+		Keywords struct {
+			Keywords []struct {
+				Name string `json:"name"`
+			} `json:"keywords"`
+		} `json:"keywords"`
+		Recommendations struct {
+			Results []struct {
+				ID int `json:"id"`
+			} `json:"results"`
+		} `json:"recommendations"`
+	}
+	q := url.Values{"append_to_response": {"credits,keywords,recommendations"}}
+	if err := c.get(ctx, fmt.Sprintf("/movie/%d", movieID), q, &raw); err != nil {
+		return Taste{}, err
+	}
+	t := Taste{Details: raw.Details, Cast: raw.Credits.Cast, Crew: raw.Credits.Crew}
+	t.Kind = Movie
+	for _, k := range raw.Keywords.Keywords {
+		t.Keywords = append(t.Keywords, k.Name)
+	}
+	for _, r := range raw.Recommendations.Results {
+		t.Recommendations = append(t.Recommendations, r.ID)
+	}
+	return t, nil
 }
 
 // Directed lists the TMDB ids of the films a person is credited as Director on.

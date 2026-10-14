@@ -113,7 +113,12 @@ func pickAll(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options
 				delete(v.sh.Recent, id)
 			}
 		}
-		picks := shuffled(lib, ratings, w, v.sh.Recent, opt, day, v.who)
+		var picks []pick
+		if opt.Mode == "recommend" {
+			picks = recommended(lib, ratings, w, v.sh.Recent, opt)
+		} else {
+			picks = shuffled(lib, ratings, w, v.sh.Recent, opt, day, v.who)
+		}
 		if len(picks) == 0 {
 			rep.Alert("tonight: no film for %s on %s: none they have not seen is over the bars (%d of %d films are)", v.who, day, pass, len(lib))
 			continue
