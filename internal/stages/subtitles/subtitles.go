@@ -857,7 +857,9 @@ func (r *run) plan(ctx context.Context, titles, sidecarred []*title) ([]*title, 
 			}
 			continue
 		}
-		if !t.englishText { // with an embedded English text track a sidecar is the owner's own choice
+		// beside an embedded English text track a sidecar is the owner's own choice, unless the stage wrote it (an
+		// extract is made from that very track)
+		if !t.englishText || written[t.path] {
 			due = append(due, t)
 			n++
 		}
