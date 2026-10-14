@@ -172,10 +172,18 @@ func readSubFacts(raw []byte, ext string) SubFacts {
 	return f
 }
 
-// textScript is the first script with more than 20 characters (sub_stats.script), counting only characters in words
-// with no Latin letter: OCR'd English writes Greek or Cyrillic capitals for their Latin look-alikes ("PLAYIΝG"), and
-// reading that as Greek would archive a film's only English track — which the subtitle fetcher then fetches again.
+// textScript is the first script with more than 20 characters (sub_stats.script) that are also more than a fifth of the
+// Latin letters, counting only characters in words with no Latin letter: OCR'd English writes Greek or Cyrillic
+// capitals for their Latin look-alikes ("PLAYIΝG"), and an English track can keep a few untranslated lines (Evil Does
+// Not Exist's: 39 Chinese characters among 4,853 English words); reading either as another script would archive a
+// film's only English track, which the subtitle stage then writes again.
 func textScript(text string) string {
+	latinLetters := 0
+	for _, r := range text {
+		if r < 0x80 && unicode.IsLetter(r) {
+			latinLetters++
+		}
+	}
 	for _, s := range scripts {
 		n, mixed, word, latin := 0, 0, 0, false
 		flush := func() {
@@ -196,7 +204,7 @@ func textScript(text string) string {
 			}
 		}
 		flush()
-		if n-mixed > 20 {
+		if n-mixed > 20 && 5*(n-mixed) > latinLetters {
 			return s.name
 		}
 	}
@@ -245,7 +253,8 @@ var factExt = set(".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx", ".smi")
 // read again rather than planned from stale facts.
 const subFactsSchema = `DROP TABLE IF EXISTS rename_subfacts;
 DROP TABLE IF EXISTS rename_subfacts_v2;
-CREATE TABLE IF NOT EXISTS rename_subfacts_v3 (
+DROP TABLE IF EXISTS rename_subfacts_v3;
+CREATE TABLE IF NOT EXISTS rename_subfacts_v4 (
   path     TEXT PRIMARY KEY,
   size     INTEGER NOT NULL,
   mtime_ns INTEGER NOT NULL,
@@ -270,7 +279,7 @@ func subFacts(ctx context.Context, env *stage.Env, files map[string]int64) (map[
 		facts       SubFacts
 	}
 	cached := map[string]row{}
-	rows, err := db.QueryContext(ctx, `SELECT path, size, mtime_ns, facts FROM rename_subfacts_v3`)
+	rows, err := db.QueryContext(ctx, `SELECT path, size, mtime_ns, facts FROM rename_subfacts_v4`)
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +307,7 @@ func subFacts(ctx context.Context, env *stage.Env, files map[string]int64) (map[
 		defer tx.Rollback()
 		for p, r := range fresh {
 			raw, _ := json.Marshal(r.facts)
-			if _, err := tx.Exec(`INSERT OR REPLACE INTO rename_subfacts_v3(path, size, mtime_ns, facts) VALUES (?, ?, ?, ?)`,
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO rename_subfacts_v4(path, size, mtime_ns, facts) VALUES (?, ?, ?, ?)`,
 				p, r.size, r.mtime, string(raw)); err != nil {
 				return err
 			}
@@ -338,7 +347,7 @@ func subFacts(ctx context.Context, env *stage.Env, files map[string]int64) (map[
 	}
 	for p := range cached {
 		if _, live := out[p]; !live {
-			if _, err := db.ExecContext(ctx, `DELETE FROM rename_subfacts_v3 WHERE path = ?`, p); err != nil {
+			if _, err := db.ExecContext(ctx, `DELETE FROM rename_subfacts_v4 WHERE path = ?`, p); err != nil {
 				return nil, err
 			}
 		}
