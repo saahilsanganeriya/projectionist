@@ -1,6 +1,6 @@
 // Package llm calls models through OpenAI-compatible Chat Completions APIs, the one path for every stage that asks a
 // model: one process-wide bound on calls in flight across every API, one failure policy, and the dollar cost of every
-// call so a stage can hold a hard budget. Each task (posters, collections, tonight) names its model and an ordered list
+// call so a stage can hold a hard budget. Each task (posters, collections) names its model and an ordered list
 // of fallbacks in [llm.tasks.<task>], sent through the Vercel AI Gateway ([llm] api and key_file) and priced from its
 // catalogue; a Claude model is just another id ("anthropic/claude-sonnet-5.5"). A task may instead call an API of its
 // own on its own key (OpenAI's, say): then it is priced at its own price_in and price_out, takes no fallbacks, and sends
@@ -77,11 +77,10 @@ type Task struct {
 }
 
 // The bake-offs' picks: the posters and collections judge and its fallback (the owner's-taste test, 2026-10-06: the
-// cheap models nearest Opus at choosing the poster he picked), and tonight's cheap fallback.
+// cheap models nearest Opus at choosing the poster he picked).
 const (
 	VisionModel    = "openai/gpt-5.6-luna"
 	VisionFallback = "alibaba/qwen3-vl-instruct"
-	FallbackModel  = "alibaba/qwen3.7-flash"
 )
 
 // Defaults is the configuration a missing [llm] key takes. The vision tasks send effort "none" rather than "off":
@@ -93,7 +92,6 @@ func Defaults() Config {
 		Tasks: map[string]Task{
 			"posters":     {Model: VisionModel, Fallbacks: []string{VisionFallback}, Reasoning: "none"},
 			"collections": {Model: VisionModel, Fallbacks: []string{VisionFallback}, Reasoning: "none"},
-			"tonight":     {Model: "deepseek/deepseek-v4.1-flash", Fallbacks: []string{FallbackModel}, Reasoning: "off"},
 		},
 	}
 }
@@ -625,7 +623,7 @@ func parkedForBilling(api string, since time.Time, err error) error {
 }
 
 // billingRecheck is how often an account that refuses for billing is tried again: by one call, which the others wait
-// for. A refused call costs nothing; the hold keeps every run of every stage from asking (tonight runs every 30 min).
+// for. A refused call costs nothing; the hold keeps every run of every stage from asking (posters runs every 6 h).
 const billingRecheck = time.Hour
 
 // blocked is a billing refusal, kept in the store until a call is answered again: since when, when a call was last

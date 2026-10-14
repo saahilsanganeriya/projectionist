@@ -96,7 +96,7 @@ func TestFailurePolicy(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				g := llmtest.New(func(n int, _ llm.Request) llmtest.Answer { return c.answers[n-1] })
-				s := onClock(g, &memStore{}, nil).Session("tonight")
+				s := onClock(g, &memStore{}, nil).Session("collections")
 				start := time.Now()
 				res, err := s.Chat(context.Background(), ask)
 				waited := time.Since(start)
@@ -135,7 +135,7 @@ func TestInFlightBound(t *testing.T) {
 			mu.Unlock()
 			return llmtest.Answer{Text: "ok"}
 		})
-		s := onClock(g, &memStore{}, nil).Session("tonight")
+		s := onClock(g, &memStore{}, nil).Session("collections")
 		start := time.Now()
 		var wg sync.WaitGroup
 		for range 20 {
@@ -242,7 +242,7 @@ func TestSessionParks(t *testing.T) {
 	ctx := context.Background()
 	set := func(f, b bool) { mu.Lock(); fail, billing = f, b; mu.Unlock() }
 
-	s := c.Session("tonight")
+	s := c.Session("collections")
 	for range 4 {
 		s.Chat(ctx, ask)
 	}
@@ -262,7 +262,7 @@ func TestSessionParks(t *testing.T) {
 	}
 
 	set(false, true)
-	s = c.Session("tonight")
+	s = c.Session("collections")
 	_, err = s.Chat(ctx, ask)
 	_, again := s.Chat(ctx, ask)
 	if !errors.Is(err, llm.ErrBilling) || !errors.Is(again, llm.ErrParked) || len(g.Calls()) != 11 ||
@@ -273,19 +273,19 @@ func TestSessionParks(t *testing.T) {
 	}
 	clock = clock.Add(6 * time.Hour) // the next run: a new client, as after a restart, still refused
 	c = llmtest.Client(t, g, st, func() time.Time { return clock }, llm.Config{})
-	s = c.Session("tonight")
+	s = c.Session("collections")
 	s.Chat(ctx, ask)
 	if !strings.Contains(s.Parked().Error(), "since 2026-10-05T23:00:00Z") {
 		t.Fatalf("the next run's refusal: %v; want it dated from the first", s.Parked())
 	}
 	set(false, false)
 	clock = clock.Add(time.Hour) // the next try (TestBillingHold owns the hold)
-	s = c.Session("tonight")
+	s = c.Session("collections")
 	if _, err := s.Chat(ctx, ask); err != nil {
 		t.Fatal(err)
 	}
 	set(false, true)
-	s = c.Session("tonight")
+	s = c.Session("collections")
 	s.Chat(ctx, ask)
 	if !strings.Contains(s.Parked().Error(), "since 2026-10-06T06:00:00Z") {
 		t.Fatalf("a refusal after an answered call: %v; want it dated anew", s.Parked())
@@ -336,8 +336,8 @@ func TestBillingHold(t *testing.T) {
 
 		start := time.Now()
 		c := onClock(g, st, nil)
-		_, err := c.Session("tonight").Chat(ctx, ask)
-		tell := func() bool { return c.Session("tonight").TellBilling(ctx) }
+		_, err := c.Session("collections").Chat(ctx, ask)
+		tell := func() bool { return c.Session("collections").TellBilling(ctx) }
 		if told, again := tell(), tell(); !errors.Is(err, llm.ErrBilling) || !told || again || len(g.Calls()) != 1 {
 			t.Fatalf("the first refusal: %v, %d calls, told %v then %v; want one call and one alert", err, len(g.Calls()), told, again)
 		}
@@ -357,7 +357,7 @@ func TestBillingHold(t *testing.T) {
 				t.Fatalf("call %d of the hourly burst: %v; want a billing refusal", i, err)
 			}
 		}
-		parked = c.Session("tonight").Parked()
+		parked = c.Session("collections").Parked()
 		if len(g.Calls()) != 2 || tell() || strings.Count(fmt.Sprint(parked), "its last answer") != 1 ||
 			!strings.Contains(fmt.Sprint(parked), "tried again from "+time.Now().Add(time.Hour).Format(time.RFC3339)) {
 			t.Fatalf("the hourly try: %d calls in all, then %v; want 2 (one try for 8 callers), no second alert, the next try an "+
@@ -374,7 +374,7 @@ func TestBillingHold(t *testing.T) {
 			t.Fatalf("%d calls in all; want 10: the try and the 7 behind it", len(g.Calls()))
 		}
 		set(true, nil)
-		c.Session("tonight").Chat(ctx, ask)
+		c.Session("collections").Chat(ctx, ask)
 		if len(g.Calls()) != 11 || !tell() {
 			t.Fatalf("a new refusal after an answered call: %d calls; want it sent and told", len(g.Calls()))
 		}
@@ -463,14 +463,13 @@ func (failing) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, errors.New("connection refused")
 }
 
-// Catches a task table that sets only some keys (its fallbacks, say) sending an empty model, or the tonight task
-// losing its reasoning or its fallback, because the table replaced the default wholesale.
+// Catches a task table that sets only some keys (its fallbacks, say) sending an empty model, or a task that names only
+// its model losing its reasoning or its fallback, because the table replaced the default wholesale.
 func TestPartialTaskKeepsItsDefaults(t *testing.T) {
-	c := llm.New(llm.Config{Tasks: map[string]llm.Task{"posters": {Fallbacks: []string{"google/gemma-4-31b-it"}}, "tonight": {Model: "m/x"}}}, nil, time.Now)
-	if p, n := c.Task("posters"), c.Task("tonight"); p.Model != llm.VisionModel || p.Reasoning != "none" || len(p.Fallbacks) != 1 ||
-		n.Model != "m/x" || n.Reasoning != "off" || !slices.Equal(n.Fallbacks, []string{llm.FallbackModel}) ||
-		c.Task("collections").Model != llm.VisionModel {
-		t.Fatalf("posters %+v, tonight %+v, collections %+v", p, n, c.Task("collections"))
+	c := llm.New(llm.Config{Tasks: map[string]llm.Task{"posters": {Fallbacks: []string{"google/gemma-4-31b-it"}}, "collections": {Model: "m/x"}}}, nil, time.Now)
+	if p, n := c.Task("posters"), c.Task("collections"); p.Model != llm.VisionModel || p.Reasoning != "none" || len(p.Fallbacks) != 1 ||
+		n.Model != "m/x" || n.Reasoning != "none" || !slices.Equal(n.Fallbacks, []string{llm.VisionFallback}) {
+		t.Fatalf("posters %+v, collections %+v", p, n)
 	}
 }
 
@@ -585,7 +584,7 @@ func TestBillingHoldIsPerAccount(t *testing.T) {
 	st, ctx := &memStore{}, context.Background()
 	cfg := llm.Config{Tasks: map[string]llm.Task{"posters": direct(t, api)}}
 	c := llmtest.Client(t, g, st, time.Now, cfg)
-	posters, tonight := c.Session("posters"), c.Session("tonight")
+	posters, tonight := c.Session("posters"), c.Session("collections")
 	_, err := posters.Chat(ctx, ask)
 	_, tonightErr := tonight.Chat(ctx, ask)
 	if !errors.Is(err, llm.ErrBilling) || !errors.Is(posters.Parked(), llm.ErrBilling) || len(o.sent()) != 1 || tonightErr != nil || tonight.Parked() != nil {
@@ -596,7 +595,7 @@ func TestBillingHoldIsPerAccount(t *testing.T) {
 		t.Fatalf("told posters %v, tonight %v; want the one alert for posters' account only", told, other)
 	}
 	c = llmtest.Client(t, g, st, time.Now, cfg) // a restart
-	if !errors.Is(c.Session("posters").Parked(), llm.ErrBilling) || c.Session("tonight").Parked() != nil {
-		t.Fatalf("after a restart: posters %v, tonight %v; want posters still held, tonight not", c.Session("posters").Parked(), c.Session("tonight").Parked())
+	if !errors.Is(c.Session("posters").Parked(), llm.ErrBilling) || c.Session("collections").Parked() != nil {
+		t.Fatalf("after a restart: posters %v, tonight %v; want posters still held, tonight not", c.Session("posters").Parked(), c.Session("collections").Parked())
 	}
 }
