@@ -52,6 +52,11 @@ const (
 
 var errWatchLimit = errors.New("inotify watch limit reached")
 
+// sigVersion is the format of a unit's content signature; a build that changes what it covers bumps it, and its first
+// run records every unit afresh, as a first sweep does, instead of triggering each one it next sees (2: subtitle files
+// left out). A video changed just before such a deploy is left to the stages' own schedules.
+const sigVersion = 2
+
 var subtitleExt = map[string]bool{".srt": true, ".ass": true, ".ssa": true, ".vtt": true, ".sub": true, ".idx": true, ".smi": true}
 
 type Options struct {
@@ -115,8 +120,9 @@ type pending struct {
 
 // state is kept between runs; the per-unit signatures live in the watcher_units table.
 type state struct {
-	LastSweep map[string]time.Time `json:"last_sweep"` // per root: start of its last complete walk
-	Pending   map[string]*pending  `json:"pending"`
+	LastSweep  map[string]time.Time `json:"last_sweep"` // per root: start of its last complete walk
+	Pending    map[string]*pending  `json:"pending"`
+	SigVersion int                  `json:"sig_version"` // the format of the signatures in watcher_units (sigVersion)
 }
 
 type watcher struct {
@@ -189,8 +195,8 @@ func (w *watcher) load(ctx context.Context) error {
 	if _, err := w.env.Store.GetJSON(ctx, name, "state", &w.st); err != nil {
 		return err
 	}
-	if w.st.LastSweep == nil {
-		w.st.LastSweep = map[string]time.Time{}
+	if w.st.LastSweep == nil || w.st.SigVersion != sigVersion {
+		w.st.LastSweep, w.st.SigVersion = map[string]time.Time{}, sigVersion
 	}
 	if w.st.Pending == nil {
 		w.st.Pending = map[string]*pending{}

@@ -148,6 +148,40 @@ func TestSweepCatchesLostEvents(t *testing.T) {
 	})
 }
 
+// Catches a build whose signature covers less (subtitle files left out) triggering every unit it next sees once, since
+// each recorded signature was taken the old way (2026-10-14: 16 units in 20 minutes as the subtitles stage walked the
+// library); and the reverse, a run re-recording every unit each time, which would swallow a change made between runs.
+func TestNewSignatureFormatTriggersNothing(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		r := newRig(t, 100)
+		old := "Movies/Old (2001) {tmdb-1}"
+		r.put(old+"/Old (2001) {tmdb-1}.mkv", 10)
+		r.start()()
+		var st state
+		_, err := r.env.Store.GetJSON(t.Context(), name, "state", &st)
+		must(t, err)
+		st.SigVersion = 1 // as an older build left it, with its own signatures
+		must(t, r.env.Store.PutJSON(t.Context(), name, "state", st))
+		_, err = r.env.Store.DB().Exec(`UPDATE watcher_units SET sig = '0123456789abcdef'`)
+		must(t, err)
+		time.Sleep(time.Minute)
+		r.put(old+"/Old (2001) {tmdb-1}.en.srt", 3)
+		finish := r.start()
+		time.Sleep(3*time.Minute + time.Second)
+		if got := r.quiet(); len(got) != 0 {
+			t.Fatalf("first run under the new format: quiet %q; want none", got)
+		}
+		finish()
+		r.put(old+"/Old (2001) {tmdb-1} - Extended.mkv", 10) // between runs, with no event
+		finish = r.start()
+		time.Sleep(3*time.Minute + time.Second)
+		if got := r.quiet(); len(got) != 1 || !strings.HasSuffix(got[0], old+" sweep") {
+			t.Fatalf("a video added between runs: quiet %q; want Old once, found by the sweep", got)
+		}
+		finish()
+	})
+}
+
 // ---- harness ----
 
 // fakeSource stands in for inotify: tests deliver events by hand, and limit plays fs.inotify.max_user_watches.
