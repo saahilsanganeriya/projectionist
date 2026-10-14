@@ -315,8 +315,10 @@ func (f *fixture) outcomes() map[string]string {
 // search deferring its own title too (one title's refusal would hold up every run), or recording it while another
 // provider is out for the quota; OpenSubtitles out (its quota) holding back a title Gestdown has candidates for, in the
 // cheap pass or in the queue, or reading its file hash although it will not search; an alignment downloading a
-// candidate before the one ahead of it failed (an OpenSubtitles download is quota); and dead download links (plain
-// 404s) parking OpenSubtitles with an alert instead of moving on as subfetch2.py does.
+// candidate before the one ahead of it failed (an OpenSubtitles download is quota); dead download links (plain
+// 404s) parking OpenSubtitles with an alert instead of moving on as subfetch2.py does; and a dead link downloaded again
+// when its title is searched again (2,018 of 2,184 failed downloads from 2026-10-07 to 10-14 repeated one already
+// failed for good: a 404, a zip with no single SRT, not a zip).
 func TestRunProviderTrouble(t *testing.T) {
 	gone := httptest.NewServer(http.NotFoundHandler())
 	gone.Close()
@@ -430,6 +432,12 @@ func TestRunProviderTrouble(t *testing.T) {
 	dead.h.Env.Store.DB().QueryRow(`SELECT count(*) FROM events WHERE item=? AND status='download_failed'`, dead.path(ran)).Scan(&failed)
 	if failed != maxTries {
 		t.Errorf("Ran: %d failed downloads recorded, want %d", failed, maxTries)
+	}
+	downloads := strings.Count(strings.Join(dead.requests, " "), "/dl/ran")
+	dead.h.Env.Store.DB().Exec(`DELETE FROM subtitles_titles WHERE path=?`, dead.path(ran)) // searched again
+	dead.run(t)
+	if again := strings.Count(strings.Join(dead.requests, " "), "/dl/ran") - downloads; again != 0 || dead.outcomes()[dead.path(ran)] != "no_aligned_candidate" {
+		t.Errorf("Ran searched again: %d dead links downloaded again, recorded %q; want 0, no_aligned_candidate", again, dead.outcomes()[dead.path(ran)])
 	}
 }
 
