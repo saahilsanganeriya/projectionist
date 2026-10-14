@@ -711,6 +711,33 @@ func TestTasteReferencesCurrent(t *testing.T) {
 	}
 }
 
+// Catches a call carrying more images than the model takes (the gateway refused 770 calls with "Too many images in
+// request: 37 > 32" when 31 references rode with a 6-poster pool): the references leave room for a full pool, the one
+// the owner named by its current poster kept before his favourites.
+func TestReferencesLeaveRoomForAPool(t *testing.T) {
+	defer func(n int) { maxImages = n }(maxImages)
+	maxImages = poolSize + 1
+	w := newWorld(t, "dry_run = true\ntaste_references = [\"movie:tmdb-2\"]\ntaste_references_current = [\"movie:tmdb-1\"]\n")
+	w.h.Plex.Handle("GET", "/library/metadata/101/thumb", 200, string(poster("blue")))
+	w.run(t)
+	for _, c := range w.gateway.Calls() {
+		images := 0
+		for _, m := range c.Messages {
+			for _, p := range m.Content {
+				if p.Type == "image_url" {
+					images++
+				}
+			}
+		}
+		if ref := c.Messages[1]; images > maxImages || len(ref.Content) != 3 || ref.Content[1].Text != "Alpha (2001):" {
+			t.Fatalf("a call with %d images (at most %d), references %v; want Alpha's alone", images, maxImages, ref.Content)
+		}
+	}
+	if len(w.gateway.Calls()) == 0 {
+		t.Fatal("no judge call")
+	}
+}
+
 // Catches: titles judged under the old rules (a pick replaced by a candidate 3 points better, Plex's default by one 1
 // point better) keeping those verdicts, or being paid for again: they are decided again from their stored scores.
 func TestRedecideFromStoredScores(t *testing.T) {

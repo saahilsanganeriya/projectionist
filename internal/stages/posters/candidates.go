@@ -68,6 +68,10 @@ const (
 	priorVotes = 5  // TMDB ratings are pulled towards 5/10 as if by this many votes: sparse votes count less
 )
 
+// maxImages is the most images one judge call carries: the gateway refuses more for alibaba/qwen3.8-flash ("Too many
+// images in request: 37 > 32"). A variable so a test can lower it.
+var maxImages = 32
+
 // thumbBox is the most a poster's thumbnail measures: ⌈252/28⌉×⌈392/28⌉ = 126 visual tokens at most. A photo of a
 // director gets photoBox (at most 19×19 = 361 tokens): the judge reads who and what is in it, and where.
 var thumbBox, photoBox = image.Rect(0, 0, 252, 392), image.Rect(0, 0, 512, 512)
