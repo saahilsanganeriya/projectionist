@@ -2,6 +2,7 @@
 //
 //	projectionist serve [-config FILE]          scheduler + HTTP until SIGTERM
 //	projectionist run [-config FILE] STAGE      one run of one stage; exit 1 on alert or error
+//	projectionist check [-config FILE]          validate the config as serve would, start nothing; exit 2 on any problem
 //	projectionist stages                        list the stages this binary knows
 //	projectionist align-worker [-server URL] [-via CMD] [-lanes N] [-ffmpeg DIR] [-alass FILE] [-work DIR]
 //	                                            on another machine: align the subtitles queue's titles until Ctrl-C
@@ -12,6 +13,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -58,7 +60,7 @@ func main() {
 			alass = filepath.Join(filepath.Dir(exe), "alass", "bin", "alass-cli")
 		}
 		fs.StringVar(&worker.Server, "server", "http://127.0.0.1:18097", "the NAS's listener: a forwarded port, or with -via its address on the NAS")
-		fs.Func("via", "a command that runs a command on the NAS (e.g. ~/.ssh/bin/nas): each connection is a relay it runs there",
+		fs.Func("via", "a command that runs a command on the NAS (e.g. \"ssh nas\"): each connection is a relay it runs there",
 			func(v string) error { worker.Via = strings.Fields(v); return nil })
 		fs.IntVar(&worker.Lanes, "lanes", 8, "titles aligned at once")
 		fs.StringVar(&worker.FFmpegDir, "ffmpeg", filepath.Dir(ffmpeg), "directory holding ffmpeg")
@@ -75,6 +77,8 @@ func main() {
 		fmt.Println(version)
 	case "serve":
 		os.Exit(run(*cfgPath, ""))
+	case "check":
+		os.Exit(check(*cfgPath, os.Stdout, os.Stderr))
 	case "run":
 		if fs.NArg() != 1 {
 			usage()
@@ -98,7 +102,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: projectionist serve|run STAGE|stages|version [-config FILE] | align-worker [flags] | opus-index ZIP")
+	fmt.Fprintln(os.Stderr, "usage: projectionist serve|run STAGE|check|stages|version [-config FILE] | align-worker [flags] | opus-index ZIP")
 	os.Exit(2)
 }
 
@@ -122,12 +126,59 @@ func alignWorker(o subtitles.WorkerOptions) int {
 	return 0
 }
 
+// validate is the one start-up check serve, run and check share: the top-level keys, then every stage's schedule and
+// each enabled stage's own keys (and the keys of the stage run by hand, enabled or not). It returns every problem at
+// once, so one deploy fixes them all.
+func validate(cfg *config.Config, only string) []config.Problem {
+	ps := cfg.Check()
+	for _, s := range stages() {
+		sched, sps := cfg.CheckSchedule(s.Name())
+		ps = append(ps, sps...)
+		if c, ok := s.(stage.Checker); ok && (sched.Enabled || s.Name() == only) {
+			ps = append(ps, c.Check(func(v any) error { return cfg.StageOptions(s.Name(), v) })...)
+		}
+	}
+	return ps
+}
+
+// check is the parse test a deploy runs before a restart: validate, nothing started or written. It prints one
+// "config ok" line and returns 0, or prints every problem and returns 2.
+func check(cfgPath string, stdout, stderr io.Writer) int {
+	cfg, err := config.Parse(cfgPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 2
+	}
+	if ps := validate(cfg, ""); len(ps) > 0 {
+		for _, p := range ps {
+			fmt.Fprintln(stderr, p)
+		}
+		fmt.Fprintf(stderr, "%s: %d problem(s); serve and run refuse to start until they are fixed\n", cfgPath, len(ps))
+		return 2
+	}
+	var enabled []string
+	for _, s := range stages() {
+		if sched, _ := cfg.Schedule(s.Name()); sched.Enabled {
+			enabled = append(enabled, s.Name())
+		}
+	}
+	fmt.Fprintf(stdout, "config ok: %s: %d stages enabled: %s\n", cfgPath, len(enabled), strings.Join(enabled, ", "))
+	return 0
+}
+
 // run serves (only == "") or runs one stage once; it returns the process exit code.
 func run(cfgPath, only string) int {
 	boot := obs.NewLogger(os.Stderr, "text", "info")
-	cfg, err := config.Load(cfgPath)
+	cfg, err := config.Parse(cfgPath)
 	if err != nil {
 		boot.Error("config", "event", "config_error", "err", err)
+		return 2
+	}
+	if ps := validate(cfg, only); len(ps) > 0 {
+		for _, p := range ps {
+			boot.Error("config", "event", "config_error", "key", p.Key, "problem", p.Want)
+		}
+		boot.Error("refusing to start", "event", "config_error", "problems", len(ps), "config", cfgPath)
 		return 2
 	}
 	log := obs.NewLogger(os.Stderr, cfg.Log.Format, cfg.Log.Level).With("version", version)
