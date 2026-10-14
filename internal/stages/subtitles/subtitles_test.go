@@ -932,6 +932,22 @@ func TestAlassFit(t *testing.T) {
 			t.Errorf("%s against its speech %v: ok %v result %q attempt %v", c.mode, c.want, ok, result, attempt)
 		}
 	}
+	// alass moved every cue together, but noise in three of the eight chunks of speech (a laugh track, a score) leaves
+	// the check unable to confirm any place: that says nothing against the subtitle, so it is unjudged, not refused
+	// (22 in-sync sidecars were archived that way on 2026-10-14, Friends S05E15 at z 7.0 among them)
+	moved := cues(uniform.String())
+	noisy := make([]span, len(moved))
+	for i, c := range moved {
+		if chunk := i * chunks / len(moved); chunk == 1 || chunk == 3 || chunk == 5 {
+			c.start, c.end = c.start+3, c.end+3
+		}
+		noisy[i] = c
+	}
+	ref := reference{label: "alass", dir: dir, hearings: []hearing{{label: "silero", speech: filepath.Join(dir, "speech.srt"), talk: spanBits(noisy, 1)}}}
+	os.WriteFile(filepath.Join(dir, "mode"), []byte("uniform"), 0o644)
+	if _, result, ok := r.fit(context.Background(), &ref, cand.String(), map[string]any{}); ok || result != "unjudged" {
+		t.Errorf("speech that cannot confirm alass's uniform shift: ok %v result %q; want unjudged", ok, result)
+	}
 }
 
 // Catches a subtitle in sync with the speech given to alass anyway (alass tore the in-sync release sidecars of Batman:
