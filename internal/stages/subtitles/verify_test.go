@@ -123,8 +123,9 @@ func TestVerifyRetimed(t *testing.T) {
 func TestVerifyJudgesAReleaseMatch(t *testing.T) {
 	truth := dense(1000, 7)
 	late := srtOf(cueSpans(truth, 1, -15.7))
-	for _, written := range []string{"release_matched", "extracted"} {
+	for written, track := range map[string]string{"release_matched": "none", "extracted": "eng subrip"} {
 		f := verifyFixture(t, true, map[string]string{".en.srt": late})
+		f.note(show, "Show.S01E01.720p.HDTV.x264-KILLERS.mkv", track, "0h 50m") // an extract's video has its source track
 		db := f.h.Env.Store.DB()
 		db.Exec(schema)
 		if _, err := db.Exec(`INSERT INTO subtitles_titles(path, outcome, detail, tries, last_try) VALUES (?, ?, '', 1, ?)`,
