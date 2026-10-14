@@ -1,543 +1,352 @@
-# projectionist config. Mounted read-only at /config/projectionist.toml.
-# Secrets are never written here: only the paths of the files that hold them.
+# projectionist config: copy to the folder mounted at /config as projectionist.toml, replace every placeholder,
+# delete the [stages.<name>] table of each stage you do not want, then check it: projectionist check -config FILE.
+# Active keys are the ones you must set (or will want to); a commented key shows its default, or an example when it
+# has none.
+# Every key is described in docs/configuration.md. Secrets are never written here: only the files that hold them.
 
-listen   = "127.0.0.1:8097"          # /health and /metrics; host network, so keep it on loopback
-state_db = "/state/projectionist.db" # SQLite on the btrfs volume (never on SMB/NFS)
-timezone = "America/Los_Angeles"     # used only for stage windows; logs and the DB are UTC
-owners   = ["saahilsanganeriya", "saahil"] # Plex, Jellyfin accounts whose viewing never pauses a job
+# listen   = "127.0.0.1:8097"  # host network: keep it on 127.0.0.1 or the LAN address
+# state_db = "/state/projectionist.db"  # SQLite file; must sit on a local disk (btrfs volume), never SMB/NFS
+# timezone = "UTC"  # only for stage windows; logs and the DB are always UTC
+owners   = ["your-plex-username", "your-jellyfin-username"]  # your own Plex and Jellyfin account names: their viewing never pauses a job
 
-# Trackers and indexers whose tags ride on the library's release names ('[SITE.MX]', 'x264-SITE') and whose adverts sit
-# in subtitle files: a name here is never read as part of a title, and a subtitle line naming one is an advert. A file
-# whose name starts with a junk_file_prefixes entry is a site's bundled clip or notice, never the title's video.
+# Release and tracker sites whose tags ride on release names and subtitle adverts; none = no site is known.
 [release_sites]
-names              = [] # e.g. ["SITE"]
-junk_file_prefixes = [] # e.g. ["site.com", "group."]
+# names              = ["SITE"]  # a release's site tag and a subtitle's advert line
+# junk_file_prefixes = ["site.com"]  # a file named so is a site's bundled clip, never the title's video
 
 [log]
-format = "text" # key=value lines; "json" for JSON lines
-level  = "info"
+# format = "text"  # "text" (key=value) or "json"
+# level  = "info"  # debug, info, warn, error
 
 [plex]
-url         = "http://127.0.0.1:32400"
-preferences = "/volume1/PlexMediaServer/AppData/Plex Media Server/Preferences.xml" # holds the token; read per request
-timeout     = "20s"
+# url         = "http://127.0.0.1:32400"  # where Plex answers; the service runs on the host network
+preferences = "/volume1/PlexMediaServer/AppData/Plex Media Server/Preferences.xml"  # Preferences.xml, mounted read-only; holds the token
+# timeout     = "20s"  # bound on each Plex request
 
 [jellyfin]
-url      = "http://127.0.0.1:8096"
-key_file = "/run/secrets/jellyfin_key"
-timeout  = "20s"
+# url      = "http://127.0.0.1:8096"  # where Jellyfin answers
+key_file = "/run/secrets/jellyfin_key"  # API key file, mounted read-only
+# timeout  = "20s"  # bound on each Jellyfin request
 
 [ffmpeg]
-dir    = "/usr/lib/jellyfin-ffmpeg" # inside the image; same build as the Jellyfin container
-device = "/dev/dri/renderD128"
+# dir    = "/usr/lib/jellyfin-ffmpeg"  # jellyfin-ffmpeg install: <dir>/ffmpeg, <dir>/ffprobe
+# device = "/dev/dri/renderD128"  # render node passed through from the host
 
-# The online sources: identity, episodes, collections, external ids and images come from TMDB directly, artwork
-# also from fanart.tv. Plex and Jellyfin are never asked. Responses are cached in state_db for cache_ttl.
 [tmdb]
-read_token_file = "/run/secrets/tmdb_read_token" # v4 read-access token, sent as a bearer
-api_key_file    = "/run/secrets/tmdb_api_key"    # v3 key, used only when the token file is missing or empty
-cache_ttl       = "24h"
+# read_token_file = "/run/secrets/tmdb_read_token"  # v4 read-access token, preferred
+# api_key_file    = "/run/secrets/tmdb_api_key"  # v3 key, used only when the token file is missing or empty
+# cache_ttl       = "24h"  # how long a TMDB answer is reused from state_db
 
 [fanart]
-api_key_file = "/run/secrets/fanart_api_key"
-cache_ttl    = "24h"
+# api_key_file = "/run/secrets/fanart_api_key"  # fanart.tv API key file, read on every request
+# cache_ttl    = "24h"  # how long a fanart.tv answer is reused from state_db
 
-# One table per stage. Common keys: enabled (default true when the table exists), every, window ("HH:MM-HH:MM",
-# in timezone, may wrap midnight). Everything else in the table belongs to the stage.
-# [stages.example]
-# every  = "15m"
-# window = "02:00-08:00"
-
-# Movies collections in Plex and Jellyfin: the owner's backed-up collections + the approved list + new arrivals.
-# Facts from the folder names and TMDB; the apps only receive writes. Never removes a member or a collection.
-[stages.collections]
-every           = "6h"
-movies_dir      = "/volume1/media/Movies"
-# The owner's 111 collections, frozen once from Plex's customizations export (a one-time migration; Plex is never
-# read for them again): config/collections.owner.json in this repo, and their posters copied once beside it.
-owner_file      = "/config/collections.owner.json"
-poster_dir      = "/config/collection-posters" # <ratingKey>.jpg
-approved_file   = "/config/collections.approved.json" # config/collections.approved.json in this repo
-plex_section    = 4
-sinks           = ["plex", "jellyfin"] # reconciled concurrently; a slow or down app never fails or holds up the run
-sink_budget     = "20m" # each app's share of a run; out of time, it triggers the next run, which carries on
-call_timeout    = "2m"  # each request, on this stage's own clients ([plex] and [jellyfin] timeouts stay short)
-# A director here gets a "zz<name>" collection once their third film is on disk (names as TMDB spells them).
-canon_directors = [
-  "Paul Greengrass", "Vishal Bhardwaj", "George Miller", "Robert Zemeckis", "Nicolas Winding Refn", "Hayao Miyazaki",
-  "Ang Lee", "Todd Haynes", "Lynne Ramsay", "Andrew Stanton", "Kathryn Bigelow", "The Wachowskis", "Joachim Trier",
-  "Steve McQueen", "Gus Van Sant", "Gaspar Noé", "Chloé Zhao", "Sean Baker", "Barry Jenkins", "David Lean",
-  "Roman Polanski", "David Cronenberg", "Edward Yang", "Alexander Payne", "Kenneth Lonergan", "Miloš Forman",
-  "Jacques Demy", "John Carpenter", "Peter Weir", "Robert Wise", "Elaine May", "Julia Ducournau", "Masaki Kobayashi",
-  "Pablo Larraín", "Satoshi Kon"
-]
-# only    = ["Scary Movie"] # reconcile just these collections (gate runs)
-# dry_run = true            # log every create/add/sort/poster instead of sending it
-
-# Keeps Plex and Jellyfin transcoding on the GPU; replaces scripts/gpu_guard.py (DSM task 8).
-[stages.gpu-guard]
-every           = "15m"
-plex_device     = "8086:3185@0000:00:02.0" # Plex's id for the UHD 600 ("Auto" picks an empty device on 1.43)
-plex_log        = "/volume1/PlexMediaServer/AppData/Plex Media Server/Logs/Plex Media Server.log"
-plex_app_data   = "/volume1/PlexMediaServer/AppData/Plex Media Server"
-plex_transcoder = "/volume1/@appstore/PlexMediaServer/Plex Transcoder"
-plex_uid        = 297536 # `id PlexMediaServer` on the NAS
-plex_gid        = 297536
-plex_groups     = [297536, 999, 937] # 937 = videodriver, owner of /dev/dri/renderD128
-sample          = "/volume1/PlexMediaServer/scripts/gpu_sample.mkv"
-self_test_every = "24h"
-legacy_state    = "/volume1/PlexMediaServer/scripts/gpu_guard.state.json" # imported once at cutover
-plex_timeout    = "5s" # each Plex API call; a slower Plex never fails the run
-
-# Probes Plex, Jellyfin, qBittorrent, the Cloudflare hostnames and the containers; restarts a Jellyfin that stopped
-# answering when nobody is playing on it. New: no Python original. Needs /var/run/docker.sock (compose.yaml).
-[stages.health]
-every                 = "5m"
-timeout               = "30s"          # per probe, all at once (Cloudflare: up to 9.8 s seen); Plex/Jellyfin: also [plex]/[jellyfin] timeout
-fail_threshold        = 3              # consecutive failed runs before an alert (and a restart)
-restart_cooldown      = "1h"           # at most one restart per container per cooldown; at least 1h
-restartable           = ["jellyfin"]   # the ONLY containers projectionist may restart; left out or [] = alert only
-docker_socket         = "/var/run/docker.sock"
-jellyfin_container    = "jellyfin"
-qbittorrent_container = "qbittorrent"
-qbittorrent_url       = "http://127.0.0.1:8080" # 403 counts as up: the WebUI answers and wants a login
-# Plex's speed: the Movies and Home hubs are timed every run; Plex's Optimize Database runs once (at most daily, no
-# guest watching) when they are slower than plex_slow 3 runs in a row, or after a big batch of library changes.
-plex_movies_section   = 4
-plex_slow             = "5s"           # a cold Movies tab took 26.8 s on a fragmented database, 17 ms after an optimize
-plex_batch            = 500            # details notes + rename moves + Plex collection edits since the last optimize
-plex_optimize_window  = "03:00-06:00"  # when an optimize may start (timezone above); the 2026-10-05 one took 4 min 21 s
-# The app-data NVMe volume, mounted read-only: alerts on every run while it is not mounted on the host, read-only, too
-# full, or holds anything but app data. "" = no volume checks.
-volume2               = "/volume2"
-volume2_max_used      = 75             # percent, as df counts it
-volume2_allow         = ["PlexAppData", "jellyfin", "projectionist", "transcode", "transcode.img", "swapfile",
-                         "lost+found", "aquota.user", "aquota.group", "@eaDir", "@tmp", ".move"] # .move: drop after the move
-backup_max_age        = "36h"          # alert while appbackup's newest version is older; "0s" = no check
-[stages.health.public] # URL = the status it must answer through the Cloudflare tunnel; redirects are not followed
-"https://jellyfin.example.com"    = 302
-"https://plex.example.com"    = 401
-"https://nas.example.com" = 200
-
-# Each member's Letterboxd diary → projectionist's watch record (jfsync, the one writer, carries it to Plex and
-# Jellyfin), and each member's Letterboxd watchlist → their own Plex watchlist (plex.tv, per user; never a server
-# collection, which everyone the server is shared with would see).
-[stages.letterboxd]
-every           = "30m"                   # the RSS feeds are read every run. Letterboxd is paced at one request per 2 s for
-                                          # the whole process, shared with lists and tonight; it offers no webhooks, so it is polled
-user            = "saahilsan"
-max_fetches     = 400                     # Letterboxd requests per run; the first lookups resume over a few runs
-watchlist_every = "6h"                    # each member's watchlist grid crawl
-pages_every     = "24h"                   # his watched-films grid crawl
-export_dir      = "/volume1/docker/projectionist/data/letterboxd" # unzipped account exports; the newest folder wins
-movies_dir      = "/volume1/media/Movies"
-tv_root         = "/volume1/media/TV" # read only with plex_watchlist: the shows that may stay on a Plex watchlist
-missing_file    = "/volume1/media/_watchlist-missing.txt" # his watchlist films not on the NAS; "" = none
-sink_refresh    = "24h"                   # re-read each Plex watchlist this often; also before any write to it
-person          = "saahil"                # the owner in the watch record: his name in jfsync's users (jfsync alerts on any other)
-# false: only diary entries logged after a member's first run become watch events. true: also the export and the
-# feed's backlog (for him on 2026-10-05 about 465 Plex watched marks and 649 ratings, which Plex shows his friends:
-# watch history to friends of friends, ratings to friends). His decision.
-history         = false
-# Each member's own Plex watchlist holds only titles on the NAS, whoever added them. Their Letterboxd watchlist films
-# that are on the NAS (in movies_dir) and that they have not watched (on Letterboxd, or in Plex or Jellyfin as the
-# watch record has it) are added, a film arriving on the NAS by the next run. Every film not in movies_dir, every show
-# not in tv_root (by the {tmdb-N} in the folder names) and every item with no TMDB id is taken off, also one they added
-# by hand (Plex's free streaming titles), and so is a film this stage added once it leaves their Letterboxd watchlist.
-# A title on the NAS that they added by hand stays. A movies_dir or tv_root that is missing or holds no {tmdb-N}
-# folder fails the run, so nothing is taken off. His is written with the server's own sign-in, a person's through a
-# Plex Home switch to their plex_user (a managed user has a watchlist too). Visible as each account's privacy allows.
-plex_watchlist  = false
-# true: his Plex watchlist loses only the films this stage added (once off the NAS or off his Letterboxd watchlist);
-# what he added by hand stays, on the NAS or not. A person sets it in their people entry. false (the default): strict.
-keep_hand_added = false
-run_budget      = "25m"                   # no plex.tv call starts later than this into a run; keep it under every
-dry_run         = false                   # count events and watchlist writes only
-# More members, each synced after him on the same max_fetches: their diary becomes watch events for person (a name in
-# jfsync's users). user is their Letterboxd username; plex_user, their Plex Home user (its username, or a managed user's
-# name), is where their watchlist goes ("" = their watchlist is not read). Optional: history (false, as his),
-# keep_hand_added (false, as his; the owner's value does not carry over) and export_dir ("" = none; it may be his: each
-# member reads only the letterboxd-<user>-* folders named for them). A Home user with a PIN cannot be switched to: the
-# run alerts and skips that member's watchlist.
-# people = [{ person = "roger", user = "auralb", plex_user = "roger", keep_hand_added = true },
-#           { person = "aaron", user = "aaron1009", plex_user = "aarontest941" }]
-
-# Small 4K copies of the films listed as "Remote 4K" (Plex playlist, Jellyfin playlist or Jellyfin collection);
-# replaces scripts/remote4k.py (DSM task 9).
-[stages.remote4k]
-every        = "15m"
-playlist     = "Remote 4K"
-label        = "2160p 14Mbps"
-small_kbps   = 20000
-work_dir     = "/volume1/media/.projectionist/remote4k" # same share as the library: publish = one rename
-status_file  = "/volume1/PlexMediaServer/remote4k/STATUS.txt"
-list_timeout = "30s" # an app slower than this leaves its half of the list empty for that run (a busy Plex needs > 5 s)
-
-# Watch state (played, play count, resume position, rating) kept the same in Plex and Jellyfin from projectionist's
-# own record: Plex's webhook and the Jellyfin Webhook plugin push plays to /hooks/{plex,jellyfin} (a Jellyfin push
-# carries no rating: ratings come from Plex and Letterboxd); the history that lived only inside the apps is imported
-# once (newest Plex DB backup copy, Jellyfin played/resumable/rated items). The listings and the imports wait while
-# anyone but the owner is watching; the writes do not.
-[stages.jfsync]
-every          = "5m"
-apply          = true # false: plan only (no app writes); plan_file lists what would be written
-# plan_file    = "/volume1/PlexMediaServer/projectionist-test/jfsync/plan.tsv"
-movies_section = 4
-tv_section     = 2
-# One item listing per app per day (the sources rule) maps app ids to the library's {tmdb-N} identity. It runs after
-# the run's writes (Plex's in pages of 1,000); a failed one alerts and is tried again a day later, the old listing staying in
-# use. A play of an item added since the last listing waits for the next one. Only an app never listed retries sooner.
-address_every  = "24h"
-list_timeout   = "30m" # per request; 2026-10-05 on the loaded NAS, mid Jellyfin first scan: Jellyfin 4m56s-9m04s, Plex 4m55s-5m41s
-# Mount read-only; the newest *.db is read once per person. Take a fresh copy (backup_plex_db.sh) just before the
-# first run: plays after the copy and before the webhook is registered are not recorded.
-plex_backups   = "/volume1/PlexMediaServer/backups"
-webhook_url    = "http://127.0.0.1:8097/hooks/plex" # registered on the owner's plex.tv account; "" = leave it alone
-users = [
-  { name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" },
-  { name = "roger",  plex = "roger",             jellyfin = "roger" },
-  { name = "aaron",  plex = "Aaron Test",        jellyfin = "aaron" },
-]
-
-# Keeps "<dir>/.details/<video>.txt" true for every video in the scheme, from ffprobe and the rename logs;
-# replaces rename/write_details_files.py. Bounds are per run; probed and scanned files are cached.
-[stages.details]
-every             = "15m"
-library           = "/volume1/media"
-sections          = ["Movies", "TV"]
-# Rename logs, oldest first: the Python renamers', the rename stage's legacy copies of them, then its own. A missing
-# log is skipped and a row read twice counts once, but a run that finds no move row at all fails ([] = no logs).
-undo_logs         = ["/volume1/PlexMediaServer/rename/undo.tsv", "/volume1/PlexMediaServer/rename/undo_auto.tsv",
-                     "/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv",
-                     "/volume1/media/.projectionist/rename/undo.tsv"]
-max_probes        = 400  # new ffprobe runs per run
-max_peak_scans    = 2    # whole-file packet scans per run (files above peak_above_kbps only; ~20 min per 50 GB)
-max_decode_checks = 60   # 3 x 5 s decode samples per file
-peak_above_kbps   = 20000
-retry_unreadable  = "24h"
-# notes_root      = "/volume1/PlexMediaServer/projectionist-test/details/notes" # dry run: notes into a mirror tree
-# paths_file      = "/path/to/list.txt"                                          # only these videos
-
-# Keeps Movies/ and TV/ in the naming scheme (replaces rename/rename_engine.py + apply_ops.py and autorename.py).
-# Identity from the names and TMDB (env.TMDB, direct); never from Plex or Jellyfin.
-[stages.rename]
-every        = "15m"
-root         = "/volume1/media"
-mode         = "apply" # "plan": write ops.tsv, review.tsv, problems.tsv to plan_dir and touch nothing; "undo": replay undo_log backwards
-plan_dir     = "/volume1/media/.projectionist/rename/plan"
-undo_log     = "/volume1/media/.projectionist/rename/undo.tsv" # apply_ops.py's format: either tool can undo the other's moves
-undo_units   = [] # undo mode: only these units (e.g. "movie:tmdb-348"); empty = the whole log
-redo_undone  = false # false: a file undo put back stays until you rename or move it; true: apply plans it again
-ghost_logs   = ["/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv"]
-review_file  = "/volume1/media/_needs-review.txt"
-aligned_log  = "/volume1/PlexMediaServer/subtitle-downloads/log2.csv" # the aligner's copy wins the primary subtitle name
-sublang_file = "" # optional JSON {path: {lang, sdh}} for subtitles whose language neither name nor text gives
-notify       = true  # tell Jellyfin which folders changed (one /Library/Media/Updated push per run; Plex watches the disk)
-quiet        = "10m" # a folder written to more recently is still arriving
-
-# An English text subtitle beside every movie and episode; replaces scripts/sub_stats.py and scripts/subfetch2.py.
-# A video carrying an embedded English text track is not searched: after the queue, inside align_window, that track is
-# converted to <video>.en.srt (one read of the whole file, an hour of it a run). A subtitle made for the file's own release is trusted once its length fits
-# the video's; any other is written only once fitted to the video's captions or speech. Per title, the first route
-# that succeeds: a subtitle made for the file's own release (its original name's group, from the .details note or the
-# rename logs; or an OpenSubtitles file-hash match) is written without reading the video once its last cue fits the
-# note's duration and frame rate; in sampled mode (the default) a plausible subtitle fitted to an English .en.idx
-# beside the video, still without reading it; then one fitted to sample_windows short windows of the video (the
-# English image track's caption starts, else the voice band of its audio), written retimed only when every window has
-# evidence and agrees. Anything else waits in the alignment queue, worked while nobody but the owner watches, at most
-# align_per_day titles in any 24 h (sampled mode: only inside align_window). Providers are called
-# directly, never through Plex: Gestdown (Addic7ed, episodes) and a film site (film_site) need no key; SubSource (the
-# Subscene archive; a free key, 7,200 requests a day) and Subdl join only when <secrets_dir>/subsource_api_key,
-# subdl_api_key exists. OpenSubtitles' legacy REST API (180 downloads a day) and OpenSubtitles.com (20 a day for a
-# free user) come last whatever this list's order, and are used for a hash match, or when no other provider has a
-# candidate; OpenSubtitles.com joins only when opensubtitles_api_key (a free consumer key), opensubtitles_username and
-# opensubtitles_password exist, and a subtitle both find is tried once. A spent daily limit waits for its reset across
-# runs without an alert. IMDb and TheTVDB ids come from TMDB. A provider that is out holds back only a title none of
-# the others' subtitles is written for, which waits for it unrecorded; drop one that cannot be reached from this
-# network (Subdl, 2026-10-05) from the list. A title whose only English subtitle is an image track (PGS or VobSub) and
-# that no provider subtitle fits gets that track read by OCR (the image's subocr, PP-OCRv6 small) after the queue,
-# inside align_window, written with the track's own timing when it reads as a full English subtitle.
-[stages.subtitles]
-every         = "6h"
-roots         = ["/volume1/media/Movies", "/volume1/media/TV"]
-stats_file    = "/state/sub_stats.tsv" # sub_stats.py's TSV over the whole library, refreshed each run
-retry_after   = "168h"                 # a title that got no subtitle is searched again after this, then 2, 4, 8x it
-workers       = 3                      # titles searched at once; the queue aligns one at a time
-max_titles    = 0                      # per run; 0 = every due title
-secrets_dir   = "/run/secrets"
-alass         = "/usr/local/bin/alass" # the queue: aligns to the audio when there is no English image track, and rescues misfits
-providers     = ["gestdown", "subsource", "subdl", "opensubtitles", "opensubtitles-com"]
-# film_site   = { name = "filmsite", url = "https://subtitles.example.com" } # pages at /movie-imdb/tt<id>; add its name to providers
-align_per_day = 20                     # queued titles aligned in any 24 h, counted as each starts reading its video; 0 = none
-mode          = "sampled"              # sampled: the routes above. careful, the rollback: only a release match before
-                                       # the queue, which aligns at any hour
-align_window  = "01:00-07:00"          # sampled mode: the queue starts alignments only inside this window (config timezone);
-                                       # a run outside it, or inside it with the day's cap spent, asks for a run when it may
-sample_windows = 4                     # windows the sampled fit reads, the first at 3 % of the runtime, the last ending at 97 %
-sample_length  = "90s"                 # each; a window without dialogue is replaced by the stretch next to it toward the
-                                       # middle, twice at most
-legacy_quota  = "/volume1/PlexMediaServer/subtitle-downloads" # subfetch2.py's quota files, read once while the store has none
-align_remote_lanes = 0                 # titles leased at once to align workers on another machine (projectionist align-worker
-                                       # over SSH to listen), while one called in the last minute; 0 = off
-verify_per_run = 300                   # sampled mode: videos a run whose English .srt sidecars no record shows verified are
-                                       # fitted to their windows: kept; retimed under the same name (the old file archived);
-                                       # archived when they cannot fit (the video is searched anew); or queued, behind every
-                                       # title lacking a subtitle, for a full alignment of their own; 0 = off
-archive_dir = "/volume1/PlexMediaServer/_archive/subtitles" # where a replaced or refused sidecar moves, its library path
-                                       # mirrored (Movies/..., TV/...), never overwritten; it must exist (bind-mount it
-                                       # read-write), else the verify pass waits, with an alert
-plex_db = "/volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
-                                       # read-only: the Plex item whose video got a new sidecar, which Plex is asked to
-                                       # refresh (a scan does not attach it); the read-write mount, as Plex keeps it in WAL mode
-# undo_logs = [...]                    # rename logs for original names a note lacks; default: the details stage's list
-# output_dir = "/volume1/PlexMediaServer/projectionist-test/subtitles/out" # test runs: write sidecars here instead
-
-# Five films for the household that none of them has seen, picked once a day by one model call over each person's
-# Letterboxd ratings and reviews; a Plex Movies collection "Tonight · Household" promoted to his Home and to the Home of
-# everyone the library is shared with, as the first Movies row (below Continue Watching, On Deck and the rows of
-# libraries ordered before Movies), and the same BoxSet in Jellyfin. Nothing personal reaches it: the model knows the
-# people only as viewers A, B, C, and a reason that quotes a review (6 words of one, or a short one whole) is retried,
-# then dropped. Unseen: in no one's Letterboxd (export, feed, films page) and in no one's watch record (each person's
-# plays and ratings, from jfsync and letterboxd), nor played on his own Plex or Jellyfin account. A collection or BoxSet
-# the stage made under an older title is renamed in place.
-# Each person also gets a private playlist (playlist; "" = none) of five films they alone have not seen, from one more
-# call a day over their own history: in Plex, in their own account on this server (his with the server's sign-in,
-# anyone else's through a switch to their plex_user, a Plex Home user; one behind a PIN, not in the Home or without
-# access to this server is skipped with one alert); in Jellyfin, owned by the user jfsync's users name for their
-# person, and private. Each day's picks replace the last day's; only playlists the stage made are written to.
-# Reconciles every 30 min: a pick anyone has since watched leaves the row at once, and their own playlist too.
-# daily_cap_usd is a hard cap on every call of the day together, the household's first: each call and its one retry
-# are sized together before the first is sent, each at its worst (the input estimated at 3 bytes a token and all of
-# max_tokens as output, at the dearest price the gateway lists for the tonight task's models), and the candidate list
-# is cut until the pair fits what is left. At DeepSeek V4.1 Flash's price a call costs about a cent (the bake-off:
-# $0.005-0.011), so the four calls of a household of three cost a few cents and the cap only binds on a dear model.
-[stages.tonight]
-every           = "30m"                          # the model is [llm.tasks.tonight]'s
-max_tokens      = 4000                           # reasoning + the JSON; a cut-off answer is retried with the least reasoning
-daily_cap_usd   = 0.15                           # hard: see the comment above the table
-pick_after      = "05:00"                        # in timezone: a new day's picks after this
-picks           = 5
-max_candidates  = 400                            # unseen films shown, best-ranked first; fewer when the cap needs it
-movies_dir      = "/volume1/media/Movies"
-section         = 4
-collection      = "Tonight · Household"
-playlist        = "Tonight"                      # each person's own: this Jellyfin playlist and the Plex shelf "Tonight · <name>"; "" = none
-plex_tv         = "https://clients.plex.tv"      # the sharing restrictions of every account, and the Home (to remove the old playlists)
-jellyfin_user   = "saahil"                       # his own account, whose played flags count
-sink_timeout    = "3m"                           # per sink per run; a failed write is retried with backoff
-plex_map_timeout = "10m"                         # the daily TMDB id → ratingKey listing; a page took 112 s in a scan
-# The household. person: their name in jfsync's users (their plays and ratings in the watch record count as seen, and
-# that entry's jellyfin owns their Jellyfin playlist); user: their Letterboxd username; plex_user: their Plex account,
-# as [stages.letterboxd] names it (its username, or a managed user's name; his is the server's own sign-in); name: their
-# shelf's ("" = person, capitalized); export_dir: a folder holding their own letterboxd-<user>-* export ("" = none).
-# Each person's shelf is a Plex collection labelled Tonight-<person>: his on his own Home alone, anyone else's on the
-# shared Home. Every account the server is shared with, these and all others, gets the other people's labels added to
-# its Movies restrictions on plex.tv (every other filter and setting kept, each write read back), so each sees only
-# their own. A shelf some account would see is not shown until that account's restrictions take the labels. Every
-# run reads each feed (the latest 50 diary entries, reviews included), and once a day page 1 of the films of anyone
-# without an export (their newest 72, rated): Cloudflare refuses deeper and sorted pages, so for them only what those
-# show, kept since the first run, and the watch record count as seen. All paced with every stage (lbpace). A person
-# whose feed has not answered for 48 h does not stop the picks: they are made from the others and whatever of theirs is
-# cached, and the day's picks raise one alert naming them. Unset: him alone.
-people = [
-  { person = "saahil", user = "saahilsan",  plex_user = "saahilsanganeriya", export_dir = "/volume1/docker/projectionist/data/letterboxd" },
-  { person = "roger",  user = "auralb",    plex_user = "roger", name = "Aurelia" },
-  { person = "aaron",  user = "aaron1009", plex_user = "aarontest941" },
-]
-
-# Real-time trigger: inotify on the library and finished downloads. A top-level folder (a movie, a show, a download)
-# that changed and then stayed quiet for `quiet` triggers each stage in `trigger`; each is a reconciler that finds its
-# own work. One run = one `sweep` period (walk every root, then follow events), so `every` must be <= `sweep`: the next
-# period then starts at once, and a failed start retries after `every`. One watch per folder: 3,278 for these roots
-# (2026-10-05, `find` with the ignore rules below), root's other processes hold 90 of fs.inotify.max_user_watches=8192;
-# past the limit it alerts and the sweep covers the rest.
-[stages.watcher]
-every   = "1m"
-sweep   = "15m"
-quiet   = "3m" # long SMB/rsync copies keep a folder busy; it triggers this long after the last change
-roots   = ["/volume1/media/Movies", "/volume1/media/TV", "/volume1/media/_downloads/complete"]
-trigger = ["rename", "details", "subtitles", "posters", "collections", "jfsync"]
-ignore  = ["@eaDir", "#recycle", "#snapshot", "_archive", "_assets"] # never watched or counted; dot folders (.details) too
-partial_suffixes = [".part", ".!qB"] # in-progress files (and dot files): keep a folder busy, never trigger on their own
-
-# Read-only library audit: names outside the scheme, unreadable videos, orphan sidecars, identical copies, episodes
-# without English subtitles. Writes <root>/_audit.txt and alerts when a category grows; never moves or deletes.
-[stages.audit]
-every         = "24h"
-window        = "04:00-07:00"
-root          = "/volume1/media"          # holds Movies/ and TV/
-report        = "/volume1/media/_audit.txt"
-max_listed    = 50                             # examples per category in the report
-settle        = "15m"                          # a file or folder changed more recently may still be moving: judged next run
-probe_workers = 2                              # ffprobes on cache misses, only while no guest is watching
-quiet         = ["missing_english_subs"]       # grows with every download until the subtitles stage catches up
-
-# The poster the owner would choose for every movie, show and season, on Jellyfin and Plex; replaces posters/posters.py.
-# Candidates: the owner's poster (from a Plex DB backup and the export taken with it), a Criterion release's cover,
-# TMDB and fanart.tv (the shared clients). Judge: one vision call per title on [llm.tasks.posters]'s model (collections on
-# [llm.tasks.collections]'s), as many at once as [llm] in_flight allows, to his taste: illustrated, artistic fan art
-# over mainstream key art, creative over plain, the title the only text. Off until enabled: even with dry_run, judging
-# spends. Verdicts judged under the prompts before the owner's taste are judged again once (the backfill: run it on
-# anthropic/claude-opus-5.5, about $0.0054 a title, then set the tasks back; docs/STAGES.md). Each call holds its worst
-# case (all of max_tokens at the dearest provider's price) against budget_usd until it settles.
-[stages.posters]
-enabled            = false
-every              = "6h"
-dry_run            = true            # judge only; review posters_items, then set false to upload
-budget_usd         = 12              # all judge calls ever (the Anthropic calls before the gateway included); a hard stop
-                                     # for new calls (lost answers may pass it by in_flight x 3 worst cases, ~$0.05)
-max_tokens         = 1024            # reasoning included
-cache_dir          = "/state/posters" # thumbnails
-# One export: items.json and posters/ from export_customizations.py, and the Plex DB backup taken with them. Pointing
-# these at a newer export (before dry_run = false) merges it in: its uploads and picks win, its defaults never do.
-owner_items        = "/volume1/PlexMediaServer/backups/customizations/items.json"
-owner_posters      = "/volume1/PlexMediaServer/backups/customizations/posters"
-owner_backup_db    = "/volume1/PlexMediaServer/backups/pre-rename-20261005T0328Z/com.plexapp.plugins.library.db"
-plex_movie_section = 4
-plex_tv_section    = 2
-sink_index_every   = "24h"           # one item listing per app per day maps titles to the apps' ids; a title an app
-                                     # re-created under a new id (Jellyfin: any rename) gets its poster again
-sink_alert_after   = "72h"           # an app whose listing fails this long raises an alert (its posters wait)
-mark               = "poster-curator 2026-10" # EXIF ImageDescription on the images the stage uploads, the owner's own
-                                     # uploads excepted; a later export reads a marked upload as the stage's
-# Collections: every Movies collection the owner gave no poster (the approved ones, and those arrivals open) gets one:
-# a franchise its TMDB collection's or fanart.tv's poster or its most acclaimed film's; a director a textless 1000x1500
-# poster composed from a photo (Wikimedia Commons, on-set first, then TMDB). One judge call per collection, about 150
-# for the approved list (cents at the vision model's price). The owner's collections are never touched. Both files on =
-# collections on.
-collections_owner_file    = "/config/collections.owner.json"
-collections_approved_file = "/config/collections.approved.json"
-collection_dry_run        = true # judge only; review posters_items (keys "collection:<name>"), then set false to upload
-collection_budget_usd     = 5    # all collection judge calls ever; a hard stop, apart from budget_usd
-director_min_score        = 4    # a director's best photo needs this judge score (1-10), else no poster and an alert
-# The owner's own posters for other films, shown to the judge before every title's and franchise's candidates as his
-# taste (his uploads or picks, by title key; any other key fails the run). The gateway caches them for Claude models,
-# so on Opus they add about $0.0004 a call. These 8 span his styles (the owner's-taste test, docs/STAGES.md):
-# I Vitelloni, The Empire Strikes Back, Mission: Impossible - Fallout, Casino Royale (2006), Days of Heaven,
-# Bottle Rocket, Call Me by Your Name, Dunkirk.
-taste_references = ["movie:tmdb-12548", "movie:tmdb-1891", "movie:tmdb-353081", "movie:tmdb-36557", "movie:tmdb-16642",
-                    "movie:tmdb-13685", "movie:tmdb-398818", "movie:tmdb-374720"]
-# Titles whose CURRENT Plex poster (his default, say) the owner named as his taste: fetched from Plex once, then kept
-# in cache_dir/references; once this stage has put its own pick on Plex, his export's poster for the title stands in.
-taste_references_current = []
-# A film the Criterion Collection released gets its cover art as a candidate: Wikidata names the films (weekly), the
-# Internet Archive's copy of each criterion.com page names the cover (www.criterion.com is never asked: it refuses
-# non-browser clients and its terms forbid automated collection). Lookups go 4 s apart; a found cover is kept for good.
-criterion = true
-# Every applied title's candidates at full size, its chosen poster and verdict.json, in <archive_dir>/<kind>/<key>/.
-# volume1 only (a run refuses /volume2 and /state, the NVMe); compose.yaml mounts it read-write. "" = no archive.
-archive_dir = "/volume1/PlexMediaServer/poster-archive"
-# commons_contact = ""           # a URL or e-mail for Wikimedia's User-Agent policy: 200 requests a minute instead
-                                 # of 10 (unset, Wikimedia requests go 6.5 s apart; about 10 per director)
-# Poster sets, with collections on: every TMDB collection a franchise shelf holds (the approved ones and the owner's
-# own) wears one MediUX set, so its films look alike. Candidates: the English sets with a poster for every film on disk
-# whose poster the owner did not upload or pick; the collections judge scores up to 5 per collection, one call each.
-# A film's judge gives its set's poster +1 over the other remote candidates (Plex's default still needs a raw 2-point
-# lead); a set fewer than half of whose films take it is dropped. The approved collection also gets the set's
-# collection poster as a candidate; the owner's never. MediUX is read anonymously, one page every 2 s, each kept a week.
-mediux        = "https://mediux.pro"            # "" turns poster sets off
-mediux_assets = "https://api.mediux.pro/assets" # images; full size only for a worn set's posters
-
-# Letterboxd lists as Plex collections and Jellyfin BoxSets: the canon plus the owner's own public lists, owned films
-# in list order, "On the NAS: N of M · seen S · <url>" summaries, generated posters, Plex Home rows for `home`.
-# Letterboxd is read politely (one request per 2 s for the whole process, page 1 only of user pages) and cached in
-# SQLite. A shelf whose title an owner's collection already has (ignoring case) is named "<list> · Letterboxd", and an
-# own list named like a canon shelf "<list> · my list". A shelf whose list is gone (private or deleted, in skip_own,
-# dropped from the canon) is deleted from both apps. Shelves keep each list's published order.
-[stages.lists]
-every            = "24h"
-window           = "03:00-08:00"
-dry_run          = false      # true: read and count everything, write nothing
-only             = []         # shelve only these lists (names); empty = all
-letterboxd_user  = "saahilsan"
-canon_refresh    = "20h"      # canon list pages are re-read on every daily run: the Top 500 changes as members rate
-own_refresh      = "20h"      # the owner's lists, films page and diary feed: daily
-export_dir       = "/volume1/docker/projectionist/data/letterboxd" # the unzipped Letterboxd export (lists/*.csv, watched.csv),
-                                 # mounted read-only by compose.yaml; missing or empty = an alert; "" = no export
-own_lists        = true
-skip_own         = ["*private*"] # the owner's lists to leave out: names or slugs, any case, "*" = any text; lists
-                                 # private on Letterboxd are never shelved
-movies_dir       = "/volume1/media/Movies"
-missing_file     = "/volume1/media/_lists-missing.txt"
-plex_section     = 4
-plex_refresh     = "24h"      # one /library/sections/4/all listing (TMDB id → ratingKey, watched) per day at most
-plex_budget      = "30m"      # first build of all shelves: ~2,000 calls; later runs a handful
-jellyfin_user    = "saahil"
-jellyfin_budget  = "15m"
-home             = ["Letterboxd Top 500", "Criterion Collection", "Sight & Sound 2022"] # the owner's own Plex Home rows, in order
-home_after       = "movie.recentlyadded"
-# To take a shelf away, leave its list out here (skip_own, only, the canon): a shelf deleted by hand in Plex or
-# Jellyfin is made again on the next run. A shelf whose summary you rewrite is yours: it stays when its list goes.
-# The canon defaults to the lists in lists.go's defaultCanon (checked 2026-10-05: Letterboxd Top 500, Criterion
-# Collection, Sight & Sound 2022 and its directors' poll, TSPDT 1000, Best Picture, Palme d'Or); a
-# [[stages.lists.canon]] table replaces all of them. A shelf of a canon list no longer named is deleted, if the stage
-# made it (its summary starts "On the NAS: "), even with no record of it: the gate-made "Letterboxd Top 250" goes so.
-# [[stages.lists.canon]]
-# name    = "Criterion Collection"
-# url     = "https://letterboxd.com/jbutts15/list/the-complete-criterion-collection/"
-# limit   = 0      # keep only the first N (a Top 250 is the Top 500 with limit = 250)
-# poster  = ""     # an image file instead of the generated poster
-
-# Every model call goes through the Vercel AI Gateway (OpenAI-compatible Chat Completions) on one key, unless its task
-# names an API of its own; one bound on calls in flight for the whole process, and one failure policy (docs/STAGES.md,
-# "LLM calls"). Each task names its model, the fallbacks the gateway tries in order when it fails, and how much it may
-# reason ("off" = the least the model allows); prices come from the gateway's model list, fetched daily. A Claude model
-# is just another id ("anthropic/claude-sonnet-5.5"). These are the defaults; a task table may set only some keys.
+# The AI gateway every model call goes through (posters, collections, tonight); unset keys take the built-in models.
 [llm]
-api        = "https://ai-gateway.vercel.sh/v1"
-key_file   = "/run/secrets/ai_gateway_api_key"
-in_flight  = 8      # calls in the air across the process
-timeout    = "120s" # per attempt
-attempts   = 4      # 429, 5xx, timeouts and dropped answers are retried with jittered backoff or Retry-After
-park_after = 5      # failed calls in a row before a stage stops calling for the rest of its run (a billing refusal: at
-                    # once, one alert in all, and one call an hour across the process until the gateway answers)
+api        = "https://ai-gateway.vercel.sh/v1"  # the AI gateway's OpenAI-compatible base URL
+key_file   = "/run/secrets/ai_gateway_api_key"  # the gateway's API key file, read on every request
+in_flight  = 8  # calls in the air across the process
+timeout    = "2m"  # per attempt
+attempts   = 4  # per call, the first included
+park_after = 5  # failed calls in a row before a session parks
 
-# The models are the bake-offs' picks (docs/STAGES.md, 2026-10-06): the vision judges the cheap model nearest Opus at
-# choosing the poster the owner picked. The vision tasks send effort "none" rather than "off": "off" reads only the
-# first model's controls. For the one-time backfill, set both vision tasks to model = "anthropic/claude-opus-5.5" with
-# fallbacks = [] (a fallback would judge the backfill cheaply, for good), then back to these.
-[llm.tasks.posters]     # the movie, show and season poster judge: vision
-model     = "openai/gpt-5.6-luna"
-fallbacks = ["alibaba/qwen3-vl-instruct"]
-reasoning = "none"
+# One table per model task: the defaults, shown in full. A task may also set api, key_file, price_in and
+# price_out to call an API of its own (docs/configuration.md).
+[llm.tasks.posters] # the movie, show and season poster judge: vision
+model     = "openai/gpt-5.6-luna"  # the model this task calls
+fallbacks = ["alibaba/qwen3-vl-instruct"]  # tried by the gateway, in order, when the first fails
+reasoning = "none"  # reasoning effort sent with the call
 
 [llm.tasks.collections] # the franchise and director collection judges: vision
-model     = "openai/gpt-5.6-luna"
-fallbacks = ["alibaba/qwen3-vl-instruct"]
-reasoning = "none"
+model     = "openai/gpt-5.6-luna"  # the model this task calls
+fallbacks = ["alibaba/qwen3-vl-instruct"]  # tried by the gateway, in order, when the first fails
+reasoning = "none"  # reasoning effort sent with the call
 
-[llm.tasks.tonight]     # the daily picks: text
-model     = "deepseek/deepseek-v4.1-flash"
-fallbacks = ["alibaba/qwen3.7-flash"]
-reasoning = "off"
+[llm.tasks.tonight] # the daily picks
+model     = "deepseek/deepseek-v4.1-flash"  # the model this task calls
+fallbacks = ["alibaba/qwen3.7-flash"]  # tried by the gateway, in order, when the first fails
+reasoning = "off"  # reasoning effort sent with the call
 
-# A task may call an API of its own on its own key: in place of the posters table above, OpenAI's (GPT-6 Astra, the
-# one-time poster pass; the same for collections). It then needs its prices (USD per million tokens; no catalogue
-# prices it) and takes no fallbacks (only the gateway tries them); its effort goes as written, and Astra's least is
-# "low". A missing price or a fallback fails the config load. Delete api, key_file, price_in and price_out to move it
-# back to the gateway.
-# [llm.tasks.posters]
-# api       = "https://api.openai.com/v1"
-# key_file  = "/run/secrets/openai_api_key_task"
-# model     = "gpt-6-astra"
-# fallbacks = []
-# reasoning = "low"
-# price_in  = 10   # OpenAI's list price for up to 272K input tokens; above that 20
-# price_out = 50   # above 272K input tokens 75
-
-# Nightly versions of the NVMe app data on volume1: SQLite's online backup of each database, then the roots file by
-# file, hardlinking what did not change since the newest version. Needs /volume2 read-only, each database's folder
-# read-write (SQLite opens the -shm read-write) and target read-write (see compose.yaml).
+# Nightly versions of the app data (Plex, Jellyfin, projectionist databases) on another volume.
 [stages.appbackup]
-every     = "24h"
-window    = "04:30-06:30"
-databases = [
-  "/volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db",
-  "/volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.blobs.db",
-  "/volume2/jellyfin/config/data/jellyfin.db",
-  "/volume2/projectionist/state/projectionist.db",
-]
-roots     = ["/volume2/PlexAppData", "/volume2/jellyfin", "/volume2/projectionist"]
-exclude   = ["/volume2/transcode", "/volume2/transcode.img"] # transcoder scratch, never copied
-target    = "/volume1/PlexMediaServer/nvme-backup"           # <target>/<YYYY-MM-DD>/<the source path>
-keep      = 7
+every     = "24h"  # how often the stage runs
+# window    = "04:30-06:30"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
+databases = ["/volume2/apps/jellyfin/jellyfin.db"]  # SQLite files copied through the online backup API, never as plain files (required roots or databases, when enabled)
+roots     = ["/volume2/apps"]  # folders copied file by file (required roots or databases, when enabled)
+# exclude   = ["/volume2/apps/transcode"]  # paths never copied, wherever they sit
+target    = "/volume1/projectionist/app-backups"  # the folder that holds one version per day, on another volume than the roots
+# keep      = 7  # versions kept, today's included
+
+# Read-only library audit: writes <root>/_audit.txt and alerts when a category grows.
+[stages.audit]
+every         = "24h"  # how often the stage runs
+# window        = "04:00-07:00"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
+root          = "/volume1/media"  # the media share that holds Movies/ and TV/
+# report        = ""  # the one file this stage writes; default <root>/_audit.txt
+# max_listed    = 50  # examples per category in the report
+# settle        = "15m"  # a file or folder changed more recently may still be moving
+# probe_workers = 2  # concurrent ffprobes on a cache miss
+# quiet         = ["missing_english_subs"]  # categories whose growth never alerts
+
+# Movies collections in Plex and Jellyfin: yours, the approved list and new arrivals.
+[stages.collections]
+every           = "6h"  # how often the stage runs
+# window          = "01:00-07:00"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
+movies_dir      = "/volume1/media/Movies"  # the folder that holds the films (one folder per film)
+# owner_file      = "/config/collections.owner.json"  # your own collections, frozen once from Plex's customizations export (JSON)
+# poster_dir      = "/config/collection-posters"  # <ratingKey>.jpg for each of your collections, copied once from the export
+# approved_file   = "/config/collections.approved.json"  # the approved franchise and director collections (JSON)
+plex_section    = 1  # the id of the Plex Movies library (the number in its URL: section=N)
+# sinks           = ["plex", "jellyfin"]  # the apps reconciled, concurrently; a slow or down app never holds up the other
+# canon_directors = ["Agnès Varda"]  # such a director gets a collection at their third film on disk
+# only            = []  # reconcile just these collections; empty means all
+# dry_run         = false  # log every write instead of sending it
+# sink_budget     = "20m"  # each app's share of a run; no request starts after it
+# call_timeout    = "2m"  # each request to an app, on this stage's own clients
+
+# Keeps <dir>/.details/<video>.txt true for every video, from ffprobe and the rename logs.
+[stages.details]
+every             = "15m"  # how often the stage runs
+# window            = "01:00-07:00"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
+library           = "/volume1/media"  # the media share whose sections hold the videos
+# sections          = ["Movies", "TV"]  # folders under Library that hold the scheme
+# undo_logs         = ["/volume1/media/.projectionist/rename/undo.tsv"]  # rename logs, oldest first (TSV): each video's original name for its note; none = no logs
+# max_probes        = 400  # ffprobes per run (files already probed cost nothing)
+# max_peak_scans    = 2  # bitrate peak scans per run
+# max_decode_checks = 60  # decode checks per run
+# peak_above_kbps   = 20000  # only files whose average bitrate is above this get a peak scan
+# retry_unreadable  = "24h"  # an unreadable verdict is retried after this long
+# notes_root        = ""  # when set, notes go into a mirror of the library under it, not beside the videos (dry runs)
+# paths_file        = ""  # when set, limits the run to the videos it lists, one path per line (gates)
+
+# Keeps Plex and Jellyfin transcoding on the GPU (Synology's Plex package paths are the defaults).
+[stages.gpu-guard]
+every           = "15m"  # how often the stage runs
+# window          = "01:00-07:00"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
+plex_device     = "8086:3185@0000:00:02.0"  # Plex's id for the GPU it must use, as its HardwareDevicePath preference shows it
+# plex_log        = "/volume1/PlexMediaServer/AppData/Plex Media Server/Logs/Plex Media Server.log"  # Plex Media Server.log
+# plex_app_data   = "/volume1/PlexMediaServer/AppData/Plex Media Server"  # for the transcoder's Codecs and VA driver dirs
+# plex_transcoder = "/volume1/@appstore/PlexMediaServer/Plex Transcoder"  # "Plex Transcoder" binary
+plex_uid        = 297536  # the uid of Plex's own user (the self-test runs as it, like Plex does)
+plex_gid        = 297536  # the gid of Plex's own user
+plex_groups     = [297536, 937]  # Plex's user's groups, including the group that owns the render node
+sample          = "/volume1/projectionist/gpu-sample.mkv"  # a 5 s HEVC 10-bit 1080p clip the Plex user can read
+# self_test_every = "24h"  # how often Plex's transcoder is run on the sample as a GPU self-test
+# legacy_state    = ""  # gpu_guard.state.json; imported once when the store has no state
+# plex_timeout    = "5s"  # bound on each Plex API call
+
+# Probes Plex, Jellyfin, qBittorrent and your public hostnames; restarts a listed container that stopped answering.
+[stages.health]
+every                 = "5m"  # how often the stage runs
+# window                = "01:00-07:00"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
+# timeout               = "30s"  # per probe; Plex and Jellyfin calls also stop at their client's timeout
+# fail_threshold        = 3  # consecutive failed runs before an alert or a restart
+# restart_cooldown      = "1h"  # at most one restart per container per cooldown; at least 1h
+restartable           = ["jellyfin"]  # the only containers this stage may restart
+# docker_socket         = "/var/run/docker.sock"  # the Docker socket mounted into the container
+# jellyfin_container    = "jellyfin"  # the Jellyfin container's name (inspected, and restarted if listed in restartable)
+# qbittorrent_container = "qbittorrent"  # the qBittorrent container's name (inspected)
+# qbittorrent_url       = "http://127.0.0.1:8080"  # qBittorrent's WebUI; 403 counts as up
+public                = { "https://media.example.com" = 200 }  # URL = the status it must answer (redirects not followed); none = no public probes
+plex_movies_section   = 1  # the id of the Plex Movies library, whose hub row is timed
+# plex_slow             = "5s"  # a hub load slower than this is slow
+# plex_batch            = 500  # library changes since the last optimize that make one due
+plex_optimize_window  = "03:00-06:00"  # the hours Plex may optimize its database, HH:MM-HH:MM in the config time zone (when nobody watches)
+# volume2               = "/volume2"  # the app-data NVMe volume; "" = no volume checks
+# volume2_max_used      = 75  # percent used that alerts
+volume2_allow         = ["apps", "@eaDir"]  # the only top-level entries it may hold (required when volume2 is set)
+# backup_max_age        = "36h"  # the appbackup stage's newest version; 0 = no check
+
+# The watch record: plays, positions and ratings kept the same in Plex and Jellyfin for each viewer.
+[stages.jfsync]
+every          = "5m"  # how often the stage runs
+# window         = "01:00-07:00"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
+users          = [{ name = "you", plex = "your-plex-username", jellyfin = "your-jellyfin-username" }]  # one entry per viewer: name, and their plex and jellyfin account names
+# apply          = true  # false: plan only, no app writes (plan_file shows them)
+# plan_file      = ""  # optional TSV of the run's planned writes
+movies_section = 1  # the id of the Plex Movies library
+tv_section     = 2  # the id of the Plex TV library
+# address_every  = "24h"  # how often each app's item listing is refreshed
+# list_timeout   = "30m"  # a whole-section listing takes minutes on a busy NAS
+plex_backups   = "/volume1/projectionist/plex-backups"  # the folder of Plex database backups: the newest *.db below it seeds the watch history, once
+# webhook_url    = "http://127.0.0.1:8097/hooks/plex"  # the webhook registered on your plex.tv account; "" = do not register
+# plex_tv        = "https://plex.tv"  # plex.tv, where the webhook is registered
+
+# Each member's Letterboxd diary into the watch record, and their watchlist onto their own Plex watchlist.
+[stages.letterboxd]
+every           = "30m"  # how often the stage runs
+# window          = "01:00-07:00"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
+user            = "your-letterboxd-username"  # your Letterboxd username
+# letterboxd_url  = "https://letterboxd.com"  # Letterboxd's site
+# boxd_url        = "https://boxd.it"  # Letterboxd's short-link host
+# user_agent      = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36 (projectionist; personal sync of one member's own public diary)"  # the User-Agent sent to Letterboxd
+# max_fetches     = 400  # Letterboxd requests per run; the backfill resumes next run
+# watchlist_every = "6h"  # each member's watchlist grid crawl
+# pages_every     = "24h"  # how often your watched-films grid is read
+export_dir      = "/volume1/projectionist/letterboxd"  # holds letterboxd-<user>-<date>-utc/ folders; newest wins; "" = none
+movies_dir      = "/volume1/media/Movies"  # the folder that holds the films
+tv_root         = "/volume1/media/TV"  # its shows, as posters reads them: only for the Plex watchlist (required when plex_watchlist is true)
+# missing_file    = "/volume1/media/_watchlist-missing.txt"  # your watchlist films not on the NAS, as a text file; "" = none
+# sink_refresh    = "24h"  # re-read each Plex watchlist this often (also before writing to it)
+person          = "you"  # your name in the watch record: the name of your entry in stages.jfsync.users
+# history         = false  # also record the export and the feed's backlog, not just entries logged from now on
+# plex_watchlist  = false  # each member's Letterboxd watchlist → their own Plex watchlist (visible per their Plex privacy)
+# keep_hand_added = false  # the Plex watchlist loses only this stage's adds: titles put there by hand stay, on the NAS or not
+# plex_tv         = "https://clients.plex.tv"  # plex.tv's clients API (each person's watchlist)
+# discover_url    = "https://discover.provider.plex.tv"  # Plex Discover's API (watchlist items)
+# run_budget      = "25m"  # no plex.tv call starts later than this into a run; keep it under "every"
+# dry_run         = false  # count events and writes, record and write nothing (nor the missing file)
+# people          = [{ person = "partner", user = "their-letterboxd-username", name = "Their Name" }]  # more members, synced after you on the same fetch budget
+
+# Letterboxd lists (canon lists and your own) as shelves in Plex and Jellyfin.
+[stages.lists]
+every           = "24h"  # how often the stage runs
+# window          = "03:00-08:00"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
+# dry_run         = false  # read and count everything, write nothing
+# only            = []  # shelve only these lists (by name); empty = all
+letterboxd_user = "your-letterboxd-username"  # your Letterboxd username
+# letterboxd_url  = "https://letterboxd.com"  # Letterboxd's site
+# shortlink_url   = "https://boxd.it"  # Letterboxd's short-link host
+# user_agent      = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36 projectionist/1.0 (+personal media server)"  # the User-Agent sent to Letterboxd
+# canon_refresh   = "20h"  # canon list pages are read again after this
+# own_refresh     = "20h"  # your lists, films page and diary feed are read again after this
+export_dir      = "/volume1/projectionist/letterboxd"  # holds your unzipped Letterboxd export; "" = none
+# own_lists       = true  # also shelve your own Letterboxd lists
+# skip_own        = []  # your lists to leave out (names or slugs, "*" matches any text); default ["*private*"]
+movies_dir      = "/volume1/media/Movies"  # the folder that holds the films
+# missing_file    = "/volume1/media/_lists-missing.txt"  # the shelved lists' films not on the NAS; "" = none
+plex_section    = 1  # the id of the Plex Movies library
+# plex_refresh    = "24h"  # the TMDB id → ratingKey map is read at most this often
+# plex_budget     = "30m"  # the Plex share of a run; what is left waits for the next run
+jellyfin_user   = "your-jellyfin-username"  # your Jellyfin user name, whose library gets the shelves
+# jellyfin_budget = "15m"  # the Jellyfin share of a run
+# home            = ["Top 500"]  # lists promoted to your Plex Home, in row order; none = no promotion
+# home_after      = "movie.recentlyadded"  # the Plex hub the first promoted row follows
+# canon           = [{ name = "Top 500", url = "https://letterboxd.com/official/list/letterboxds-top-500-films/" }]  # the Letterboxd lists to shelve, in shelf order; none = only your own
+
+# Chooses each title's poster with a model judge (off until enabled: judging spends).
+[stages.posters]
+enabled                   = false  # off until you enable it
+every                     = "6h"  # how often the stage runs
+# window                    = "01:00-07:00"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
+movies_root               = "/volume1/media/Movies"  # the folder that holds the films
+tv_root                   = "/volume1/media/TV"  # the folder that holds the shows
+# only                      = []  # title keys ("movie:tmdb-422", "season:tmdb-1400:2", "collection:scary movie") to limit a run to
+# dry_run                   = false  # titles: candidates and judge only, no poster uploaded
+# cache_dir                 = "/state/posters"  # candidate thumbnails and judge inputs (on the state volume)
+owner_items               = "/volume1/projectionist/plex-export/items.json"  # your Plex customizations export's items.json; "" = no export (required all three of owner_items, owner_posters, owner_backup_db, or none)
+owner_posters             = "/volume1/projectionist/plex-export/posters"  # customizations/posters/<kind>/<ratingKey>.jpg (required all three of owner_items, owner_posters, owner_backup_db, or none)
+owner_backup_db           = "/volume1/projectionist/plex-export/com.plexapp.plugins.library.db"  # the Plex DB .backup taken with that export (required all three of owner_items, owner_posters, owner_backup_db, or none)
+# max_tokens                = 1024  # reasoning included
+# budget_usd                = 12  # every judge call ever, not per run
+# fetch_workers             = 3  # candidate downloads at once
+# apply_workers             = 2  # poster uploads at once
+plex_movie_section        = 1  # the id of the Plex Movies library
+plex_tv_section           = 2  # the id of the Plex TV library
+# sink_index_every          = "24h"  # how often each app's item list is fetched
+# sink_alert_after          = "72h"  # an app whose listing fails this long raises an alert
+# mark                      = "poster-curator 2026-10"  # EXIF ImageDescription on the images the stage chose
+# tmdb_images               = "https://image.tmdb.org/t/p"  # TMDB's image host
+# collections_owner_file    = ""  # the collections stage's owner_file: with both files set, collections get posters too
+# collections_approved_file = ""  # the collections stage's approved_file
+# collection_dry_run        = true  # collections: candidates and judge only (default)
+# collection_budget_usd     = 5  # every collection judge call ever, apart from budget_usd
+# director_min_score        = 4  # a director's photo needs this judge score or no poster
+# commons_api               = "https://commons.wikimedia.org/w/api.php"  # Wikimedia Commons' API (directors' photos)
+# commons_contact           = "you@example.com"  # a URL or e-mail for the User-Agent: Wikimedia then allows 20× the rate
+# taste_references          = []  # title keys of posters you chose, shown to the judge as your taste
+# taste_references_current  = []  # titles whose current Plex poster is your taste: fetched once and cached
+# criterion                 = true  # a film the Criterion Collection released gets its cover art as a candidate
+# wikidata_sparql           = "https://query.wikidata.org/sparql"  # Wikidata's SPARQL endpoint (Criterion releases)
+# criterion_sitemap         = "http://sitemap.criterion.com/films.xml"  # the Criterion Collection's sitemap
+# wayback                   = "https://web.archive.org"  # the Internet Archive, for Criterion cover art
+archive_dir               = "/volume1/projectionist/poster-archive"  # every candidate a title was judged on and its chosen poster, at full size; "" = no archive
+# mediux                    = "https://mediux.pro"  # MediUX's site (poster sets, with collections on); "" = off
+# mediux_assets             = "https://api.mediux.pro/assets"  # MediUX's image host
+
+# Small 4K copies of the films listed in one playlist, for watching away from home.
+[stages.remote4k]
+every        = "15m"  # how often the stage runs
+# window       = "01:00-07:00"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
+playlist     = "Remote 4K"  # the name of the Plex playlist, Jellyfin playlist or Jellyfin collection that lists the films to shrink
+label        = "2160p small"  # the version name the small copy gets beside the film (e.g. "4K for remote")
+# small_kbps   = 20000  # a 4K version at or under this already fits the upload
+work_dir     = "/volume1/media/.projectionist/remote4k"  # a work folder on the same share as the films (the copy is renamed into place)
+status_file  = "/volume1/projectionist/remote4k/STATUS.txt"  # the text file where the stage says what it is doing
+# list_timeout = "30s"  # each app's half of the list is given up after this, each request too
+
+# Keeps Movies/ and TV/ in the naming scheme; every move is in the undo log first.
+[stages.rename]
+every        = "15m"  # how often the stage runs
+# window       = "01:00-07:00"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
+root         = "/volume1/media"  # the media share: Movies/, TV/ and _archive/ live there
+# mode         = "apply"  # apply (default) | plan (write the plan to plan_dir, touch nothing) | undo
+plan_dir     = "/volume1/projectionist/rename-plan"  # plan mode output: ops.tsv, review.tsv, problems.tsv (required when mode is plan)
+undo_log     = "/volume1/media/.projectionist/rename/undo.tsv"  # the undo log the stage writes before each move (TSV), e.g. <root>/.projectionist/rename/undo.tsv
+# undo_units   = []  # undo mode: only these units ([] = everything in the log)
+# redo_undone  = false  # apply plans files undo put back (default: left until renamed or moved)
+# ghost_logs   = []  # older rename logs: where moved videos used to live; none = no older logs
+review_file  = "/volume1/media/_needs-review.txt"  # the text file that lists what the stage left for you to sort out
+# aligned_log  = ""  # an older subtitle aligner's CSV log ("retimed ... -> X.srt"); "" = none
+# sublang_file = ""  # optional JSON {path: {lang, sdh}} from a text classifier
+# notify       = true  # tell Jellyfin which folders changed (off for a sandbox run)
+# quiet        = "10m"  # a folder written to more recently is still arriving
+
+# An English subtitle for every video: providers, then alignment to the video's speech.
+[stages.subtitles]
+every              = "6h"  # how often the stage runs
+# window             = "01:00-07:00"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
+roots              = ["/volume1/media/Movies", "/volume1/media/TV"]  # the folders that hold the films and the shows
+# stats_file         = "/state/sub_stats.tsv"  # the per-title subtitle statistics (TSV)
+# output_dir         = ""  # test runs: sidecars land here under the same relative paths
+# retry_after        = "168h"  # a title with no English subtitle is searched again after this
+# workers            = 3  # titles worked on at once
+# max_titles         = 0  # per run; 0 = every due title
+# secrets_dir        = "/run/secrets"  # where the providers' key files are read
+# alass              = "/usr/local/bin/alass"  # the alass binary (in the image)
+# providers          = ["gestdown", "subsource", "subdl", "opensubtitles-stremio", "opensubtitles", "opensubtitles-com"]  # subtitle sources, in order; keyed ones (subsource, subdl, opensubtitles-com) need their key files
+# film_site          = { name = "filmsite", url = "https://subtitles.example.com" }  # a film-only subtitle site, { name, url }; its name is what providers lists
+# legacy_quota       = ""  # an older downloader's folder whose quota.csv seeds the OpenSubtitles quota once; "" = none
+# align_per_day      = 20  # queued titles aligned in any 24 h; each reads its video once or twice
+# mode               = "sampled"  # sampled (also the sampled fit; the queue aligns only inside align_window) or careful (release match only)
+align_window       = "01:00-07:00"  # the hours the queue may read whole videos, HH:MM-HH:MM in timezone (when nobody watches) (required when mode is sampled (the default))
+# sample_windows     = 4  # stretches the sampled fit reads, spread over the runtime
+# sample_length      = "90s"  # the length of each sampled stretch
+# undo_logs          = ["/volume1/media/.projectionist/rename/undo.tsv"]  # rename logs, oldest first: a video's original release name when its .details note has none; none = no logs
+# align_remote_lanes = 0  # titles leased at once to align workers on another machine (projectionist align-worker); 0 = off
+# verify_per_run     = 300  # videos a run whose English sidecars are not yet verified get them fitted to the windows; 0 = off
+archive_dir        = "/volume1/projectionist/subtitle-archive"  # where sidecars the verify pass replaces or refuses are kept; must exist (required when verify_per_run > 0 (the default))
+# plex_db            = "/volume1/PlexMediaServer/AppData/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"  # Plex's library database, read-only: the item a video with a new sidecar belongs to
+
+# Each day's film picks for the household and for each person, as shelves in Plex and Jellyfin.
+[stages.tonight]
+every            = "30m"  # how often the stage runs
+# window           = "01:00-07:00"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
+# max_tokens       = 4000  # reasoning included
+# daily_cap_usd    = 0.15  # every call of the day together: the household's and each person's
+# picks            = 5  # films picked each day
+pick_after       = "05:00"  # the local time (HH:MM, config time zone) after which a new day's picks are made
+# max_candidates   = 400  # unseen films shown to the model, best-ranked first
+section          = 1  # the id of the Plex Movies library
+collection       = "Tonight"  # the name of the household's Plex collection and Jellyfin BoxSet
+playlist         = "Tonight"  # each person's own: this Jellyfin playlist, and the Plex shelf "<playlist> · <name>"; "" = none
+movies_dir       = "/volume1/media/Movies"  # the folder that holds the films
+# image_base       = "https://image.tmdb.org/t/p"  # TMDB's image host
+jellyfin_user    = "your-jellyfin-username"  # your Jellyfin user name, whose played flags count
+people           = [{ person = "you", user = "your-letterboxd-username", plex_user = "your-plex-username", name = "Your Name" }]  # one entry per person in the household (person, user, and plex_user, export_dir, name as needed)
+# plex_tv          = "https://clients.plex.tv"  # plex.tv's clients API
+# letterboxd_url   = "https://letterboxd.com"  # Letterboxd's site
+# sink_timeout     = "3m"  # per sink per run; what is left over waits for the next run
+# plex_map_timeout = "10m"  # the once-a-day Movies listing; minutes during a scan
+# map_every        = "24h"  # how often the TMDB → Plex/Jellyfin item maps are re-read
+
+# Watches the library folders and triggers the stages for each quiet, changed folder.
+[stages.watcher]
+every            = "1m"  # how often the stage runs
+# window           = "01:00-07:00"  # HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it
+roots            = ["/volume1/media/Movies", "/volume1/media/TV"]  # the folders to watch (the films, the shows, the finished downloads)
+# trigger          = ["rename", "details", "subtitles", "posters", "collections", "jfsync"]  # stages to trigger for each quiet, changed unit
+# quiet            = "3m"  # a changed folder is acted on once it has been quiet this long
+# sweep            = "15m"  # length of one run = the safety sweep's cadence
+# ignore           = ["@eaDir", "#recycle", "#snapshot", "_archive", "_assets"]  # names neither watched nor counted, at any depth
+# partial_suffixes = [".part", ".!qB"]  # in-progress files: busy, never a change on their own

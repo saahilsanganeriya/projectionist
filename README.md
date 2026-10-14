@@ -99,13 +99,22 @@ The design rules that shape the code:
   curls it every 15 minutes, and DSM's own failure e-mail is the alert channel. `/metrics` exports runs, alerts, items
   and durations per stage.
 - **One stage by hand.** `projectionist run <stage> -config FILE` runs one stage once and exits 1 on an alert or an
-  error.
+  error. `projectionist check -config FILE` validates the config as `serve` would and starts nothing: run it
+  before a restart.
 
-The config format, with every stage's keys and defaults, is [config.example.toml](config.example.toml). A deployment
-keeps its own config outside git: the household's accounts, the trackers and indexers its release names carry
-(`[release_sites]`), the subtitle site it uses (`film_site`) and its paths. On the NAS it is `/config/projectionist.toml`;
-in a checkout, `deploy/nas/` holds a copy and git ignores it. The people, sites and hosts named in the example and the
-tests are placeholders.
+## Configure it for your home
+
+Everything that belongs to one household lives in one config file, never in the code: the people and their Plex,
+Jellyfin and Letterboxd accounts, the NAS paths, the Plex library ids, the collection and playlist names, the hours
+the heavy work may run. To run projectionist at home, copy [config.example.toml](config.example.toml) to
+`/config/projectionist.toml`, replace its placeholders (`your-plex-username`, `your-letterboxd-username`,
+`media.example.com`, `/volume1/media`, ...), delete the tables of the stages you do not want, and put your API keys in
+the secret files compose mounts at `/run/secrets/`. Then build the image (`make image`, or `make save` for a
+tarball to `docker load`), run `projectionist check -config /config/projectionist.toml` in it, and start the
+Container Manager project. The check names every missing or wrong key as `section.key` with what to set, and `serve`
+refuses to start until there are none. [docs/configuration.md](docs/configuration.md) lists every parameter, its
+default and an example, the secret files, and a minimal working config. A deployment keeps its own config outside
+git; in a checkout, `deploy/nas/` holds a copy and git ignores it.
 
 ## Build and test
 
@@ -130,7 +139,7 @@ To add a stage, see [docs/SKELETON_READY.md](docs/SKELETON_READY.md).
 
 | Path | Contents |
 |---|---|
-| `cmd/projectionist` | The service: `serve`, `run <stage>`, `align-worker` |
+| `cmd/projectionist` | The service: `serve`, `run <stage>`, `check`, `align-worker` |
 | `cmd/subocr` | OCR helper for image subtitle tracks |
 | `cmd/bakeoff` | Compares vision models as poster judges, to pick the one the posters stage uses |
 | `internal/stage`, `internal/scheduler`, `internal/store` | The stage interface, the scheduler and the SQLite state |
@@ -139,6 +148,7 @@ To add a stage, see [docs/SKELETON_READY.md](docs/SKELETON_READY.md).
 | `internal/viewers` | The pause rule |
 | `internal/fsx`, `internal/probe` | Atomic file operations and the ffprobe cache |
 | `config/` | The collection lists the collections stage reads |
+| `testdata/` | The synthetic config the tests share (roles and example.com hosts, no real people) |
 | `deploy/nas/` | Not in git: the NAS's own compose file and config, copied after each deploy |
 
 ## Licence
