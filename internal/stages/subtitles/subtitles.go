@@ -1428,19 +1428,22 @@ func (r *run) download(ctx context.Context, c Candidate) (string, error) {
 }
 
 // rejected are the candidates (provider:id) rejected for this very file before, by the furthest route that refused
-// them: "aligned" (an alignment or its length check: never tried again), "sampled" (the sampled fit), "idx" (the .idx
-// fit). Each route skips what it or a later one refused; the queue tries all but "aligned". So a candidate's refusals
-// come in route order, and its latest is its furthest.
+// them: "aligned" (an alignment or its length check, or a download that failed for good: never tried again),
+// "sampled" (the sampled fit), "idx" (the .idx fit). Each route skips what it or a later one refused; the queue tries
+// all but "aligned". So a candidate's refusals come in route order, and its latest is its furthest. A download failed
+// for good is a 404 or 410, or a file that is not a zip of one SRT; a timeout, a 5xx or a quota is tried again.
 func (r *run) rejected(ctx context.Context, path, key string) (map[string]string, error) {
 	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT json_extract(fields, '$.id'), status FROM events WHERE stage=? AND item=?
-		AND status IN ('rejected_offsync', 'rejected_length', 'rejected_sampled', 'rejected_idx')
+		AND (status IN ('rejected_offsync', 'rejected_length', 'rejected_sampled', 'rejected_idx') OR status = 'download_failed'
+		  AND (json_extract(fields, '$.detail') LIKE 'zip%' OR json_extract(fields, '$.detail') LIKE '%HTTP 404%'
+		    OR json_extract(fields, '$.detail') LIKE '%HTTP 410%'))
 		AND json_extract(fields, '$.file')=? ORDER BY id`, name, path, key)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	route := map[string]string{"rejected_offsync": "aligned", "rejected_length": "aligned", "rejected_sampled": "sampled",
-		"rejected_idx": "idx"}
+	route := map[string]string{"rejected_offsync": "aligned", "rejected_length": "aligned", "download_failed": "aligned",
+		"rejected_sampled": "sampled", "rejected_idx": "idx"}
 	out := map[string]string{}
 	for rows.Next() {
 		var id, status string
