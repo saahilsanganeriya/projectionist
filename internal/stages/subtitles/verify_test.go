@@ -288,11 +288,22 @@ func TestVerifyRefusedByTheQueueIsArchived(t *testing.T) {
 
 // Catches a sidecar archived on no evidence: one the speech cannot place at all (here another film's; in the library,
 // a laugh track heard as speech, so no lag stands out) refused as if it were out of sync, which left 57 titles with no
-// subtitle (Friends, Batman: The Animated Series, New Girl). It must stay as it is, its title recorded unjudged and out
-// of the queue; and a refusal recorded before refusals needed evidence (rejected_misaligned) must not refuse it.
+// subtitle (Friends, Batman: The Animated Series, New Girl); or one with too few cues for any fit (a short special's,
+// refused as "not an SRT a video could carry"). It must stay as it is, its title recorded unjudged and out of the
+// queue; and a refusal recorded before refusals needed evidence (rejected_misaligned) must not refuse it.
 func TestVerifyUnjudgedSidecarStays(t *testing.T) {
-	other := srtOf(cueSpans(dense(1000, 11), 1, 0))
-	for _, onWorker := range []bool{false, true} {
+	for _, c := range []struct{ why, sidecar string }{
+		{"another film's", srtOf(cueSpans(dense(1000, 11), 1, 0))},
+		{"12 cues", srtOf(cueSpans(dense(12, 7), 1, 0))},
+	} {
+		for _, onWorker := range []bool{false, true} {
+			testUnjudgedStays(t, c.why, c.sidecar, onWorker)
+		}
+	}
+}
+
+func testUnjudgedStays(t *testing.T, why, other string, onWorker bool) {
+	{
 		f, rm := queueFixture(t, onWorker, other)
 		os.Remove(filepath.Join(f.h.Env.FFmpeg.Dir, "realign.srt"))
 		key := filepath.Base(f.showBase()+".en.srt") + "@" + fileKey(f.showBase()+".en.srt")
@@ -305,8 +316,8 @@ func TestVerifyUnjudgedSidecarStays(t *testing.T) {
 		f.run(t)
 		got, _ := os.ReadFile(f.showBase() + ".en.srt")
 		if o := f.outcomes()[f.path(show)]; o != "unjudged" || string(got) != other || len(f.archived()) != 0 || f.queued()[0] != "" {
-			t.Errorf("on a worker %v: Show %q, sidecar untouched %v, archive %v, queue %v; want unjudged, untouched, nothing archived, out of the queue",
-				onWorker, o, string(got) == other, f.archived(), f.queued())
+			t.Errorf("%s, on a worker %v: Show %q, sidecar untouched %v, archive %v, queue %v; want unjudged, untouched, nothing archived, out of the queue",
+				why, onWorker, o, string(got) == other, f.archived(), f.queued())
 		}
 	}
 }

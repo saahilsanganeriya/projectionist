@@ -95,8 +95,10 @@ func (r *run) verifyPass(ctx context.Context, t *title) outcome {
 		fields := map[string]any{"sidecar": filepath.Base(p), "file": t.key}
 		verdict, out := "undecided", ""
 		switch n := len(cues(texts[i])); {
-		case n < minCues:
-			verdict, fields["detail"] = "refused", fmt.Sprintf("not an SRT a video could carry: %d cues", n)
+		case n == 0:
+			verdict, fields["detail"] = "refused", "not an SRT: no cues"
+		case n < minCues: // a short special's: too few for any fit to judge, so the full alignment leaves it unjudged
+			fields["detail"] = fmt.Sprintf("%d cues: too few to judge", n)
 		case smp == nil:
 			fields["detail"] = why
 		default:

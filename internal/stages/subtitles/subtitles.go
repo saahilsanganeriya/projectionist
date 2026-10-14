@@ -2182,8 +2182,8 @@ func lastLines(out []byte, n int) string {
 // result "unjudged" when the speech is the reference and no hearing of it judged the candidate either way.
 func (r *run) fit(ctx context.Context, ref *reference, txt string, attempt map[string]any) (string, string, bool) {
 	spans := cues(txt)
-	if len(spans) < minCues {
-		return "", "", false
+	if len(spans) < minCues { // too few for any fit to judge: no evidence either way
+		return "", "unjudged", false
 	}
 	if ref.label != "alass" {
 		starts := make([]span, len(spans)) // cue starts against caption starts: a cue stays up after its line ends
