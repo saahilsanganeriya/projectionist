@@ -4,6 +4,8 @@ import (
 	"math"
 	"os"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -35,9 +37,10 @@ func TestSpeechFollowsSileroRules(t *testing.T) {
 	}
 }
 
-// Catches the model run wrongly (no 64-sample context, the state not carried, the wrong scale): it then hears nothing,
-// or hears the silence around a spoken sentence. The clip is synthetic (macOS say): 2 s silence, 4.9 s speech, 2 s
-// silence. It runs where ONNX Runtime is (ORT_LIB, else the image's path) and skips elsewhere.
+// Catches the model run unlike Silero's own wrapper (no 64-sample context, the state not carried, the wrong scale):
+// every window's probability must match what silero-vad 6.2.0's OnnxWrapper gave for the same clip (speech.probs),
+// which a clean clip's stretches alone do not show. The clip is synthetic (macOS say): 2 s silence, 4.9 s speech,
+// 2 s silence. It runs where ONNX Runtime is (ORT_LIB, else the image's path) and skips elsewhere.
 func TestModelHearsSpeechNotSilence(t *testing.T) {
 	lib := os.Getenv("ORT_LIB")
 	if lib == "" {
@@ -63,6 +66,19 @@ func TestModelHearsSpeechNotSilence(t *testing.T) {
 	probs, samples, err := d.Probabilities(f)
 	if err != nil {
 		t.Fatal(err)
+	}
+	raw, err := os.ReadFile("testdata/speech.probs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Fields(string(raw))
+	if len(probs) != len(want) {
+		t.Fatalf("%d windows, want %d", len(probs), len(want))
+	}
+	for i, w := range want {
+		if ref, _ := strconv.ParseFloat(w, 64); math.Abs(float64(probs[i])-ref) > 0.01 {
+			t.Fatalf("window %d: probability %.4f, Silero's own wrapper %.4f", i, probs[i], ref)
+		}
 	}
 	got := Speech(probs, samples)
 	var heard float64
