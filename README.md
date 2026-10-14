@@ -84,7 +84,7 @@ The design rules that shape the code:
 - **One image, no registry.** `make save` builds a linux/amd64 image and writes a tarball. On the NAS, `docker load`
   reads it, and a Container Manager project runs [compose.yaml](compose.yaml). The image holds the static Go binary
   (about 16 MB, stripped), the same ffmpeg build that Jellyfin uses (with the Intel QSV/VAAPI drivers), alass, and a
-  small OCR helper (`cmd/subocr`, ONNX Runtime with a PP-OCR text model).
+  two small helpers on ONNX Runtime: `cmd/subocr` (OCR, a PP-OCR text model) and `cmd/subvad` (speech, Silero VAD).
 - **Host network, hardware encode.** The container shares the host network to reach Plex and Jellyfin on loopback.
   `/dev/dri/renderD128` is passed through for QSV encodes.
 - **Least privilege.** The service runs as root inside the container, so that files it moves keep their owners. All
@@ -141,6 +141,7 @@ To add a stage, see [docs/SKELETON_READY.md](docs/SKELETON_READY.md).
 |---|---|
 | `cmd/projectionist` | The service: `serve`, `run <stage>`, `check`, `align-worker` |
 | `cmd/subocr` | OCR helper for image subtitle tracks |
+| `cmd/subvad` | Speech helper: the stretches Silero VAD hears as speech, for subtitle alignment |
 | `cmd/bakeoff` | Compares vision models as poster judges, to pick the one the posters stage uses |
 | `internal/stage`, `internal/scheduler`, `internal/store` | The stage interface, the scheduler and the SQLite state |
 | `internal/stages/<name>` | One package per stage |
