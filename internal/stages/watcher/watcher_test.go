@@ -52,7 +52,9 @@ func TestClassify(t *testing.T) {
 
 // Catches: a trigger in the middle of a long copy (the busy check), one trigger per file instead of one per folder,
 // a trigger for noise (.part, .DS_Store, @eaDir) next to the media, the first sweep triggering what already exists,
-// and watches spent on @eaDir and .details folders (one per movie: they would double the library's need).
+// watches spent on @eaDir and .details folders (one per movie: they would double the library's need), and a subtitle
+// written beside a known video triggering every stage (the subtitles stage's own writes fired a full rename, details
+// and posters round about 27 times an hour on 2026-10-14).
 func TestQuietFolderTriggersOnce(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		r := newRig(t, 100)
@@ -94,6 +96,11 @@ func TestQuietFolderTriggersOnce(t *testing.T) {
 		time.Sleep(3 * time.Minute)
 		if got := r.quiet(); len(got) != 2 || got[1] != "10:09 "+batch+" inotify" || r.fired.Load() != 2 {
 			t.Fatalf("50 files in one folder: quiet %q, %d triggers; want one more for %s", got, r.fired.Load(), batch)
+		}
+		r.send(r.ev(r.put(old+"/Old (2001) {tmdb-1}.en.srt", 3), false))
+		time.Sleep(3*time.Minute + time.Second)
+		if got := r.quiet(); len(got) != 2 || r.fired.Load() != 2 {
+			t.Fatalf("a subtitle written beside Old's video: quiet %q, %d triggers; want none", got, r.fired.Load())
 		}
 		if rep := finish(); len(rep.Alerts) != 0 {
 			t.Fatalf("alerts %q", rep.Alerts)

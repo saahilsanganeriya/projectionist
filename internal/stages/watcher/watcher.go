@@ -10,8 +10,9 @@
 // QUIET when the names, sizes and mtimes under it have not changed for `quiet`, so a long SMB or rsync copy keeps it
 // busy. In-progress files (dot files, *.part, *.!qB) count as busy but never start a unit; @eaDir, dot directories
 // (.details) and the configured names are neither watched nor counted. A quiet unit triggers only when its content
-// signature (in-progress files left out) differs from the one recorded at its last trigger, so each real change
-// triggers once: not .DS_Store, not .details, not the sweep re-finding what inotify already handled.
+// signature (in-progress files and subtitle files left out) differs from the one recorded at its last trigger, so each
+// real change triggers once: not .DS_Store, not .details, not a subtitle, not the sweep re-finding what inotify already
+// handled.
 //
 // Each run is one sweep period: walk every root (watch each folder; queue units that are new, gone, or hold a folder
 // modified since the last sweep), follow events until `sweep` has passed, then return, so /health sees alerts every
@@ -20,8 +21,8 @@
 // raises an alert and leaves the unwatched folders to the sweep. Known gap: a file rewritten in place, with no
 // folder change, is seen only by inotify.
 //
-// Stages are triggered by name only: each is a reconciler that finds its own work, so a stage's own writes (a new
-// subtitle, a rename) cause at most one more no-op round.
+// Stages are triggered by name only: each is a reconciler that finds its own work, so a stage's own writes (a rename)
+// cause at most one more no-op round; a subtitle the subtitles stage writes causes none.
 package watcher
 
 import (
@@ -50,6 +51,8 @@ const (
 )
 
 var errWatchLimit = errors.New("inotify watch limit reached")
+
+var subtitleExt = map[string]bool{".srt": true, ".ass": true, ".ssa": true, ".vtt": true, ".sub": true, ".idx": true, ".smi": true}
 
 type Options struct {
 	Roots           []string      `toml:"roots" required:"the folders to watch (the films, the shows, the finished downloads)"`
@@ -250,7 +253,9 @@ func (o *Options) unitOf(path string, isDir bool) (string, kind) {
 }
 
 // sigs fingerprints a unit from the names, sizes and mtimes under it (folders by name only, since a folder's mtime
-// moves when @eaDir or .details appears): busy covers in-progress files too, content leaves them out.
+// moves when @eaDir or .details appears): busy covers in-progress files too, content leaves them out, and subtitle
+// files: the subtitles stage writes and retimes them beside known videos all day, and no triggered stage acts on one
+// (rename and subtitles find a dropped one on their own schedule; a new Subs folder still counts, by its name).
 func (o *Options) sigs(unit string) (busy, content string, err error) {
 	b, c := fnv.New64a(), fnv.New64a()
 	found := false
@@ -283,7 +288,7 @@ func (o *Options) sigs(unit string) (busy, content string, err error) {
 			line = fmt.Sprintf("%s\x00%d\x00%d\n", path[len(unit):], info.Size(), info.ModTime().UnixNano())
 		}
 		b.Write([]byte(line))
-		if k == counted {
+		if k == counted && (d.IsDir() || !subtitleExt[strings.ToLower(filepath.Ext(d.Name()))]) {
 			c.Write([]byte(line))
 		}
 		return nil
