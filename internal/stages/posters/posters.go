@@ -474,13 +474,13 @@ func loadRows(ctx context.Context, db *sql.DB, titles []Title, now time.Time) ([
 // poolSig names what a title's pool is gathered from: a new owner poster (a newer export) or another worn set gathers
 // it again.
 func (r *run) poolSig(t Title) string {
-	switch t.Kind {
+	switch t.Kind { // "titled": gathered without textless posters (2026-10-14); a pool gathered before is gathered again
 	case franchise:
-		return "tmdb-collection+fanart+film" + r.setSig(t.Key)
+		return "tmdb-collection+fanart+film titled" + r.setSig(t.Key)
 	case director:
 		return "commons+tmdb-person"
 	}
-	sig := "tmdb+fanart"
+	sig := "tmdb+fanart titled"
 	if p, ok := r.owners[t.Key]; ok {
 		sig += " owner=" + p.State + ":" + p.File
 	}

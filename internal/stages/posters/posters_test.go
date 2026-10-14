@@ -738,6 +738,30 @@ func TestReferencesLeaveRoomForAPool(t *testing.T) {
 	}
 }
 
+// Catches a pool gathered before textless posters were kept out (by an older build) judged as it stands: on 2026-10-14,
+// 113 of the stage's choices were textless though judged under the titled prompt, from pools gathered the day before.
+// Such a pool is gathered again once, without its textless posters.
+func TestPoolFromBeforeTheTitledRuleIsGatheredAgain(t *testing.T) {
+	w := newWorld(t, "dry_run = true\n")
+	w.run(t)
+	db := w.h.Env.Store.DB()
+	var raw string
+	db.QueryRow(`SELECT cands FROM posters_items WHERE key='movie:tmdb-1'`).Scan(&raw)
+	var pool []Candidate
+	json.Unmarshal([]byte(raw), &pool)
+	i := slices.IndexFunc(pool, func(c Candidate) bool { return c.Source == srcTMDB })
+	green := pool[i]
+	green.URL, green.Thumb, green.Lang = strings.Replace(green.URL, "/red.jpg", "/green.jpg", 1), strings.Replace(green.Thumb, "/red.jpg", "/green.jpg", 1), ""
+	green.URL, green.Thumb = strings.Replace(green.URL, "/blue.jpg", "/green.jpg", 1), strings.Replace(green.Thumb, "/blue.jpg", "/green.jpg", 1)
+	old, _ := json.Marshal(append(pool, green))
+	db.Exec(`UPDATE posters_items SET cands=?, sig=replace(sig, ' titled', '') WHERE key='movie:tmdb-1'`, string(old)) // as an older build stored it
+	w.run(t)
+	db.QueryRow(`SELECT cands FROM posters_items WHERE key='movie:tmdb-1'`).Scan(&raw)
+	if strings.Contains(raw, "/green.jpg") {
+		t.Errorf("Alpha's pool after the next run: %s; want it gathered again, without the textless green", raw)
+	}
+}
+
 // Catches: titles judged under the old rules (a pick replaced by a candidate 3 points better, Plex's default by one 1
 // point better) keeping those verdicts, or being paid for again: they are decided again from their stored scores.
 func TestRedecideFromStoredScores(t *testing.T) {
