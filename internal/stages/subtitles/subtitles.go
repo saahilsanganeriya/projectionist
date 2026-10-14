@@ -100,7 +100,8 @@
 //
 // The extraction pass (extract.go), after the OCR pass and inside align_window, converts the English text track (subrip,
 // ASS/SSA, mov_text, WebVTT; tagged English, or undetermined) of a title that carries one and has no English sidecar to
-// SRT, the cues timed as they are, and writes it as <video>.en.srt, recorded "extracted"; one that is not a full English
+// SRT, the cues timed as they are, and writes it as <video>.en.srt, recorded "extracted" (which the verify pass fits on
+// its next run, as a release's own track can be off: Colin from Accounts S01E05's by 1.2 s); one that is not a full English
 // subtitle (its text read as English) is not written, and its title is searched for from the next run on. Each file is
 // read once, written or refused, titles with an ASS track first, and a run starts no title once its extraction has
 // taken an hour; the next run, asked for at once, goes on.
@@ -782,7 +783,7 @@ func (r *run) plan(ctx context.Context, titles, sidecarred []*title) ([]*title, 
 			}
 		}
 	}
-	next, verified := map[string]time.Time{}, map[string]bool{}
+	next, verified, written := map[string]time.Time{}, map[string]bool{}, map[string]bool{}
 	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT path, outcome, last_try, tries FROM subtitles_titles`)
 	if err != nil {
 		return nil, err
@@ -796,7 +797,7 @@ func (r *run) plan(ctx context.Context, titles, sidecarred []*title) ([]*title, 
 		}
 		last, _ := time.Parse(store.TimeFormat, at)
 		next[p] = last.Add(r.opt.RetryAfter << min(tries-1, 3)) // each miss doubles the wait, up to 8x retry_after
-		verified[p] = verifiedOutcomes[result]
+		verified[p], written[p] = verifiedOutcomes[result], unfitted[result]
 	}
 	rows.Close()
 	var due []*title
@@ -847,7 +848,7 @@ func (r *run) plan(ctx context.Context, titles, sidecarred []*title) ([]*title, 
 		if n == r.opt.VerifyPerRun {
 			break
 		}
-		if at, ok := next[t.path]; verified[t.path] || queued[t.path] || ok && r.env.Now().Before(at) {
+		if at, ok := next[t.path]; verified[t.path] || queued[t.path] || ok && !written[t.path] && r.env.Now().Before(at) {
 			continue
 		}
 		if !r.describe(ctx, t) {

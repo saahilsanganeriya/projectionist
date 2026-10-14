@@ -43,10 +43,15 @@ const (
 )
 
 // verifiedOutcomes are the outcomes the stage records only once a subtitle's timing was checked against this very file;
-// an OCR'd or extracted one has the timing of the file's own image or text track. release_matched is not one: such a
-// subtitle was written as downloaded, before a release match was fitted like any other (The Game sat 15.7 s off).
+// an OCR'd one has the timing of the file's own image track.
 var verifiedOutcomes = map[string]bool{"sampled": true, "retimed": true, "idx_retimed": true, "rescued": true, "kept": true,
-	"idx_kept": true, "ocr": true, "extracted": true}
+	"idx_kept": true, "ocr": true}
+
+// unfitted are the outcomes of a subtitle the stage wrote without fitting it, which the verify pass judges on its next
+// run, not after a failed search's retry wait: one written as downloaded before a release match was fitted like any
+// other (The Game sat 15.7 s off), and one extracted from the video's own English text track, whose timing a release can
+// get wrong too (Colin from Accounts S01E05's runs 1.2 s early).
+var unfitted = map[string]bool{"release_matched": true, "extracted": true}
 
 // misaligned are sidecars (by their path below a root) an alignment kept against a reference on the wrong time base:
 // Lord of War's, kept on an align worker whose ffmpeg counted the streamed media from its first packet, the audio's,

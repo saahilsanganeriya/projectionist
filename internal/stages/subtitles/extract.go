@@ -10,7 +10,8 @@ package subtitles
 //	  every such track converted to SRT by one ffmpeg (the whole file read once; the cues timed as they are; an ASS
 //	  track as plain text, its styling and drawings dropped)
 //	  tried full tracks first, then SDH ones, each in the video's order:
-//	    the first whose text passes trackRefusal    -> <video>.en.srt (O_EXCL), recorded "extracted"
+//	    the first whose text passes trackRefusal    -> <video>.en.srt (O_EXCL), recorded "extracted"; the verify pass
+//	                                                   fits it on its next run, as any sidecar written unfitted
 //	    none passes, or ffmpeg cannot read the file -> an event rejected_extract, nothing recorded; from the next run
 //	                                                   the title is searched for as one with no English text track
 //	  an English sidecar appeared during the read   -> not written, recorded not_written
