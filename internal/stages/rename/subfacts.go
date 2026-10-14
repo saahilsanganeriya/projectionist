@@ -172,10 +172,18 @@ func readSubFacts(raw []byte, ext string) SubFacts {
 	return f
 }
 
-// textScript is the first script with more than 20 characters (sub_stats.script), counting only characters in words
-// with no Latin letter: OCR'd English writes Greek or Cyrillic capitals for their Latin look-alikes ("PLAYIΝG"), and
-// reading that as Greek would archive a film's only English track — which the subtitle fetcher then fetches again.
+// textScript is the first script with more than 20 characters (sub_stats.script) that are also more than a fifth of the
+// Latin letters, counting only characters in words with no Latin letter: OCR'd English writes Greek or Cyrillic
+// capitals for their Latin look-alikes ("PLAYIΝG"), and an English track can keep a few untranslated lines (Evil Does
+// Not Exist's: 39 Chinese characters among 4,853 English words); reading either as another script would archive a
+// film's only English track, which the subtitle stage then writes again.
 func textScript(text string) string {
+	latinLetters := 0
+	for _, r := range text {
+		if r < 0x80 && unicode.IsLetter(r) {
+			latinLetters++
+		}
+	}
 	for _, s := range scripts {
 		n, mixed, word, latin := 0, 0, 0, false
 		flush := func() {
@@ -196,7 +204,7 @@ func textScript(text string) string {
 			}
 		}
 		flush()
-		if n-mixed > 20 {
+		if n-mixed > 20 && 5*(n-mixed) > latinLetters {
 			return s.name
 		}
 	}
