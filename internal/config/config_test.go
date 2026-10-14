@@ -14,6 +14,7 @@ func TestStageTablesDecode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "c.toml")
 	os.WriteFile(path, []byte(`
 timezone = "America/Los_Angeles"
+owners = ["owner"]
 [stages.alpha]
 every = "15m"
 window = "02:00-08:00"
@@ -103,6 +104,8 @@ func TestWindowClose(t *testing.T) {
 func TestConcurrentStageDecodes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "c.toml")
 	if err := os.WriteFile(path, []byte(`
+owners = ["owner"]
+
 [stages.health]
 every = "5m"
 timeout = "10s"
@@ -143,7 +146,7 @@ apply = true
 // Catches an [llm] task on an API of its own loading without its prices (to be priced at $0 against every budget), or
 // its api and price keys not decoding.
 func TestLLMTaskValidatedAtLoad(t *testing.T) {
-	task := "[llm.tasks.posters]\napi = \"https://api.openai.com/v1\"\nmodel = \"gpt-6-astra\"\nfallbacks = []\nprice_in = 10\n"
+	task := "owners = [\"owner\"]\n[llm.tasks.posters]\napi = \"https://api.openai.com/v1\"\nmodel = \"gpt-6-astra\"\nfallbacks = []\nprice_in = 10\n"
 	for toml, wantErr := range map[string]bool{task + "price_out = 50\n": false, task: true} {
 		path := filepath.Join(t.TempDir(), "c.toml")
 		os.WriteFile(path, []byte(toml), 0o600)

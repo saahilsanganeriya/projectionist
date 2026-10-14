@@ -16,7 +16,7 @@ type Config struct {
 	Listen   string     `toml:"listen"`   // host network: keep it on 127.0.0.1 or the LAN address
 	StateDB  string     `toml:"state_db"` // SQLite file; must sit on a local disk (btrfs volume), never SMB/NFS
 	Timezone string     `toml:"timezone"` // only for stage windows; logs and the DB are always UTC
-	Owners   []string   `toml:"owners"`   // Plex/Jellyfin account names whose viewing never pauses a job
+	Owners   []string   `toml:"owners" required:"the Plex and Jellyfin account names whose viewing never pauses a job (your own)"`
 	Log      Log        `toml:"log"`
 	Plex     Plex       `toml:"plex"`
 	Jellyfin Jellyfin   `toml:"jellyfin"`
@@ -85,7 +85,21 @@ type Schedule struct {
 	Window  string        `toml:"window"` // optional "HH:MM-HH:MM" in Timezone; may wrap past midnight
 }
 
+// Load reads the file and fails on any problem Check finds.
 func Load(path string) (*Config, error) {
+	cfg, err := Parse(path)
+	if err != nil {
+		return nil, err
+	}
+	if ps := cfg.Check(); len(ps) > 0 {
+		return nil, fmt.Errorf("config %s:\n%w", path, Problems(ps))
+	}
+	return cfg, nil
+}
+
+// Parse reads the TOML file over the defaults; only a file that is not TOML (or not this shape) fails. Check names
+// what the result still lacks.
+func Parse(path string) (*Config, error) {
 	cfg := Config{
 		Listen:   "127.0.0.1:8097",
 		StateDB:  "/state/projectionist.db",
@@ -102,19 +116,36 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config %s: %w", path, err)
 	}
 	cfg.md = md
-	if err := cfg.LLM.Validate(); err != nil {
-		return nil, fmt.Errorf("config %s: %w", path, err)
-	}
-	if cfg.location, err = time.LoadLocation(cfg.Timezone); err != nil {
-		return nil, fmt.Errorf("config timezone: %w", err)
-	}
+	cfg.location, _ = time.LoadLocation(cfg.Timezone) // Check reports a bad name
 	return &cfg, nil
+}
+
+// Check names every top-level problem: the keys a deployment must set, the time zone, the [llm] tasks. Each stage's
+// own keys are checked by the stage (stage.Checker), and its schedule by CheckSchedule.
+func (c *Config) Check() []Problem {
+	ps := Required("", "", c)
+	if _, err := time.LoadLocation(c.Timezone); err != nil {
+		ps = append(ps, Problem{Key: "timezone", Want: fmt.Sprintf("unknown time zone %q; set an IANA name such as \"Europe/London\"", c.Timezone)})
+	}
+	if err := c.LLM.Validate(); err != nil {
+		ps = append(ps, Problem{Key: "llm", Want: err.Error()})
+	}
+	return ps
 }
 
 func (c *Config) Location() *time.Location { return c.location }
 
 // Schedule decodes the scheduler keys of [stages.<name>]; a stage with no table is disabled.
 func (c *Config) Schedule(name string) (Schedule, error) {
+	s, ps := c.CheckSchedule(name)
+	if len(ps) > 0 {
+		return s, Problems(ps)
+	}
+	return s, nil
+}
+
+// CheckSchedule is Schedule naming each problem by its key.
+func (c *Config) CheckSchedule(name string) (Schedule, []Problem) {
 	s := Schedule{Enabled: true}
 	prim, ok := c.Stages[name]
 	if !ok {
@@ -124,15 +155,16 @@ func (c *Config) Schedule(name string) (Schedule, error) {
 	err := c.md.PrimitiveDecode(prim, &s)
 	c.mdMu.Unlock()
 	if err != nil {
-		return s, fmt.Errorf("stages.%s: %w", name, err)
+		return s, []Problem{{Key: "stages." + name, Want: err.Error()}}
 	}
+	var ps []Problem
 	if s.Enabled && s.Every <= 0 {
-		return s, fmt.Errorf("stages.%s: every must be > 0", name)
+		ps = append(ps, Missing("stages."+name+".every", EnabledWhen(name), `how often it runs, as a duration such as "1h"`))
 	}
 	if _, err := ParseWindow(s.Window); err != nil {
-		return s, fmt.Errorf("stages.%s: %w", name, err)
+		ps = append(ps, Problem{Key: "stages." + name + ".window", Want: err.Error()})
 	}
-	return s, nil
+	return s, ps
 }
 
 // StageOptions decodes a stage's own keys from the same table; an absent table leaves v at its defaults.
