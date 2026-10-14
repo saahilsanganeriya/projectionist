@@ -46,11 +46,11 @@ func newWorld(t *testing.T) *world {
 	w.top = w.lb.srv.URL + "/official/list/letterboxds-top-500-films/"
 	w.lb.pages["/official/list/letterboxds-top-500-films/"] = fixture(t, "list_top500_p1.html")
 	w.lb.pages["/official/list/letterboxds-top-500-films/page/2/"] = fixture(t, "list_top500_p2.html")
-	w.lb.pages["/saahilsan/lists/"] = fixture(t, "lists_index.html") // both lists on it answer 404: private
-	w.lb.pages["/saahilsan/list/nolan/"] = fixture(t, "list_nolan.html")
-	w.lb.pages["/saahilsan/films/"] = fixture(t, "films_grid.html")
-	w.lb.pages["/saahilsan/rss/"] = fixture(t, "rss.xml")
-	w.lb.redirect["fQbG8"] = "/saahilsan/list/nolan/"
+	w.lb.pages["/owner-lb/lists/"] = fixture(t, "lists_index.html") // both lists on it answer 404: private
+	w.lb.pages["/owner-lb/list/nolan/"] = fixture(t, "list_nolan.html")
+	w.lb.pages["/owner-lb/films/"] = fixture(t, "films_grid.html")
+	w.lb.pages["/owner-lb/rss/"] = fixture(t, "rss.xml")
+	w.lb.redirect["fQbG8"] = "/owner-lb/list/nolan/"
 	for slug, id := range map[string]string{"harakiri": "movie/14537", "the-human-condition-iii-a-soldiers-prayer": "movie/31414",
 		"12-angry-men": "movie/389", "come-and-see": "movie/25237", "oldboy": "movie/670", "sherlock-jr": "movie/992",
 		"chainsaw-man-the-movie-reze-arc": "tv/389", // a TV id equal to an owned film's
@@ -190,7 +190,7 @@ func TestShelvesAndRerunChangesNothing(t *testing.T) {
 	if want := []string{"j157336", "j77", "j27205"}; !reflect.DeepEqual(jfOrder(bsNolan), want) {
 		t.Errorf("jellyfin nolan = %v, want %v", bsNolan.items, want)
 	}
-	nolanURL := w.lb.srv.URL + "/saahilsan/list/nolan/"
+	nolanURL := w.lb.srv.URL + "/owner-lb/list/nolan/"
 	if bsNolan.overview != "On the NAS: 3 of 4 · seen 1 · "+nolanURL || bsNolan.forcedSort != "~ Mine nolan" || len(bsNolan.poster) == 0 {
 		t.Errorf("jellyfin nolan: overview=%q sort=%q poster=%d bytes", bsNolan.overview, bsNolan.forcedSort, len(bsNolan.poster))
 	}
@@ -382,31 +382,15 @@ func TestLimit(t *testing.T) {
 	}
 }
 
-// Catches: a default canon shelf out of its list's published order — the Criterion shelf reversed, as it once was:
-// the list runs newest spine first and ends with box-set films that have no spine, so its reverse opened on Full
-// Metal Jacket rather than on the newest release.
-func TestDefaultCanonKeepsPublishedOrder(t *testing.T) {
-	w := newWorld(t)
-	w.h.SetOptions(w.opts) // the default canon and Home rows
-	w.lb.pages["/jbutts15/list/the-complete-criterion-collection/"] = w.lb.pages["/official/list/letterboxds-top-500-films/"]
-	w.run(t)
-	if want := []string{"k14537", "k389", "k25237", "k670"}; !reflect.DeepEqual(w.plexColl(t, "Criterion Collection").items, want) {
-		t.Errorf("plex Criterion = %v, want %v", w.plexColl(t, "Criterion Collection").items, want)
-	}
-	if want := []string{"j14537", "j389", "j25237", "j670"}; !reflect.DeepEqual(jfOrder(w.boxSet(t, "Criterion Collection")), want) {
-		t.Errorf("jellyfin Criterion = %v, want %v", w.boxSet(t, "Criterion Collection").items, want)
-	}
-}
-
 // Catches: a renamed own list shelved twice — once from the lists page (new path), once from the export's code,
 // whose cached path is the old one (Letterboxd redirects it) — two shelves fighting over one collection.
 func TestRenamedOwnListShelvedOnce(t *testing.T) {
 	w := newWorld(t)
-	w.lb.redirect["fQbG8"] = "/saahilsan/list/nolan-old/"
-	w.lb.redirect["saahilsan/list/nolan-old/"] = "/saahilsan/list/nolan/"
-	index := string(w.lb.pages["/saahilsan/lists/"])
-	w.lb.pages["/saahilsan/lists/"] = []byte(strings.Replace(index, `<div class="list-summary-list">`,
-		`<div class="list-summary-list"><h2 class="name prettify"><a href="/saahilsan/list/nolan/">nolan</a></h2>`, 1))
+	w.lb.redirect["fQbG8"] = "/owner-lb/list/nolan-old/"
+	w.lb.redirect["owner-lb/list/nolan-old/"] = "/owner-lb/list/nolan/"
+	index := string(w.lb.pages["/owner-lb/lists/"])
+	w.lb.pages["/owner-lb/lists/"] = []byte(strings.Replace(index, `<div class="list-summary-list">`,
+		`<div class="list-summary-list"><h2 class="name prettify"><a href="/owner-lb/list/nolan/">nolan</a></h2>`, 1))
 	w.run(t)
 	n := 0
 	for _, s := range w.jf.sets {
@@ -516,7 +500,7 @@ func TestOwnShelfNeverTakesItsOwnTitle(t *testing.T) {
 // (a refusal, a state read that fails); a shelf deleted after the owner made it his (rewrote its summary); and a
 // record forgotten while its collection is still there.
 func TestRetiresShelvesOfGoneLists(t *testing.T) {
-	nolan := "/saahilsan/list/nolan/"
+	nolan := "/owner-lb/list/nolan/"
 	canonTop := func(w *world, extra string) {
 		w.h.SetOptions(w.opts + extra + fmt.Sprintf("home = [\"Top\"]\n[[canon]]\nname = \"Top\"\nurl = %q\n", w.top))
 	}
@@ -531,11 +515,11 @@ func TestRetiresShelvesOfGoneLists(t *testing.T) {
 		{"made private", nil, func(w *world) { delete(w.lb.pages, nolan) }, "nolan · Letterboxd", "nolan · Letterboxd", 2},
 		{"made private, found only on his lists page", func(w *world) {
 			os.RemoveAll(filepath.Join(filepath.Dir(w.missing), "export"))
-			w.lb.pages["/saahilsan/lists/"] = []byte(strings.Replace(string(w.lb.pages["/saahilsan/lists/"]), `<div class="list-summary-list">`,
-				`<div class="list-summary-list"><h2 class="name prettify"><a href="/saahilsan/list/nolan/">nolan</a></h2>`, 1))
+			w.lb.pages["/owner-lb/lists/"] = []byte(strings.Replace(string(w.lb.pages["/owner-lb/lists/"]), `<div class="list-summary-list">`,
+				`<div class="list-summary-list"><h2 class="name prettify"><a href="/owner-lb/list/nolan/">nolan</a></h2>`, 1))
 		}, func(w *world) {
 			delete(w.lb.pages, nolan)
-			w.lb.pages["/saahilsan/lists/"] = fixture(t, "lists_index.html")
+			w.lb.pages["/owner-lb/lists/"] = fixture(t, "lists_index.html")
 		}, "nolan · Letterboxd", "nolan · Letterboxd", 2},
 		{"left out by skip_own", nil, func(w *world) { canonTop(w, "skip_own = [\"nolan\"]\n") }, "nolan · Letterboxd", "nolan · Letterboxd", 2},
 		{"dropped from the canon", nil, func(w *world) { w.h.SetOptions(w.opts + "canon = []\n") }, "Top", "Top", 2},
@@ -666,7 +650,7 @@ func TestRetireForgetsOnlyConfirmedGone(t *testing.T) {
 	w := newWorld(t)
 	w.run(t)
 	px, jf := w.plexColl(t, "nolan · Letterboxd"), w.boxSet(t, "nolan · Letterboxd")
-	delete(w.lb.pages, "/saahilsan/list/nolan/") // made private
+	delete(w.lb.pages, "/owner-lb/list/nolan/") // made private
 	// a canon list dropped from the config whose create was refused: no collection, no id to confirm anything by
 	const unconfirmed = "https://letterboxd.com/x/list/dropped/"
 	for _, app := range []string{"plex", "jellyfin"} {
@@ -768,7 +752,7 @@ func TestAdoptsOnlyItsOwnCreate(t *testing.T) {
 // shelf's title: Plex files both under one tag, and the two shelves adopt it by its summary and fight every run.
 func TestOwnListNamedLikeACanonShelf(t *testing.T) {
 	w := newWorld(t)
-	w.lb.pages["/saahilsan/list/nolan/"] = []byte(strings.Replace(string(fixture(t, "list_nolan.html")), `content="nolan"`, `content="TOP"`, 1))
+	w.lb.pages["/owner-lb/list/nolan/"] = []byte(strings.Replace(string(fixture(t, "list_nolan.html")), `content="nolan"`, `content="TOP"`, 1))
 	w.run(t)
 	if want := []string{"k14537", "k389", "k25237", "k670"}; !reflect.DeepEqual(w.plexColl(t, "Top").items, want) {
 		t.Errorf("plex Top = %v, want %v", w.plexColl(t, "Top").items, want)
@@ -784,7 +768,7 @@ func TestOwnListNamedLikeACanonShelf(t *testing.T) {
 // ranked") or with case.
 func TestPrivateOwnListsStayOff(t *testing.T) {
 	w := newWorld(t)
-	w.lb.pages["/saahilsan/list/nolan/"] = []byte(strings.Replace(string(fixture(t, "list_nolan.html")), `content="nolan"`,
+	w.lb.pages["/owner-lb/list/nolan/"] = []byte(strings.Replace(string(fixture(t, "list_nolan.html")), `content="nolan"`,
 		`content="Private Reviews and Notes"`, 1))
 	w.run(t)
 	for _, c := range w.px.colls {
@@ -947,7 +931,7 @@ func TestPostersRenderedOnlyWhenSent(t *testing.T) {
 	}
 }
 
-// Catches, for the Top 250 the defaults no longer shelve: its shelf left in either app, or its Home row left, both
+// Catches, for a Top 250 the config no longer shelves: its shelf left in either app, or its Home row left, both
 // when this database recorded it and when no record exists because another database's run made it (the NAS gate:
 // Plex collection 46182 with "the first 250 of" in its summary, promoted to Home, and a BoxSet with an older head's
 // plain link); a dry run that hides those deletes; and a delete of anything the stage cannot show it made: the
@@ -955,6 +939,9 @@ func TestPostersRenderedOnlyWhenSent(t *testing.T) {
 // only be unreadable this run.
 func TestRetiresTheTop250(t *testing.T) {
 	const top500 = "https://letterboxd.com/official/list/letterboxds-top-500-films/"
+	top500Only := func(w *world, extra string) string { // the config after the Top 250 is dropped from it
+		return w.opts + extra + fmt.Sprintf("[[canon]]\nname = \"Letterboxd Top 500\"\nurl = %q\n", top500)
+	}
 	gate := func(w *world) {
 		w.px.colls = append(w.px.colls, &plexColl0{key: "46182", title: "Letterboxd Top 250", items: []string{"k389"},
 			summary: "On the NAS: 143 of 250 · seen 77 · the first 250 of " + top500})
@@ -973,25 +960,25 @@ func TestRetiresTheTop250(t *testing.T) {
 				"[[canon]]\nname = \"Letterboxd Top 250\"\nurl = %q\nlimit = 250\n", top500, top500))
 			w.run(t)
 			gone := []string{w.plexColl(t, "Letterboxd Top 250").key, w.boxSet(t, "Letterboxd Top 250").id}
-			w.h.SetOptions(w.opts)
+			w.h.SetOptions(top500Only(w, ""))
 			w.clock.Sleep(context.Background(), 24*time.Hour)
 			return gone
 		}, nil, 2},
 		{"made by another database's run", func(t *testing.T, w *world) []string {
 			gate(w)
 			w.px.colls = append(w.px.colls, &plexColl0{key: "602", title: "old list", items: []string{"k77"},
-				summary: "On the NAS: 1 of 1 · seen 1 · " + w.lb.srv.URL + "/saahilsan/list/old-list/"})
-			w.h.SetOptions(w.opts + "dry_run = true\n")
+				summary: "On the NAS: 1 of 1 · seen 1 · " + w.lb.srv.URL + "/owner-lb/list/old-list/"})
+			w.h.SetOptions(top500Only(w, "dry_run = true\n"))
 			if rep := w.run(t); !strings.HasSuffix(rep.Summary, ", 2 strays") || w.px.coll("46182") == nil || w.jf.set("bc88") == nil {
 				t.Errorf("dry run: summary %q, 46182 kept %v, bc88 kept %v", rep.Summary, w.px.coll("46182") != nil, w.jf.set("bc88") != nil)
 			}
-			w.h.SetOptions(w.opts)
+			w.h.SetOptions(top500Only(w, ""))
 			return []string{"46182", "bc88"}
 		}, []string{"602"}, 2},
 		{"the owner's own", func(t *testing.T, w *world) []string {
 			gate(w)
 			w.px.coll("46182").summary, w.jf.sets[len(w.jf.sets)-1].overview = "my picks · "+top500, ""
-			w.h.SetOptions(w.opts)
+			w.h.SetOptions(top500Only(w, ""))
 			return nil
 		}, []string{"46182", "bc88"}, 0},
 	} {

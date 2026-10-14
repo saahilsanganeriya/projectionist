@@ -1,0 +1,125 @@
+# Synthetic config for tests: every stage enabled, every key a deployment must set set to a neutral value. The
+# validation tests remove one key at a time from it; stage tests read their stage's table from it (fake.Harness).
+# The people are roles (owner, viewer-a, viewer-b), the hosts are example.com, the paths a typical Synology layout.
+
+listen   = "127.0.0.1:8097"
+state_db = "/state/projectionist.db"
+timezone = "UTC"
+owners   = ["owner-plex", "owner"]
+
+[release_sites]
+names              = ["SITEA", "SITEB", "SITEC"]
+junk_file_prefixes = ["sitea.com", "sitee."]
+
+[plex]
+url         = "http://127.0.0.1:32400"
+preferences = "/volume1/PlexMediaServer/AppData/Plex Media Server/Preferences.xml"
+
+[jellyfin]
+url      = "http://127.0.0.1:8096"
+key_file = "/run/secrets/jellyfin_key"
+
+[stages.appbackup]
+every     = "24h"
+window    = "02:00-05:00"
+databases = ["/volume2/apps/plex/library.db", "/volume2/apps/jellyfin/jellyfin.db"]
+roots     = ["/volume2/apps"]
+exclude   = ["/volume2/apps/transcode"]
+target    = "/volume1/projectionist/app-backups"
+
+[stages.audit]
+every = "24h"
+root  = "/volume1/media"
+
+[stages.collections]
+every        = "24h"
+movies_dir   = "/volume1/media/Movies"
+plex_section = 4
+
+[stages.details]
+every     = "1h"
+library   = "/volume1/media"
+undo_logs = ["/volume1/media/.projectionist/rename/undo.tsv"]
+
+[stages.gpu-guard]
+every       = "15m"
+plex_device = "8086:3185@0000:00:02.0"
+plex_uid    = 297536
+plex_gid    = 297536
+plex_groups = [297536, 937]
+sample      = "/volume1/projectionist/gpu-sample.mkv"
+
+[stages.health]
+every                = "5m"
+plex_movies_section  = 4
+plex_optimize_window = "03:00-06:00"
+
+[stages.jfsync]
+every          = "5m"
+movies_section = 4
+tv_section     = 2
+plex_backups   = "/volume1/projectionist/plex-backups"
+users = [
+  { name = "owner",    plex = "owner-plex",    jellyfin = "owner" },
+  { name = "viewer-a", plex = "viewer-a-plex", jellyfin = "viewer-a" },
+  { name = "viewer-b", plex = "viewer-b",      jellyfin = "viewer-b" },
+]
+
+[stages.letterboxd]
+every          = "1h"
+user           = "owner-lb"
+person         = "owner"
+export_dir     = "/volume1/projectionist/letterboxd"
+movies_dir     = "/volume1/media/Movies"
+tv_root        = "/volume1/media/TV"
+missing_file   = "/volume1/media/_watchlist-missing.txt"
+
+[stages.lists]
+every           = "24h"
+letterboxd_user = "owner-lb"
+export_dir      = "/volume1/projectionist/letterboxd"
+movies_dir      = "/volume1/media/Movies"
+missing_file    = "/volume1/media/_lists-missing.txt"
+plex_section    = 4
+jellyfin_user   = "owner"
+
+[stages.posters]
+every              = "1h"
+movies_root        = "/volume1/media/Movies"
+tv_root            = "/volume1/media/TV"
+plex_movie_section = 4
+plex_tv_section    = 2
+archive_dir        = "/volume1/projectionist/poster-archive"
+
+[stages.remote4k]
+every       = "10m"
+playlist    = "Remote 4K"
+label       = "2160p 14Mbps"
+work_dir    = "/volume1/media/.projectionist/remote4k"
+status_file = "/volume1/projectionist/remote4k/STATUS.txt"
+
+[stages.rename]
+every       = "15m"
+root        = "/volume1/media"
+undo_log    = "/volume1/media/.projectionist/rename/undo.tsv"
+review_file = "/volume1/media/_needs-review.txt"
+
+[stages.subtitles]
+every        = "1h"
+roots        = ["/volume1/media/Movies", "/volume1/media/TV"]
+align_window = "01:00-07:00"
+archive_dir  = "/volume1/projectionist/subtitle-archive"
+
+[stages.tonight]
+every         = "1h"
+pick_after    = "05:00"
+section       = 4
+collection    = "Tonight · Household"
+playlist      = "Tonight"
+movies_dir    = "/volume1/media/Movies"
+jellyfin_user = "owner"
+people        = [{ person = "owner", user = "owner-lb", plex_user = "owner-plex", export_dir = "/volume1/projectionist/letterboxd" }]
+
+[stages.watcher]
+every = "15m"
+roots = ["/volume1/media/Movies", "/volume1/media/TV", "/volume1/media/_downloads/complete"]

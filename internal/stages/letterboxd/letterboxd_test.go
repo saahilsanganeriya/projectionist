@@ -44,7 +44,7 @@ type fakeLetterboxd struct {
 func newLetterboxd(t *testing.T) *fakeLetterboxd {
 	lids := map[string]string{"qTKY": "licorice-pizza", "aAst": "ad-astra-2019", "okja1": "okja", "ring1": "the-ring-2002"}
 	tmdb := map[string]int{"the-ring-2002": 565, "what-happened-was": 18, "okja": 387426, "primetime-2026": 999001, "licorice-pizza": 718032}
-	files := map[string]string{"/saahilsan/watchlist/": "watchlist.html", "/saahilsan/films/": "films.html"}
+	files := map[string]string{"/owner-lb/watchlist/": "watchlist.html", "/owner-lb/films/": "films.html"}
 	lb := &fakeLetterboxd{hits: map[string]int{}, challenge: map[string]bool{}, pages: map[string]string{}, moved: map[string]string{}, status: map[string]int{}, feed: fixture(t, "rss.xml"), etag: `"v1"`}
 	lb.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		lb.mu.Lock()
@@ -65,15 +65,15 @@ func newLetterboxd(t *testing.T) *fakeLetterboxd {
 			io.WriteString(w, override)
 		case moved != "":
 			http.Redirect(w, r, moved, http.StatusFound)
-		case r.URL.Path == "/saahilsan/rss/" && r.Header.Get("If-None-Match") == etag:
+		case r.URL.Path == "/owner-lb/rss/" && r.Header.Get("If-None-Match") == etag:
 			w.WriteHeader(http.StatusNotModified)
-		case r.URL.Path == "/saahilsan/rss/":
+		case r.URL.Path == "/owner-lb/rss/":
 			w.Header().Set("ETag", etag)
 			w.Write(feed)
 		case files[r.URL.Path] != "":
 			w.Header().Set("ETag", `"v1"`)
 			w.Write(fixture(t, files[r.URL.Path]))
-		case r.URL.Path == "/saahilsan/watchlist/page/2/": // the last page: Digger, which he has watched since adding it
+		case r.URL.Path == "/owner-lb/watchlist/page/2/": // the last page: Digger, which he has watched since adding it
 			io.WriteString(w, `<div class="cols-2 js-watchlist-content" data-num-entries="3"><ul class="grid"><li class="griditem"> <div data-item-name="Digger (2026)" data-item-slug="digger-2026"></div> </li></ul></div>`+
 				`<div class="paginate-nextprev"><span class="next">Older</span></div>`)
 		case strings.HasPrefix(r.URL.Path, "/boxd/") && lids[strings.TrimPrefix(r.URL.Path, "/boxd/")] != "":
@@ -90,7 +90,7 @@ func newLetterboxd(t *testing.T) *fakeLetterboxd {
 
 // ringItem is a diary entry for The Ring (TMDB 565, watched 2026-10-04, ★★★★), logged at 07:00Z, an hour after the
 // world's first run.
-const ringItem = `<item> <title>The Ring, 2002</title> <link>https://letterboxd.com/saahilsan/film/the-ring-2002/</link>` +
+const ringItem = `<item> <title>The Ring, 2002</title> <link>https://letterboxd.com/owner-lb/film/the-ring-2002/</link>` +
 	` <guid isPermaLink="false">letterboxd-watch-1530000000</guid> <pubDate>Mon, 5 Oct 2026 20:00:00 +1300</pubDate>` +
 	` <letterboxd:watchedDate>2026-10-04</letterboxd:watchedDate> <letterboxd:rewatch>No</letterboxd:rewatch>` +
 	` <letterboxd:filmTitle>The Ring</letterboxd:filmTitle> <letterboxd:filmYear>2002</letterboxd:filmYear>` +
@@ -208,7 +208,7 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 		fmt.Sscan(r.URL.Query().Get("rating"), &a.plex[r.URL.Query().Get("key")].rating)
 	})
 
-	jf.Handle("GET", "/Users", 200, `[{"Id":"u2","Name":"roger"},{"Id":"u1","Name":"saahil"}]`)
+	jf.Handle("GET", "/Users", 200, `[{"Id":"u2","Name":"viewer-b"},{"Id":"u1","Name":"owner"}]`)
 	item := func(id string, f *jfFilm) map[string]any {
 		return map[string]any{"Id": id, "Name": id, "Path": libraryPath(f.tmdb),
 			"UserData": map[string]any{"PlayCount": f.plays, "Played": f.played, "Rating": f.rating, "LastPlayedDate": f.last}}
@@ -258,11 +258,11 @@ func setupApps(t *testing.T, h *fake.Harness) *apps {
 
 // ---- a fake plex.tv: the owner's Plex Home (list, switch) and each Home user's Discover watchlist, by token ----
 
-// The Home: the owner (the server's token), Aurelia as the managed user "roger" (no username), Aaron by username, and
+// The Home: the owner (the server's token), Viewer B as the managed user "viewer-b" (no username), Viewer-a by username, and
 // a child profile behind a PIN.
 const (
-	rogerToken = "test-token-roger"
-	aaronToken = "test-token-aaron"
+	viewerBToken = "test-token-viewer-b"
+	viewerAToken = "test-token-viewer-a"
 )
 
 type fakePlexTV struct {
@@ -275,9 +275,9 @@ type fakePlexTV struct {
 }
 
 func newPlexTV(t *testing.T) *fakePlexTV {
-	pt := &fakePlexTV{lists: map[string][]string{fake.PlexToken: {"show565"}, rogerToken: {}, aaronToken: {}},
+	pt := &fakePlexTV{lists: map[string][]string{fake.PlexToken: {"show565"}, viewerBToken: {}, viewerAToken: {}},
 		refuse: map[string]bool{}, unknown: map[int]bool{}, calls: map[string]int{}}
-	switched := map[string]string{"u-roger": rogerToken, "u-aaron": aaronToken}
+	switched := map[string]string{"u-viewer-b": viewerBToken, "u-viewer-a": viewerAToken}
 	pt.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		pt.mu.Lock()
 		defer pt.mu.Unlock()
@@ -291,10 +291,10 @@ func newPlexTV(t *testing.T) *fakePlexTV {
 		case strings.HasPrefix(r.URL.Path, "/api/v2/home/") && tok != fake.PlexToken: // only the Home admin manages the Home
 			http.Error(w, "forbidden", http.StatusForbidden)
 		case r.Method == "GET" && r.URL.Path == "/api/v2/home/users":
-			io.WriteString(w, `{"id":1,"users":[{"id":1,"uuid":"u-owner","title":"Saahil","username":"saahilsanganeriya","admin":true},`+
+			io.WriteString(w, `{"id":1,"users":[{"id":1,"uuid":"u-owner","title":"Owner","username":"owner-plex","admin":true},`+
 				`{"id":3,"uuid":"u-kid","title":"kid","username":null,"restricted":true,"protected":true},`+
-				`{"id":4,"uuid":"u-roger","title":"roger","username":null,"restricted":true,"protected":false},`+
-				`{"id":5,"uuid":"u-aaron","title":"Aaron Test","username":"aarontest941","protected":false}]}`)
+				`{"id":4,"uuid":"u-viewer-b","title":"viewer-b","username":null,"restricted":true,"protected":false},`+
+				`{"id":5,"uuid":"u-viewer-a","title":"Viewer A","username":"viewer-a-plex","protected":false}]}`)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/switch") && switched[uuid] != "":
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(map[string]any{"uuid": uuid, "authToken": switched[uuid]})
@@ -356,7 +356,7 @@ func (pt *fakePlexTV) count(call string) int {
 func ptr[T any](v T) *T { return &v }
 
 func writeExport(t *testing.T, dir string) {
-	ex := filepath.Join(dir, "letterboxd-saahilsan-2026-02-01-14-47-utc")
+	ex := filepath.Join(dir, "letterboxd-owner-lb-2026-02-01-14-47-utc")
 	files := map[string]string{
 		"watched.csv": "Date,Name,Year,Letterboxd URI\n2022-01-10,Licorice Pizza,2021,https://boxd.it/qTKY\n2020-01-02,Ad Astra,2019,https://boxd.it/aAst\n",
 		"diary.csv": "Date,Name,Year,Letterboxd URI,Rating,Rewatch,Tags,Watched Date\n" +
@@ -543,7 +543,7 @@ func diaryEvents(t *testing.T, db *sql.DB) string {
 	t.Helper()
 	var lines []string
 	err := query(context.Background(), db, `SELECT kind, item, ref, at, plays, played_at, coalesce(rating, 0) FROM watch_events
-		WHERE source = 'letterboxd' AND person = 'saahil' ORDER BY id`, func(rows *sql.Rows) error {
+		WHERE source = 'letterboxd' AND person = 'owner' ORDER BY id`, func(rows *sql.Rows) error {
 		var kind, item, ref, at, playedAt string
 		var plays int
 		var rating float64
@@ -622,14 +622,14 @@ func TestUnplayedInJellyfinStaysUnplayed(t *testing.T) {
 		CREATE TABLE metadata_item_settings (id INTEGER PRIMARY KEY, account_id INTEGER, guid TEXT, rating REAL, view_offset INTEGER, view_count INTEGER, last_viewed_at INTEGER, updated_at INTEGER);
 		CREATE TABLE media_items (id INTEGER PRIMARY KEY, metadata_item_id INTEGER, deleted_at INTEGER);
 		CREATE TABLE media_parts (id INTEGER PRIMARY KEY, media_item_id INTEGER, file TEXT);
-		INSERT INTO accounts VALUES (1, 'saahilsanganeriya')`); err != nil {
+		INSERT INTO accounts VALUES (1, 'owner-plex')`); err != nil {
 		t.Fatal(err)
 	}
 	bdb.Close()
 	os.Chtimes(filepath.Join(backups, "pre.db"), w.h.Now, w.h.Now)
-	w.h.Plex.Handle("GET", "/accounts", 200, `{"MediaContainer":{"Account":[{"id":1,"name":"saahilsanganeriya"}]}}`)
+	w.h.Plex.Handle("GET", "/accounts", 200, `{"MediaContainer":{"Account":[{"id":1,"name":"owner-plex"}]}}`)
 	w.h.Plex.Handle("GET", "/library/sections/2/all", 200, `{"MediaContainer":{"Metadata":[]}}`)
-	jfOpts := fmt.Sprintf("plex_backups = %q\nwebhook_url = \"\"\nusers = [{ name = \"saahil\", plex = \"saahilsanganeriya\", jellyfin = \"saahil\" }]\n", backups)
+	jfOpts := fmt.Sprintf("plex_backups = %q\nwebhook_url = \"\"\nusers = [{ name = \"owner\", plex = \"owner-plex\", jellyfin = \"owner\" }]\n", backups)
 	jfsyncRun := func() {
 		t.Helper()
 		w.h.SetOptions(jfOpts)
@@ -675,7 +675,7 @@ func TestUnplayedInJellyfinStaysUnplayed(t *testing.T) {
 	w.h.SetOptions(jfOpts)
 	rec := httptest.NewRecorder()
 	(jfsync.Stage{}).Hooks(w.h.Env)["POST /hooks/jellyfin"].ServeHTTP(rec, httptest.NewRequest("POST", "/hooks/jellyfin", strings.NewReader(
-		`{"NotificationType":"UserDataSaved","NotificationUsername":"saahil","ItemId":"j30","ItemType":"Movie","SaveReason":"TogglePlayed","Played":false}`)))
+		`{"NotificationType":"UserDataSaved","NotificationUsername":"owner","ItemId":"j30","ItemType":"Movie","SaveReason":"TogglePlayed","Played":false}`)))
 	jfsyncRun()
 	if views, _ := ring(); rec.Code != http.StatusNoContent || views != 0 || calls("/:/unscrobble") != 1 {
 		t.Fatalf("after the unplayed (hook %d): Plex views %d, unscrobbles %d; want 0 and 1", rec.Code, views, calls("/:/unscrobble"))
@@ -707,7 +707,7 @@ func TestUnplayedInJellyfinStaysUnplayed(t *testing.T) {
 // without an alert.
 func TestRunSurvivesBlocks(t *testing.T) {
 	w := newWorld(t)
-	w.lb.challenge["/saahilsan/watchlist/page/2/"] = true
+	w.lb.challenge["/owner-lb/watchlist/page/2/"] = true
 	if rep := w.run(t, ""); rep.Counts["challenged.watchlist"] != 1 {
 		t.Fatalf("counts = %v", rep.Counts)
 	}
@@ -716,9 +716,9 @@ func TestRunSurvivesBlocks(t *testing.T) {
 	}
 
 	w.lb.challenge = map[string]bool{}
-	hits := w.lb.hits["/saahilsan/watchlist/page/2/"]
+	hits := w.lb.hits["/owner-lb/watchlist/page/2/"]
 	rep := w.run(t, "")
-	if rep.Counts["backed_off.watchlist"] != 1 || w.lb.hits["/saahilsan/watchlist/page/2/"] != hits {
+	if rep.Counts["backed_off.watchlist"] != 1 || w.lb.hits["/owner-lb/watchlist/page/2/"] != hits {
 		t.Errorf("watchlist fetched inside its backoff: counts %v", rep.Counts)
 	}
 	if len(rep.Alerts) != 0 {
@@ -726,14 +726,14 @@ func TestRunSurvivesBlocks(t *testing.T) {
 	}
 
 	w.h.Now = w.h.Now.Add(25 * time.Hour) // next day, page 2 still blocked: page 1 (the newest films) is read again
-	page1 := w.lb.hits["/saahilsan/watchlist/"]
-	w.lb.challenge["/saahilsan/watchlist/page/2/"] = true
+	page1 := w.lb.hits["/owner-lb/watchlist/"]
+	w.lb.challenge["/owner-lb/watchlist/page/2/"] = true
 	w.run(t, "")
-	if w.lb.hits["/saahilsan/watchlist/"] != page1+1 {
+	if w.lb.hits["/owner-lb/watchlist/"] != page1+1 {
 		t.Errorf("a stuck crawl did not start over at page 1 the next day")
 	}
 
-	w.lb.challenge["/saahilsan/rss/"] = true // blocked for over two days: the owner must hear of it
+	w.lb.challenge["/owner-lb/rss/"] = true // blocked for over two days: the owner must hear of it
 	w.h.Now = w.h.Now.Add(feedStale + time.Minute)
 	rep = w.run(t, "")
 	if !slices.ContainsFunc(rep.Alerts, func(a string) bool { return strings.Contains(a, "feed unread") }) {
@@ -813,14 +813,14 @@ func TestEmptyWatchlistPageIsRefused(t *testing.T) {
 	w := newWorld(t)
 	w.run(t, "")
 	before, _ := os.ReadFile(w.missing)
-	w.lb.serve("/saahilsan/watchlist/", `<html><head><title>Just a moment...</title></head><body></body></html>`)
+	w.lb.serve("/owner-lb/watchlist/", `<html><head><title>Just a moment...</title></head><body></body></html>`)
 	w.h.Now = w.h.Now.Add(25 * time.Hour) // the daily crawl
 	rep := w.run(t, "")
 	text, _ := os.ReadFile(w.missing)
 	if got := w.pt.list(fake.PlexToken); got != "m565,show565" || string(text) != string(before) || rep.Counts["challenged.watchlist"] != 1 {
 		t.Errorf("a page listing no films ended the crawl: his Plex watchlist %s, missing file %q (counts %v)", got, text, rep.Counts)
 	}
-	w.lb.serve("/saahilsan/watchlist/", `<div class="cols-2 js-watchlist-content" data-num-entries="0"></div>`) // he empties it
+	w.lb.serve("/owner-lb/watchlist/", `<div class="cols-2 js-watchlist-content" data-num-entries="0"></div>`) // he empties it
 	w.h.Now = w.h.Now.Add(25 * time.Hour)
 	w.run(t, "")
 	if text, _ := os.ReadFile(w.missing); w.pt.list(fake.PlexToken) != "show565" || !strings.Contains(string(text), "(0)") {
@@ -843,25 +843,25 @@ func TestWatchlistCrawlCompletesOnlyAtTheStatedCount(t *testing.T) {
 		return fmt.Sprintf(`<div class="cols-2 js-watchlist-content" data-num-entries="%d"><ul class="grid">%s</ul></div>`+
 			`<div class="paginate-nextprev">%s</div>`, stated, items, next)
 	}
-	const next, last = `<a class="next" href="/saahilsan/watchlist/page/2/">Older</a>`, `<span class="next">Older</span>`
+	const next, last = `<a class="next" href="/owner-lb/watchlist/page/2/">Older</a>`, `<span class="next">Older</span>`
 	whw, ring := gridEntry("What Happened Was... (1994)", "what-happened-was"), gridEntry("The Ring (2002)", "the-ring-2002")
 	prime, okja := gridEntry("Primetime (2026)", "primetime-2026"), gridEntry("Okja (2017)", "okja")
 	for _, tc := range []struct{ name, page1, page2, laterPage1, laterPage2 string }{
 		{"pagination link written another way", page(2, whw, next), page(2, ring, last),
-			page(2, whw, `<a href="/saahilsan/watchlist/page/2/" class="next">Older</a>`), page(2, ring, last)},
+			page(2, whw, `<a href="/owner-lb/watchlist/page/2/" class="next">Older</a>`), page(2, ring, last)},
 		{"a film removed between page 1 and page 2", page(4, whw+prime, next), page(4, ring+okja, last),
 			page(4, whw+prime, next), page(3, okja, last)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newWorld(t)
-			w.lb.serve("/saahilsan/watchlist/", tc.page1)
-			w.lb.serve("/saahilsan/watchlist/page/2/", tc.page2)
+			w.lb.serve("/owner-lb/watchlist/", tc.page1)
+			w.lb.serve("/owner-lb/watchlist/page/2/", tc.page2)
 			w.run(t, "")
 			if !strings.Contains(w.pt.list(fake.PlexToken), "m565") {
 				t.Fatalf("setup: his Plex watchlist %s", w.pt.list(fake.PlexToken))
 			}
-			w.lb.serve("/saahilsan/watchlist/", tc.laterPage1)
-			w.lb.serve("/saahilsan/watchlist/page/2/", tc.laterPage2)
+			w.lb.serve("/owner-lb/watchlist/", tc.laterPage1)
+			w.lb.serve("/owner-lb/watchlist/page/2/", tc.laterPage2)
 			w.h.Now = w.h.Now.Add(25 * time.Hour) // the daily crawl
 			rep := w.run(t, "")
 			if !strings.Contains(w.pt.list(fake.PlexToken), "m565") || rep.Counts["challenged.watchlist"] != 1 {
@@ -929,8 +929,8 @@ func TestUnreadableEverywhereBacksOffTheKind(t *testing.T) {
 // and told still once the pages read again, or once that film no longer needs its page (the feed names its TMDB id).
 func TestLastingRefusalsAlert(t *testing.T) {
 	w := newWorld(t)
-	w.lb.serve("/saahilsan/watchlist/", `<html><head><title>Just a moment...</title></head><body></body></html>`)
-	w.lb.fail("/saahilsan/films/", http.StatusInternalServerError)
+	w.lb.serve("/owner-lb/watchlist/", `<html><head><title>Just a moment...</title></head><body></body></html>`)
+	w.lb.fail("/owner-lb/films/", http.StatusInternalServerError)
 	w.lb.serve("/film/licorice-pizza/", `<html><body class="film"></body></html>`)
 	for _, d := range []time.Duration{0, 25 * time.Hour, 25 * time.Hour, 21 * time.Hour} { // up to 71 h
 		w.h.Now = w.h.Now.Add(d)
@@ -944,8 +944,8 @@ func TestLastingRefusalsAlert(t *testing.T) {
 		!strings.Contains(rep.Alerts[1], "watched-films pages failing since") || !strings.Contains(rep.Alerts[2], "slug:licorice-pizza") {
 		t.Errorf("after 73 h: alerts %q, want the watchlist's, the films grid's and Licorice Pizza's", rep.Alerts)
 	}
-	w.lb.serve("/saahilsan/watchlist/", "")
-	w.lb.fail("/saahilsan/films/", 0)
+	w.lb.serve("/owner-lb/watchlist/", "")
+	w.lb.fail("/owner-lb/films/", 0)
 	w.lb.editFeed("<channel>", "<channel>"+strings.NewReplacer("The Ring, 2002", "Licorice Pizza, 2021", "the-ring-2002", "licorice-pizza",
 		"1530000000", "1530000002", ">The Ring<", ">Licorice Pizza<", ">2002<", ">2021<", ">565<", ">718032<").Replace(ringItem))
 	w.h.Now = w.h.Now.Add(25 * time.Hour)
@@ -981,27 +981,27 @@ func TestOlderStateDBGainsTheNewColumns(t *testing.T) {
 // films he watched most recently, not read again the next day.
 func TestFilmsCrawlEndsAtItsRefusedPageOnceADay(t *testing.T) {
 	w := newWorld(t)
-	w.lb.serve("/saahilsan/films/", strings.Replace(string(fixture(t, "films.html")), `<div class="paginate-nextprev paginate-disabled"><span class="next">Older</span></div>`,
-		`<div class="paginate-nextprev"><a class="next" href="/saahilsan/films/page/2/">Older</a></div>`, 1))
-	w.lb.challenge["/saahilsan/films/page/2/"] = true
+	w.lb.serve("/owner-lb/films/", strings.Replace(string(fixture(t, "films.html")), `<div class="paginate-nextprev paginate-disabled"><span class="next">Older</span></div>`,
+		`<div class="paginate-nextprev"><a class="next" href="/owner-lb/films/page/2/">Older</a></div>`, 1))
+	w.lb.challenge["/owner-lb/films/page/2/"] = true
 	partial := 0
 	for _, d := range []time.Duration{0, 90 * time.Minute, 4 * time.Hour} { // the old backoff retried at 1 h, then 2 h later
 		w.h.Now = w.h.Now.Add(d)
 		partial += w.run(t, "").Counts["films_partial"]
 	}
-	if p1, p2 := w.lb.hits["/saahilsan/films/"], w.lb.hits["/saahilsan/films/page/2/"]; p1 != 1 || p2 != 1 || partial != 1 {
+	if p1, p2 := w.lb.hits["/owner-lb/films/"], w.lb.hits["/owner-lb/films/page/2/"]; p1 != 1 || p2 != 1 || partial != 1 {
 		t.Errorf("first day: page 1 read %d times, page 2 %d, logged %d; want 1, 1, 1", p1, p2, partial)
 	}
 	w.h.Now = w.h.Now.Add(20 * time.Hour) // the next day
-	if rep := w.run(t, ""); w.lb.hits["/saahilsan/films/"] != 2 || rep.Counts["films_partial"] != 1 || rep.Counts["challenged.films"] != 0 {
-		t.Errorf("next day: page 1 read %d times in all (counts %v); want 2, logged once, no backoff", w.lb.hits["/saahilsan/films/"], rep.Counts)
+	if rep := w.run(t, ""); w.lb.hits["/owner-lb/films/"] != 2 || rep.Counts["films_partial"] != 1 || rep.Counts["challenged.films"] != 0 {
+		t.Errorf("next day: page 1 read %d times in all (counts %v); want 2, logged once, no backoff", w.lb.hits["/owner-lb/films/"], rep.Counts)
 	}
 }
 
 // ---- a second person beside the owner ----
 
 // Her username sorts after his: the export pick before people took the last folder name in sort order, any user's.
-const people = "[[people]]\nperson = \"roger\"\nuser = \"zaurelia\"\n"
+const people = "[[people]]\nperson = \"viewer-b\"\nuser = \"zviewer b\"\n"
 
 // herFeed is her RSS feed holding these diary items, newest first.
 func herFeed(items ...string) string {
@@ -1011,7 +1011,7 @@ func herFeed(items ...string) string {
 
 // herItem is one of her diary entries, logged at the given UTC time.
 func herItem(id, slug, title string, year, tmdb int, logged time.Time, watched, stars string) string {
-	return fmt.Sprintf(`<item> <link>https://letterboxd.com/zaurelia/film/%s/</link> <guid isPermaLink="false">letterboxd-watch-%s</guid>`+
+	return fmt.Sprintf(`<item> <link>https://letterboxd.com/zviewer b/film/%s/</link> <guid isPermaLink="false">letterboxd-watch-%s</guid>`+
 		` <pubDate>%s</pubDate> <letterboxd:watchedDate>%s</letterboxd:watchedDate> <letterboxd:filmTitle>%s</letterboxd:filmTitle>`+
 		` <letterboxd:filmYear>%d</letterboxd:filmYear> <letterboxd:memberRating>%s</letterboxd:memberRating> <tmdb:movieId>%d</tmdb:movieId> </item>`,
 		slug, id, logged.Format("Mon, 2 Jan 2006 15:04:05 -0700"), watched, title, year, stars, tmdb)
@@ -1040,7 +1040,7 @@ func personEvents(t *testing.T, db *sql.DB, person string) string {
 func ownerCounts(rep stage.Report) map[string]int {
 	out := map[string]int{}
 	for k, v := range rep.Counts {
-		if !strings.HasPrefix(k, "roger.") && k != "letterboxd_fetches" {
+		if !strings.HasPrefix(k, "viewer-b.") && k != "letterboxd_fetches" {
 			out[k] = v
 		}
 	}
@@ -1049,7 +1049,7 @@ func ownerCounts(rep stage.Report) map[string]int {
 
 func readFile(path string) string { b, _ := os.ReadFile(path); return string(b) }
 
-// Catches, with Aurelia (person roger) added beside the owner, step by step against a world where he is alone: her
+// Catches, with Viewer B (person viewer-b) added beside the owner, step by step against a world where he is alone: her
 // entries logged after his deploy but before her own first run recorded (her history is off, so her start is her first
 // run, not his); her diary recorded under his person, or his under hers; her viewing of a film he also logged
 // counted in his plays; her export beside his, read as his (The Ring, which she watched, would leave his Plex
@@ -1058,7 +1058,7 @@ func readFile(path string) string { b, _ := os.ReadFile(path); return string(b) 
 // her feed going unread without an alert that names her.
 func TestSecondPersonsDiary(t *testing.T) {
 	alone, both := newWorld(t), newWorld(t)
-	her := filepath.Join(filepath.Dir(both.missing), "export", "letterboxd-zaurelia-2026-10-01-10-00-utc")
+	her := filepath.Join(filepath.Dir(both.missing), "export", "letterboxd-zviewer b-2026-10-01-10-00-utc")
 	os.MkdirAll(her, 0o755)
 	for n, body := range map[string]string{"watched.csv": "Date,Name,Year,Letterboxd URI\n2026-09-30,The Ring,2002,https://boxd.it/ring1\n",
 		"diary.csv": "Date,Name,Year,Letterboxd URI,Rating,Rewatch,Tags,Watched Date\n", "ratings.csv": "Date,Name,Year,Letterboxd URI,Rating\n",
@@ -1086,7 +1086,7 @@ func TestSecondPersonsDiary(t *testing.T) {
 			reps[i] = w.run(t, opts)
 		}
 		a, b := reps[0], reps[1]
-		if got, want := personEvents(t, db, "saahil"), personEvents(t, alone.h.Env.Store.DB(), "saahil"); got != want {
+		if got, want := personEvents(t, db, "owner"), personEvents(t, alone.h.Env.Store.DB(), "owner"); got != want {
 			t.Errorf("%s: his events with her beside him\n%s\nwant (alone)\n%s", name, got, want)
 		}
 		if got, want := ownerCounts(b), ownerCounts(a); fmt.Sprint(got) != fmt.Sprint(want) {
@@ -1099,42 +1099,42 @@ func TestSecondPersonsDiary(t *testing.T) {
 		if got, want := missing(both), missing(alone); got != want || !strings.Contains(got, "(1)") {
 			t.Errorf("%s: his missing-films file %q, want (alone) %q", name, got, want)
 		}
-		if extra != "" && !strings.HasPrefix(b.Summary, a.Summary+"; roger: ") || len(b.Alerts) != 0 {
+		if extra != "" && !strings.HasPrefix(b.Summary, a.Summary+"; viewer-b: ") || len(b.Alerts) != 0 {
 			t.Errorf("%s: summary %q (alone %q), alerts %v", name, b.Summary, a.Summary, b.Alerts)
 		}
 		return b
 	}
 
 	step("his deploy", 0, nil, "")
-	both.lb.serve("/zaurelia/rss/", herFeed(okja)) // Okja, logged at 06:30, after his deploy and before her first run
+	both.lb.serve("/zviewer b/rss/", herFeed(okja)) // Okja, logged at 06:30, after his deploy and before her first run
 	rep := step("her first run", time.Hour, nil, people)
-	if got := personEvents(t, db, "roger"); got != "" || rep.Counts["roger.rss_entries"] != 1 {
+	if got := personEvents(t, db, "viewer-b"); got != "" || rep.Counts["viewer-b.rss_entries"] != 1 {
 		t.Errorf("her first run recorded\n%s\n(counts %v); want her entry stored and nothing recorded", got, rep.Counts)
 	}
-	if rep.Counts["roger.plextv.snapshot"] != 0 || both.pt.count("GET /api/v2/home/users") != 0 {
+	if rep.Counts["viewer-b.plextv.snapshot"] != 0 || both.pt.count("GET /api/v2/home/users") != 0 {
 		t.Errorf("plex.tv read for a person with no Plex user: counts %v", rep.Counts)
 	}
-	both.lb.serve("/zaurelia/rss/", herFeed(ring, okja)) // she logs The Ring at 07:30; he logs it too (07:00)
+	both.lb.serve("/zviewer b/rss/", herFeed(ring, okja)) // she logs The Ring at 07:30; he logs it too (07:00)
 	step("both log The Ring", time.Hour, func(w *world) { w.lb.logRing() }, people)
 	want := "logged movie/tmdb-565 letterboxd:1540000002 2026-10-05T07:30 plays=1 rating=0\n" +
 		"rated movie/tmdb-565 letterboxd:1540000002 2026-10-05T07:30 plays=0 rating=8"
-	if got := personEvents(t, db, "roger"); got != want {
+	if got := personEvents(t, db, "viewer-b"); got != want {
 		t.Errorf("her events\n%s\nwant\n%s", got, want)
 	}
 	rep = step("he edits his rating", 30*time.Minute, func(w *world) {
 		w.lb.editFeed("<letterboxd:memberRating>4.0<", "<letterboxd:memberRating>3.5<") // his feed is read whole again
 	}, people)
-	if got := personEvents(t, db, "roger"); got != want || rep.Counts["roger.events.logged"]+rep.Counts["roger.events.rated"] != 0 {
+	if got := personEvents(t, db, "viewer-b"); got != want || rep.Counts["viewer-b.events.logged"]+rep.Counts["viewer-b.events.rated"] != 0 {
 		t.Errorf("a later run: her events\n%s\n(counts %v)", got, rep.Counts)
 	}
-	for _, path := range []string{"/zaurelia/watchlist/", "/zaurelia/films/"} {
+	for _, path := range []string{"/zviewer b/watchlist/", "/zviewer b/films/"} {
 		if both.lb.hits[path] != 0 {
 			t.Errorf("%s read %d times for a person with no Plex user", path, both.lb.hits[path])
 		}
 	}
-	both.lb.fail("/zaurelia/rss/", http.StatusInternalServerError)
+	both.lb.fail("/zviewer b/rss/", http.StatusInternalServerError)
 	both.h.Now = both.h.Now.Add(feedStale + time.Hour)
-	if rep := both.run(t, people); len(rep.Alerts) != 1 || !strings.HasPrefix(rep.Alerts[0], "roger: Letterboxd feed unread since") {
+	if rep := both.run(t, people); len(rep.Alerts) != 1 || !strings.HasPrefix(rep.Alerts[0], "viewer-b: Letterboxd feed unread since") {
 		t.Errorf("her feed unread for days: alerts %v", rep.Alerts)
 	}
 }
@@ -1143,9 +1143,9 @@ func TestSecondPersonsDiary(t *testing.T) {
 // pages) spends the run's max_fetches: every member's feed and grid pages come before anyone's film lookups.
 func TestPeoplesPagesComeBeforeHisBackfill(t *testing.T) {
 	w := newWorld(t)
-	w.lb.serve("/zaurelia/rss/", herFeed(herItem("1540000001", "okja", "Okja", 2017, 387426, w.h.Now, "2026-10-04", "4.5")))
+	w.lb.serve("/zviewer b/rss/", herFeed(herItem("1540000001", "okja", "Okja", 2017, 387426, w.h.Now, "2026-10-04", "4.5")))
 	rep := w.run(t, "max_fetches = 5\n"+people) // his feed, two watchlist pages and his films page, then hers
-	if rep.Counts["roger.rss_entries"] != 1 || len(rep.Alerts) != 0 || rep.Counts["budget_spent"] == 0 {
+	if rep.Counts["viewer-b.rss_entries"] != 1 || len(rep.Alerts) != 0 || rep.Counts["budget_spent"] == 0 {
 		t.Errorf("alerts %v (counts %v); want her feed read and his backfill cut short", rep.Alerts, rep.Counts)
 	}
 }
@@ -1153,9 +1153,9 @@ func TestPeoplesPagesComeBeforeHisBackfill(t *testing.T) {
 // Catches a people entry that would share state with the owner or another person, or has no feed to read.
 func TestPeopleNeedTheirOwnPersonAndAUser(t *testing.T) {
 	for _, tc := range []struct{ name, people string }{
-		{"the owner's person", `[{ person = "saahil", user = "zaurelia" }]`},
-		{"a person twice", `[{ person = "roger", user = "zaurelia" }, { person = "roger", user = "other" }]`},
-		{"no user", `[{ person = "roger" }]`},
+		{"the owner's person", `[{ person = "owner", user = "zviewer b" }]`},
+		{"a person twice", `[{ person = "viewer-b", user = "zviewer b" }, { person = "viewer-b", user = "other" }]`},
+		{"no user", `[{ person = "viewer-b" }]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := newWorld(t)
@@ -1167,10 +1167,10 @@ func TestPeopleNeedTheirOwnPersonAndAUser(t *testing.T) {
 	}
 }
 
-// threePeople adds Aurelia (person roger: the managed Plex user "roger", who has no username) and Aaron (by his Plex
-// username; his title is "Aaron Test") beside the owner.
-const threePeople = "[[people]]\nperson = \"roger\"\nuser = \"zaurelia\"\nplex_user = \"roger\"\n" +
-	"[[people]]\nperson = \"aaron\"\nuser = \"zaaron\"\nplex_user = \"aarontest941\"\n"
+// threePeople adds Viewer B (person viewer-b: the managed Plex user "viewer-b", who has no username) and Viewer-a (by his Plex
+// username; his title is "Viewer A") beside the owner.
+const threePeople = "[[people]]\nperson = \"viewer-b\"\nuser = \"zviewer b\"\nplex_user = \"viewer-b\"\n" +
+	"[[people]]\nperson = \"viewer-a\"\nuser = \"zviewer-a\"\nplex_user = \"viewer-a-plex\"\n"
 
 // watchlistPage is a whole one-page Letterboxd watchlist holding these grid entries.
 func watchlistPage(films ...string) string {
@@ -1179,52 +1179,52 @@ func watchlistPage(films ...string) string {
 }
 
 // Catches, with all three members: a film put on another member's Plex watchlist (the owner's token, or another Home
-// user's, standing for a person's; Aurelia found by her name, Aaron by his username); a film a member put there by
+// user's, standing for a person's; Viewer B found by her name, Viewer-a by his username); a film a member put there by
 // hand taken out, or added again: one on their Letterboxd watchlist too (never this stage's add), one added by hand
 // since the last read, and one this stage added for another member (his What Happened Was, while hers was her own);
 // a film this stage added kept once it leaves her Letterboxd watchlist, or once the watch record has her playing it,
-// or taken off Aaron's for her play; her watchlist crawled again before watchlist_every (6 h by default); and a
+// or taken off Viewer-a's for her play; her watchlist crawled again before watchlist_every (6 h by default); and a
 // Home switch made by a run with nothing to read or write.
 func TestEachMembersOwnPlexWatchlist(t *testing.T) {
 	w := newWorld(t)
 	okja, ring := gridEntry("Okja (2017)", "okja"), gridEntry("The Ring (2002)", "the-ring-2002")
 	whw, prime := gridEntry("What Happened Was... (1994)", "what-happened-was"), gridEntry("Primetime (2026)", "primetime-2026")
 	w.onNAS(whwFolder, "Okja (2017) {tmdb-387426}", "Primetime (2026) {tmdb-999001}", "Hers (1999) {tmdb-999}") // titles off the NAS: TestPlexWatchlistHoldsOnlyTitlesOnTheNAS
-	w.lb.serve("/zaurelia/rss/", herFeed())
-	w.lb.serve("/zaaron/rss/", herFeed())
-	w.lb.serve("/zaurelia/watchlist/", watchlistPage(okja, ring, whw))
-	w.lb.serve("/zaaron/watchlist/", watchlistPage(gridEntry("Licorice Pizza (2021)", "licorice-pizza"), okja))
-	w.pt.set(rogerToken, "m18", "m999") // What Happened Was and a film of her own, both put there by hand
+	w.lb.serve("/zviewer b/rss/", herFeed())
+	w.lb.serve("/zviewer-a/rss/", herFeed())
+	w.lb.serve("/zviewer b/watchlist/", watchlistPage(okja, ring, whw))
+	w.lb.serve("/zviewer-a/watchlist/", watchlistPage(gridEntry("Licorice Pizza (2021)", "licorice-pizza"), okja))
+	w.pt.set(viewerBToken, "m18", "m999") // What Happened Was and a film of her own, both put there by hand
 	lists := func() string {
-		return fmt.Sprintf("his %s; hers %s; Aaron's %s", w.pt.list(fake.PlexToken), w.pt.list(rogerToken), w.pt.list(aaronToken))
+		return fmt.Sprintf("his %s; hers %s; Viewer-a's %s", w.pt.list(fake.PlexToken), w.pt.list(viewerBToken), w.pt.list(viewerAToken))
 	}
-	switches := func() int { return w.pt.count("POST /api/v2/home/users/u-roger/switch") }
+	switches := func() int { return w.pt.count("POST /api/v2/home/users/u-viewer-b/switch") }
 	step := func(name string, d time.Duration, want string, wantSwitches int) {
 		t.Helper()
 		w.h.Now = w.h.Now.Add(d)
 		rep := w.run(t, threePeople)
-		failed := rep.Counts["plextv.failed"] + rep.Counts["roger.plextv.failed"] + rep.Counts["aaron.plextv.failed"]
+		failed := rep.Counts["plextv.failed"] + rep.Counts["viewer-b.plextv.failed"] + rep.Counts["viewer-a.plextv.failed"]
 		if lists() != want || switches() != wantSwitches || len(rep.Alerts)+failed != 0 {
 			t.Fatalf("%s: %s, %d switches to her, alerts %v, %d failed writes\nwant %s, %d switches", name, lists(), switches(), rep.Alerts, failed, want, wantSwitches)
 		}
 	}
-	step("first run", 0, "his m18,m565,show565; hers m18,m387426,m565,m999; Aaron's m387426,m718032", 1)
+	step("first run", 0, "his m18,m565,show565; hers m18,m387426,m565,m999; Viewer-a's m387426,m718032", 1)
 
-	w.lb.serve("/zaurelia/watchlist/", watchlistPage(okja, prime))    // she takes The Ring and What Happened Was off it, adds Primetime,
-	w.pt.set(rogerToken, "m18", "m999", "m387426", "m565", "m999001") // which she also puts on her Plex watchlist by hand
-	hits := w.lb.hits["/zaurelia/watchlist/"]
-	step("an hour later", time.Hour, "his m18,m565,show565; hers m18,m387426,m565,m999,m999001; Aaron's m387426,m718032", 1)
-	if w.lb.hits["/zaurelia/watchlist/"] != hits {
+	w.lb.serve("/zviewer b/watchlist/", watchlistPage(okja, prime))     // she takes The Ring and What Happened Was off it, adds Primetime,
+	w.pt.set(viewerBToken, "m18", "m999", "m387426", "m565", "m999001") // which she also puts on her Plex watchlist by hand
+	hits := w.lb.hits["/zviewer b/watchlist/"]
+	step("an hour later", time.Hour, "his m18,m565,show565; hers m18,m387426,m565,m999,m999001; Viewer-a's m387426,m718032", 1)
+	if w.lb.hits["/zviewer b/watchlist/"] != hits {
 		t.Errorf("her watchlist crawled again after an hour")
 	}
-	step("her next crawl", 5*time.Hour, "his m18,m565,show565; hers m18,m387426,m999,m999001; Aaron's m387426,m718032", 2)
+	step("her next crawl", 5*time.Hour, "his m18,m565,show565; hers m18,m387426,m999,m999001; Viewer-a's m387426,m718032", 2)
 
-	err := watch.Add(context.Background(), w.h.Env.Store.DB(), watch.Event{Person: "roger", Item: movieItem(387426), Ref: "plex:77",
+	err := watch.Add(context.Background(), w.h.Env.Store.DB(), watch.Event{Person: "viewer-b", Item: movieItem(387426), Ref: "plex:77",
 		Source: "plex-webhook", At: w.h.Now, Kind: watch.Finished}) // she watches Okja in Plex; jfsync records it
 	if err != nil {
 		t.Fatal(err)
 	}
-	step("after she watched Okja", 30*time.Minute, "his m18,m565,show565; hers m18,m999,m999001; Aaron's m387426,m718032", 3)
+	step("after she watched Okja", 30*time.Minute, "his m18,m565,show565; hers m18,m999,m999001; Viewer-a's m387426,m718032", 3)
 }
 
 // Catches, on his Plex watchlist, which holds only titles on the NAS, whoever put them there: a film on his Letterboxd
@@ -1234,7 +1234,7 @@ func TestEachMembersOwnPlexWatchlist(t *testing.T) {
 // while its folder is in tv_root (show565), or kept while it is not (show1399); and an item with no TMDB id kept.
 func TestPlexWatchlistHoldsOnlyTitlesOnTheNAS(t *testing.T) {
 	w := newWorld(t)
-	w.lb.serve("/saahilsan/watchlist/", watchlistPage(gridEntry("The Ring (2002)", "the-ring-2002"),
+	w.lb.serve("/owner-lb/watchlist/", watchlistPage(gridEntry("The Ring (2002)", "the-ring-2002"),
 		gridEntry("What Happened Was... (1994)", "what-happened-was"), gridEntry("Okja (2017)", "okja")))
 	w.pt.set(fake.PlexToken, "show565", "show1399", "m387426", "m718032", "plex1") // all put there by hand
 	step := func(d time.Duration) string {
@@ -1296,21 +1296,21 @@ func TestMissingOrEmptyRootRemovesNothing(t *testing.T) {
 	}
 }
 
-// Catches keep_hand_added ignored, or reaching a member whose entry lacks it. With it on Aurelia's entry only: a film,
+// Catches keep_hand_added ignored, or reaching a member whose entry lacks it. With it on Viewer B's entry only: a film,
 // a show or an item with no TMDB id that she put on her Plex watchlist by hand, none on the NAS, taken off; a film
 // this stage added for her (What Happened Was) kept once it is off the NAS; and, in the same runs, a title off the NAS
-// that the owner or Aaron put there by hand kept.
+// that the owner or Viewer-a put there by hand kept.
 func TestKeepHandAddedKeepsWhatThatMemberAddedByHand(t *testing.T) {
 	w := newWorld(t)
 	w.onNAS(whwFolder)
-	w.lb.serve("/zaurelia/rss/", herFeed())
-	w.lb.serve("/zaaron/rss/", herFeed())
-	w.lb.serve("/zaurelia/watchlist/", watchlistPage(gridEntry("What Happened Was... (1994)", "what-happened-was")))
-	w.lb.serve("/zaaron/watchlist/", watchlistPage(gridEntry("Licorice Pizza (2021)", "licorice-pizza")))
+	w.lb.serve("/zviewer b/rss/", herFeed())
+	w.lb.serve("/zviewer-a/rss/", herFeed())
+	w.lb.serve("/zviewer b/watchlist/", watchlistPage(gridEntry("What Happened Was... (1994)", "what-happened-was")))
+	w.lb.serve("/zviewer-a/watchlist/", watchlistPage(gridEntry("Licorice Pizza (2021)", "licorice-pizza")))
 	w.pt.set(fake.PlexToken, "show565", "m999") // all put there by hand; of these only show565 is on the NAS
-	w.pt.set(rogerToken, "m999", "show1399", "plex1")
-	w.pt.set(aaronToken, "m999", "show1399")
-	people := strings.Replace(threePeople, "plex_user = \"roger\"\n", "plex_user = \"roger\"\nkeep_hand_added = true\n", 1)
+	w.pt.set(viewerBToken, "m999", "show1399", "plex1")
+	w.pt.set(viewerAToken, "m999", "show1399")
+	people := strings.Replace(threePeople, "plex_user = \"viewer-b\"\n", "plex_user = \"viewer-b\"\nkeep_hand_added = true\n", 1)
 	type check struct {
 		tok, item string
 		kept      bool
@@ -1327,16 +1327,16 @@ func TestKeepHandAddedKeepsWhatThatMemberAddedByHand(t *testing.T) {
 		}
 	}
 	step("first run", 0,
-		check{rogerToken, "m18", true, "What Happened Was, on her Letterboxd watchlist and on the NAS, not added"},
-		check{rogerToken, "m999", true, "her film off the NAS, put there by hand, taken off"},
-		check{rogerToken, "show1399", true, "her show off the NAS, put there by hand, taken off"},
-		check{rogerToken, "plex1", true, "her item with no TMDB id, put there by hand, taken off"},
+		check{viewerBToken, "m18", true, "What Happened Was, on her Letterboxd watchlist and on the NAS, not added"},
+		check{viewerBToken, "m999", true, "her film off the NAS, put there by hand, taken off"},
+		check{viewerBToken, "show1399", true, "her show off the NAS, put there by hand, taken off"},
+		check{viewerBToken, "plex1", true, "her item with no TMDB id, put there by hand, taken off"},
 		check{fake.PlexToken, "m999", false, "his film off the NAS, put there by hand, kept: her keep_hand_added reached the owner"},
-		check{aaronToken, "m999", false, "Aaron's film off the NAS, put there by hand, kept: her keep_hand_added reached him"},
-		check{aaronToken, "show1399", false, "Aaron's show off the NAS, put there by hand, kept: her keep_hand_added reached him"})
+		check{viewerAToken, "m999", false, "Viewer-a's film off the NAS, put there by hand, kept: her keep_hand_added reached him"},
+		check{viewerAToken, "show1399", false, "Viewer-a's show off the NAS, put there by hand, kept: her keep_hand_added reached him"})
 	os.RemoveAll(filepath.Join(w.movies, whwFolder))
 	step("What Happened Was left the NAS", 30*time.Minute,
-		check{rogerToken, "m18", false, "What Happened Was, which this stage added for her, kept once it is off the NAS"})
+		check{viewerBToken, "m18", false, "What Happened Was, which this stage added for her, kept once it is off the NAS"})
 }
 
 // Catches a person whose Plex Home user projectionist cannot switch to (no user by that name; one behind a PIN, which
@@ -1344,17 +1344,17 @@ func TestKeepHandAddedKeepsWhatThatMemberAddedByHand(t *testing.T) {
 func TestHomeUserProblemsAlert(t *testing.T) {
 	for _, tc := range []struct{ plexUser, alert string }{{"nobody", `no Plex Home user "nobody"`}, {"kid", `"kid" has a PIN`}} {
 		w := newWorld(t)
-		w.lb.serve("/zaurelia/rss/", herFeed())
-		w.lb.serve("/zaurelia/watchlist/", watchlistPage(gridEntry("Okja (2017)", "okja")))
-		rep := w.run(t, fmt.Sprintf("[[people]]\nperson = \"roger\"\nuser = \"zaurelia\"\nplex_user = %q\n", tc.plexUser))
-		if len(rep.Alerts) != 1 || !strings.HasPrefix(rep.Alerts[0], "roger: ") || !strings.Contains(rep.Alerts[0], tc.alert) ||
+		w.lb.serve("/zviewer b/rss/", herFeed())
+		w.lb.serve("/zviewer b/watchlist/", watchlistPage(gridEntry("Okja (2017)", "okja")))
+		rep := w.run(t, fmt.Sprintf("[[people]]\nperson = \"viewer-b\"\nuser = \"zviewer b\"\nplex_user = %q\n", tc.plexUser))
+		if len(rep.Alerts) != 1 || !strings.HasPrefix(rep.Alerts[0], "viewer-b: ") || !strings.Contains(rep.Alerts[0], tc.alert) ||
 			w.pt.count("POST /api/v2/home/users/u-kid/switch") != 0 || w.pt.list(fake.PlexToken) != "m565,show565" {
 			t.Errorf("%s: alerts %q, his watchlist %s", tc.plexUser, rep.Alerts, w.pt.list(fake.PlexToken))
 		}
 	}
 }
 
-// Catches a Plex watchlist listing that stops after its first page, or skips or repeats one (Aurelia's held 137 items
+// Catches a Plex watchlist listing that stops after its first page, or skips or repeats one (Viewer B's held 137 items
 // on 2026-10-05, and plex.tv refuses pages of 200; 250 crosses two page boundaries and ends on a partial page): The
 // Ring, listed last, would be added a second time, and the films he put there by hand past page 1 forgotten.
 func TestWatchlistListingReadsEveryPage(t *testing.T) {

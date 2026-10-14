@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"projectionist/internal/config"
 	"projectionist/internal/lbpace"
 	"projectionist/internal/stage"
 	"projectionist/internal/store"
@@ -36,8 +37,8 @@ const name = "lists"
 
 // Source is one canon list.
 type Source struct {
-	Name   string `toml:"name"`
-	URL    string `toml:"url"`
+	Name   string `toml:"name" required:"the shelf's title"`
+	URL    string `toml:"url" required:"the Letterboxd list's address"`
 	Limit  int    `toml:"limit"`  // keep the first N entries (a Top 250 is the Top 500 with limit 250)
 	Poster string `toml:"poster"` // an image file to use instead of the generated poster
 }
@@ -45,70 +46,46 @@ type Source struct {
 type Options struct {
 	DryRun         bool          `toml:"dry_run"` // read and count everything, write nothing
 	Only           []string      `toml:"only"`    // shelve only these lists (by name); empty = all
-	User           string        `toml:"letterboxd_user"`
+	User           string        `toml:"letterboxd_user" required:"your Letterboxd username"`
 	LetterboxdURL  string        `toml:"letterboxd_url"`
 	ShortURL       string        `toml:"shortlink_url"`
 	UserAgent      string        `toml:"user_agent"`
 	CanonRefresh   time.Duration `toml:"canon_refresh"` // canon list pages are read again after this
 	OwnRefresh     time.Duration `toml:"own_refresh"`   // the owner's lists, films page and diary feed
-	ExportDir      string        `toml:"export_dir"`
+	ExportDir      string        `toml:"export_dir"`    // holds your unzipped Letterboxd export; "" = none
 	OwnLists       bool          `toml:"own_lists"`
 	SkipOwn        []string      `toml:"skip_own"` // the owner's lists to leave out: names or slugs, "*" matches any text
-	MoviesDir      string        `toml:"movies_dir"`
-	MissingFile    string        `toml:"missing_file"`
-	PlexSection    int           `toml:"plex_section"`
+	MoviesDir      string        `toml:"movies_dir" required:"the folder that holds the films"`
+	MissingFile    string        `toml:"missing_file"` // the shelved lists' films not on the NAS; "" = none
+	PlexSection    int           `toml:"plex_section" required:"the id of the Plex Movies library"`
 	PlexRefresh    time.Duration `toml:"plex_refresh"` // the TMDB id → ratingKey map is read at most this often
 	PlexBudget     time.Duration `toml:"plex_budget"`
-	JellyfinUser   string        `toml:"jellyfin_user"`
+	JellyfinUser   string        `toml:"jellyfin_user" required:"your Jellyfin user name, whose library gets the shelves"`
 	JellyfinBudget time.Duration `toml:"jellyfin_budget"`
-	Home           []string      `toml:"home"`       // lists promoted to the owner's Plex Home, in row order
+	Home           []string      `toml:"home"`       // lists promoted to your Plex Home, in row order; none = no promotion
 	HomeAfter      string        `toml:"home_after"` // the Plex hub the first promoted row follows
-	Canon          []Source      `toml:"canon"`
+	Canon          []Source      `toml:"canon"`      // the Letterboxd lists to shelve, in shelf order; none = only your own
 }
 
 func defaults() Options {
 	return Options{
-		User:           "saahilsan",
 		LetterboxdURL:  "https://letterboxd.com",
 		ShortURL:       "https://boxd.it",
 		UserAgent:      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36 projectionist/1.0 (+personal media server)",
 		CanonRefresh:   20 * time.Hour, // read on every daily run: the Top 500 changes as members rate
 		OwnRefresh:     20 * time.Hour,
-		ExportDir:      "/volume1/docker/projectionist/data/letterboxd",
 		OwnLists:       true,
-		MoviesDir:      "/volume1/media/Movies",
-		MissingFile:    "/volume1/media/_lists-missing.txt",
-		PlexSection:    4,
 		PlexRefresh:    24 * time.Hour,
 		PlexBudget:     30 * time.Minute, // the first build of ~70 shelves is ~2,000 calls; later runs send a handful
-		JellyfinUser:   "saahil",
 		JellyfinBudget: 15 * time.Minute,
 		HomeAfter:      "movie.recentlyadded",
 	}
 }
 
-// The list defaults are applied after decoding, never decoded into: TOML fills an existing slice element by
-// element, so a configured canon entry would inherit the default's limit or reverse (and the shared defaults
-// would change for the next run).
-var defaultHome = []string{"Letterboxd Top 500", "Criterion Collection", "Sight & Sound 2022"}
-
-// defaultSkipOwn keeps lists like "private reviews and notes" off a library every shared account sees, though
-// Letterboxd shows them publicly.
+// defaultSkipOwn is applied after decoding, never decoded into: TOML fills an existing slice element by element. It
+// keeps lists like "private reviews and notes" off a library every shared account sees, though Letterboxd shows them
+// publicly.
 var defaultSkipOwn = []string{"*private*"}
-
-// defaultCanon was checked on 2026-10-05. The Top 500 is Letterboxd's own (account "official", boxd.it/8HjM): 500
-// narrative features over 5 pages, ranked by average member rating and restamped "As of <date>" as it changes, which
-// is why canon_refresh is under a day. It replaced the standalone Top 250 (2026-02-23; that list answers 404), and a
-// Top 250 shelf is no longer a default: the one the NAS gate made is retired as a stray.
-var defaultCanon = []Source{
-	{Name: "Letterboxd Top 500", URL: "https://letterboxd.com/official/list/letterboxds-top-500-films/"},
-	{Name: "Criterion Collection", URL: "https://letterboxd.com/jbutts15/list/the-complete-criterion-collection/"},
-	{Name: "Sight & Sound 2022", URL: "https://letterboxd.com/sight_and_sound/list/the-greatest-films-of-all-time-2022/"},
-	{Name: "Sight & Sound 2022 Directors", URL: "https://letterboxd.com/sight_and_sound/list/directors-100-greatest-films-of-all-time/"},
-	{Name: "TSPDT 1000", URL: "https://letterboxd.com/tspdtfanaccount/list/the-1000-greatest-films-21st-edition-2026/"},
-	{Name: "Best Picture", URL: "https://letterboxd.com/oscars/list/oscar-winning-films-best-picture/"},
-	{Name: "Palme d'Or", URL: "https://letterboxd.com/festival_cannes/list/70-years-of-the-palme-dor-70-ans-de-la-palme/"},
-}
 
 // list is one Letterboxd list in shelf order.
 type list struct {
@@ -125,16 +102,16 @@ type list struct {
 	about    string
 }
 
+func (Stage) Check(decode func(any) error) []config.Problem {
+	opt := defaults()
+	ps, _ := config.CheckStage(name, decode, &opt)
+	return ps
+}
+
 func options(env *stage.Env) (Options, error) {
 	opt := defaults()
 	if err := env.Options(&opt); err != nil {
 		return opt, err
-	}
-	if opt.Canon == nil {
-		opt.Canon = defaultCanon
-	}
-	if opt.Home == nil {
-		opt.Home = defaultHome
 	}
 	if opt.SkipOwn == nil {
 		opt.SkipOwn = defaultSkipOwn
@@ -265,7 +242,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 			shelve = append(shelve, s)
 		}
 	}
-	if !opt.DryRun {
+	if !opt.DryRun && opt.MissingFile != "" {
 		if err := writeMissing(opt.MissingFile, shelves); err != nil {
 			env.Log.Warn("missing-films file not written", "event", "missing_file_error", "path", opt.MissingFile, "err", err)
 		}

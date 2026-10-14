@@ -29,6 +29,7 @@ import (
 	"syscall"
 	"time"
 
+	"projectionist/internal/config"
 	"projectionist/internal/jellyfin"
 	"projectionist/internal/plex"
 	"projectionist/internal/stage"
@@ -42,33 +43,35 @@ const (
 )
 
 type Options struct {
-	PlexDevice     string        `toml:"plex_device"`     // Plex's id for the UHD 600; "Auto" picks an empty device on 1.43
+	PlexDevice     string        `toml:"plex_device" required:"Plex's id for the GPU it must use, as its HardwareDevicePath preference shows it"`
 	PlexLog        string        `toml:"plex_log"`        // Plex Media Server.log
 	PlexAppData    string        `toml:"plex_app_data"`   // for the transcoder's Codecs and VA driver dirs
 	PlexTranscoder string        `toml:"plex_transcoder"` // "Plex Transcoder" binary
-	PlexUID        int           `toml:"plex_uid"`        // the self-test runs as Plex's own user, like Plex does
-	PlexGID        int           `toml:"plex_gid"`
-	PlexGroups     []int         `toml:"plex_groups"` // must include videodriver (owner of the render node)
-	Sample         string        `toml:"sample"`      // 5 s HEVC 10-bit 1080p clip, readable by the Plex user
+	PlexUID        int           `toml:"plex_uid" required:"the uid of Plex's own user (the self-test runs as it, like Plex does)"`
+	PlexGID        int           `toml:"plex_gid" required:"the gid of Plex's own user"`
+	PlexGroups     []int         `toml:"plex_groups" required:"Plex's user's groups, including the group that owns the render node"`
+	Sample         string        `toml:"sample" required:"a 5 s HEVC 10-bit 1080p clip the Plex user can read"`
 	SelfTestEvery  time.Duration `toml:"self_test_every"`
 	LegacyState    string        `toml:"legacy_state"` // gpu_guard.state.json; imported once when the store has no state
 	PlexTimeout    time.Duration `toml:"plex_timeout"` // bound on each Plex API call
 }
 
+// defaults holds the paths of Synology's Plex package, which are the same on every NAS.
 func defaults() Options {
 	app := "/volume1/PlexMediaServer/AppData/Plex Media Server"
 	return Options{
-		PlexDevice:     "8086:3185@0000:00:02.0",
 		PlexLog:        app + "/Logs/Plex Media Server.log",
 		PlexAppData:    app,
 		PlexTranscoder: "/volume1/@appstore/PlexMediaServer/Plex Transcoder",
-		PlexUID:        297536,
-		PlexGID:        297536,
-		PlexGroups:     []int{297536, 999, 937},
-		Sample:         "/volume1/PlexMediaServer/scripts/gpu_sample.mkv",
 		SelfTestEvery:  24 * time.Hour,
 		PlexTimeout:    5 * time.Second,
 	}
+}
+
+func (Stage) Check(decode func(any) error) []config.Problem {
+	opt := defaults()
+	ps, _ := config.CheckStage("gpu-guard", decode, &opt)
+	return ps
 }
 
 // pref is one Plex preference to pin; order matches the Python version so alerts read the same.

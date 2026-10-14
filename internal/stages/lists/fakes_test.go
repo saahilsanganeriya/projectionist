@@ -404,7 +404,7 @@ func newFakeJellyfin(t *testing.T, movies map[string]int, now func() time.Time) 
 	ids := func(r *http.Request) []string { return strings.Split(r.URL.Query().Get("ids"), ",") }
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /Users", func(w http.ResponseWriter, r *http.Request) {
-		js(w, []map[string]string{{"Id": "u-roger", "Name": "roger"}, {"Id": "u-saahil", "Name": "saahil"}})
+		js(w, []map[string]string{{"Id": "u-viewer-b", "Name": "viewer-b"}, {"Id": "u-owner", "Name": "owner"}})
 	})
 	mux.HandleFunc("GET /Library/VirtualFolders", func(w http.ResponseWriter, r *http.Request) {
 		status := map[bool]string{true: "Active", false: "Idle"}[j.scanning == "library"]

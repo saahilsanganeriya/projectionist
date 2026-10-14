@@ -13,7 +13,7 @@ import (
 	"projectionist/internal/viewers"
 )
 
-var owners = map[string]bool{"saahilsanganeriya": true, "saahil": true}
+var owners = map[string]bool{"owner-plex": true, "owner": true}
 
 // Catches: the owner's own viewing pausing jobs, or someone else's viewing not pausing them (the Big Lebowski
 // incident: a move under a live stream 404s it). Same rule as apply_ops.viewers().
@@ -26,10 +26,10 @@ func TestOthers(t *testing.T) {
 		want int
 	}{
 		{"nobody", nil, nil, 0},
-		{"owner on both", []plex.Session{{User: "saahilsanganeriya"}}, []jellyfin.Session{{UserName: "saahil", NowPlayingItem: playing}}, 0},
-		{"guest on plex", []plex.Session{{User: "roger"}, {User: "saahilsanganeriya"}}, nil, 1},
-		{"guest on jellyfin", nil, []jellyfin.Session{{UserName: "roger", NowPlayingItem: playing}}, 1},
-		{"idle jellyfin client", nil, []jellyfin.Session{{UserName: "roger"}}, 0},
+		{"owner on both", []plex.Session{{User: "owner-plex"}}, []jellyfin.Session{{UserName: "owner", NowPlayingItem: playing}}, 0},
+		{"guest on plex", []plex.Session{{User: "viewer-b"}, {User: "owner-plex"}}, nil, 1},
+		{"guest on jellyfin", nil, []jellyfin.Session{{UserName: "viewer-b", NowPlayingItem: playing}}, 1},
+		{"idle jellyfin client", nil, []jellyfin.Session{{UserName: "viewer-b"}}, 0},
 		{"plex session with no user counts", []plex.Session{{User: ""}}, nil, 1},
 	}
 	for _, c := range cases {
@@ -44,10 +44,10 @@ func TestCountAgainstFakeServers(t *testing.T) {
 	ps, pc, _ := fake.Plex(t, nil)
 	js, jc := fake.Jellyfin(t)
 	ps.Handle("GET", "/status/sessions", 200, `<MediaContainer size="2">
-  <Video type="movie" title="Heat"><User title="saahilsanganeriya"/></Video>
-  <Track type="track" title="Song"><User title="roger"/></Track>
+  <Video type="movie" title="Heat"><User title="owner-plex"/></Video>
+  <Track type="track" title="Song"><User title="viewer-b"/></Track>
 </MediaContainer>`)
-	js.Handle("GET", "/Sessions", 200, `[{"Id":"a","UserName":"roger","NowPlayingItem":{"Name":"Ran"}}]`)
+	js.Handle("GET", "/Sessions", 200, `[{"Id":"a","UserName":"viewer-b","NowPlayingItem":{"Name":"Ran"}}]`)
 	g := &viewers.Gate{Plex: pc, Jellyfin: jc, Owners: owners, Poll: time.Millisecond, Log: obs.NewLogger(io.Discard, "text", "error")}
 	n, err := g.Count(context.Background())
 	if err != nil || n != 2 {

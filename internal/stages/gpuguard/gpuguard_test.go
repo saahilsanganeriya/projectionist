@@ -134,7 +134,7 @@ sample = "/samples/gpu_sample.mkv"`)
 		body, _ := io.ReadAll(r.Body)
 		encoding = string(body)
 	})
-	cpuTranscode := `<MediaContainer size="1"><Video type="movie" title="Heat"><User title="roger"/>
+	cpuTranscode := `<MediaContainer size="1"><Video type="movie" title="Heat"><User title="viewer-b"/>
 <TranscodeSession key="/transcode/sessions/abc" videoDecision="transcode" transcodeHwEncoding="vaapi" sourceVideoCodec="hevc" videoCodec="h264"/></Video></MediaContainer>`
 	h.Plex.Handle("GET", "/status/sessions", 200, cpuTranscode)
 

@@ -150,7 +150,7 @@ status_file = "` + filepath.Join(statusDir, "STATUS.txt") + `"`)
 		pid, _ := os.ReadFile(filepath.Join(ffdir, "pid"))
 		return len(pid) > 0
 	})
-	h.Plex.Handle("GET", "/status/sessions", 200, `<MediaContainer size="1"><Video type="episode" title="Pilot"><User title="roger"/></Video></MediaContainer>`)
+	h.Plex.Handle("GET", "/status/sessions", 200, `<MediaContainer size="1"><Video type="episode" title="Pilot"><User title="viewer-b"/></Video></MediaContainer>`)
 	waitFor(t, "encode paused for the guest", func() bool {
 		raw, _ := os.ReadFile(filepath.Join(statusDir, "STATUS.txt"))
 		return strings.Contains(string(raw), "paused: someone is watching")

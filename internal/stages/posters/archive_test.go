@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"projectionist/internal/fake"
 	"projectionist/internal/stage"
 )
 
@@ -84,8 +85,8 @@ func TestArchive(t *testing.T) {
 	}
 }
 
-// Catches: an archive_dir on the NVMe (/volume2, or /state, which lives on it) written to instead of refused before
-// any work.
+// Catches: an archive_dir on the app-data volume (health's volume2, here /volume2) or under /state written to instead of
+// refused before any work.
 func TestArchiveNeverOnNVMe(t *testing.T) {
 	for _, c := range []struct {
 		dir  string
@@ -98,7 +99,7 @@ func TestArchiveNeverOnNVMe(t *testing.T) {
 		{"/volume1/PlexMediaServer/poster-archive", false},
 		{"/volume22/x", false},
 	} {
-		if got := onNVMe(c.dir); got != c.nvme {
+		if got := onNVMe(c.dir, "/volume2"); got != c.nvme {
 			t.Errorf("onNVMe(%s) = %v, want %v", c.dir, got, c.nvme)
 		}
 		if !c.nvme {
@@ -106,6 +107,7 @@ func TestArchiveNeverOnNVMe(t *testing.T) {
 		}
 		w := newWorld(t, "")
 		w.h.SetOptions(strings.Replace(w.opts, fmt.Sprintf("archive_dir = %q", w.archive), fmt.Sprintf("archive_dir = %q", c.dir), 1))
+		w.h.Env.PeerOptions = func(peer string, v any) error { return fake.DecodeOver(peer, `volume2 = "/volume2"`, v) }
 		var rep stage.Report
 		if err := (Stage{}).Run(context.Background(), w.h.Env, &rep); err == nil || !strings.Contains(err.Error(), "archive_dir") || w.messages != 0 {
 			t.Errorf("archive_dir %s: run error %v after %d judge calls; want it refused before any", c.dir, err, w.messages)

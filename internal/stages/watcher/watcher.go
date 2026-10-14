@@ -36,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"projectionist/internal/config"
 	"projectionist/internal/stage"
 	"projectionist/internal/store"
 )
@@ -51,7 +52,7 @@ const (
 var errWatchLimit = errors.New("inotify watch limit reached")
 
 type Options struct {
-	Roots           []string      `toml:"roots"`
+	Roots           []string      `toml:"roots" required:"the folders to watch (the films, the shows, the finished downloads)"`
 	Trigger         []string      `toml:"trigger"` // stages to trigger for each quiet, changed unit
 	Quiet           time.Duration `toml:"quiet"`
 	Sweep           time.Duration `toml:"sweep"`            // length of one run = the safety sweep's cadence
@@ -61,13 +62,24 @@ type Options struct {
 
 func defaults() Options {
 	return Options{
-		Roots:           []string{"/volume1/media/Movies", "/volume1/media/TV", "/volume1/media/_downloads/complete"},
 		Trigger:         []string{"rename", "details", "subtitles", "posters", "collections", "jfsync"},
 		Quiet:           3 * time.Minute,
 		Sweep:           15 * time.Minute,
 		Ignore:          []string{"@eaDir", "#recycle", "#snapshot", "_archive", "_assets"},
 		PartialSuffixes: []string{".part", ".!qB"},
 	}
+}
+
+func (Stage) Check(decode func(any) error) []config.Problem {
+	opt := defaults()
+	ps, ok := config.CheckStage(name, decode, &opt)
+	if ok && opt.Quiet <= 0 {
+		ps = append(ps, config.Problem{Key: "stages.watcher.quiet", Want: "must be longer than 0"})
+	}
+	if ok && opt.Sweep <= 0 {
+		ps = append(ps, config.Problem{Key: "stages.watcher.sweep", Want: "must be longer than 0"})
+	}
+	return ps
 }
 
 // source is a set of directory watches; inotify on Linux, a fake in tests.

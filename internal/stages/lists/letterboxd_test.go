@@ -46,8 +46,8 @@ func TestParsePage(t *testing.T) {
 		{file: "list_nolan.html", title: "nolan", lid: "fQbG8",
 			entries: []entry{{"oppenheimer-2023", "wUow", "Oppenheimer (2023)"}, {"interstellar", "4VZ8", "Interstellar (2014)"},
 				{"memento", "2bcK", "Memento (2000)"}, {"inception", "1skk", "Inception (2010)"}}},
-		{file: "lists_index.html", title: "lists", next: "/saahilsan/lists/page/2/", entries: []entry{},
-			lists: []string{"/saahilsan/list/to-show-rosa/", "/saahilsan/list/what-is-this-genre-called-9/"}},
+		{file: "lists_index.html", title: "lists", next: "/owner-lb/lists/page/2/", entries: []entry{},
+			lists: []string{"/owner-lb/list/to-show-a-friend/", "/owner-lb/list/what-is-this-genre-called-9/"}},
 	}
 	for _, c := range cases {
 		p := parsePage(fixture(t, c.file))
@@ -83,7 +83,7 @@ func TestParseRSS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []rssItem{{"https://letterboxd.com/saahilsan/film/the-fox-and-the-hound/", 10948}, {"https://letterboxd.com/saahilsan/film/digger-2026/", 1248832}}
+	want := []rssItem{{"https://letterboxd.com/owner-lb/film/the-fox-and-the-hound/", 10948}, {"https://letterboxd.com/owner-lb/film/digger-2026/", 1248832}}
 	if !reflect.DeepEqual(items, want) {
 		t.Errorf("items = %+v", items)
 	}

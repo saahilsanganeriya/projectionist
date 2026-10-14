@@ -53,7 +53,7 @@ func writeBackup(t *testing.T, path string, rows [][]any) {
 		CREATE TABLE metadata_item_settings (id INTEGER PRIMARY KEY, account_id INTEGER, guid TEXT, rating REAL, view_offset INTEGER, view_count INTEGER, last_viewed_at INTEGER, updated_at INTEGER);
 		CREATE TABLE media_items (id INTEGER PRIMARY KEY, metadata_item_id INTEGER, deleted_at INTEGER);
 		CREATE TABLE media_parts (id INTEGER PRIMARY KEY, media_item_id INTEGER, file TEXT);
-		INSERT INTO accounts VALUES (1, 'saahilsanganeriya'), (578, 'roger'), (579, 'roger-tv')`)
+		INSERT INTO accounts VALUES (1, 'owner-plex'), (578, 'viewer-b'), (579, 'viewer-b-tv')`)
 	for _, r := range rows {
 		typ, section := 1, 4
 		if strings.Contains(r[3].(string), "/TV/") {
@@ -107,8 +107,8 @@ func plexPages(items ...string) http.HandlerFunc {
 
 // newHarness: Plex holds Heat (re-created after the backup: ratingKey 13, was 10), Ran, Alien, Clerks, Dune, Fargo
 // and both episodes of a two-episode Wire file; Jellyfin holds all but Alien, the Wire file as one item. History:
-// saahil watched Heat (twice), Alien, Clerks, Dune, Fargo in Plex, is 30 min into Ran in Jellyfin and 20 min into a
-// rewatch of Clerks there; roger watched Wire E02 in Plex and Ran in Jellyfin, rating it 7.
+// owner watched Heat (twice), Alien, Clerks, Dune, Fargo in Plex, is 30 min into Ran in Jellyfin and 20 min into a
+// rewatch of Clerks there; viewer-b watched Wire E02 in Plex and Ran in Jellyfin, rating it 7.
 func newHarness(t *testing.T) (h *fake.Harness, w *writes, options, backups string) {
 	h = fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "mid"})
 	dir := t.TempDir()
@@ -117,17 +117,17 @@ func newHarness(t *testing.T) (h *fake.Harness, w *writes, options, backups stri
 	T1, T2 := time.Date(2024, 8, 9, 0, 0, 0, 0, time.UTC).Unix(), time.Date(2024, 9, 1, 0, 0, 0, 0, time.UTC).Unix()
 	writeBackup(t, filepath.Join(backups, "pre-x.db"), nil) // older copy: ignored
 	writeBackup(t, filepath.Join(backups, "pre-y.db"), [][]any{
-		{"saahilsanganeriya", 10, 0, heat, 2, 0, T1}, {"saahilsanganeriya", 12, 0, alien, 1, 0, T1},
-		{"saahilsanganeriya", 14, 0, clerks, 1, 0, T1}, {"saahilsanganeriya", 15, 0, dune, 1, 0, T1},
-		{"saahilsanganeriya", 16, 0, fargo, 1, 0, T1},
-		{"roger", 21, 2, wire, 1, 0, T2},
+		{"owner-plex", 10, 0, heat, 2, 0, T1}, {"owner-plex", 12, 0, alien, 1, 0, T1},
+		{"owner-plex", 14, 0, clerks, 1, 0, T1}, {"owner-plex", 15, 0, dune, 1, 0, T1},
+		{"owner-plex", 16, 0, fargo, 1, 0, T1},
+		{"viewer-b", 21, 2, wire, 1, 0, T2},
 	})
 	os.Chtimes(filepath.Join(backups, "pre-x.db"), time.Unix(T1, 0), time.Unix(T1, 0))
 	os.Chtimes(filepath.Join(backups, "pre-y.db"), h.Now.Add(-10*time.Minute), h.Now.Add(-10*time.Minute))
 	options = `plex_backups = "` + backups + `"
 plex_tv = "` + h.Plex.URL + `"
 plan_file = "` + filepath.Join(dir, "plan.tsv") + `"
-users = [{ name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" }, { name = "roger", plex = "roger", jellyfin = "roger" }]
+users = [{ name = "owner", plex = "owner-plex", jellyfin = "owner" }, { name = "viewer-b", plex = "viewer-b", jellyfin = "viewer-b" }]
 `
 	h.SetOptions(options)
 
@@ -135,7 +135,7 @@ users = [{ name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" }, {
 	part := func(rk string, index int, file string) string {
 		return `{"ratingKey":"` + rk + `","index":` + string(rune('0'+index)) + `,"Media":[{"Part":[{"file":"` + file + `"}]}]}`
 	}
-	h.Plex.Handle("GET", "/accounts", 200, `{"MediaContainer":{"Account":[{"id":1,"name":"saahilsanganeriya"},{"id":578,"name":"roger"},{"id":9,"name":""}]}}`)
+	h.Plex.Handle("GET", "/accounts", 200, `{"MediaContainer":{"Account":[{"id":1,"name":"owner-plex"},{"id":578,"name":"viewer-b"},{"id":9,"name":""}]}}`)
 	h.Plex.HandleFunc("GET", "/library/sections/4/all", plexPages(part("13", 0, heat), part("11", 0, ran), part("12", 0, alien),
 		part("14", 0, clerks), part("15", 0, dune), part("16", 0, fargo)))
 	h.Plex.HandleFunc("GET", "/library/sections/2/all", plexPages(part("20", 1, wire), part("21", 2, wire)))
@@ -155,7 +155,7 @@ users = [{ name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" }, {
 		})
 	}
 
-	h.Jellyfin.Handle("GET", "/Users", 200, `[{"Name":"saahil","Id":"u1"},{"Name":"roger","Id":"u2"}]`)
+	h.Jellyfin.Handle("GET", "/Users", 200, `[{"Name":"owner","Id":"u1"},{"Name":"viewer-b","Id":"u2"}]`)
 	// Like Jellyfin 12.1 on the NAS, user-scoped item queries leave items out; each item's own UserData is right.
 	h.Jellyfin.HandleFunc("GET", "/Items", func(rw http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("userId") != "" {
@@ -235,8 +235,8 @@ func TestRunTwoWay(t *testing.T) {
 	if len(w.since(0)) != 0 || len(h.Plex.Calls("POST", "/api/v2/user/webhooks")) != 0 {
 		t.Fatalf("dry run wrote: %v", w.since(0))
 	}
-	if rep.Counts["pending.jellyfin.saahil"] != 1 || rep.Counts["to_jellyfin.saahil"] != 4 || rep.Counts["to_jellyfin.roger"] != 1 ||
-		rep.Counts["to_plex.saahil"] != 2 || rep.Counts["to_plex.roger"] != 1 || len(rep.Alerts) != 0 {
+	if rep.Counts["pending.jellyfin.owner"] != 1 || rep.Counts["to_jellyfin.owner"] != 4 || rep.Counts["to_jellyfin.viewer-b"] != 1 ||
+		rep.Counts["to_plex.owner"] != 2 || rep.Counts["to_plex.viewer-b"] != 1 || len(rep.Alerts) != 0 {
 		t.Fatalf("plan: counts %v alerts %v", rep.Counts, rep.Alerts)
 	}
 
@@ -271,19 +271,19 @@ func TestRunTwoWay(t *testing.T) {
 
 	h.Now = h.Now.Add(time.Hour)
 	// The owner's payload carries his plex.tv title, not his account name on the server: the id maps him.
-	push(h, plexApp, strings.Replace(plexPlay("media.scrobble", "Saahil S", "11", ""), `"title"`, `"id":1,"title"`, 1))
-	push(h, plexApp, plexPlay("media.stop", "roger", "15", `,"viewOffset":600000,"duration":6000000`))
+	push(h, plexApp, strings.Replace(plexPlay("media.scrobble", "Owner S", "11", ""), `"title"`, `"id":1,"title"`, 1))
+	push(h, plexApp, plexPlay("media.stop", "viewer-b", "15", `,"viewOffset":600000,"duration":6000000`))
 	run(t, h)
 	if got := strings.Join(w.since(done), "\n"); got != `/UserItems/b1/UserData?userId=u1 {"LastPlayedDate":"2026-10-05T07:00:00Z","PlayCount":1,"PlaybackPositionTicks":0,"Played":true}`+"\n"+
 		`/UserItems/d1/UserData?userId=u2 {"LastPlayedDate":"2026-10-05T07:00:00Z","PlaybackPositionTicks":6000000000}` {
-		t.Fatalf("after the Plex play and roger's stop:\n%s", got)
+		t.Fatalf("after the Plex play and viewer-b's stop:\n%s", got)
 	}
 
 	// Rewatches stopped 10 min in on Jellyfin: Plex holds both plays (Ran's it pushed; Heat's from the backup, under
 	// the ratingKey Plex has since replaced), so only the positions go.
 	h.Now = h.Now.Add(10 * time.Minute)
 	for _, id := range []string{"b1", "a1"} {
-		push(h, jellyfinApp, `{"NotificationType":"UserDataSaved","NotificationUsername":"saahil","ItemId":"`+id+`","ItemType":"Movie","SaveReason":"PlaybackFinished","Played":true,"PlayCount":1,"PlaybackPositionTicks":6000000000}`)
+		push(h, jellyfinApp, `{"NotificationType":"UserDataSaved","NotificationUsername":"owner","ItemId":"`+id+`","ItemType":"Movie","SaveReason":"PlaybackFinished","Played":true,"PlayCount":1,"PlaybackPositionTicks":6000000000}`)
 	}
 	run(t, h)
 	if got := strings.Join(w.since(done+2), "\n"); got != "owner /:/progress?identifier=com.plexapp.plugins.library&key=11&time=600000&state=stopped\n"+
@@ -293,10 +293,10 @@ func TestRunTwoWay(t *testing.T) {
 
 	done = len(w.since(0))
 	h.Now = h.Now.Add(10 * time.Minute)
-	push(h, plexApp, plexPlay("media.rate", "saahilsanganeriya", "13", `,"userRating":8`)) // Jellyfin holds the play
-	push(h, plexApp, plexPlay("media.scrobble", "roger", "15", ""))
+	push(h, plexApp, plexPlay("media.rate", "owner-plex", "13", `,"userRating":8`)) // Jellyfin holds the play
+	push(h, plexApp, plexPlay("media.scrobble", "viewer-b", "15", ""))
 	h.Now = h.Now.Add(time.Minute)
-	push(h, plexApp, plexPlay("media.rate", "roger", "15", `,"userRating":6`))
+	push(h, plexApp, plexPlay("media.rate", "viewer-b", "15", `,"userRating":6`))
 	run(t, h)
 	if got := strings.Join(w.since(done), "\n"); got != `/UserItems/a1/UserData?userId=u1 {"Rating":8}`+"\n"+
 		`/UserItems/d1/UserData?userId=u2 {"LastPlayedDate":"2026-10-05T07:20:00Z","PlayCount":1,"PlaybackPositionTicks":0,"Played":true,"Rating":6}` {
@@ -304,19 +304,19 @@ func TestRunTwoWay(t *testing.T) {
 	}
 }
 
-// Catches: a push that crosses this stage's write to the same field lost for good. Saahil marks Heat unplayed in
+// Catches: a push that crosses this stage's write to the same field lost for good. Owner marks Heat unplayed in
 // Jellyfin while the run writes Heat's Plex play there; the next run would skip the item (its newest state came
-// from Jellyfin) and both apps would keep the play. Likewise roger's Plex stop of a Ran rewatch crossing the
+// from Jellyfin) and both apps would keep the play. Likewise viewer-b's Plex stop of a Ran rewatch crossing the
 // stage's scrobble, which clears the resume point. Also: Heat's re-created Plex item, which nothing is known to
 // hold, not unscrobbled.
 func TestPushCrossingAWrite(t *testing.T) {
 	h, w, _, _ := newHarness(t)
 	code := 0
 	w.during["/UserItems/a1/UserData"] = func(*http.Request) {
-		code = push(h, jellyfinApp, `{"NotificationType":"UserDataSaved","NotificationUsername":"saahil","ItemId":"a1","ItemType":"Movie","SaveReason":"TogglePlayed","Played":false}`)
+		code = push(h, jellyfinApp, `{"NotificationType":"UserDataSaved","NotificationUsername":"owner","ItemId":"a1","ItemType":"Movie","SaveReason":"TogglePlayed","Played":false}`)
 	}
 	w.during["/:/scrobble"] = func(*http.Request) {
-		push(h, plexApp, plexPlay("media.stop", "roger", "11", `,"viewOffset":600000,"duration":6000000`))
+		push(h, plexApp, plexPlay("media.stop", "viewer-b", "11", `,"viewOffset":600000,"duration":6000000`))
 	}
 	run(t, h)
 	w.during = map[string]func(*http.Request){}
@@ -337,9 +337,9 @@ func TestPushCrossingAWrite(t *testing.T) {
 
 // Catches: Plex's echo of this stage's own write read as a push that crossed it. PUT /:/rate comes back as media.rate
 // (as any client's rating does); the sink then forgot what Plex holds, and every later run scrobbled Ran again for
-// roger (a view nobody can remove) and rated it again, which echoed again. Also: a real Plex scrobble crossing the
-// stage's progress write (saahil) or its scrobble (roger; Plex's play count is nobody's to set) making it forget the
-// play Plex then holds, so the next run scrobbles again; and roger's own rating crossing the stage's lost, though
+// viewer-b (a view nobody can remove) and rated it again, which echoed again. Also: a real Plex scrobble crossing the
+// stage's progress write (owner) or its scrobble (viewer-b; Plex's play count is nobody's to set) making it forget the
+// play Plex then holds, so the next run scrobbles again; and viewer-b's own rating crossing the stage's lost, though
 // Plex may hold either.
 func TestPlexPushesCrossingWrites(t *testing.T) {
 	h, w, _, _ := newHarness(t)
@@ -350,11 +350,11 @@ func TestPlexPushesCrossingWrites(t *testing.T) {
 			push(h, plexApp, plexPlay(event, account, "11", extra))
 		}
 	}
-	w.during["/:/progress"] = func(r *http.Request) { cross(r, "saahilsanganeriya", "media.scrobble", "") }
-	w.during["/:/scrobble"] = func(r *http.Request) { cross(r, "roger", "media.scrobble", "") }
-	w.during["/:/rate"] = func(r *http.Request) { // roger's is the only rating the stage writes
-		push(h, plexApp, plexPlay("media.rate", "roger", "11", `,"userRating":`+r.URL.Query().Get("rating"))) // the echo
-		cross(r, "roger", "media.rate", `,"userRating":9`)
+	w.during["/:/progress"] = func(r *http.Request) { cross(r, "owner-plex", "media.scrobble", "") }
+	w.during["/:/scrobble"] = func(r *http.Request) { cross(r, "viewer-b", "media.scrobble", "") }
+	w.during["/:/rate"] = func(r *http.Request) { // viewer-b's is the only rating the stage writes
+		push(h, plexApp, plexPlay("media.rate", "viewer-b", "11", `,"userRating":`+r.URL.Query().Get("rating"))) // the echo
+		cross(r, "viewer-b", "media.rate", `,"userRating":9`)
 	}
 	for range 4 {
 		run(t, h)
@@ -436,15 +436,15 @@ func TestPlexAccountConfig(t *testing.T) {
 		plex, alert      string
 		imported, writes int
 	}{
-		{`""`, "", 5, 0}, // saahil's five films import
-		{`"Roger R"`, `"Roger R" (users entry "roger") is not in the backup copy`, 0, 0},
-		{`"roger-tv"`, `plex has no account "roger-tv"`, 0, 0}, // in the copy, with no plays
-		{`"roger"`, "", 1, 1}, // the Wire episode he finished in Plex; Ran, finished in Jellyfin, goes to Plex
+		{`""`, "", 5, 0}, // owner's five films import
+		{`"Viewer-b R"`, `"Viewer-b R" (users entry "viewer-b") is not in the backup copy`, 0, 0},
+		{`"viewer-b-tv"`, `plex has no account "viewer-b-tv"`, 0, 0}, // in the copy, with no plays
+		{`"viewer-b"`, "", 1, 1}, // the Wire episode he finished in Plex; Ran, finished in Jellyfin, goes to Plex
 	} {
-		h.SetOptions(strings.Replace(options, `plex = "roger"`, "plex = "+c.plex, 1))
+		h.SetOptions(strings.Replace(options, `plex = "viewer-b"`, "plex = "+c.plex, 1))
 		rep := run(t, h)
 		alerts := strings.Join(rep.Alerts, "|")
-		if rep.Counts["imported.plex"] != c.imported || rep.Counts["to_plex.roger"] != c.writes ||
+		if rep.Counts["imported.plex"] != c.imported || rep.Counts["to_plex.viewer-b"] != c.writes ||
 			!strings.Contains(alerts, c.alert) || (c.alert == "") != (alerts == "") {
 			t.Errorf("plex = %s: counts %v alerts %q", c.plex, rep.Counts, rep.Alerts)
 		}
@@ -489,7 +489,7 @@ func TestListingsFollowTheWrites(t *testing.T) {
 	})
 	for i, step := range []struct {
 		after     time.Duration
-		key, want string // key: a film saahil finishes in Plex before the run
+		key, want string // key: a film owner finishes in Plex before the run
 	}{
 		{time.Hour, "17", ""}, // added since the listing: it waits for the next one
 		{23 * time.Hour, "15", "/UserItems/d1/ list plex"},
@@ -499,7 +499,7 @@ func TestListingsFollowTheWrites(t *testing.T) {
 		done := len(w.since(0))
 		h.Now = h.Now.Add(step.after)
 		if step.key != "" {
-			push(h, plexApp, plexPlay("media.scrobble", "saahilsanganeriya", step.key, ""))
+			push(h, plexApp, plexPlay("media.scrobble", "owner-plex", step.key, ""))
 		}
 		rep := run(t, h)
 		var got []string
@@ -530,13 +530,13 @@ func TestJellyfinImportResumes(t *testing.T) {
 		}
 	})
 	gone := func() int { return len(h.Jellyfin.Calls("GET", "/UserItems/a1/UserData")) }
-	if rep := run(t, h); rep.Counts["waiting.jellyfin.saahil"] != 1 || rep.Counts["waiting.jellyfin.roger"] != 0 {
+	if rep := run(t, h); rep.Counts["waiting.jellyfin.owner"] != 1 || rep.Counts["waiting.jellyfin.viewer-b"] != 0 {
 		t.Fatalf("first run: counts %v", rep.Counts)
 	}
 	for i, after := range []time.Duration{5 * time.Minute, 25 * time.Hour} { // the second ends with a new listing
 		h.Now = h.Now.Add(after)
 		rep := run(t, h)
-		if gone() != 2 || strings.Contains(strings.Join(rep.Alerts, "|"), "saahil stops at item c1 (3 runs in a row)") != (i == 1) {
+		if gone() != 2 || strings.Contains(strings.Join(rep.Alerts, "|"), "owner stops at item c1 (3 runs in a row)") != (i == 1) {
 			t.Fatalf("run %d: %d asks for a1 (it resumes at c1), alerts %q", i+2, gone(), rep.Alerts)
 		}
 	}
@@ -545,7 +545,7 @@ func TestJellyfinImportResumes(t *testing.T) {
 	rep := run(t, h)
 	var rows int
 	h.Env.Store.DB().QueryRow(`SELECT count(*) FROM watch_events WHERE source = 'jellyfin-backfill'`).Scan(&rows)
-	if gone() != 3 || rep.Counts["waiting.jellyfin.saahil"] != 0 || rows != 3 { // saahil's Ran and Clerks, roger's Ran
+	if gone() != 3 || rep.Counts["waiting.jellyfin.owner"] != 0 || rows != 3 { // owner's Ran and Clerks, viewer-b's Ran
 		t.Fatalf("after the fix: %d asks for a1, %d imported rows, counts %v", gone(), rows, rep.Counts)
 	}
 
@@ -555,7 +555,7 @@ func TestJellyfinImportResumes(t *testing.T) {
 	if err := (Stage{}).Run(ctx, h.Env, &stage.Report{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("a cancelled import returned %v", err)
 	}
-	if run(t, h); len(h.Jellyfin.Calls("GET", "/UserItems/a1/UserData")) != 2 { // saahil's before the cancel, roger's
+	if run(t, h); len(h.Jellyfin.Calls("GET", "/UserItems/a1/UserData")) != 2 { // owner's before the cancel, viewer-b's
 		t.Errorf("the cancelled import restarted")
 	}
 }
@@ -568,12 +568,12 @@ func TestHeavyReadsWaitForGuests(t *testing.T) {
 	guest := func(on bool) {
 		body := `<MediaContainer size="0"></MediaContainer>`
 		if on {
-			body = `<MediaContainer size="1"><Video type="movie" title="Ran"><User title="roger"/></Video></MediaContainer>`
+			body = `<MediaContainer size="1"><Video type="movie" title="Ran"><User title="viewer-b"/></Video></MediaContainer>`
 		}
 		h.Plex.Handle("GET", "/status/sessions", 200, body)
 	}
 	listings := func() int { return len(h.Plex.Calls("GET", "/accounts")) + len(h.Jellyfin.Calls("GET", "/Items")) }
-	asked := func(id string) int { // saahil's history import asking for one item
+	asked := func(id string) int { // owner's history import asking for one item
 		return strings.Count(fmt.Sprint(h.Jellyfin.Calls("GET", "/UserItems/"+id+"/UserData")), "userId=u1")
 	}
 	h.Plex.Handle("GET", "/status/sessions", 500, "") // who is watching is unknown: someone may be
@@ -583,7 +583,7 @@ func TestHeavyReadsWaitForGuests(t *testing.T) {
 	guest(false)
 	arrives := true
 	h.Jellyfin.HandleFunc("GET", "/UserItems/c1/UserData", func(rw http.ResponseWriter, r *http.Request) {
-		if arrives { // a guest starts watching while saahil's import reads Clerks
+		if arrives { // a guest starts watching while owner's import reads Clerks
 			arrives = false
 			guest(true)
 			h.Now = h.Now.Add(h.Env.Viewers.Poll)
@@ -600,7 +600,7 @@ func TestHeavyReadsWaitForGuests(t *testing.T) {
 	guest(true)
 	h.Now = h.Now.Add(25 * time.Hour) // both listings due
 	done := len(w.since(0))
-	push(h, plexApp, plexPlay("media.stop", "roger", "15", `,"viewOffset":600000,"duration":6000000`))
+	push(h, plexApp, plexPlay("media.stop", "viewer-b", "15", `,"viewOffset":600000,"duration":6000000`))
 	if run(t, h); listings() != 2 || strings.Join(w.since(done), "\n") != `/UserItems/d1/UserData?userId=u2 {"LastPlayedDate":"2026-10-06T07:00:00Z","PlaybackPositionTicks":6000000000}` {
 		t.Fatalf("guest watching, listings due: %d listing requests, writes %v", listings(), w.since(done))
 	}
@@ -615,7 +615,7 @@ func TestResolveCommitsWithTheSink(t *testing.T) {
 	if _, err := db.Exec(`CREATE TRIGGER gone BEFORE INSERT ON jfsync_sink BEGIN SELECT RAISE(ABORT, 'disk gone'); END`); err != nil {
 		t.Fatal(err)
 	}
-	push(h, plexApp, plexPlay("media.scrobble", "roger", "15", ""))
+	push(h, plexApp, plexPlay("media.scrobble", "viewer-b", "15", ""))
 	if err := (Stage{}).Run(context.Background(), h.Env, &stage.Report{}); err == nil || !strings.Contains(err.Error(), "disk gone") {
 		t.Fatalf("run with a failing sink write returned %v", err)
 	}
@@ -635,15 +635,15 @@ func TestImportsWaitForTheirSource(t *testing.T) {
 	bad := filepath.Join(backups, "pre-z.db")
 	os.WriteFile(bad, []byte("not a database"), 0o644)
 	os.Chtimes(bad, h.Now, h.Now)
-	h.Jellyfin.Handle("GET", "/Users", 200, `[{"Name":"saahil","Id":"u1"}]`)
-	push(h, plexApp, plexPlay("media.scrobble", "saahilsanganeriya", "15", ""))
+	h.Jellyfin.Handle("GET", "/Users", 200, `[{"Name":"owner","Id":"u1"}]`)
+	push(h, plexApp, plexPlay("media.scrobble", "owner-plex", "15", ""))
 	rep := run(t, h)
 	if got := strings.Join(w.since(0), "\n"); got != `/UserItems/d1/UserData?userId=u1 {"LastPlayedDate":"2026-10-05T06:00:00Z","PlayCount":1,"PlaybackPositionTicks":0,"Played":true}` ||
-		len(rep.Alerts) != 2 || !strings.Contains(rep.Alerts[0], "Plex watch history not imported") || rep.Counts["waiting.plex.saahil"] != 1 {
+		len(rep.Alerts) != 2 || !strings.Contains(rep.Alerts[0], "Plex watch history not imported") || rep.Counts["waiting.plex.owner"] != 1 {
 		t.Fatalf("bad copy: writes %q, alerts %q, counts %v", got, rep.Alerts, rep.Counts)
 	}
 	os.Remove(bad)
-	h.Jellyfin.Handle("GET", "/Users", 200, `[{"Name":"saahil","Id":"u1"},{"Name":"roger","Id":"u2"}]`)
+	h.Jellyfin.Handle("GET", "/Users", 200, `[{"Name":"owner","Id":"u1"},{"Name":"viewer-b","Id":"u2"}]`)
 	h.Now = h.Now.Add(25 * time.Hour)
 	if rep = run(t, h); !strings.Contains(strings.Join(rep.Alerts, "|"), "taken 25h10m0s ago") { // also relists Jellyfin
 		t.Errorf("a stale copy imported without an alert: %q", rep.Alerts)
@@ -670,28 +670,30 @@ const pluginPayload = `{"ServerId":"f1e2d3c4b5a697881726354453627181","ServerNam
 "UtcTimestamp":"2026-10-05T08:00:00.0000000Z","Name":"Fargo","Overview":"","Tagline":"","ItemId":"0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d",
 "ItemType":"Movie","RunTimeTicks":58800000000,"RunTime":"01:38:00","Year":1996,"PremiereDate":"1996-03-08","Genres":"Crime, Drama",
 "Likes":false,"Rating":0,"PlaybackPositionTicks":6000000000,"PlaybackPosition":"00:10:00","PlayCount":0,"Favorite":true,
-"Played":false,"AudioStreamIndex":-1,"SubtitleStreamIndex":-1,"SaveReason":"%s","NotificationUsername":"saahil",
+"Played":false,"AudioStreamIndex":-1,"SubtitleStreamIndex":-1,"SaveReason":"%s","NotificationUsername":"owner",
 "UserId":"9f8e7d6c-5b4a-3928-1706-f5e4d3c2b1a0"}`
 
 func TestParseHooks(t *testing.T) {
 	opt := defaults()
-	opt.Users = []User{{Name: "saahil", Plex: "saahilsanganeriya", Jellyfin: "saahil"}}
+	if err := fake.DecodeOver(name, `users = [{ name = "owner", plex = "owner-plex", jellyfin = "owner" }]`, &opt); err != nil {
+		t.Fatal(err)
+	}
 	plex := func(event, account, section, extra string) string {
 		return `{"event":"` + event + `","Account":{"id":9,"title":"` + account + `"},"rating":-1,"Metadata":{"ratingKey":"7","type":"movie","librarySectionID":` +
 			section + `,"duration":1000000` + extra + `}}`
 	}
 	jf := func(reason, extra string) string {
-		return `{"NotificationType":"UserDataSaved","NotificationUsername":"saahil","ItemId":"AB-CD","ItemType":"Movie","SaveReason":"` + reason + `"` + extra + `}`
+		return `{"NotificationType":"UserDataSaved","NotificationUsername":"owner","ItemId":"AB-CD","ItemType":"Movie","SaveReason":"` + reason + `"` + extra + `}`
 	}
 	cases := []struct {
 		name, hook, payload, want string // want: "kind pos rating ref", or "dropped: <reason>"
 	}{
-		{"scrobble", "plex", plex("media.scrobble", "saahilsanganeriya", "4", ""), "finished 0 <nil> plex:7"},
-		{"stop midway", "plex", plex("media.stop", "saahilsanganeriya", "4", `,"viewOffset":500000`), "stopped 500000 <nil> plex:7"},
-		{"stop at the end", "plex", plex("media.stop", "saahilsanganeriya", "4", `,"viewOffset":950000`), "dropped: stop at the start or in the last tenth"},
-		{"rating removed", "plex", plex("media.rate", "saahilsanganeriya", "4", ""), "rated 0 <nil> plex:7"},
+		{"scrobble", "plex", plex("media.scrobble", "owner-plex", "4", ""), "finished 0 <nil> plex:7"},
+		{"stop midway", "plex", plex("media.stop", "owner-plex", "4", `,"viewOffset":500000`), "stopped 500000 <nil> plex:7"},
+		{"stop at the end", "plex", plex("media.stop", "owner-plex", "4", `,"viewOffset":950000`), "dropped: stop at the start or in the last tenth"},
+		{"rating removed", "plex", plex("media.rate", "owner-plex", "4", ""), "rated 0 <nil> plex:7"},
 		{"unmapped account", "plex", plex("media.scrobble", "someone", "4", ""), `dropped: account "someone" (id 9) is in no users entry`},
-		{"home videos", "plex", plex("media.scrobble", "saahilsanganeriya", `"5"`, ""), "dropped: section 5 is neither"},
+		{"home videos", "plex", plex("media.scrobble", "owner-plex", `"5"`, ""), "dropped: section 5 is neither"},
 		{"part-way stop", "jellyfin", jf("PlaybackFinished", `,"Played":true,"PlaybackPositionTicks":12340000`), "stopped 1234 <nil> jellyfin:abcd"},
 		{"marked unplayed", "jellyfin", jf("TogglePlayed", `,"Played":false`), "state 0 <nil> jellyfin:abcd"},
 		{"progress save", "jellyfin", jf("PlaybackProgress", ""), "dropped: save reason PlaybackProgress"},
@@ -728,13 +730,13 @@ func TestRecordedPersonWithoutUsersEntryAlerts(t *testing.T) {
 	if err := watch.Open(ctx, db); err != nil {
 		t.Fatal(err)
 	}
-	for _, person := range []string{"Saahil", "saahil"} {
+	for _, person := range []string{"Owner", "owner"} {
 		if err := watch.Add(ctx, db, watch.Event{Person: person, Item: "movie/tmdb-11645", Ref: "letterboxd:1", Source: "letterboxd",
 			At: h.Now, Kind: watch.Logged, Plays: 1}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if rep := run(t, h); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], `state for "Saahil" (1 items)`) {
-		t.Errorf("alerts %q, want one naming Saahil", rep.Alerts)
+	if rep := run(t, h); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], `state for "Owner" (1 items)`) {
+		t.Errorf("alerts %q, want one naming Owner", rep.Alerts)
 	}
 }

@@ -154,7 +154,7 @@ const (
 )
 
 type Options struct {
-	Roots      []string      `toml:"roots"`
+	Roots      []string      `toml:"roots" required:"the folders that hold the films and the shows"`
 	StatsFile  string        `toml:"stats_file"`
 	OutputDir  string        `toml:"output_dir"` // test runs: sidecars land here under the same relative paths
 	RetryAfter time.Duration `toml:"retry_after"`
@@ -169,7 +169,7 @@ type Options struct {
 	Providers []string `toml:"providers"`
 	FilmSite  FilmSite `toml:"film_site"`
 	// subfetch2.py's OUT folder: its quota.csv and downloads.csv seed the OpenSubtitles quota once, at cutover.
-	LegacyQuota string `toml:"legacy_quota"`
+	LegacyQuota string `toml:"legacy_quota"`  // "" = none
 	AlignPerDay int    `toml:"align_per_day"` // queued titles aligned in any 24 h; each reads its video once or twice
 	// sampled (the default): also the .en.idx fit and the sampled fit before the queue, which aligns only inside
 	// align_window (HH:MM-HH:MM, config timezone). careful, the rollback: only a release match before the queue, which
@@ -179,7 +179,7 @@ type Options struct {
 	// The sampled fit reads sample_windows stretches of sample_length each, spread over the runtime.
 	SampleWindows int           `toml:"sample_windows"`
 	SampleLength  time.Duration `toml:"sample_length"`
-	// Rename logs, oldest first: the original release name of a video whose .details note does not give one.
+	// Rename logs, oldest first: the original release name of a video whose .details note does not give one; none = no logs.
 	UndoLogs []string `toml:"undo_logs"`
 	// Align workers on another machine (projectionist align-worker, over SSH to the listener) take the
 	// queue's titles while one has called in the last minute, at most this many leased at once; 0: off.
@@ -190,32 +190,55 @@ type Options struct {
 	VerifyPerRun int    `toml:"verify_per_run"`
 	ArchiveDir   string `toml:"archive_dir"`
 	// Plex's library database, read-only: the item (ratingKey) whose media part a video is, refreshed once it has a new
-	// sidecar. A live database in WAL mode, so a read-write mount: SQLite's readers share its -shm.
+	// sidecar. A live database in WAL mode, so a read-write mount: SQLite's readers share its -shm. The default is where
+	// Synology's Plex package keeps it.
 	PlexDB string `toml:"plex_db"`
 }
 
 func defaults() Options {
 	return Options{
-		Roots:         []string{"/volume1/media/Movies", "/volume1/media/TV"},
 		StatsFile:     "/state/sub_stats.tsv",
 		RetryAfter:    7 * 24 * time.Hour,
 		Workers:       3,
 		SecretsDir:    "/run/secrets",
 		Alass:         "/usr/local/bin/alass",
 		Providers:     []string{"gestdown", "subsource", "subdl", "opensubtitles-stremio", "opensubtitles", "opensubtitles-com"},
-		LegacyQuota:   "/volume1/PlexMediaServer/subtitle-downloads",
 		AlignPerDay:   20,
 		Mode:          "sampled",
-		AlignWindow:   "01:00-07:00",
 		SampleWindows: 4,
 		SampleLength:  90 * time.Second,
 		VerifyPerRun:  300,
-		ArchiveDir:    "/volume1/PlexMediaServer/_archive/subtitles",
-		PlexDB:        "/volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db",
-		UndoLogs: []string{"/volume1/PlexMediaServer/rename/undo.tsv", "/volume1/PlexMediaServer/rename/undo_auto.tsv",
-			"/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv",
-			"/volume1/media/.projectionist/rename/undo.tsv"},
+		PlexDB:        "/volume1/PlexMediaServer/AppData/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db",
 	}
+}
+
+func (Stage) Check(decode func(any) error) []config.Problem {
+	opt := defaults()
+	ps, ok := config.CheckStage(name, decode, &opt)
+	if !ok {
+		return ps
+	}
+	switch opt.Mode {
+	case "sampled":
+		if opt.AlignWindow == "" {
+			ps = append(ps, config.Missing("stages.subtitles.align_window", "when stages.subtitles.mode is sampled",
+				"the hours the queue may read whole videos, HH:MM-HH:MM in the config time zone (when nobody watches)"))
+		}
+	case "careful":
+	default:
+		ps = append(ps, config.Problem{Key: "stages.subtitles.mode", Want: fmt.Sprintf("%q: want sampled or careful", opt.Mode)})
+	}
+	if _, err := config.ParseWindow(opt.AlignWindow); err != nil {
+		ps = append(ps, config.Problem{Key: "stages.subtitles.align_window", Want: err.Error()})
+	}
+	if opt.SampleWindows < 2 || opt.SampleLength < 30*time.Second {
+		ps = append(ps, config.Problem{Key: "stages.subtitles.sample_windows", Want: "want at least 2 windows (sample_windows) of at least 30 s (sample_length)"})
+	}
+	if opt.VerifyPerRun > 0 && opt.ArchiveDir == "" {
+		ps = append(ps, config.Missing("stages.subtitles.archive_dir", "when stages.subtitles.verify_per_run is above 0",
+			"the folder where sidecars the verify pass replaces are kept (on the media disks)"))
+	}
+	return ps
 }
 
 // FilmSite is a subtitle website with a page per film at /movie-imdb/tt<id>, a row per subtitle and a zip per

@@ -25,8 +25,8 @@ import (
 // plexTVFake is plex.tv: the owner's Home (list, switch, each user's servers) and the accounts this server is shared
 // with, whose sharing settings it reads and writes as Plex Web does.
 //
-// The Home: the owner (admin: the server's own sign-in), Aurelia as the managed user "roger" and Aaron by username. A
-// switched user's server token is fake Plex's PlexUserToken plus their name. The shares: Aurelia, Aaron, a friend,
+// The Home: the owner (admin: the server's own sign-in), Viewer B as the managed user "viewer-b" and Viewer-a by username. A
+// switched user's server token is fake Plex's PlexUserToken plus their name. The shares: Viewer B, Viewer-a, a friend,
 // and a friend of another server.
 type plexTVFake struct {
 	srv       *httptest.Server
@@ -52,18 +52,18 @@ func shareOf(machine string, id int, title string, username any, filter string) 
 		"filterTelevision": "label!=Kids", "filterAll": nil, "allowSync": true, "allowCameraUpload": false, "allowSubtitleAdmin": false,
 		"allowTuners": 0}
 	return map[string]any{"id": 30000 + id, "machineIdentifier": machine, "invitedId": id, "invitedEmail": "user@example.com",
-		"owner":   map[string]any{"id": 1, "title": "Saahil", "username": "saahilsanganeriya"},
+		"owner":   map[string]any{"id": 1, "title": "Owner", "username": "owner-plex"},
 		"invited": map[string]any{"id": id, "title": title, "username": username, "sharingSettings": settings}, "sharingSettings": settings}
 }
 
 func newPlexTV(t *testing.T) *plexTVFake {
 	tv := &plexTVFake{failWrite: map[string]bool{}, shares: []map[string]any{
-		shareOf("machine1", 578, "roger", nil, ""),
-		shareOf("machine1", 372, "Aaron Test", "aarontest941", ""),
-		shareOf("machine1", 114, "adam7", "adam7", ""),
+		shareOf("machine1", 578, "viewer-b", nil, ""),
+		shareOf("machine1", 372, "Viewer A", "viewer-a-plex", ""),
+		shareOf("machine1", 114, "viewer-c-plex", "viewer-c-plex", ""),
 		shareOf("elsewhere", 999, "elsewhere-friend", "elsewhere-friend", ""),
 	}}
-	switched := map[string]string{"u-roger": "tv-roger", "u-aaron": "tv-aaron"}
+	switched := map[string]string{"u-viewer-b": "tv-viewer-b", "u-viewer-a": "tv-viewer-a"}
 	tv.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tok := r.Header.Get("X-Plex-Token")
 		uuid := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v2/home/users/"), "/switch")
@@ -71,9 +71,9 @@ func newPlexTV(t *testing.T) *plexTVFake {
 		defer tv.mu.Unlock()
 		switch {
 		case r.URL.Path == "/api/v2/home/users" && tok == fake.PlexToken:
-			io.WriteString(w, `{"id":1,"users":[{"uuid":"u-owner","title":"Saahil","username":"saahilsanganeriya","admin":true},`+
-				`{"uuid":"u-roger","title":"roger","username":null,"restricted":true},`+
-				`{"uuid":"u-aaron","title":"Aaron Test","username":"aarontest941"}]}`)
+			io.WriteString(w, `{"id":1,"users":[{"uuid":"u-owner","title":"Owner","username":"owner-plex","admin":true},`+
+				`{"uuid":"u-viewer-b","title":"viewer-b","username":null,"restricted":true},`+
+				`{"uuid":"u-viewer-a","title":"Viewer A","username":"viewer-a-plex"}]}`)
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/switch") && tok == fake.PlexToken && switched[uuid] != "":
 			tv.switches.Add(1)
 			w.WriteHeader(http.StatusCreated)
@@ -260,7 +260,7 @@ type jfPlaylists struct {
 
 func newJFPlaylists(srv *fake.Server, j *jfFake) *jfPlaylists {
 	p := &jfPlaylists{srv: srv}
-	srv.Handle("GET", "/Users", 200, `[{"Name":"guest","Id":"u2"},{"Name":"saahil","Id":"u1"},{"Name":"Roger","Id":"u3"},{"Name":"aaron","Id":"u4"}]`)
+	srv.Handle("GET", "/Users", 200, `[{"Name":"guest","Id":"u2"},{"Name":"owner","Id":"u1"},{"Name":"Viewer-b","Id":"u3"},{"Name":"viewer-a","Id":"u4"}]`)
 	srv.HandleFunc("POST", "/Playlists", func(rw http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
@@ -357,9 +357,9 @@ type ownWorld struct {
 }
 
 const jfsyncUsers = `users = [
-  { name = "saahil", plex = "saahilsanganeriya", jellyfin = "saahil" },
-  { name = "roger",  plex = "roger",             jellyfin = "roger" },
-  { name = "aaron", plex = "Aaron Test",      jellyfin = "aaron" },
+  { name = "owner", plex = "owner-plex", jellyfin = "owner" },
+  { name = "viewer-b",  plex = "viewer-b",             jellyfin = "viewer-b" },
+  { name = "viewer-a", plex = "Viewer A",      jellyfin = "viewer-a" },
 ]`
 
 func newOwn(t *testing.T, people string) *ownWorld {
@@ -401,9 +401,9 @@ func jfKeys(ids ...int) string {
 }
 
 const threeWithPlex = `people = [
-  { person = "saahil", user = "saahilsan", plex_user = "saahilsanganeriya", export_dir = "testdata/export" },
-  { person = "roger", user = "auralb", plex_user = "roger", name = "Aurelia" },
-  { person = "aaron", user = "aaron1009", plex_user = "aarontest941" },
+  { person = "owner", user = "owner-lb", plex_user = "owner-plex", export_dir = "testdata/export" },
+  { person = "viewer-b", user = "viewer-b-lb", plex_user = "viewer-b", name = "Viewer B" },
+  { person = "viewer-a", user = "viewer-a-lb", plex_user = "viewer-a-plex" },
 ]
 `
 
@@ -420,11 +420,11 @@ func (w *ownWorld) shelfItems(title string) string {
 }
 
 // Catches a person's own picks reaching anyone else. In Plex each person's shelf "Tonight · <name>" must hold their
-// picks alone, labelled for them: his on his own Home alone, Aurelia's and Aaron's on the shared Home alone, each below
+// picks alone, labelled for them: his on his own Home alone, Viewer B's and Viewer-a's on the shared Home alone, each below
 // the household row, with every account the server is shared with excluding every shelf but its own in its Movies
 // restrictions (a friend all three, another server's friend none), and no Plex playlist made in anyone's account. In
 // Jellyfin each person's playlist is owned by their user and private (Jellyfin makes a playlist public unless told).
-// Also: a person's candidates taken from the household's unseen films (Aurelia's must include films only the owner has
+// Also: a person's candidates taken from the household's unseen films (Viewer B's must include films only the owner has
 // seen), or his own offering a film his Plex or Jellyfin account played; the household's row taking a person's picks;
 // and a run with nothing new writing a restriction, switching to a Home user or reading a playlist.
 func TestOwnPicksReachOnlyTheirPerson(t *testing.T) {
@@ -441,9 +441,9 @@ func TestOwnPicksReachOnlyTheirPerson(t *testing.T) {
 		ids                     []int
 		own                     bool
 	}{
-		{"saahil", "u1", "Tonight · Saahil", "Tonight-saahil", []int{1398, 949, 18148}, true},
-		{"roger", "u3", "Tonight · Aurelia", "Tonight-roger", []int{559907, 954, 13}, false},
-		{"aaron", "u4", "Tonight · Aaron", "Tonight-aaron", []int{843, 419704, 10948}, false},
+		{"owner", "u1", "Tonight · Owner", "Tonight-owner", []int{1398, 949, 18148}, true},
+		{"viewer-b", "u3", "Tonight · Viewer B", "Tonight-viewer-b", []int{559907, 954, 13}, false},
+		{"viewer-a", "u4", "Tonight · Viewer-a", "Tonight-viewer-a", []int{843, 419704, 10948}, false},
 	} {
 		s, hub, at := w.plex.shelf(c.shelf)
 		if s == nil || strings.Join(s.items, ",") != plexKeys(c.ids...) || !slices.Equal(s.labels, []string{"projectionist", c.label}) {
@@ -455,8 +455,8 @@ func TestOwnPicksReachOnlyTheirPerson(t *testing.T) {
 			t.Errorf("%s's Jellyfin playlists %q, want %q", c.who, got, want)
 		}
 	}
-	for name, want := range map[string]string{"roger": "label!=Tonight-aaron,Tonight-saahil",
-		"aarontest941": "label!=Tonight-roger,Tonight-saahil", "adam7": "label!=Tonight-aaron,Tonight-roger,Tonight-saahil",
+	for name, want := range map[string]string{"viewer-b": "label!=Tonight-owner,Tonight-viewer-a",
+		"viewer-a-plex": "label!=Tonight-owner,Tonight-viewer-b", "viewer-c-plex": "label!=Tonight-owner,Tonight-viewer-a,Tonight-viewer-b",
 		"elsewhere-friend": ""} {
 		if got := w.tv.filter(name); got != want {
 			t.Errorf("%s's Movies restrictions %q, want %q", name, got, want)
@@ -490,19 +490,19 @@ func TestOwnPicksReachOnlyTheirPerson(t *testing.T) {
 // her Jellyfin playlist, and the next day's picks replace the last day's, in Plex (the same shelf) and in Jellyfin
 // (one playlist, made anew).
 func TestOwnPicksAreReplacedNotAppended(t *testing.T) {
-	w := newOwn(t, `people = [{ person = "roger", user = "auralb", plex_user = "roger" }]`+"\n")
+	w := newOwn(t, `people = [{ person = "viewer-b", user = "viewer-b-lb", plex_user = "viewer-b" }]`+"\n")
 	w.ai.script(pickedFor("Columbus (2017)", 389, 346, 655), pickedFor("Columbus (2017)", 559907, 954, 13))
 	w.run(t)
-	w.record(t, "roger", 954, watch.Finished, 0)
+	w.record(t, "viewer-b", 954, watch.Finished, 0)
 	w.h.Now = w.h.Now.Add(30 * time.Minute)
 	w.run(t)
-	if p, j := w.shelfItems("Tonight · Roger"), w.jp.owned("u3"); p != plexKeys(559907, 13) || !slices.Equal(j, []string{"Tonight: " + jfKeys(559907, 13)}) {
+	if p, j := w.shelfItems("Tonight · Viewer-b"), w.jp.owned("u3"); p != plexKeys(559907, 13) || !slices.Equal(j, []string{"Tonight: " + jfKeys(559907, 13)}) {
 		t.Fatalf("after she played her pick Mission - Impossible: shelf %q, Jellyfin %q\n%s", p, j, w.logs)
 	}
 	w.ai.script(pickedFor("Columbus (2017)", 1398, 949, 18148), pickedFor("Columbus (2017)", 843, 419704, 10948))
 	w.h.Now = time.Date(2026, 10, 6, 13, 0, 0, 0, time.UTC)
 	w.run(t)
-	if p, j := w.shelfItems("Tonight · Roger"), w.jp.owned("u3"); p != plexKeys(843, 419704, 10948) ||
+	if p, j := w.shelfItems("Tonight · Viewer-b"), w.jp.owned("u3"); p != plexKeys(843, 419704, 10948) ||
 		!slices.Equal(j, []string{"Tonight: " + jfKeys(843, 419704, 10948)}) || len(w.plex.shelves) != 1 {
 		t.Fatalf("next day: shelf %q (of %d), Jellyfin %q; want only the day's picks, one shelf and one playlist", p, len(w.plex.shelves), j)
 	}
@@ -530,19 +530,19 @@ func TestHouseholdShelfIsRenamedInPlace(t *testing.T) {
 	}
 }
 
-// Catches a collection or playlist the stage did not make edited or deleted: Aurelia's own collection "Tonight ·
-// Roger" (no label) and her own Jellyfin "Tonight" playlist must keep their films through two days of picks, beside
+// Catches a collection or playlist the stage did not make edited or deleted: Viewer B's own collection "Tonight ·
+// Viewer-b" (no label) and her own Jellyfin "Tonight" playlist must keep their films through two days of picks, beside
 // the shelf and the playlist the stage makes her.
 func TestForeignCollectionsAndPlaylistsAreUntouched(t *testing.T) {
-	w := newOwn(t, `people = [{ person = "roger", user = "auralb", plex_user = "roger" }]`+"\n")
-	w.plex.addForeign("778", "Tonight · Roger")
+	w := newOwn(t, `people = [{ person = "viewer-b", user = "viewer-b-lb", plex_user = "viewer-b" }]`+"\n")
+	w.plex.addForeign("778", "Tonight · Viewer-b")
 	w.jp.add("jplhers", "u3", "Tonight", jfID(13), jfID(389))
 	w.ai.script(pickedFor("Columbus (2017)", 346, 655, 1398), pickedFor("Columbus (2017)", 389, 346, 655))
 	w.run(t)
 	w.ai.script(pickedFor("Columbus (2017)", 949, 18148, 843), pickedFor("Columbus (2017)", 559907, 954, 13))
 	w.h.Now = time.Date(2026, 10, 6, 13, 0, 0, 0, time.UTC)
 	w.run(t)
-	if p := w.shelfItems("Tonight · Roger"); p != plexKeys(559907, 954, 13) {
+	if p := w.shelfItems("Tonight · Viewer-b"); p != plexKeys(559907, 954, 13) {
 		t.Fatalf("our shelf beside hers holds %q\n%s", p, w.logs)
 	}
 	if j := w.jp.owned("u3"); !slices.Contains(j, "Tonight: "+jfKeys(13, 389)) || len(j) != 2 {
@@ -561,23 +561,23 @@ func TestForeignCollectionsAndPlaylistsAreUntouched(t *testing.T) {
 // Catches a second Jellyfin playlist in someone's account after a create whose answer was lost (Jellyfin made it, the
 // stage never heard its id): the next run must adopt it, not make another that nothing would ever take away.
 func TestOwnPlaylistCreateNeverDuplicates(t *testing.T) {
-	w := newOwn(t, `people = [{ person = "roger", user = "auralb", plex_user = "roger" }]`+"\n")
+	w := newOwn(t, `people = [{ person = "viewer-b", user = "viewer-b-lb", plex_user = "viewer-b" }]`+"\n")
 	w.jp.dropCreate = true
 	w.ai.script(pickedFor("Columbus (2017)", 346, 655, 1398), pickedFor("Columbus (2017)", 389, 346, 655))
-	if rep := w.run(t); rep.Counts["roger.jellyfin_retry"] != 1 {
+	if rep := w.run(t); rep.Counts["viewer-b.jellyfin_retry"] != 1 {
 		t.Fatalf("run 1 counts %v\n%s", rep.Counts, w.logs)
 	}
 	w.jp.mu.Lock()
 	w.jp.dropCreate = false
 	w.jp.mu.Unlock()
 	w.h.Now = w.h.Now.Add(16 * time.Minute) // past the first 15 min backoff
-	if rep := w.run(t); rep.Counts["roger.jellyfin_synced"] != 1 {
+	if rep := w.run(t); rep.Counts["viewer-b.jellyfin_synced"] != 1 {
 		t.Fatalf("run 2 counts %v\n%s", rep.Counts, w.logs)
 	}
 	if j := w.jp.owned("u3"); len(j) != 1 {
 		t.Fatalf("her Jellyfin playlists %q; want one", j)
 	}
-	if st := w.state(t).Persons["roger"]; st.Jellyfin.ID == "" || st.Jellyfin.Pending != nil {
+	if st := w.state(t).Persons["viewer-b"]; st.Jellyfin.ID == "" || st.Jellyfin.Pending != nil {
 		t.Fatalf("her state: jellyfin %+v", st.Jellyfin)
 	}
 }

@@ -55,6 +55,7 @@ import (
 	"strings"
 	"time"
 
+	"projectionist/internal/config"
 	"projectionist/internal/lbpace"
 	"projectionist/internal/library"
 	"projectionist/internal/stage"
@@ -65,20 +66,20 @@ import (
 const name = "letterboxd"
 
 type Options struct {
-	User           string        `toml:"user"`
+	User           string        `toml:"user" required:"your Letterboxd username"`
 	LetterboxdURL  string        `toml:"letterboxd_url"`
 	BoxdURL        string        `toml:"boxd_url"`
 	UserAgent      string        `toml:"user_agent"`
 	MaxFetches     int           `toml:"max_fetches"`     // Letterboxd requests per run; the backfill resumes next run
 	WatchlistEvery time.Duration `toml:"watchlist_every"` // each member's watchlist grid crawl
 	PagesEvery     time.Duration `toml:"pages_every"`     // the owner's watched-films grid crawl
-	ExportDir      string        `toml:"export_dir"`      // holds letterboxd-<user>-<date>-utc/ folders; newest wins
-	MoviesDir      string        `toml:"movies_dir"`
+	ExportDir      string        `toml:"export_dir"`      // holds letterboxd-<user>-<date>-utc/ folders; newest wins; "" = none
+	MoviesDir      string        `toml:"movies_dir" required:"the folder that holds the films"`
 	TVRoot         string        `toml:"tv_root"`      // its shows, as posters reads them: only for the Plex watchlist
 	MissingFile    string        `toml:"missing_file"` // the owner's watchlist films not on the NAS; "" = none
 	SinkRefresh    time.Duration `toml:"sink_refresh"` // re-read each Plex watchlist this often (also before writing to it)
 
-	Person        string `toml:"person"`          // the owner in the watch record: his name in jfsync's users (jfsync alerts otherwise)
+	Person        string `toml:"person" required:"your name in the watch record: the name of your entry in stages.jfsync.users"`
 	History       bool   `toml:"history"`         // also record the export and the feed's backlog, not just entries logged from now on
 	PlexWatchlist bool   `toml:"plex_watchlist"`  // each member's Letterboxd watchlist → their own Plex watchlist (visible per their Plex privacy)
 	PlexUser      string `toml:"-"`               // a person's Plex Home user (Person.PlexUser); the owner's token is the server's
@@ -95,8 +96,8 @@ type Options struct {
 // Person is one more Letterboxd member whose diary becomes watch events for Person, a name in jfsync's users, and
 // whose watchlist goes to their own Plex watchlist when they name a Plex Home user. The missing-films file is the owner's.
 type Person struct {
-	Person        string `toml:"person"`
-	User          string `toml:"user"`            // their Letterboxd username
+	Person        string `toml:"person" required:"their name in the watch record: the name of their entry in stages.jfsync.users"`
+	User          string `toml:"user" required:"their Letterboxd username"`
 	PlexUser      string `toml:"plex_user"`       // their Plex Home user: its username, or its title for a managed user (no username); "" = none
 	ExportDir     string `toml:"export_dir"`      // "" = none; may be the owner's: only folders named for User are read
 	History       bool   `toml:"history"`         // as the owner's history
@@ -130,23 +131,33 @@ func (o Options) members() ([]member, error) {
 
 func defaults() Options {
 	return Options{
-		User:           "saahilsan",
 		LetterboxdURL:  "https://letterboxd.com",
 		BoxdURL:        "https://boxd.it",
 		UserAgent:      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36 (projectionist; personal sync of one member's own public diary)",
 		MaxFetches:     400,
 		WatchlistEvery: 6 * time.Hour,
 		PagesEvery:     24 * time.Hour,
-		ExportDir:      "/volume1/docker/projectionist/data/letterboxd",
-		MoviesDir:      "/volume1/media/Movies",
-		TVRoot:         "/volume1/media/TV",
-		MissingFile:    "/volume1/media/_watchlist-missing.txt",
 		SinkRefresh:    24 * time.Hour,
-		Person:         "saahil",
 		PlexTVURL:      "https://clients.plex.tv",
 		DiscoverURL:    "https://discover.provider.plex.tv",
 		RunBudget:      25 * time.Minute,
 	}
+}
+
+func (Stage) Check(decode func(any) error) []config.Problem {
+	opt := defaults()
+	ps, ok := config.CheckStage(name, decode, &opt)
+	if !ok {
+		return ps
+	}
+	if opt.PlexWatchlist && opt.TVRoot == "" {
+		ps = append(ps, config.Missing("stages.letterboxd.tv_root", "when stages.letterboxd.plex_watchlist is true",
+			"the folder that holds the shows"))
+	}
+	if _, err := opt.members(); err != nil {
+		ps = append(ps, config.Problem{Key: "stages.letterboxd.people", Want: err.Error()})
+	}
+	return ps
 }
 
 const schema = `

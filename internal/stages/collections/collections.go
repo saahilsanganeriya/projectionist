@@ -35,6 +35,7 @@ import (
 	"sync"
 	"time"
 
+	"projectionist/internal/config"
 	"projectionist/internal/library"
 	"projectionist/internal/stage"
 	"projectionist/internal/store"
@@ -47,11 +48,11 @@ const (
 )
 
 type Options struct {
-	MoviesDir      string        `toml:"movies_dir"`
+	MoviesDir      string        `toml:"movies_dir" required:"the folder that holds the films (one folder per film)"`
 	OwnerFile      string        `toml:"owner_file"` // the owner's collections, frozen from the Plex export
 	PosterDir      string        `toml:"poster_dir"` // <ratingKey>.jpg for each of them, copied once from the export
 	ApprovedFile   string        `toml:"approved_file"`
-	PlexSection    int           `toml:"plex_section"`
+	PlexSection    int           `toml:"plex_section" required:"the id of the Plex Movies library (the number in its URL: section=N)"`
 	Sinks          []string      `toml:"sinks"`
 	CanonDirectors []string      `toml:"canon_directors"` // such a director gets a collection at their third film on disk
 	Only           []string      `toml:"only"`            // reconcile just these collections; empty means all
@@ -62,15 +63,19 @@ type Options struct {
 
 func defaults() Options {
 	return Options{
-		MoviesDir:    "/volume1/media/Movies",
 		OwnerFile:    "/config/collections.owner.json",
 		PosterDir:    "/config/collection-posters",
 		ApprovedFile: "/config/collections.approved.json",
-		PlexSection:  4,
 		Sinks:        []string{"plex", "jellyfin"},
 		SinkBudget:   20 * time.Minute,
 		CallTimeout:  2 * time.Minute, // a member list took over 90 s while Jellyfin ran its first scan
 	}
+}
+
+func (Stage) Check(decode func(any) error) []config.Problem {
+	opt := defaults()
+	ps, _ := config.CheckStage(name, decode, &opt)
+	return ps
 }
 
 // ---- desired state ----

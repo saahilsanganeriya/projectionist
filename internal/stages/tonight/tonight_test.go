@@ -56,7 +56,7 @@ func TestPickDay(t *testing.T) {
 // a year off by one; and the reverse, hiding a different film that shares a title.
 func TestSeen(t *testing.T) {
 	w := newWatched()
-	w.add("saahil", []entry{{Name: "Mission: Impossible", Year: 1996}, {Name: "Amélie", Year: 2001}, {Name: "Dune", Year: 2021},
+	w.add("owner", []entry{{Name: "Mission: Impossible", Year: 1996}, {Name: "Amélie", Year: 2001}, {Name: "Dune", Year: 2021},
 		{Name: "Se7en", Year: 1995}},
 		map[string]entry{"g": {Name: "Ad Astra", Year: 2019, TMDB: 419704}})
 	for _, c := range []struct {
@@ -208,17 +208,17 @@ type world struct {
 	mu      sync.Mutex
 }
 
-// household is the three of them: the owner with his export, Aurelia (jfsync's roger) and Aaron, each with only a
+// household is the three of them: the owner with his export, Viewer B (jfsync's viewer-b) and Viewer-a, each with only a
 // feed and a films page.
 const household = `people = [
-  { person = "saahil", user = "saahilsan", export_dir = "testdata/export" },
-  { person = "roger", user = "auralb" },
-  { person = "aaron", user = "aaron1009" },
+  { person = "owner", user = "owner-lb", export_dir = "testdata/export" },
+  { person = "viewer-b", user = "viewer-b-lb" },
+  { person = "viewer-a", user = "viewer-a-lb" },
 ]
 `
 
-// aureliaReview is long enough that 6 of its words make a quote.
-const aureliaReview = "Quiet buildings and quieter people, I could live inside this film forever."
+// viewerBReview is long enough that 6 of its words make a quote.
+const viewerBReview = "Quiet buildings and quieter people, I could live inside this film forever."
 
 // lbItem is one entry of a fake Letterboxd feed (all fields) or films page (title, year, stars).
 type lbItem struct {
@@ -269,7 +269,7 @@ func filmsHTML(items []lbItem) string {
 // need the real library's ~190 candidate lines.
 func newWorld(t *testing.T, options string, fillers int) *world {
 	t.Helper()
-	w := &world{h: fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "machine1", "PlexOnlineUsername": "saahilsanganeriya"}),
+	w := &world{h: fake.NewEnv(t, map[string]string{"ProcessedMachineIdentifier": "machine1", "PlexOnlineUsername": "owner-plex"}),
 		logs: &bytes.Buffer{}}
 	w.h.Env.Log = slog.New(slog.NewTextHandler(w.logs, nil))
 	la, _ := time.LoadLocation("America/Los_Angeles")
@@ -304,14 +304,14 @@ func newWorld(t *testing.T, options string, fillers int) *world {
 	if err := jpeg.Encode(thumb, image.NewRGBA(image.Rect(0, 0, 34, 51)), nil); err != nil {
 		t.Fatal(err)
 	}
-	// Aurelia and Aaron log films outside the unseen seven by default: each test adds what it needs.
+	// Viewer B and Viewer-a log films outside the unseen seven by default: each test adds what it needs.
 	w.feeds = map[string][]lbItem{
-		"auralb": {{id: 11, tmdb: 429191, title: "Columbus", year: 2017, stars: 5, review: aureliaReview},
+		"viewer-b-lb": {{id: 11, tmdb: 429191, title: "Columbus", year: 2017, stars: 5, review: viewerBReview},
 			{id: 12, tmdb: 680, title: "Pulp Fiction", year: 1994, stars: 4}},
-		"aaron1009": {{id: 21, tmdb: 603, title: "The Matrix", year: 1999, stars: 4.5, review: "the lobby scene still rules"}},
+		"viewer-a-lb": {{id: 21, tmdb: 603, title: "The Matrix", year: 1999, stars: 4.5, review: "the lobby scene still rules"}},
 	}
-	w.films = map[string][]lbItem{"auralb": {{title: "Columbus", year: 2017, stars: 5}},
-		"aaron1009": {{title: "Spirited Away", year: 2001, stars: 5}}}
+	w.films = map[string][]lbItem{"viewer-b-lb": {{title: "Columbus", year: 2017, stars: 5}},
+		"viewer-a-lb": {{title: "Spirited Away", year: 2001, stars: 5}}}
 	w.down = map[string]bool{}
 	ext := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		w.mu.Lock()
@@ -326,7 +326,7 @@ func newWorld(t *testing.T, options string, fillers int) *world {
 			}
 			var body []byte
 			switch {
-			case r.URL.Path == "/saahilsan/rss/":
+			case r.URL.Path == "/owner-lb/rss/":
 				body, _ = os.ReadFile("testdata/rss.xml")
 			case page == "rss":
 				body = []byte(feedXML(user, w.feeds[user]))
@@ -365,7 +365,7 @@ image_base = %q
 // alone with his export, and no one gets a playlist of their own.
 func (w *world) options(text string) {
 	if !strings.Contains(text, "people") {
-		text += `people = [{ person = "saahil", user = "saahilsan", export_dir = "testdata/export" }]` + "\n"
+		text += `people = [{ person = "owner", user = "owner-lb", export_dir = "testdata/export" }]` + "\n"
 	}
 	if !strings.Contains(w.base+text, "playlist") {
 		text += "playlist = \"\"\n"
@@ -607,7 +607,7 @@ func newPlexFake(srv *fake.Server) *plexFake {
 		mc(rw, map[string]any{"Metadata": []map[string]string{{"ratingKey": "900"}}})
 	})
 	// 777 is his own collection with our title, with no label: no route writes to it, so a write fails the sink.
-	his := map[string]any{"ratingKey": "777", "index": 77700, "type": "collection", "title": defaults().Collection, "summary": "his"}
+	his := map[string]any{"ratingKey": "777", "index": 77700, "type": "collection", "title": household, "summary": "his"}
 	srv.HandleFunc("GET", "/library/metadata/777", func(rw http.ResponseWriter, _ *http.Request) {
 		mc(rw, map[string]any{"Metadata": []any{his}})
 	})
@@ -883,7 +883,7 @@ func (p *plexFake) homeRow() []string {
 	return slices.Sorted(slices.Values(p.home))
 }
 
-// ---- fake Jellyfin: user "saahil", the films above, and the BoxSet the stage makes ----
+// ---- fake Jellyfin: user "owner", the films above, and the BoxSet the stage makes ----
 
 type jfFake struct {
 	mu         sync.Mutex
@@ -899,7 +899,7 @@ type jfFake struct {
 
 func newJFFake(srv *fake.Server) *jfFake {
 	j := &jfFake{}
-	srv.Handle("GET", "/Users", 200, `[{"Name":"guest","Id":"u2"},{"Name":"saahil","Id":"u1"}]`)
+	srv.Handle("GET", "/Users", 200, `[{"Name":"guest","Id":"u2"},{"Name":"owner","Id":"u1"}]`)
 	item := func(f libFilm) map[string]any {
 		return map[string]any{"Id": jfID(f.tmdb), "Name": f.title, "Type": "Movie",
 			"ProviderIds": map[string]string{"Tmdb": strconv.Itoa(f.tmdb)}, "UserData": map[string]bool{"Played": f.jellyPlayed}}
@@ -918,7 +918,7 @@ func newJFFake(srv *fake.Server) *jfFake {
 		switch {
 		case q.Get("IncludeItemTypes") == "BoxSet", q.Get("Ids") == "box1":
 			if q.Get("Ids") == "" { // box9 is his own, with our title, untagged; no route writes to it
-				out = append(out, map[string]any{"Id": "box9", "Name": defaults().Collection, "Type": "BoxSet"})
+				out = append(out, map[string]any{"Id": "box9", "Name": household, "Type": "BoxSet"})
 			}
 			if j.box != nil {
 				out = append(out, map[string]any{"Id": "box1", "Name": j.name, "Type": "BoxSet", "Tags": j.tags})
@@ -995,7 +995,7 @@ func (j *jfFake) members() []string {
 // collection, so a pick in one was left out of Jellyfin's Tonight, and a collection's TMDB id was read as a film's.
 func TestJellyfinMapListsFilmsInCollections(t *testing.T) {
 	h := fake.NewEnv(t, nil)
-	h.Jellyfin.Handle("GET", "/Users", 200, `[{"Name":"saahil","Id":"u1"}]`)
+	h.Jellyfin.Handle("GET", "/Users", 200, `[{"Name":"owner","Id":"u1"}]`)
 	h.Jellyfin.HandleFunc("GET", "/Items", func(rw http.ResponseWriter, r *http.Request) {
 		item := `{"Id":"j438631","ProviderIds":{"Tmdb":"438631"}}`
 		if r.URL.Query().Get("collapseBoxSetItems") != "false" { // Jellyfin's default for a movie query
@@ -1003,7 +1003,7 @@ func TestJellyfinMapListsFilmsInCollections(t *testing.T) {
 		}
 		io.WriteString(rw, `{"Items":[`+item+`]}`)
 	})
-	m, err := jellyfinMap(context.Background(), h.Env.Jellyfin, "saahil")
+	m, err := jellyfinMap(context.Background(), h.Env.Jellyfin, "owner")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1441,12 +1441,12 @@ func (w *world) listed(i, tmdb int) bool {
 func TestFilmSeenByAnyoneIsExcluded(t *testing.T) {
 	ownExport := func(t *testing.T) string {
 		dir := t.TempDir()
-		mine := filepath.Join(dir, "letterboxd-aaron1009-2026-09-01-10-00-utc")
+		mine := filepath.Join(dir, "letterboxd-viewer-a-lb-2026-09-01-10-00-utc")
 		write(t, filepath.Join(mine, "watched.csv"), "Date,Name,Year,Letterboxd URI\n2026-08-01,\"Paris, Texas\",1984,https://boxd.it/pt\n")
 		for _, f := range []string{"diary.csv", "ratings.csv", "watchlist.csv"} {
 			write(t, filepath.Join(mine, f), "Date,Name,Year,Letterboxd URI\n")
 		}
-		const his = "letterboxd-saahilsan-2026-02-01-14-47-utc"
+		const his = "letterboxd-owner-lb-2026-02-01-14-47-utc"
 		for _, f := range []string{"diary.csv", "ratings.csv", "reviews.csv", "watched.csv", "watchlist.csv"} {
 			body, err := os.ReadFile(filepath.Join("testdata/export", his, f))
 			if err != nil {
@@ -1455,9 +1455,9 @@ func TestFilmSeenByAnyoneIsExcluded(t *testing.T) {
 			write(t, filepath.Join(dir, his, f), string(body))
 		}
 		return fmt.Sprintf(`people = [
-  { person = "saahil", user = "saahilsan", export_dir = %[1]q },
-  { person = "roger", user = "auralb" },
-  { person = "aaron", user = "aaron1009", export_dir = %[1]q },
+  { person = "owner", user = "owner-lb", export_dir = %[1]q },
+  { person = "viewer-b", user = "viewer-b-lb" },
+  { person = "viewer-a", user = "viewer-a-lb", export_dir = %[1]q },
 ]
 `, dir)
 	}
@@ -1468,13 +1468,13 @@ func TestFilmSeenByAnyoneIsExcluded(t *testing.T) {
 		gone    int
 	}{
 		{"her feed names it", nil, func(_ *testing.T, w *world) {
-			w.feeds["auralb"] = append(w.feeds["auralb"], lbItem{id: 13, tmdb: 949, title: "Heat", year: 1995, stars: 3})
+			w.feeds["viewer-b-lb"] = append(w.feeds["viewer-b-lb"], lbItem{id: 13, tmdb: 949, title: "Heat", year: 1995, stars: 3})
 		}, 949},
 		{"his films page lists it", nil, func(_ *testing.T, w *world) {
-			w.films["aaron1009"] = append(w.films["aaron1009"], lbItem{title: "Stalker", year: 1979, stars: 4})
+			w.films["viewer-a-lb"] = append(w.films["viewer-a-lb"], lbItem{title: "Stalker", year: 1979, stars: 4})
 		}, 1398},
-		{"her Plex play is in the watch record", nil, func(t *testing.T, w *world) { w.record(t, "roger", 18148, watch.Finished, 0) }, 18148},
-		{"his rating is in the watch record", nil, func(t *testing.T, w *world) { w.record(t, "aaron", 843, watch.Rated, 8) }, 843},
+		{"her Plex play is in the watch record", nil, func(t *testing.T, w *world) { w.record(t, "viewer-b", 18148, watch.Finished, 0) }, 18148},
+		{"his rating is in the watch record", nil, func(t *testing.T, w *world) { w.record(t, "viewer-a", 843, watch.Rated, 8) }, 843},
 		{"an export of his own beside the owner's", ownExport, func(*testing.T, *world) {}, 655},
 		{"a play outside the household", nil, func(t *testing.T, w *world) { w.record(t, "guest", 389, watch.Finished, 0) }, 0},
 	} {
@@ -1511,7 +1511,7 @@ func TestUnreachableFeedDegrades(t *testing.T) {
 		alert   string        // "" = no alert
 		viewers int           // taste blocks sent
 	}{
-		{"never answered", 0, "roger (Letterboxd auralb: feed unanswered since it was first asked, latest error " +
+		{"never answered", 0, "viewer-b (Letterboxd viewer-b-lb: feed unanswered since it was first asked, latest error " +
 			`"letterboxd: challenged: GET `, 2},
 		{"answered yesterday", 24 * time.Hour, "", 3},
 		{"last answered three days ago", 72 * time.Hour, "feed unanswered since 2026-10-02T15:00:00Z", 3},
@@ -1525,7 +1525,7 @@ func TestUnreachableFeedDegrades(t *testing.T) {
 				w.h.Now = w.h.Now.Add(c.upAgo)
 			}
 			w.mu.Lock()
-			w.down["auralb"] = true
+			w.down["viewer-b-lb"] = true
 			w.mu.Unlock()
 			w.ai.script(answer3(1398, 949, 18148))
 			rep := w.run(t)
@@ -1534,7 +1534,7 @@ func TestUnreachableFeedDegrades(t *testing.T) {
 			}
 			switch {
 			case c.alert == "" && len(rep.Alerts) != 0,
-				c.alert != "" && (len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], c.alert) || strings.Contains(rep.Alerts[0], "aaron")):
+				c.alert != "" && (len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], c.alert) || strings.Contains(rep.Alerts[0], "viewer-a")):
 				t.Fatalf("alerts %q; want %q alone", rep.Alerts, c.alert)
 			}
 			calls := w.ai.gw.Calls()
@@ -1560,9 +1560,9 @@ func TestPickWatchedByAnyoneLeavesTheRow(t *testing.T) {
 		{"her feed logs it", func(_ *testing.T, w *world) {
 			w.mu.Lock()
 			defer w.mu.Unlock()
-			w.feeds["auralb"] = append(w.feeds["auralb"], lbItem{id: 14, tmdb: 346, title: "Seven Samurai", year: 1954, stars: 4.5})
+			w.feeds["viewer-b-lb"] = append(w.feeds["viewer-b-lb"], lbItem{id: 14, tmdb: 346, title: "Seven Samurai", year: 1954, stars: 4.5})
 		}},
-		{"his play reaches the watch record", func(t *testing.T, w *world) { w.record(t, "aaron", 346, watch.Finished, 0) }},
+		{"his play reaches the watch record", func(t *testing.T, w *world) { w.record(t, "viewer-a", 346, watch.Finished, 0) }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			w := newWorld(t, household, 0)
@@ -1579,7 +1579,7 @@ func TestPickWatchedByAnyoneLeavesTheRow(t *testing.T) {
 	}
 }
 
-// Catches the shared row quoting a review: a reason repeating 6 words of Aurelia's feed review must be retried with
+// Catches the shared row quoting a review: a reason repeating 6 words of Viewer B's feed review must be retried with
 // that named, and must not reach Plex or Jellyfin. Also catches a person's name or Letterboxd username reaching the
 // model, which knows the household only as viewers A to C, and a "liked" film one of the others loved refused.
 func TestReasonQuotingAReviewIsRetried(t *testing.T) {
@@ -1596,7 +1596,7 @@ func TestReasonQuotingAReviewIsRetried(t *testing.T) {
 		t.Fatalf("a review was quoted on the row: %q", w.plex.summary)
 	}
 	sent := w.ai.messages(0)
-	for _, who := range []string{"saahil", "roger", "aaron", "auralb"} {
+	for _, who := range []string{"owner", "viewer-b", "viewer-a", "viewer-b-lb"} {
 		if strings.Contains(strings.ToLower(sent), who) {
 			t.Errorf("the model was told %q", who)
 		}

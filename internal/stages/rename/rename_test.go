@@ -272,9 +272,9 @@ func TestRunWaitsForViewersAndArrivals(t *testing.T) {
 		touch        string // a file whose mtime is pushed inside the quiet window
 		moved, swept bool
 	}{
-		{"guest watching", 200, `<MediaContainer size="1"><Video><User title="roger"/></Video></MediaContainer>`, "", false, false},
+		{"guest watching", 200, `<MediaContainer size="1"><Video><User title="viewer-b"/></Video></MediaContainer>`, "", false, false},
 		{"plex not answering", 503, "", "", false, false},
-		{"owner watching", 200, `<MediaContainer size="1"><Video><User title="saahil"/></Video></MediaContainer>`, "", true, true},
+		{"owner watching", 200, `<MediaContainer size="1"><Video><User title="owner"/></Video></MediaContainer>`, "", true, true},
 		{"still arriving", 200, `<MediaContainer size="0"></MediaContainer>`, "TV/Show.S01.1080p.WEB-GRP/Show.S01E02.1080p.WEB-GRP.mkv", false, true},
 	}
 	for _, c := range cases {

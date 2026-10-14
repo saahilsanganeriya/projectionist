@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"projectionist/internal/config"
 	"projectionist/internal/fsx"
 	"projectionist/internal/library"
 	"projectionist/internal/probe"
@@ -41,7 +42,7 @@ import (
 const name = "details"
 
 type Options struct {
-	Library  string   `toml:"library"`
+	Library  string   `toml:"library" required:"the media share whose sections hold the videos"`
 	Sections []string `toml:"sections"` // folders under Library that hold the scheme
 	// Rename logs, oldest first (TSV: time, op, old path, new path, unit). A missing one is skipped, but a run
 	// that reads no move row at all fails: every note would lose its original name. [] means "no logs".
@@ -61,18 +62,19 @@ type Options struct {
 
 func defaults() Options {
 	return Options{
-		Library:  "/volume1/media",
-		Sections: []string{"Movies", "TV"},
-		// The Python renamers' logs, the copies the rename stage keeps of them, then its own log.
-		UndoLogs: []string{"/volume1/PlexMediaServer/rename/undo.tsv", "/volume1/PlexMediaServer/rename/undo_auto.tsv",
-			"/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv",
-			"/volume1/media/.projectionist/rename/undo.tsv"},
+		Sections:        []string{"Movies", "TV"},
 		MaxProbes:       400,
 		MaxPeakScans:    2,
 		MaxDecodeChecks: 60,
 		PeakAboveKbps:   20000,
 		RetryUnreadable: 24 * time.Hour,
 	}
+}
+
+func (Stage) Check(decode func(any) error) []config.Problem {
+	opt := defaults()
+	ps, _ := config.CheckStage(name, decode, &opt)
+	return ps
 }
 
 const schema = `CREATE TABLE IF NOT EXISTS details_files (

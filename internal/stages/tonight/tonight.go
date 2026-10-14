@@ -45,6 +45,7 @@ import (
 	"strings"
 	"time"
 
+	"projectionist/internal/config"
 	"projectionist/internal/llm"
 	"projectionist/internal/stage"
 	"projectionist/internal/stages/jfsync"
@@ -57,20 +58,20 @@ type Options struct {
 	MaxTokens     int     `toml:"max_tokens"`    // reasoning included
 	DailyCapUSD   float64 `toml:"daily_cap_usd"` // every call of the day together: the household's and each person's
 	Picks         int     `toml:"picks"`
-	PickAfter     string  `toml:"pick_after"`     // HH:MM in the config timezone: a new day's picks after this
+	PickAfter     string  `toml:"pick_after" required:"the local time (HH:MM, config time zone) after which a new day's picks are made"`
 	MaxCandidates int     `toml:"max_candidates"` // unseen films shown to the model, best-ranked first
-	Section       int     `toml:"section"`
-	Collection    string  `toml:"collection"` // the household's Plex collection and Jellyfin BoxSet
-	Playlist      string  `toml:"playlist"`   // each person's own: this Jellyfin playlist, and the Plex shelf "<playlist> · <name>"; "" = none
-	MoviesDir     string  `toml:"movies_dir"`
+	Section       int     `toml:"section" required:"the id of the Plex Movies library"`
+	Collection    string  `toml:"collection" required:"the name of the household's Plex collection and Jellyfin BoxSet"`
+	Playlist      string  `toml:"playlist"` // each person's own: this Jellyfin playlist, and the Plex shelf "<playlist> · <name>"; "" = none
+	MoviesDir     string  `toml:"movies_dir" required:"the folder that holds the films"`
 	ImageBase     string  `toml:"image_base"`
-	JellyfinUser  string  `toml:"jellyfin_user"` // the owner's account, whose played flags count
+	JellyfinUser  string  `toml:"jellyfin_user" required:"your Jellyfin user name, whose played flags count"`
 	// People is the household, in the letterboxd stage's shape: person is their name in jfsync's users (the watch
 	// record; jfsync's jellyfin for that name owns their Jellyfin playlist), user their Letterboxd username, export_dir a
 	// folder holding their own letterboxd-<user>-* export ("" = none: their feed and films page instead), plex_user
 	// their Plex account (its username, or a managed user's name; the owner's is the server's own sign-in), name what
-	// their shelf is called. history and keep_hand_added mean nothing here. Unset: the owner alone.
-	People         []letterboxd.Person `toml:"people"`
+	// their shelf is called. history and keep_hand_added mean nothing here.
+	People         []letterboxd.Person `toml:"people" required:"one entry per person in the household (person, user, and plex_user, export_dir, name as needed)"`
 	PlexTVURL      string              `toml:"plex_tv"`
 	LetterboxdURL  string              `toml:"letterboxd_url"`
 	SinkTimeout    time.Duration       `toml:"sink_timeout"`     // per sink per run; what is left over waits for the next run
@@ -80,18 +81,26 @@ type Options struct {
 
 func defaults() Options {
 	return Options{
-		MaxTokens: 4000, DailyCapUSD: 0.15, Picks: 5, PickAfter: "05:00", MaxCandidates: 400,
-		Section: 4, Collection: "Tonight · Household", Playlist: "Tonight", MoviesDir: "/volume1/media/Movies",
-		PlexTVURL: "https://clients.plex.tv", LetterboxdURL: "https://letterboxd.com",
-		ImageBase: "https://image.tmdb.org/t/p", JellyfinUser: "saahil",
+		MaxTokens: 4000, DailyCapUSD: 0.15, Picks: 5, MaxCandidates: 400,
+		PlexTVURL: "https://clients.plex.tv", LetterboxdURL: "https://letterboxd.com", ImageBase: "https://image.tmdb.org/t/p",
 		SinkTimeout: 3 * time.Minute, PlexMapTimeout: 10 * time.Minute, MapEvery: 24 * time.Hour,
 	}
 }
 
-// owner is the household when people is unset. Not a default in Options: TOML decodes a shorter people list into the
-// default's backing array, so a configured entry would keep the owner's export_dir.
-var owner = letterboxd.Person{Person: "saahil", User: "saahilsan", PlexUser: "saahilsanganeriya",
-	ExportDir: "/volume1/docker/projectionist/data/letterboxd"}
+func (Stage) Check(decode func(any) error) []config.Problem {
+	opt := defaults()
+	ps, ok := config.CheckStage(name, decode, &opt)
+	if !ok {
+		return ps
+	}
+	if err := uniquePeople(opt.People); err != nil {
+		ps = append(ps, config.Problem{Key: "stages.tonight.people", Want: err.Error()})
+	}
+	if _, err := clock(opt.PickAfter); opt.PickAfter != "" && err != nil {
+		ps = append(ps, config.Problem{Key: "stages.tonight.pick_after", Want: "want HH:MM"})
+	}
+	return ps
+}
 
 // options decodes the stage's keys and checks them; after is pick_after as an offset from local midnight.
 func options(env *stage.Env) (opt Options, after time.Duration, err error) {
@@ -100,17 +109,24 @@ func options(env *stage.Env) (opt Options, after time.Duration, err error) {
 		return opt, 0, err
 	}
 	if len(opt.People) == 0 {
-		opt.People = []letterboxd.Person{owner}
+		return opt, 0, errors.New("tonight people: unset; name the household's people")
 	}
-	persons := map[string]bool{}
-	for _, p := range opt.People {
-		if p.Person == "" || p.User == "" || persons[p.Person] {
-			return opt, 0, fmt.Errorf("tonight people: each entry needs a user and a person of its own (person %q, user %q)", p.Person, p.User)
-		}
-		persons[p.Person] = true
+	if err := uniquePeople(opt.People); err != nil {
+		return opt, 0, err
 	}
 	after, err = clock(opt.PickAfter)
 	return opt, after, err
+}
+
+func uniquePeople(people []letterboxd.Person) error {
+	persons := map[string]bool{}
+	for _, p := range people {
+		if p.Person == "" || p.User == "" || persons[p.Person] {
+			return fmt.Errorf("tonight people: each entry needs a user and a person of its own (person %q, user %q)", p.Person, p.User)
+		}
+		persons[p.Person] = true
+	}
+	return nil
 }
 
 type pick struct {

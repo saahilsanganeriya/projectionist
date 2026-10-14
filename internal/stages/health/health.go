@@ -86,10 +86,10 @@ type Options struct {
 	QBittorrentURL       string         `toml:"qbittorrent_url"`
 	Public               map[string]int `toml:"public"` // URL → the status it must answer; no default (a map would merge)
 
-	PlexMoviesSection  int           `toml:"plex_movies_section"`  // the Movies library, whose hub row is timed
-	PlexSlow           time.Duration `toml:"plex_slow"`            // a hub load slower than this is slow
-	PlexBatch          int           `toml:"plex_batch"`           // library changes since the last optimize that make one due
-	PlexOptimizeWindow string        `toml:"plex_optimize_window"` // "HH:MM-HH:MM" in the config time zone
+	PlexMoviesSection  int           `toml:"plex_movies_section" required:"the id of the Plex Movies library, whose hub row is timed"`
+	PlexSlow           time.Duration `toml:"plex_slow"`  // a hub load slower than this is slow
+	PlexBatch          int           `toml:"plex_batch"` // library changes since the last optimize that make one due
+	PlexOptimizeWindow string        `toml:"plex_optimize_window" required:"the hours Plex may optimize its database, HH:MM-HH:MM in the config time zone (when nobody watches)"`
 
 	Volume2        string        `toml:"volume2"`          // the app-data NVMe volume; "" = no volume checks
 	Volume2MaxUsed float64       `toml:"volume2_max_used"` // percent used that alerts
@@ -106,15 +106,44 @@ func defaults() Options {
 		JellyfinContainer:    "jellyfin",
 		QBittorrentContainer: "qbittorrent",
 		QBittorrentURL:       "http://127.0.0.1:8080",
-		PlexMoviesSection:    4,
 		PlexSlow:             5 * time.Second,
 		PlexBatch:            500,
-		PlexOptimizeWindow:   "03:00-06:00",
 		Volume2MaxUsed:       75,
-		Volume2Allow: []string{"PlexAppData", "jellyfin", "projectionist", "transcode", "transcode.img", "swapfile",
-			"lost+found", "aquota.user", "aquota.group", "@eaDir", "@tmp", ".move"},
-		BackupMaxAge: 36 * time.Hour,
+		BackupMaxAge:         36 * time.Hour,
 	}
+}
+
+func (Stage) Check(decode func(any) error) []config.Problem {
+	opt := defaults()
+	ps, ok := config.CheckStage(name, decode, &opt)
+	if !ok {
+		return ps
+	}
+	if opt.Volume2 != "" && len(opt.Volume2Allow) == 0 {
+		ps = append(ps, config.Missing("stages.health.volume2_allow", "when stages.health.volume2 is set",
+			"the only top-level entries that volume may hold"))
+	}
+	if opt.PlexOptimizeWindow != "" {
+		if w, err := config.ParseWindow(opt.PlexOptimizeWindow); err != nil || !w.Set {
+			ps = append(ps, config.Problem{Key: "stages.health.plex_optimize_window", Want: "want HH:MM-HH:MM"})
+		}
+	}
+	for _, bad := range []struct {
+		key  string
+		isOK bool
+		want string
+	}{
+		{"timeout", opt.Timeout > 0, "must be longer than 0"},
+		{"fail_threshold", opt.FailThreshold >= 1, "must be at least 1"},
+		{"restart_cooldown", opt.RestartCooldown >= time.Hour, "must be at least 1h"},
+		{"plex_slow", opt.PlexSlow > 0, "must be longer than 0"},
+		{"plex_batch", opt.PlexBatch >= 1, "must be at least 1"},
+	} {
+		if !bad.isOK {
+			ps = append(ps, config.Problem{Key: "stages.health." + bad.key, Want: bad.want})
+		}
+	}
+	return ps
 }
 
 // fault classifies a probe's outcome.

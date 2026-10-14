@@ -120,10 +120,10 @@ func TestEvents(t *testing.T) {
 		"rated movie/tmdb-419704 letterboxd:film-aa at=2026-01-20T12Z plays=0 played=- rating=6",
 		"rated movie/tmdb-718032 letterboxd:film-lp at=2022-01-10T12Z plays=0 played=- rating=10",
 	}
-	if got, want := show(baseFacts().events("saahil", time.UTC, true, exportAt)), strings.Join(backlog, "\n"); got != want {
+	if got, want := show(baseFacts().events("owner", time.UTC, true, exportAt)), strings.Join(backlog, "\n"); got != want {
 		t.Errorf("history = true:\n%s\nwant\n%s", got, want)
 	}
-	if got, want := show(baseFacts().events("saahil", time.UTC, false, exportAt)), backlog[2]; got != want {
+	if got, want := show(baseFacts().events("owner", time.UTC, false, exportAt)), backlog[2]; got != want {
 		t.Errorf("history = false, since the export:\n%s\nwant\n%s", got, want)
 	}
 }

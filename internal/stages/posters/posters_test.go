@@ -312,7 +312,7 @@ func (w *world) jellyfinLists(items string) {
 	})
 }
 
-const guest = `<MediaContainer size="1"><Video type="movie" title="X"><User title="roger"/></Video></MediaContainer>`
+const guest = `<MediaContainer size="1"><Video type="movie" title="X"><User title="viewer-b"/></Video></MediaContainer>`
 
 func plexDB(t *testing.T, path, insert string) {
 	db, err := sql.Open("sqlite", path)

@@ -58,10 +58,14 @@ func safeName(key string) string {
 	return unsafeName.ReplaceAllString(rest, "_")
 }
 
-// onNVMe is whether path lies on the NVMe volume as the container sees it.
-func onNVMe(path string) bool {
+// onNVMe is whether path lies on the app-data volume (appVolume, "" = none) or under /state, as the container sees them.
+func onNVMe(path, appVolume string) bool {
 	p := filepath.Clean(path)
-	return slices.ContainsFunc([]string{"/volume2", "/state"}, func(root string) bool { return p == root || strings.HasPrefix(p, root+"/") })
+	roots := []string{"/state"}
+	if appVolume != "" {
+		roots = append(roots, filepath.Clean(appVolume))
+	}
+	return slices.ContainsFunc(roots, func(root string) bool { return p == root || strings.HasPrefix(p, root+"/") })
 }
 
 // archive brings the archive of rows (this run's applied verdicts) up to date. A title a guest's viewing defers, or

@@ -32,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"projectionist/internal/config"
 	"projectionist/internal/fanart"
 	"projectionist/internal/llm"
 	"projectionist/internal/mediux"
@@ -43,20 +44,20 @@ import (
 const name = "posters"
 
 type Options struct {
-	MoviesRoot       string        `toml:"movies_root"`
-	TVRoot           string        `toml:"tv_root"`
+	MoviesRoot       string        `toml:"movies_root" required:"the folder that holds the films"`
+	TVRoot           string        `toml:"tv_root" required:"the folder that holds the shows"`
 	Only             []string      `toml:"only"`    // title keys ("movie:tmdb-422", "season:tmdb-1400:2", "collection:scary movie") to limit a run to
 	DryRun           bool          `toml:"dry_run"` // titles: candidates and judge only, no poster uploaded
 	CacheDir         string        `toml:"cache_dir"`
-	OwnerItems       string        `toml:"owner_items"`     // customizations/items.json: ratingKey, guid, external ids per item
+	OwnerItems       string        `toml:"owner_items"`     // customizations/items.json: ratingKey, guid, external ids per item; "" = no export
 	OwnerPosters     string        `toml:"owner_posters"`   // customizations/posters/<kind>/<ratingKey>.jpg
 	OwnerBackupDB    string        `toml:"owner_backup_db"` // the Plex DB .backup taken with that export
 	MaxTokens        int           `toml:"max_tokens"`      // reasoning included
 	BudgetUSD        float64       `toml:"budget_usd"`      // every judge call ever, not per run
 	FetchWorkers     int           `toml:"fetch_workers"`
 	ApplyWorkers     int           `toml:"apply_workers"`
-	PlexMovieSection int           `toml:"plex_movie_section"`
-	PlexTVSection    int           `toml:"plex_tv_section"`
+	PlexMovieSection int           `toml:"plex_movie_section" required:"the id of the Plex Movies library"`
+	PlexTVSection    int           `toml:"plex_tv_section" required:"the id of the Plex TV library"`
 	SinkIndexEvery   time.Duration `toml:"sink_index_every"` // how often each app's item list is fetched
 	SinkAlertAfter   time.Duration `toml:"sink_alert_after"` // an app whose listing fails this long raises an alert
 	Mark             string        `toml:"mark"`             // EXIF ImageDescription on the images the stage chose
@@ -81,7 +82,7 @@ type Options struct {
 	CriterionSitemap string `toml:"criterion_sitemap"`
 	Wayback          string `toml:"wayback"`
 	// Every candidate a title was judged on and its chosen poster, at full size (archive.go); "" = no archive. Never
-	// on the NVMe.
+	// on the app-data volume (stages.health.volume2) or under /state.
 	ArchiveDir string `toml:"archive_dir"`
 	// Poster sets (sets.go), with collections on: MediUX's site and image host; mediux = "" turns them off.
 	MediUX       string `toml:"mediux"`
@@ -89,24 +90,16 @@ type Options struct {
 }
 
 func defaults() Options {
-	backups := "/volume1/PlexMediaServer/backups"
 	return Options{
-		MoviesRoot:       "/volume1/media/Movies",
-		TVRoot:           "/volume1/media/TV",
-		CacheDir:         "/state/posters",
-		OwnerItems:       backups + "/customizations/items.json",
-		OwnerPosters:     backups + "/customizations/posters",
-		OwnerBackupDB:    backups + "/pre-rename-20261005T0328Z/com.plexapp.plugins.library.db",
-		MaxTokens:        1024,
-		BudgetUSD:        12,
-		FetchWorkers:     3,
-		ApplyWorkers:     2,
-		PlexMovieSection: 4,
-		PlexTVSection:    2,
-		SinkIndexEvery:   24 * time.Hour,
-		SinkAlertAfter:   72 * time.Hour,
-		Mark:             "poster-curator 2026-10",
-		TMDBImages:       "https://image.tmdb.org/t/p",
+		CacheDir:       "/state/posters",
+		MaxTokens:      1024,
+		BudgetUSD:      12,
+		FetchWorkers:   3,
+		ApplyWorkers:   2,
+		SinkIndexEvery: 24 * time.Hour,
+		SinkAlertAfter: 72 * time.Hour,
+		Mark:           "poster-curator 2026-10",
+		TMDBImages:     "https://image.tmdb.org/t/p",
 
 		CollectionDryRun:    true,
 		CollectionBudgetUSD: 5,
@@ -117,10 +110,39 @@ func defaults() Options {
 		WikidataSPARQL:   "https://query.wikidata.org/sparql",
 		CriterionSitemap: "http://sitemap.criterion.com/films.xml", // its https answers nothing (2026-10-06)
 		Wayback:          "https://web.archive.org",
-		ArchiveDir:       "/volume1/PlexMediaServer/poster-archive",
 		MediUX:           "https://mediux.pro",
 		MediUXAssets:     "https://api.mediux.pro/assets",
 	}
+}
+
+func (Stage) Check(decode func(any) error) []config.Problem {
+	opt := defaults()
+	ps, ok := config.CheckStage(name, decode, &opt)
+	if !ok {
+		return ps
+	}
+	export := map[string]string{"owner_items": opt.OwnerItems, "owner_posters": opt.OwnerPosters, "owner_backup_db": opt.OwnerBackupDB}
+	if opt.OwnerItems+opt.OwnerPosters+opt.OwnerBackupDB != "" {
+		for _, key := range []string{"owner_items", "owner_posters", "owner_backup_db"} {
+			if export[key] == "" {
+				ps = append(ps, config.Missing("stages.posters."+key, "when any of owner_items, owner_posters, owner_backup_db is set",
+					"the matching part of your Plex customizations export (items.json, its posters folder, the Plex DB backup taken with it)"))
+			}
+		}
+	}
+	return ps
+}
+
+// appVolume is the app-data volume the health stage watches (stages.health.volume2), where no archive may go; "" when
+// it watches none or no peer options are given.
+func appVolume(env *stage.Env) string {
+	var h struct {
+		Volume2 string `toml:"volume2"`
+	}
+	if env.PeerOptions != nil {
+		_ = env.PeerOptions("health", &h) // health's own run reports a table that does not decode
+	}
+	return h.Volume2
 }
 
 const schema = `
@@ -271,7 +293,7 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	if _, err := env.Store.GetJSON(ctx, name, "owner_import", &imported); err != nil {
 		return err
 	}
-	if export := strings.Join([]string{opt.OwnerItems, opt.OwnerPosters, opt.OwnerBackupDB}, "\n"); imported.Export != export {
+	if export := strings.Join([]string{opt.OwnerItems, opt.OwnerPosters, opt.OwnerBackupDB}, "\n"); opt.OwnerItems != "" && imported.Export != export {
 		n, err := importOwners(ctx, db, opt.OwnerItems, opt.OwnerPosters, opt.OwnerBackupDB, opt.Mark)
 		if err != nil {
 			return fmt.Errorf("owner posters import: %w", err)
@@ -288,8 +310,8 @@ func (Stage) Run(ctx context.Context, env *stage.Env, rep *stage.Report) error {
 	}
 	r.owners = owners
 
-	if opt.ArchiveDir != "" && onNVMe(opt.ArchiveDir) {
-		return fmt.Errorf("posters: archive_dir %s is on the NVMe; the archive belongs on volume1", opt.ArchiveDir)
+	if opt.ArchiveDir != "" && onNVMe(opt.ArchiveDir, appVolume(env)) {
+		return fmt.Errorf("posters: archive_dir %s is on the app-data volume; the archive belongs on the media disks", opt.ArchiveDir)
 	}
 	titles, err := inventory(opt.MoviesRoot, opt.TVRoot)
 	if err != nil {

@@ -36,6 +36,13 @@ type Hooker interface {
 	Hooks(env *Env) map[string]http.Handler // pattern ("POST /hooks/<name>") → handler
 }
 
+// Checker is a stage with keys a deployment must set. Check decodes its [stages.<name>] table with decode (as
+// Env.Options does) and names every key that is unset or wrong; `serve`, `run` and `check` refuse to start on any.
+// It reads nothing else: the deploy's parse test runs it in a container without the NAS's mounts or network.
+type Checker interface {
+	Check(decode func(v any) error) []config.Problem
+}
+
 // Env is everything a stage may use. Clients read their secrets from files on every call, never from env vars.
 type Env struct {
 	Log      *slog.Logger // already tagged stage=<name>

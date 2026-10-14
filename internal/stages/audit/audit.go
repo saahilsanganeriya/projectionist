@@ -30,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"projectionist/internal/config"
 	"projectionist/internal/library"
 	"projectionist/internal/probe"
 	"projectionist/internal/releasesites"
@@ -39,7 +40,7 @@ import (
 const name = "audit"
 
 type Options struct {
-	Root         string        `toml:"root"`          // holds Movies/ and TV/
+	Root         string        `toml:"root" required:"the media share that holds Movies/ and TV/"`
 	Report       string        `toml:"report"`        // the one file this stage writes; default <root>/_audit.txt
 	MaxListed    int           `toml:"max_listed"`    // examples per category in the report
 	Settle       time.Duration `toml:"settle"`        // a file or folder changed more recently may still be moving
@@ -48,8 +49,13 @@ type Options struct {
 }
 
 func defaults() Options {
-	return Options{Root: "/volume1/media", MaxListed: 50, Settle: 15 * time.Minute, ProbeWorkers: 2,
-		Quiet: []string{noEnglish}}
+	return Options{MaxListed: 50, Settle: 15 * time.Minute, ProbeWorkers: 2, Quiet: []string{noEnglish}}
+}
+
+func (Stage) Check(decode func(any) error) []config.Problem {
+	opt := defaults()
+	ps, _ := config.CheckStage(name, decode, &opt)
+	return ps
 }
 
 // Category keys double as metric kinds (projectionist_stage_items_total{stage="audit",kind=...}).

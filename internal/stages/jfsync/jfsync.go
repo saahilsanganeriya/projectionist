@@ -36,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"projectionist/internal/config"
 	"projectionist/internal/stage"
 	"projectionist/internal/store"
 	"projectionist/internal/watch"
@@ -57,7 +58,7 @@ var apps = []string{jellyfinApp, plexApp}
 
 // User maps one person to an account in each app.
 type User struct {
-	Name     string `toml:"name"`     // projectionist's name for the viewer, used by the watch record
+	Name     string `toml:"name" required:"projectionist's name for the viewer, used by the watch record"`
 	Plex     string `toml:"plex"`     // Plex account name (PMS /accounts); "" = no Plex account
 	Jellyfin string `toml:"jellyfin"` // Jellyfin user name; "" = no Jellyfin user
 }
@@ -70,24 +71,29 @@ func (u User) account(app string) string {
 }
 
 type Options struct {
-	Users         []User        `toml:"users"`
-	Apply         bool          `toml:"apply"`          // false: plan only, no app writes (plan_file shows them)
-	PlanFile      string        `toml:"plan_file"`      // optional TSV of the run's planned writes
-	MoviesSection int           `toml:"movies_section"` // Plex sections to address
-	TVSection     int           `toml:"tv_section"`
+	Users         []User        `toml:"users" required:"one entry per viewer: name, and their plex and jellyfin account names"`
+	Apply         bool          `toml:"apply"`     // false: plan only, no app writes (plan_file shows them)
+	PlanFile      string        `toml:"plan_file"` // optional TSV of the run's planned writes
+	MoviesSection int           `toml:"movies_section" required:"the id of the Plex Movies library"`
+	TVSection     int           `toml:"tv_section" required:"the id of the Plex TV library"`
 	AddressEvery  time.Duration `toml:"address_every"` // how often each app's item listing is refreshed
 	ListTimeout   time.Duration `toml:"list_timeout"`  // a whole-section listing takes minutes on a busy NAS
-	PlexBackups   string        `toml:"plex_backups"`  // the newest *.db below it seeds the history, once
-	WebhookURL    string        `toml:"webhook_url"`   // registered on the owner's plex.tv account; "" = do not
+	PlexBackups   string        `toml:"plex_backups" required:"the folder of Plex database backups: the newest *.db below it seeds the watch history, once"`
+	WebhookURL    string        `toml:"webhook_url"` // registered on the owner's plex.tv account; "" = do not
 	PlexTV        string        `toml:"plex_tv"`
 }
 
 func defaults() Options {
 	return Options{
-		Apply: true, MoviesSection: 4, TVSection: 2, AddressEvery: 24 * time.Hour, ListTimeout: 30 * time.Minute,
-		PlexBackups: "/volume1/PlexMediaServer/backups", WebhookURL: "http://127.0.0.1:8097/hooks/plex",
+		Apply: true, AddressEvery: 24 * time.Hour, ListTimeout: 30 * time.Minute, WebhookURL: "http://127.0.0.1:8097/hooks/plex",
 		PlexTV: "https://plex.tv",
 	}
+}
+
+func (Stage) Check(decode func(any) error) []config.Problem {
+	opt := defaults()
+	ps, _ := config.CheckStage(name, decode, &opt)
+	return ps
 }
 
 // person is the viewer behind an app account; ok is false for accounts nobody mapped (they are not recorded).

@@ -40,23 +40,25 @@ import (
 const name = "remote4k"
 
 type Options struct {
-	Playlist    string        `toml:"playlist"` // Plex playlist, Jellyfin playlist or Jellyfin collection
-	Label       string        `toml:"label"`
+	Playlist    string        `toml:"playlist" required:"the name of the Plex playlist, Jellyfin playlist or Jellyfin collection that lists the films to shrink"`
+	Label       string        `toml:"label" required:"the version name the small copy gets beside the film (e.g. \"4K for remote\")"`
 	SmallKbps   int           `toml:"small_kbps"` // a 4K version at or under this already fits the upload
-	WorkDir     string        `toml:"work_dir"`   // must be on the library's subvolume (same share)
-	StatusFile  string        `toml:"status_file"`
+	WorkDir     string        `toml:"work_dir" required:"a work folder on the same share as the films (the copy is renamed into place)"`
+	StatusFile  string        `toml:"status_file" required:"the text file where the stage says what it is doing"`
 	ListTimeout time.Duration `toml:"list_timeout"` // each app's half of the list is given up after this, each request too
 }
 
 func defaults() Options {
 	return Options{
-		Playlist:    "Remote 4K",
-		Label:       "2160p 14Mbps",
 		SmallKbps:   20000,
-		WorkDir:     "/volume1/media/.projectionist/remote4k",
-		StatusFile:  "/volume1/PlexMediaServer/remote4k/STATUS.txt",
 		ListTimeout: 30 * time.Second, // a busy Plex took over 5 s to list in 4 runs on the NAS
 	}
+}
+
+func (Stage) Check(decode func(any) error) []config.Problem {
+	opt := defaults()
+	ps, _ := config.CheckStage(name, decode, &opt)
+	return ps
 }
 
 // request is one film someone listed. Folder is "" for an item that is not a movie; Key names it in the history.

@@ -83,8 +83,8 @@ func TestStatesLastWriterWins(t *testing.T) {
 		t.Fatal(err)
 	}
 	ep := "/tv/The Wire (2002) {tmdb-1438}/Season 01/The Wire (2002) - S01E01-E02 - The Target.mkv"
-	live := Event{Person: "saahil", Ref: "jellyfin:e1", Source: "jellyfin-webhook", At: time.Unix(200, 0), Kind: Finished}
-	old := Event{Person: "saahil", Item: "tv/tmdb-1438/s01e01", Ref: "plex:7", Source: "plex-backup", At: time.Unix(100, 0),
+	live := Event{Person: "owner", Ref: "jellyfin:e1", Source: "jellyfin-webhook", At: time.Unix(200, 0), Kind: Finished}
+	old := Event{Person: "owner", Item: "tv/tmdb-1438/s01e01", Ref: "plex:7", Source: "plex-backup", At: time.Unix(100, 0),
 		Kind: Snapshot, PositionMs: 60000}
 	Add(ctx, db, live)
 	Add(ctx, db, old)
@@ -97,7 +97,7 @@ func TestStatesLastWriterWins(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, it := range []string{"tv/tmdb-1438/s01e01", "tv/tmdb-1438/s01e02"} {
-		if s := states[Key{"saahil", it}]; !s.Played || s.Plays != 1 || s.Source != "jellyfin-webhook" {
+		if s := states[Key{"owner", it}]; !s.Played || s.Plays != 1 || s.Source != "jellyfin-webhook" {
 			t.Errorf("%s: %+v", it, s)
 		}
 	}
@@ -125,12 +125,12 @@ func TestOpenAddsPlayedAt(t *testing.T) {
 		t.Fatal(err)
 	}
 	day := time.Date(2026, 10, 4, 19, 0, 0, 0, time.UTC)
-	e := Event{Person: "saahil", Item: "movie/tmdb-565", Ref: "letterboxd:1", Source: "letterboxd", At: day.Add(11 * time.Hour),
+	e := Event{Person: "owner", Item: "movie/tmdb-565", Ref: "letterboxd:1", Source: "letterboxd", At: day.Add(11 * time.Hour),
 		Kind: Logged, Plays: 1, PlayedAt: day}
 	if err := Add(ctx, db, e); err != nil {
 		t.Fatal(err)
 	}
-	if states, err := States(ctx, db); err != nil || !states[Key{"saahil", "movie/tmdb-565"}].PlayedAt.Equal(day) {
+	if states, err := States(ctx, db); err != nil || !states[Key{"owner", "movie/tmdb-565"}].PlayedAt.Equal(day) {
 		t.Errorf("after Open on the older table: %+v (%v), want played on %v", states, err, day)
 	}
 }

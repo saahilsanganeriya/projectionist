@@ -26,21 +26,22 @@ import (
 	"strings"
 	"time"
 
+	"projectionist/internal/config"
 	"projectionist/internal/stage"
 )
 
 const name = "rename"
 
 type Options struct {
-	Root        string        `toml:"root"`         // the media share: Movies/, TV/, _archive/ live here
-	Mode        string        `toml:"mode"`         // apply (default) | plan (write the plan to plan_dir, touch nothing) | undo
-	PlanDir     string        `toml:"plan_dir"`     // plan mode output: ops.tsv, review.tsv, problems.tsv
-	UndoLog     string        `toml:"undo_log"`     // apply_ops.py format; written before acting, one fsync per unit
-	UndoUnits   []string      `toml:"undo_units"`   // undo mode: only these units ([] = everything in the log)
-	RedoUndone  bool          `toml:"redo_undone"`  // apply plans files undo put back (default: left until renamed or moved)
-	GhostLogs   []string      `toml:"ghost_logs"`   // older rename logs: where moved videos used to live
-	ReviewFile  string        `toml:"review_file"`  // what was left for the owner, rewritten when it changes
-	AlignedLog  string        `toml:"aligned_log"`  // the subtitle aligner's CSV log ("retimed ... -> X.srt")
+	Root        string        `toml:"root" required:"the media share: Movies/, TV/ and _archive/ live there"`
+	Mode        string        `toml:"mode"`     // apply (default) | plan (write the plan to plan_dir, touch nothing) | undo
+	PlanDir     string        `toml:"plan_dir"` // plan mode output: ops.tsv, review.tsv, problems.tsv
+	UndoLog     string        `toml:"undo_log" required:"the undo log the stage writes before each move (TSV), e.g. <root>/.projectionist/rename/undo.tsv"`
+	UndoUnits   []string      `toml:"undo_units"`  // undo mode: only these units ([] = everything in the log)
+	RedoUndone  bool          `toml:"redo_undone"` // apply plans files undo put back (default: left until renamed or moved)
+	GhostLogs   []string      `toml:"ghost_logs"`  // older rename logs: where moved videos used to live; none = no older logs
+	ReviewFile  string        `toml:"review_file" required:"the text file that lists what the stage left for you to sort out"`
+	AlignedLog  string        `toml:"aligned_log"`  // an older subtitle aligner's CSV log ("retimed ... -> X.srt"); "" = none
 	SubLangFile string        `toml:"sublang_file"` // optional JSON {path: {lang, sdh}} from a text classifier
 	Notify      bool          `toml:"notify"`       // tell Jellyfin which folders changed (off for a sandbox run)
 	Quiet       time.Duration `toml:"quiet"`        // a folder written to more recently is still arriving
@@ -48,15 +49,23 @@ type Options struct {
 
 func defaults() Options {
 	return Options{
-		Root:       "/volume1/media",
-		Mode:       "apply",
-		UndoLog:    "/volume1/media/.projectionist/rename/undo.tsv",
-		GhostLogs:  []string{"/volume1/media/.projectionist/rename/legacy-undo.tsv", "/volume1/media/.projectionist/rename/legacy-undo_auto.tsv"},
-		ReviewFile: "/volume1/media/_needs-review.txt",
-		AlignedLog: "/volume1/PlexMediaServer/subtitle-downloads/log2.csv",
-		Notify:     true,
-		Quiet:      10 * time.Minute,
+		Mode:   "apply",
+		Notify: true,
+		Quiet:  10 * time.Minute,
 	}
+}
+
+func (Stage) Check(decode func(any) error) []config.Problem {
+	opt := defaults()
+	ps, ok := config.CheckStage(name, decode, &opt)
+	switch {
+	case !ok:
+	case opt.Mode != "apply" && opt.Mode != "plan" && opt.Mode != "undo":
+		ps = append(ps, config.Problem{Key: "stages.rename.mode", Want: fmt.Sprintf("%q: want apply, plan or undo", opt.Mode)})
+	case opt.Mode == "plan" && opt.PlanDir == "":
+		ps = append(ps, config.Missing("stages.rename.plan_dir", "when stages.rename.mode is plan", "the folder the plan is written to"))
+	}
+	return ps
 }
 
 type Stage struct{}

@@ -757,7 +757,7 @@ func sessions(h *fake.Harness, mu *sync.Mutex, body *string) chan string {
 }
 
 const (
-	nobody = `<MediaContainer size="1"><Video type="movie" title="X"><User title="saahil"/></Video></MediaContainer>` // the owner only
+	nobody = `<MediaContainer size="1"><Video type="movie" title="X"><User title="owner"/></Video></MediaContainer>` // the owner only
 	guest  = `<MediaContainer size="1"><Video type="episode" title="Y"><User title="guest"/></Video></MediaContainer>`
 )
 

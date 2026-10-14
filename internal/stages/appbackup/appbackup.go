@@ -28,6 +28,7 @@ import (
 	"golang.org/x/sys/unix"
 	"modernc.org/sqlite"
 
+	"projectionist/internal/config"
 	"projectionist/internal/fsx"
 	"projectionist/internal/stage"
 )
@@ -42,24 +43,25 @@ type Options struct {
 	Databases []string `toml:"databases"` // SQLite files copied through the online backup API, never as plain files
 	Roots     []string `toml:"roots"`     // folders copied file by file
 	Exclude   []string `toml:"exclude"`   // paths never copied, wherever they sit
-	Target    string   `toml:"target"`    // one folder per version; another volume than the roots
-	Keep      int      `toml:"keep"`      // versions kept, today's included
+	Target    string   `toml:"target" required:"the folder that holds one version per day, on another volume than the roots"`
+	Keep      int      `toml:"keep"` // versions kept, today's included
 }
 
 func defaults() Options {
-	plexDB := "/volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases/"
-	return Options{
-		Databases: []string{
-			plexDB + "com.plexapp.plugins.library.db",
-			plexDB + "com.plexapp.plugins.library.blobs.db",
-			"/volume2/jellyfin/config/data/jellyfin.db",
-			"/volume2/projectionist/state/projectionist.db",
-		},
-		Roots:   []string{"/volume2/PlexAppData", "/volume2/jellyfin", "/volume2/projectionist"},
-		Exclude: []string{"/volume2/transcode", "/volume2/transcode.img"},
-		Target:  "/volume1/PlexMediaServer/nvme-backup",
-		Keep:    7,
+	return Options{Keep: 7}
+}
+
+func (Stage) Check(decode func(any) error) []config.Problem {
+	opt := defaults()
+	ps, ok := config.CheckStage(name, decode, &opt)
+	if ok && len(opt.Roots)+len(opt.Databases) == 0 {
+		ps = append(ps, config.Missing("stages.appbackup.roots", config.EnabledWhen(name),
+			"the folders to copy (or databases: the SQLite files to copy through the backup API)"))
 	}
+	if ok && opt.Keep < 1 {
+		ps = append(ps, config.Problem{Key: "stages.appbackup.keep", Want: "must be at least 1"})
+	}
+	return ps
 }
 
 // Last is the newest finished version, kept in the store for the health stage's age check.
