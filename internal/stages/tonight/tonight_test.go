@@ -901,9 +901,9 @@ func TestJellyfinMapListsFilmsInCollections(t *testing.T) {
 
 // ---- runs ----
 
-// Catches the recommend mode not reached from the config, or ranking on facts an earlier build cached (they hold no
-// TMDB recommendations) instead of fetching them again: Pulp Fiction, which the owner has seen, recommends Heat on
-// TMDB, and every other signal ties, so Heat leads his picks, because of a film he watched.
+// Catches the recommend mode not reached from the config (a shuffle never says why it picked a film), or facts an
+// earlier build cached kept instead of fetched again (they hold none of what the ranking reads): Pulp Fiction, which
+// the owner has seen, recommends Heat on TMDB, so Heat leads his picks, because of a film he watched.
 func TestRecommendModeReadsTasteFacts(t *testing.T) {
 	w := newWorld(t, `mode = "recommend"`+"\n", 0)
 	db := w.h.Env.Store.DB()
@@ -919,6 +919,12 @@ func TestRecommendModeReadsTasteFacts(t *testing.T) {
 	picks := w.state(t).Persons["owner"].Picks
 	if len(picks) != 3 || picks[0].TMDB != 949 || !strings.HasPrefix(picks[0].Reason, "Because you watched ") {
 		t.Errorf("picks %+v; want Heat first, because of a film he watched", picks)
+	}
+	var raw string
+	var facts film
+	if err := db.QueryRow(`SELECT facts FROM tonight_tmdb WHERE tmdb = 680`).Scan(&raw); err != nil || json.Unmarshal([]byte(raw), &facts) != nil ||
+		facts.Version != factsVersion || !slices.Equal(facts.Recs, []int{949}) {
+		t.Errorf("Pulp Fiction's facts %s (err %v); want them fetched again, with TMDB's recommendations", raw, err)
 	}
 }
 
