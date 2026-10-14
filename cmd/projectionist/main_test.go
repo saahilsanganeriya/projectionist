@@ -124,6 +124,16 @@ func TestEveryRequiredKeyHasARule(t *testing.T) {
 	}
 }
 
+// TestEmptyListIsUnset catches a required list set to [] passing as set: an absent key decodes to nil, which every
+// other row exercises, but `roots = []` decodes to an empty list that is not Go's zero value.
+func TestEmptyListIsUnset(t *testing.T) {
+	m := readFixture(t)
+	setKey(t, m, "stages.watcher.roots", []any{})
+	if ps := validateMap(t, m); !slices.ContainsFunc(ps, func(p config.Problem) bool { return p.Key == "stages.watcher.roots" }) {
+		t.Errorf("roots = []: problems %q, want stages.watcher.roots named", ps)
+	}
+}
+
 // TestProblemsSayWhatToSet catches the message losing the key's section, its condition or what to set.
 func TestProblemsSayWhatToSet(t *testing.T) {
 	m := readFixture(t)
