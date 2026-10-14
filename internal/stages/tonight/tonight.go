@@ -2,8 +2,9 @@
 // with no model call (owner 2026-10-14) by a filter on what critics and Letterboxd's members think of them, then a
 // shuffle: every library film whose Letterboxd average is over min_letterboxd stars and whose Rotten Tomatoes critics
 // score is over min_tomatoes % (a film with no critics score is judged by Letterboxd alone), less those the person has
-// seen and those picked for them in the last two weeks, in an order shuffled by the day and the person. The ratings
-// come from MDBList, 200 films a request, kept for ratings_every.
+// seen and those picked for them in the last two weeks, in an order shuffled by the day and the person; or, with mode
+// "recommend", ranked by the person's taste (recommend.go). The ratings come from MDBList, 200 films a request, kept
+// for ratings_every.
 //
 // In Plex a person's picks fill their shelf, a collection "<playlist> · <name>" labelled Tonight-<person>, on their own
 // Home alone: the owner's (the server's own sign-in) is promoted to his Home, anyone else's to the shared Home, and
@@ -18,7 +19,8 @@
 //
 //	per person: export | feed + films page (cached) ─┐
 //	watch record (jfsync: Plex, Jellyfin plays)      ├─► unseen by them ─► rated over the bars ─► shuffled ─► first 5
-//	library folders {tmdb-N} + TMDB facts (cached)  ─┤                     (MDBList, cached)        (day + person)
+//	library folders {tmdb-N} + TMDB facts (cached)  ─┤                     (MDBList, cached)        (day + person,
+//	                                                 │                                              or by taste)
 //	                                                 └─► that person: own Plex shelf, private Jellyfin playlist
 //
 // An earlier build also kept a household row ("Tonight · Household": a Plex collection with its Home row, and a
@@ -48,6 +50,7 @@ import (
 const name = "tonight"
 
 type Options struct {
+	Mode      string `toml:"mode"` // shuffle (default): the films over the bars, shuffled | recommend: ranked by taste (recommend.go)
 	Picks     int    `toml:"picks"`
 	PickAfter string `toml:"pick_after" required:"the local time (HH:MM, config time zone) after which a new day's picks are made"`
 	Section   int    `toml:"section" required:"the id of the Plex Movies library"`
@@ -76,7 +79,7 @@ type Options struct {
 
 func defaults() Options {
 	return Options{
-		Picks: 5, PlexTVURL: "https://clients.plex.tv", LetterboxdURL: "https://letterboxd.com", ImageBase: "https://image.tmdb.org/t/p",
+		Mode: "shuffle", Picks: 5, PlexTVURL: "https://clients.plex.tv", LetterboxdURL: "https://letterboxd.com", ImageBase: "https://image.tmdb.org/t/p",
 		SinkTimeout: 3 * time.Minute, PlexMapTimeout: 10 * time.Minute, MapEvery: 24 * time.Hour,
 		MinLetterboxd: 3.5, MinTomatoes: 75, MDBListURL: "https://api.mdblist.com", MDBListKeyFile: "/run/secrets/mdblist_api_key",
 		RatingsEvery: 30 * 24 * time.Hour,
@@ -95,7 +98,17 @@ func (Stage) Check(decode func(any) error) []config.Problem {
 	if _, err := clock(opt.PickAfter); opt.PickAfter != "" && err != nil {
 		ps = append(ps, config.Problem{Key: "stages.tonight.pick_after", Want: "want HH:MM"})
 	}
+	if err := checkMode(opt.Mode); err != nil {
+		ps = append(ps, config.Problem{Key: "stages.tonight.mode", Want: err.Error()})
+	}
 	return ps
+}
+
+func checkMode(mode string) error {
+	if mode != "shuffle" && mode != "recommend" {
+		return fmt.Errorf("%q: want shuffle or recommend", mode)
+	}
+	return nil
 }
 
 // options decodes the stage's keys and checks them; after is pick_after as an offset from local midnight.
@@ -109,6 +122,9 @@ func options(env *stage.Env) (opt Options, after time.Duration, err error) {
 	}
 	if err := uniquePeople(opt.People); err != nil {
 		return opt, 0, err
+	}
+	if err := checkMode(opt.Mode); err != nil {
+		return opt, 0, fmt.Errorf("tonight mode: %w", err)
 	}
 	after, err = clock(opt.PickAfter)
 	return opt, after, err

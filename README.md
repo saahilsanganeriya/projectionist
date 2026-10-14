@@ -26,7 +26,7 @@ when its `[stages.<name>]` table in the config enables it.
 | `lists` | Mirrors film canon lists (for example, Letterboxd's Top 500, the Criterion Collection, Sight and Sound) as collections, in list order. |
 | `letterboxd` | Reads Letterboxd diaries into the watch record, and Letterboxd watchlists into each user's Plex watchlist. |
 | `jfsync` | Keeps watched state, progress and ratings the same in Plex and Jellyfin. It writes from projectionist's own watch record, which webhooks and one-time imports fill. |
-| `tonight` | Each day, gives each person a "Tonight" shelf of five films from the library they have not seen: films over a Letterboxd and Rotten Tomatoes bar (MDBList's ratings), shuffled. No model call. |
+| `tonight` | Each day, gives each person a "Tonight" shelf of five films from the library they have not seen: films over a Letterboxd and Rotten Tomatoes bar (MDBList's ratings), shuffled, or (`mode = "recommend"`) ranked by their taste. No model call. |
 | `remote4k` | Makes small 4K copies (hardware HEVC) of the films on a "Remote 4K" list, for streaming away from home. The encode is paused with `SIGSTOP` while someone else watches. |
 | `gpu-guard` | Keeps Plex's hardware transcoding on the integrated GPU. It repairs drift, alerts once on each CPU transcode, and runs a GPU self-test once a day when the box is idle. |
 | `health` | Probes Plex, Jellyfin and the containers every 5 minutes. It restarts a hung Jellyfin only when nobody is playing on it. When Plex's Movies tab gets slow, it runs Plex's database optimize at night. |

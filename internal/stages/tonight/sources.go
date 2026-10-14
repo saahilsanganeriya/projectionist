@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -181,7 +182,6 @@ type film struct {
 	TMDBTitle     string   `json:"tmdb_title,omitempty"` // the title Letterboxd shows ("Se7en" where the folder says "Seven")
 	OriginalTitle string   `json:"original_title,omitempty"`
 	Year          int      `json:"year"`
-	Directors     []string `json:"directors,omitempty"`
 	Genres        []string `json:"genres,omitempty"`
 	Countries     []string `json:"countries,omitempty"`
 	Runtime       int      `json:"runtime,omitempty"` // minutes
@@ -189,8 +189,22 @@ type film struct {
 	PosterPath    string   `json:"poster_path,omitempty"`
 	Vote          float64  `json:"vote,omitempty"`
 	Votes         int      `json:"votes,omitempty"`
+	Keywords      []string `json:"keywords,omitempty"`
+	Cast          []string `json:"cast,omitempty"` // the first billed
+	Crew          []string `json:"crew,omitempty"` // "Job:Name" for the jobs in tasteJobs
+	Recs          []int    `json:"recs,omitempty"` // the films TMDB recommends from it, best first
+	Collection    int      `json:"collection,omitempty"`
+	Version       int      `json:"version,omitempty"` // factsVersion when fetched; older facts are fetched again
 	Missing       bool     `json:"missing,omitempty"` // TMDB answered 404: never asked again
 }
+
+// factsVersion 2 added what the recommend mode reads: keywords, cast, crew, TMDB's recommendations, the collection.
+const factsVersion = 2
+
+const billed = 5
+
+var tasteJobs = map[string]bool{"Director": true, "Screenplay": true, "Writer": true, "Director of Photography": true,
+	"Original Music Composer": true}
 
 var videoExt = map[string]bool{".mkv": true, ".mp4": true, ".m4v": true, ".avi": true, ".mov": true, ".ts": true}
 
@@ -247,8 +261,8 @@ func fillFacts(ctx context.Context, env *stage.Env, lib map[int]film) (fetched, 
 			var facts film
 			if json.Unmarshal([]byte(raw), &facts) == nil {
 				facts.Title, facts.Year = f.Title, f.Year // the folder is the identity the owner sees
-				lib[id] = facts
-				cached[id] = true
+				lib[id] = facts                           // an older version serves until it is fetched again
+				cached[id] = facts.Version == factsVersion
 			}
 		}
 	}
@@ -307,24 +321,23 @@ feed:
 	return fetched, failed, ctx.Err()
 }
 
-// movieFacts is one film's facts: its details and its directors. A film TMDB no longer knows is Missing.
+// movieFacts is one film's facts, in one request. A film TMDB no longer knows is Missing.
 func movieFacts(ctx context.Context, tc *tmdb.Client, id int) (film, error) {
-	d, err := tc.Details(ctx, tmdb.Movie, id)
+	d, err := tc.MovieTaste(ctx, id)
 	if errors.Is(err, tmdb.ErrNotFound) {
-		return film{TMDB: id, Missing: true}, nil
+		return film{TMDB: id, Missing: true, Version: factsVersion}, nil
 	}
-	if err != nil {
-		return film{}, err
-	}
-	dirs, err := tc.Directors(ctx, id)
 	if err != nil {
 		return film{}, err
 	}
 	f := film{TMDB: id, TMDBTitle: d.Title, OriginalTitle: d.OriginalTitle, Runtime: d.Runtime,
-		Language: d.Language, PosterPath: d.PosterPath, Vote: d.VoteAverage,
-		Votes: d.VoteCount}
+		Language: d.Language, PosterPath: d.PosterPath, Vote: d.VoteAverage, Votes: d.VoteCount, Keywords: d.Keywords,
+		Recs: d.Recommendations, Version: factsVersion}
 	if d.OriginalTitle == d.Title {
 		f.OriginalTitle = ""
+	}
+	if d.Collection != nil {
+		f.Collection = d.Collection.ID
 	}
 	for _, g := range d.Genres {
 		f.Genres = append(f.Genres, g.Name)
@@ -332,8 +345,13 @@ func movieFacts(ctx context.Context, tc *tmdb.Client, id int) (film, error) {
 	for _, c := range d.Countries {
 		f.Countries = append(f.Countries, c.ISO)
 	}
-	for _, p := range dirs {
-		f.Directors = append(f.Directors, p.Name)
+	for _, p := range d.Cast[:min(billed, len(d.Cast))] {
+		f.Cast = append(f.Cast, p.Name)
+	}
+	for _, p := range d.Crew {
+		if tasteJobs[p.Job] {
+			f.Crew = append(f.Crew, p.Job+":"+p.Name)
+		}
 	}
 	return f, nil
 }
@@ -344,22 +362,33 @@ func movieFacts(ctx context.Context, tc *tmdb.Client, id int) (film, error) {
 // Letterboxd title+year (export rows and films pages have no ids), the watch record, and the play state Plex and
 // Jellyfin report for the owner's accounts.
 type watchedSets struct {
-	IDs  map[int]string // tmdb → who or where
-	Keys map[string]bool
+	IDs   map[int]string // tmdb → who or where
+	Keys  map[string]bool
+	Stars map[string]float64 // title+year key → their Letterboxd rating (0.5..5), the first one seen
 }
 
-func newWatched() watchedSets { return watchedSets{IDs: map[int]string{}, Keys: map[string]bool{}} }
+func newWatched() watchedSets {
+	return watchedSets{IDs: map[int]string{}, Keys: map[string]bool{}, Stars: map[string]float64{}}
+}
 
 // add records one person's Letterboxd history: by TMDB id where the feed names it, by title and year for every film.
 func (w watchedSets) add(who string, export []entry, cached map[string]entry) {
 	for _, e := range export {
-		w.Keys[filmKey(e.Name, e.Year)] = true
+		w.addEntry(e)
 	}
 	for _, e := range cached {
 		if e.TMDB > 0 {
 			w.IDs[e.TMDB] = who
 		}
-		w.Keys[filmKey(e.Name, e.Year)] = true
+		w.addEntry(e)
+	}
+}
+
+func (w watchedSets) addEntry(e entry) {
+	k := filmKey(e.Name, e.Year)
+	w.Keys[k] = true
+	if _, ok := w.Stars[k]; !ok && e.Rating > 0 {
+		w.Stars[k] = e.Rating
 	}
 }
 
@@ -387,21 +416,32 @@ func recordWatched(ctx context.Context, db *sql.DB, members []member) (map[int]s
 	return out, nil
 }
 
-// seen reports whether a library film appears in anyone's history. Title+year matching tries the folder title, TMDB's
-// title and TMDB's original title, one year either side (festival vs release years differ).
+// seen reports whether a library film appears in anyone's history.
 func (w watchedSets) seen(f film) bool {
-	if w.IDs[f.TMDB] != "" {
-		return true
+	return w.IDs[f.TMDB] != "" || slices.ContainsFunc(f.keys(), func(k string) bool { return w.Keys[k] })
+}
+
+// stars is the Letterboxd rating of f in the history, 0 where none.
+func (w watchedSets) stars(f film) float64 {
+	for _, k := range f.keys() {
+		if s := w.Stars[k]; s > 0 {
+			return s
+		}
 	}
+	return 0
+}
+
+// keys are f's title+year keys: the folder title, TMDB's title and TMDB's original title, one year either side
+// (festival vs release years differ).
+func (f film) keys() []string {
+	var out []string
 	for _, t := range []string{f.Title, f.TMDBTitle, f.OriginalTitle} {
 		if t == "" {
 			continue
 		}
 		for dy := -1; dy <= 1; dy++ {
-			if w.Keys[filmKey(t, f.Year+dy)] {
-				return true
-			}
+			out = append(out, filmKey(t, f.Year+dy))
 		}
 	}
-	return false
+	return out
 }

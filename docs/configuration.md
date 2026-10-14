@@ -462,6 +462,7 @@ three keys (`enabled`, `every`, `window`).
 | stages.tonight | `enabled` | boolean |  | true | true | false turns the stage off; a stage with no table is off |
 | stages.tonight | `every` | duration | when the stage is enabled |  | "30m" | how often the stage runs |
 | stages.tonight | `window` | string |  | none (any time) |  | HH:MM-HH:MM in timezone, may wrap past midnight: the stage starts only inside it |
+| stages.tonight | `mode` | string |  | "shuffle" | "shuffle" | shuffle: the films over the bars, shuffled; recommend: ranked by each person's taste |
 | stages.tonight | `picks` | integer |  | 5 | 5 | films picked each day, per person |
 | stages.tonight | `pick_after` | string | when the stage is enabled | — | "05:00" | the local time (HH:MM, config time zone) after which a new day's picks are made |
 | stages.tonight | `section` | integer | when the stage is enabled | — | 1 | the id of the Plex Movies library |

@@ -137,6 +137,54 @@ func TestShuffledFollowsTheFilter(t *testing.T) {
 	}
 }
 
+// Catches a recommend-mode ranking blind to one of its signals: a film made like the ones the person rated highly
+// (content), and one their films recommend on TMDB (the crowd), must lead; one made like a film they rated 1.5 stars
+// must come last, not count for its look-alikes; and the films picked in the last two weeks go behind the rest, so the
+// shelf moves down the ranking day by day. A seen film, one under the bars and one TMDB no longer knows are never picked.
+func TestRecommendedFollowsTaste(t *testing.T) {
+	f := func(id int, title, genre string, keywords []string, recs ...int) film {
+		return film{TMDB: id, Title: title, Year: 2010, Genres: []string{genre}, Keywords: keywords, Recs: recs, Votes: 900}
+	}
+	lib := map[int]film{
+		1:  f(1, "Space One", "Science Fiction", []string{"space", "astronaut"}, 90),
+		2:  f(2, "Space Two", "Science Fiction", []string{"space", "alien"}),
+		3:  f(3, "Space Three", "Science Fiction", []string{"space"}),
+		4:  f(4, "Weepie", "Romance", []string{"romance", "wedding"}),
+		10: f(10, "Space Four", "Science Fiction", []string{"space", "astronaut"}),
+		90: f(90, "Quiet Drama", "Drama", []string{"family"}, 2), // after the fillers: only the crowd lifts it
+		30: f(30, "Wedding Two", "Romance", []string{"romance", "wedding"}),
+		40: f(40, "Space Five", "Science Fiction", []string{"space"}), // under the bars
+		50: {TMDB: 50, Missing: true},
+	}
+	ratings := map[int]rating{10: {80, 90}, 90: {80, 90}, 30: {80, 90}, 40: {60, 90}, 50: {95, 99}}
+	for i, genre := range []string{"Comedy", "Western", "Horror", "Music", "War", "History"} { // like nothing else
+		lib[60+i] = f(60+i, genre+" Film", genre, []string{strings.ToLower(genre)})
+		ratings[60+i] = rating{80, 90}
+	}
+	w := newWatched()
+	w.add("owner", []entry{{Name: "Space One", Year: 2010, Rating: 5}, {Name: "Space Two", Year: 2010, Rating: 4.5},
+		{Name: "Space Three", Year: 2010}, {Name: "Weepie", Year: 2010, Rating: 1.5}}, nil)
+	opt := defaults()
+	opt.Picks = 100
+	got := tmdbIDs(recommended(lib, ratings, w, nil, opt))
+	if len(got) != 9 || !slices.Equal(slices.Sorted(slices.Values(got[:2])), []int{10, 90}) || got[len(got)-1] != 30 {
+		t.Errorf("ranking %v; want Space Four and Quiet Drama first, Wedding Two last, of the 9 unseen films over the bars", got)
+	}
+	if again := tmdbIDs(recommended(lib, ratings, w, nil, opt)); !slices.Equal(again, got) {
+		t.Errorf("the same history ranked %v, then %v", got, again)
+	}
+	opt.Picks = 2
+	top := recommended(lib, ratings, w, nil, opt)
+	if i := slices.IndexFunc(top, func(p pick) bool { return p.TMDB == 10 }); i < 0 ||
+		top[i].Reason != "Because you watched Space One · Letterboxd ★4.0 · Rotten Tomatoes 90%" {
+		t.Errorf("top picks %+v; want Space Four among them, because of Space One", top)
+	}
+	recent := map[int]string{10: "2026-10-13", 90: "2026-10-13"}
+	if next := tmdbIDs(recommended(lib, ratings, w, recent, opt)); slices.Contains(next, 10) || slices.Contains(next, 90) {
+		t.Errorf("the day after: picks %v; want the next best, yesterday's two behind them", next)
+	}
+}
+
 // ---- the stage against fake Plex, plex.tv, Jellyfin, MDBList, TMDB and Letterboxd ----
 
 type libFilm struct {
@@ -270,13 +318,17 @@ func newWorld(t *testing.T, options string, fillers int) *world {
 	for _, f := range lib {
 		name := fmt.Sprintf("%s (%d) {tmdb-%d}", f.title, f.year, f.tmdb)
 		write(t, filepath.Join(movies, name, name+".mkv"), "")
+		recs := []map[string]int{}
+		if f.tmdb == 680 { // Pulp Fiction, which the owner has seen, recommends Heat
+			recs = append(recs, map[string]int{"id": 949})
+		}
 		details, _ := json.Marshal(map[string]any{"id": f.tmdb, "title": f.title, "original_title": f.title, "runtime": f.runtime,
 			"original_language": "en", "overview": "First sentence. Second sentence.", "poster_path": fmt.Sprintf("/p%d.jpg", f.tmdb),
 			"vote_average": 8.0, "vote_count": 5000, "genres": []map[string]string{{"name": "Drama"}},
-			"production_countries": []map[string]string{{"iso_3166_1": "US"}}})
+			"production_countries": []map[string]string{{"iso_3166_1": "US"}},
+			"credits":              map[string]any{"crew": []map[string]string{{"job": "Writer", "name": "Someone"}, {"job": "Director", "name": f.director}}},
+			"recommendations":      map[string]any{"results": recs}})
 		w.h.TMDB.Handle("GET", fmt.Sprintf("/movie/%d", f.tmdb), 200, string(details))
-		w.h.TMDB.Handle("GET", fmt.Sprintf("/movie/%d/credits", f.tmdb), 200,
-			fmt.Sprintf(`{"crew":[{"job":"Writer","name":"Someone"},{"job":"Director","name":%q}]}`, f.director))
 	}
 	write(t, filepath.Join(movies, "Some.Film.2020.1080p.WEB", "a.mkv"), "") // outside the naming scheme: ignored
 
@@ -848,6 +900,33 @@ func TestJellyfinMapListsFilmsInCollections(t *testing.T) {
 }
 
 // ---- runs ----
+
+// Catches the recommend mode not reached from the config (a shuffle never says why it picked a film), or facts an
+// earlier build cached kept instead of fetched again (they hold none of what the ranking reads): Pulp Fiction, which
+// the owner has seen, recommends Heat on TMDB, so Heat leads his picks, because of a film he watched.
+func TestRecommendModeReadsTasteFacts(t *testing.T) {
+	w := newWorld(t, `mode = "recommend"`+"\n", 0)
+	db := w.h.Env.Store.DB()
+	if _, err := db.Exec(tmdbSchema); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO tonight_tmdb(tmdb, facts, fetched_at) VALUES (680, '{"tmdb":680,"title":"Pulp Fiction","year":1994}', '2026-10-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	if rep := w.run(t); len(rep.Alerts) != 0 {
+		t.Fatalf("alerts %q", rep.Alerts)
+	}
+	picks := w.state(t).Persons["owner"].Picks
+	if len(picks) != 3 || picks[0].TMDB != 949 || !strings.HasPrefix(picks[0].Reason, "Because you watched ") {
+		t.Errorf("picks %+v; want Heat first, because of a film he watched", picks)
+	}
+	var raw string
+	var facts film
+	if err := db.QueryRow(`SELECT facts FROM tonight_tmdb WHERE tmdb = 680`).Scan(&raw); err != nil || json.Unmarshal([]byte(raw), &facts) != nil ||
+		facts.Version != factsVersion || !slices.Equal(facts.Recs, []int{949}) {
+		t.Errorf("Pulp Fiction's facts %s (err %v); want them fetched again, with TMDB's recommendations", raw, err)
+	}
+}
 
 // picksOf is who's picks in the state, sorted.
 func (w *world) picksOf(t *testing.T, who string) []int {
