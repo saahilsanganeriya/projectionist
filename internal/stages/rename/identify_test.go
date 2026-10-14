@@ -42,7 +42,9 @@ func TestParseRelease(t *testing.T) {
 }
 
 // Catches the acceptance rule letting a guess through: two exact titles within a year (remakes) must be refused,
-// an exact title two years off is not exact, and a lone hit is accepted whatever its title.
+// an exact title two years off is not exact, and a lone hit is accepted whatever its title; and the reverse, a film
+// left for review when only punctuation sets another apart (a household member's "Animals.2026" sat in review beside
+// TMDB's "Animals" and "Animals.", both 2026): the one titled exactly as the release is taken.
 func TestConfident(t *testing.T) {
 	r := func(id int, name string, year int) tmdb.Result {
 		return tmdb.Result{ID: id, Title: name, Date: tmdb.Date{Time: time.Date(year, 6, 1, 0, 0, 0, 0, time.UTC)}}
@@ -60,6 +62,8 @@ func TestConfident(t *testing.T) {
 		{"no year, several hits", []tmdb.Result{r(1, "Friends", 1994), r(2, "Friends", 1979)}, "Friends", 0, 0},
 		{"single hit", []tmdb.Result{r(30983, "Detective Conan", 1996)}, "Case Closed", 0, 30983},
 		{"accents folded", []tmdb.Result{r(126308, "Shōgun", 2024), r(2, "Shogun", 1980)}, "Shogun", 2024, 126308},
+		{"one exact as written", []tmdb.Result{r(1713368, "Animals.", 2026), r(1236045, "Animals", 2026), r(1747444, "The Animals", 2026)},
+			"Animals", 2026, 1236045},
 	}
 	for _, c := range cases {
 		got, ok := confident(c.hits, c.title, c.year)

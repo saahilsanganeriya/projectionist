@@ -3,7 +3,8 @@ package rename
 // Identity: which film or show each video is, and the episode rows of each TV video.
 //
 //	1. a scheme folder ("Title (Year) {tmdb-N}") or a tag in the name ({tmdb-N}, {imdb-ttN}, {tvdb-N})
-//	2. TMDB search, direct: accepted only when exactly one hit has the same normalized title and a year within ±1,
+//	2. TMDB search, direct: accepted only when exactly one hit has the same normalized title and a year within ±1 (or,
+//	   of several, exactly one is spelt as the release),
 //	   or the search returns a single hit
 //	3. otherwise the video stays where it is and goes to _needs-review.txt with the top 3 candidates
 //
@@ -176,7 +177,8 @@ func (id *identifier) byTag(ctx context.Context, kind, source, value, title stri
 	return identity{Title: Title{ID: fmt.Sprintf("tmdb-%d", r.ID), Name: title, Original: r.OriginalTitle, Year: year}}, nil
 }
 
-// confident is the acceptance rule: one exact title within a year, else the only hit.
+// confident is the acceptance rule: one exact title within a year, else the one of them titled exactly as the release,
+// else the only hit.
 func confident(hits []tmdb.Result, title string, year int) (tmdb.Result, bool) {
 	want := normTitle(title)
 	var exact []tmdb.Result
@@ -191,6 +193,16 @@ func confident(hits []tmdb.Result, title string, year int) (tmdb.Result, bool) {
 		return exact[0], true
 	case len(exact) == 0 && len(hits) == 1:
 		return hits[0], true
+	}
+	// Titles that only punctuation sets apart ("Animals" and "Animals.", both 2026): the one written as the release is.
+	var literal []tmdb.Result
+	for _, r := range exact {
+		if strings.EqualFold(r.Title, title) || strings.EqualFold(r.OriginalTitle, title) {
+			literal = append(literal, r)
+		}
+	}
+	if len(literal) == 1 {
+		return literal[0], true
 	}
 	return tmdb.Result{}, false
 }
