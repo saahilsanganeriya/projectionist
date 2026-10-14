@@ -255,6 +255,7 @@ type Stage struct {
 	sleep   func(context.Context, time.Duration) error
 	remote  *broker // nil: the process's own
 	ocr     string  // the OCR helper; "": the image's subocr
+	vad     string  // the speech helper; "": the image's subvad
 	opusZip string  // "": opusZipPath
 }
 
@@ -327,6 +328,7 @@ type run struct {
 	reading    sync.Mutex                  // one title at a time reads its windows
 	remote     *broker                     // align_remote_lanes set: the align workers
 	ocrBin     string                      // subocr (ocr.go)
+	vadBin     string                      // subvad (hear); "" or missing: the speech is heard by levels alone
 	media      func(context.Context) error // an align worker: streams the title's tracks from the NAS, where it reads the video
 
 	apps   sync.Mutex // the Jellyfin and Plex queues
@@ -437,7 +439,7 @@ func (s Stage) newRun(ctx context.Context, env *stage.Env, opt Options, rep *sta
 		return def
 	}
 	r := &run{env: env, opt: opt, rep: rep, alerted: map[string]bool{}, pools: map[string][]Candidate{},
-		ocrBin: cmp.Or(s.ocr, "/usr/local/bin/subocr")}
+		ocrBin: cmp.Or(s.ocr, "/usr/local/bin/subocr"), vadBin: cmp.Or(s.vad, "/usr/local/bin/subvad")}
 	r.undo = sync.OnceValue(func() map[string]string {
 		orig, _, err := library.Originals(opt.UndoLogs)
 		if err != nil {
@@ -1428,13 +1430,13 @@ func (r *run) download(ctx context.Context, c Candidate) (string, error) {
 // come in route order, and its latest is its furthest.
 func (r *run) rejected(ctx context.Context, path, key string) (map[string]string, error) {
 	rows, err := r.env.Store.DB().QueryContext(ctx, `SELECT json_extract(fields, '$.id'), status FROM events WHERE stage=? AND item=?
-		AND status IN ('rejected_misaligned', 'rejected_length', 'rejected_sampled', 'rejected_idx')
+		AND status IN ('rejected_offsync', 'rejected_length', 'rejected_sampled', 'rejected_idx')
 		AND json_extract(fields, '$.file')=? ORDER BY id`, name, path, key)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	route := map[string]string{"rejected_misaligned": "aligned", "rejected_length": "aligned", "rejected_sampled": "sampled",
+	route := map[string]string{"rejected_offsync": "aligned", "rejected_length": "aligned", "rejected_sampled": "sampled",
 		"rejected_idx": "idx"}
 	out := map[string]string{}
 	for rows.Next() {
@@ -1564,11 +1566,15 @@ func (r *run) workQueue(ctx context.Context, lacking, sidecarred, due []*title, 
 				o = r.fetch(ctx, t)
 				pool = o.pool
 			}
-			if o.result == "queued" {
-				if r.remote.handOff(ctx, r, t, pool) {
+			if o.result == "queued" { // probed first: a worker cannot, and hears nothing in a title with no tracks
+				switch err := r.probe(ctx, t); {
+				case err != nil:
+					o = outcome{result: "error", detail: err.Error()}
+				case r.remote.handOff(ctx, r, t, pool):
 					continue
+				default:
+					o = r.align(ctx, t, pool)
 				}
-				o = r.align(ctx, t, pool)
 			}
 			r.finish(ctx, t, o)
 			if ctx.Err() != nil {
@@ -1724,7 +1730,7 @@ func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 			ref.cleanup()
 		}
 	}()
-	incomplete, tries := false, map[string]int{}
+	incomplete, unjudged, tries := false, 0, map[string]int{}
 	for _, c := range pool {
 		if tries[c.provider.Name()] == maxTries {
 			continue
@@ -1779,7 +1785,11 @@ func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 			return outcome{result: "deferred", detail: "alass could not run: " + ref.broken.Error()}
 		}
 		if !ok {
-			r.event(ctx, t.path, outcome{result: "rejected_misaligned", fields: attempt})
+			status := "rejected_offsync" // judged: a refusal that keeps the candidate out of later alignments
+			if result == "unjudged" {
+				status, unjudged = "unjudged", unjudged+1
+			}
+			r.event(ctx, t.path, outcome{result: status, fields: attempt})
 			continue
 		}
 		spans := cues(out)
@@ -1791,6 +1801,9 @@ func (r *run) align(ctx context.Context, t *title, pool []Candidate) outcome {
 			attempt["ref_median_ms"] = math.Round(medianOffsetMS(spans, ref.starts))
 		}
 		return outcome{result: result, fields: attempt, text: out}
+	}
+	if unjudged > 0 { // the speech judged none of these either way: a verify title's sidecars stay as they are
+		return outcome{result: "unjudged", detail: fmt.Sprintf("the speech heard could judge %d candidate(s) neither way", unjudged)}
 	}
 	if incomplete || !t.verify && r.providerOut() { // a verify title's pool is its own sidecars: no provider could add one
 		return outcome{result: "deferred", detail: "a provider was out"}
@@ -1843,11 +1856,10 @@ type reference struct {
 	deferred bool // none because alass is out, not because of the title
 	bits     bitset
 	starts   []float64
-	dir      string // alass work files
-	speech   string // the voiced stretches as an SRT, once heard
-	talk     bitset // the same segments as bins, for the cross-check
-	deaf     bool   // hearing failed for a rescue: no more rescues for this title
-	broken   error  // alass failed aligning a candidate to the speech: alass's fault, not the candidate's
+	dir      string    // alass work files
+	hearings []hearing // once heard: the level detector's speech, then (subvad heard it) only what Silero heard too
+	deaf     bool      // hearing failed for a rescue: no more rescues for this title
+	broken   error     // alass failed aligning a candidate to the speech: alass's fault, not the candidate's
 }
 
 func (ref *reference) cleanup() {
@@ -1945,35 +1957,104 @@ var errNoSpeech = errors.New("no speech heard in its audio")
 // runtime for speech (the score under the dialogue), and its alignments of the right subtitles split and stretched at
 // random: tens of seconds off. A layout with a centre channel is read with its front pair in the same pass, which is
 // heard instead where nothing in the centre is voiced: a stereo mix dressed as 5.1 (Rocky III, T-34: the centre at -91 dB).
+// The voice band hears a laugh track and loud score as speech too (70 % of a Friends or Seinfeld episode, and no
+// subtitle fitted it, right ones included), so the dialogue channel also goes to subvad: its second hearing is the
+// voiced stretches Silero heard as speech too (the right subtitles of those episodes fit it at 0.0 s).
 func (r *run) hear(ctx context.Context, t *title, ref *reference) error {
 	dir, err := os.MkdirTemp("", "subtitles-")
 	if err != nil {
 		return err
 	}
-	ref.dir, ref.speech = dir, filepath.Join(dir, "speech.srt")
+	ref.dir = dir
 	audio := speechTrack(t.info.Audio)
 	heard, mix := channels{ch: []*voicing{{}}}, dialogue(audio)
 	if centred[audio.Layout] {
 		heard.ch = append(heard.ch, &voicing{})
 		mix = []string{"-af", "pan=stereo|c0=FC|c1=0.5*FL+0.5*FR," + fromStart}
 	}
+	silero := r.listen(ctx, heard.ch[0])
 	args := append(append(r.input(t), "-map", fmt.Sprintf("0:%d", audio.Index)), mix...)
-	if err := r.cmdTo(ctx, t, 0, &heard, r.env.FFmpeg.FFmpegPath(), append(args, "-ar", "16000", "-f", "s16le", "-")...); err != nil {
+	err = r.cmdTo(ctx, t, 0, &heard, r.env.FFmpeg.FFmpegPath(), append(args, "-ar", "16000", "-f", "s16le", "-")...)
+	vad, verr := silero()
+	if err != nil {
 		return err
 	}
 	spans := heard.ch[0].spans()
 	if len(spans) == 0 && len(heard.ch) > 1 {
-		spans = heard.ch[1].spans()
+		spans, vad, verr = heard.ch[1].spans(), nil, nil // Silero heard the silent centre: the front pair has only levels
 	}
 	if len(spans) == 0 {
 		return errNoSpeech
 	}
-	var b strings.Builder
-	for i, s := range spans {
-		fmt.Fprintf(&b, "%d\n%s --> %s\nspeech\n\n", i+1, srtTime(s.start), srtTime(s.end))
+	if verr != nil {
+		r.env.Log.Warn("subvad failed: the title is heard by levels alone", "event", "subvad_error", "item", t.path, "err", verr)
 	}
-	ref.talk = spanBits(spans, 1)
-	return os.WriteFile(ref.speech, []byte(b.String()), 0o644)
+	for _, h := range []struct {
+		label string
+		spans []span
+	}{{"level", spans}, {"silero", within(spans, vad)}} {
+		if len(h.spans) == 0 {
+			continue
+		}
+		var b strings.Builder
+		for i, s := range h.spans {
+			fmt.Fprintf(&b, "%d\n%s --> %s\nspeech\n\n", i+1, srtTime(s.start), srtTime(s.end))
+		}
+		file := filepath.Join(dir, h.label+".srt")
+		if err := os.WriteFile(file, []byte(b.String()), 0o644); err != nil {
+			return err
+		}
+		ref.hearings = append(ref.hearings, hearing{label: h.label, speech: file, talk: spanBits(h.spans, 1)})
+	}
+	return nil
+}
+
+// listen starts subvad (when there is one) on the PCM the dialogue channel's voicing is given, and returns what waits
+// for the speech Silero heard once that PCM ends. A subvad that fails or stops early costs the hearing nothing but
+// Silero's stretches: the PCM it no longer reads is dropped, never blocking the level detector.
+func (r *run) listen(ctx context.Context, dialogue *voicing) func() ([]span, error) {
+	if r.vadBin == "" || !fileExists(r.vadBin) {
+		return func() ([]span, error) { return nil, nil }
+	}
+	pr, pw := io.Pipe()
+	dialogue.tee = pw
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		err := r.cmdIO(ctx, nil, 0, pr, &out, r.vadBin)
+		pr.CloseWithError(cmp.Or(err, io.ErrClosedPipe))
+		done <- err
+	}()
+	return func() ([]span, error) {
+		pw.Close()
+		if err := <-done; err != nil {
+			return nil, err
+		}
+		var heard []span
+		for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+			var s span
+			if _, err := fmt.Sscan(line, &s.start, &s.end); err == nil {
+				heard = append(heard, s)
+			}
+		}
+		return heard, nil
+	}
+}
+
+// within is the stretches both a and b cover (each sorted, none overlapping).
+func within(a, b []span) []span {
+	var out []span
+	for i, j := 0, 0; i < len(a) && j < len(b); {
+		if s, e := math.Max(a[i].start, b[j].start), math.Min(a[i].end, b[j].end); s < e {
+			out = append(out, span{s, e})
+		}
+		if a[i].end < b[j].end {
+			i++
+		} else {
+			j++
+		}
+	}
+	return out
 }
 
 // speechTrack is the audio track hear listens to: the default one, else the first.
@@ -1995,9 +2076,15 @@ const hearSpan = 90 * 16000 * 2
 type voicing struct {
 	pcm    []byte
 	voiced []bool
+	tee    io.Writer // also given the PCM (subvad's stdin); dropped once it fails
 }
 
 func (v *voicing) Write(p []byte) (int, error) {
+	if v.tee != nil {
+		if _, err := v.tee.Write(p); err != nil {
+			v.tee = nil
+		}
+	}
 	v.pcm = append(v.pcm, p...)
 	for len(v.pcm) >= hearSpan {
 		v.voiced = append(v.voiced, voiced(voiceLevel(v.pcm[:hearSpan]))...)
@@ -2049,15 +2136,24 @@ func srtTime(s float64) string {
 
 var ratioRe = regexp.MustCompile(`ratio is ([0-9.]+)(?:/([0-9.]+))?`)
 
-// realign has alass align txt to the heard speech; it returns the aligned text and the frame-rate ratio alass chose.
-func (r *run) realign(ctx context.Context, ref *reference, txt string) (string, float64, error) {
+// hearing is one detector's speech in a title's dialogue: an SRT of its stretches for alass, and the same as bins for
+// the check.
+type hearing struct {
+	label  string // "level" | "silero": the level detector's stretches that Silero heard as speech too
+	speech string
+	talk   bitset
+}
+
+// realign has alass align txt to speech (an SRT of voiced stretches); it returns the aligned text and the frame-rate
+// ratio alass chose.
+func (r *run) realign(ctx context.Context, ref *reference, speech, txt string) (string, float64, error) {
 	in, out := filepath.Join(ref.dir, "candidate.srt"), filepath.Join(ref.dir, "aligned.srt")
 	os.Remove(out)
 	if err := os.WriteFile(in, []byte(txt), 0o644); err != nil {
 		return "", 0, err
 	}
 	var stdout bytes.Buffer
-	if err := r.cmdTo(ctx, nil, 0, &stdout, r.opt.Alass, ref.speech, in, out); err != nil {
+	if err := r.cmdTo(ctx, nil, 0, &stdout, r.opt.Alass, speech, in, out); err != nil {
 		return "", 0, fmt.Errorf("%w: %s", err, lastLines(stdout.Bytes(), 8)) // alass-cli prints its errors on stdout
 	}
 	aligned, err := os.ReadFile(out)
@@ -2086,11 +2182,12 @@ func lastLines(out []byte, n int) string {
 	return strings.Join(lines[max(0, len(lines)-n):], " | ")
 }
 
-// fit lines a candidate up with the reference; it returns the text to write and kept|retimed, or ok=false.
+// fit lines a candidate up with the reference; it returns the text to write and kept|retimed, or ok=false: with
+// result "unjudged" when the speech is the reference and no hearing of it judged the candidate either way.
 func (r *run) fit(ctx context.Context, ref *reference, txt string, attempt map[string]any) (string, string, bool) {
 	spans := cues(txt)
-	if len(spans) < minCues {
-		return "", "", false
+	if len(spans) < minCues { // too few for any fit to judge: no evidence either way
+		return "", "unjudged", false
 	}
 	if ref.label != "alass" {
 		starts := make([]span, len(spans)) // cue starts against caption starts: a cue stays up after its line ends
@@ -2108,7 +2205,40 @@ func (r *run) fit(ctx context.Context, ref *reference, txt string, attempt map[s
 		}
 		return retime(txt, f.Ratio, f.Offset), "retimed", true
 	}
-	aligned, ratio, err := r.realign(ctx, ref, txt)
+	judged := false
+	for _, h := range ref.hearings { // a subtitle in sync with any hearing is kept as it is: alass never runs
+		asIs, ok := align(firstSeconds(spans), h.talk)
+		if ok && asIs.Ratio == 1 && asIs.Offset == 0 {
+			attempt["hearing"], attempt["offset_ms"], attempt["ratio"] = h.label, 0.0, 1.0
+			attempt["z"], attempt["chunks"] = math.Round(asIs.Z*10)/10, asIs.Agree
+			return txt, "kept", true
+		}
+		judged = judged || asIs.Z >= zOK
+	}
+	for _, h := range ref.hearings {
+		out, result, peak := r.alassFit(ctx, ref, h, spans, txt, attempt)
+		if result != "" || ref.broken != nil {
+			return out, result, result != ""
+		}
+		judged = judged || peak
+	}
+	if !judged {
+		return "", "unjudged", false
+	}
+	return "", "", false
+}
+
+// alassFit is alass's alignment of a candidate to one hearing, cross-checked by subfetch2.py's speech test: each cue's
+// first second must sit on the speech heard (6 of 8 chunks within 0.5 s, no shift or stretch left), which rejects a
+// wrong subtitle that alass shifted whole, and an alignment left off by a drift (21 Grams: 0.6 s off its captions).
+// alass runs only once no hearing finds the candidate in sync as it is: it can tear a right subtitle apart (Batman: The
+// Animated Series S04E03's and a Friends episode's release sidecars were archived so). peak: the speech judged
+// alass's output (some lag stood out), so a refusal is evidence; a hearing where no lag stands out (a laugh track or a
+// score heard as speech) cannot tell a right subtitle from a wrong one.
+func (r *run) alassFit(ctx context.Context, ref *reference, h hearing, spans []span, txt string, attempt map[string]any) (
+	out, result string, peak bool) {
+	attempt["hearing"] = h.label
+	aligned, ratio, err := r.realign(ctx, ref, h.speech, txt)
 	if err != nil {
 		ref.broken = err
 		return "", "", false
@@ -2119,22 +2249,24 @@ func (r *run) fit(ctx context.Context, ref *reference, txt string, attempt map[s
 	if !ok || agree < alassAgree {
 		return "", "", false
 	}
-	// Cross-check with subfetch2.py's own speech test: each cue's first second must sit on the speech heard, in
-	// sync by the Python's own test (6 of 8 chunks within 0.5 s, no shift or stretch left). It rejects a wrong
-	// subtitle that alass shifted whole, and an alignment left off by a drift (21 Grams: 0.6 s off its captions).
-	first := make([]span, len(moved))
-	for i, c := range moved {
-		first[i] = span{c.start, math.Min(c.end, c.start+1)}
-	}
-	check, ok := align(first, ref.talk)
+	check, ok := align(firstSeconds(moved), h.talk)
 	attempt["z"], attempt["chunks"] = math.Round(check.Z*10)/10, check.Agree
 	if !ok || check.Ratio != 1 || check.Offset != 0 {
-		return "", "", false
+		return "", "", check.Z >= zOK
 	}
 	if slices.Equal(spans, moved) {
 		return txt, "kept", true
 	}
 	return aligned, "retimed", true
+}
+
+// firstSeconds are each cue's first second, at most: a cue stays up after its line ends.
+func firstSeconds(spans []span) []span {
+	first := make([]span, len(spans))
+	for i, c := range spans {
+		first[i] = span{c.start, math.Min(c.end, c.start+1)}
+	}
+	return first
 }
 
 // rescue gives a candidate the captions rejected (a cut, a recap or a drift the fit cannot follow) to alass, aligned
@@ -2148,14 +2280,14 @@ func (r *run) rescue(ctx context.Context, t *title, ref *reference, txt string, 
 	if ref.deaf || down || len(t.info.Audio) == 0 || !fileExists(r.opt.Alass) {
 		return "", "", false
 	}
-	if ref.speech == "" {
+	if len(ref.hearings) == 0 {
 		if err := r.hear(ctx, t, ref); err != nil {
 			ref.deaf = true
 			r.env.Log.Info("no rescue: the title could not be heard", "event", "rescue_skipped", "item", t.path, "err", err)
 			return "", "", false
 		}
 	}
-	aligned, _, err := r.realign(ctx, ref, txt)
+	aligned, _, err := r.realign(ctx, ref, ref.hearings[0].speech, txt)
 	if err != nil {
 		return "", "", false
 	}
@@ -2286,7 +2418,13 @@ func (r *run) cmdUpTo(ctx context.Context, t *title, limit int64, bin string, ar
 
 // cmdTo is cmdUpTo with the helper's stdout streamed into w.
 func (r *run) cmdTo(ctx context.Context, t *title, limit int64, w io.Writer, bin string, args ...string) error {
+	return r.cmdIO(ctx, t, limit, nil, w, bin, args...)
+}
+
+// cmdIO is cmdTo with in (when not nil) as the helper's stdin.
+func (r *run) cmdIO(ctx context.Context, t *title, limit int64, in io.Reader, w io.Writer, bin string, args ...string) error {
 	c := exec.CommandContext(ctx, bin, args...)
+	c.Stdin = in
 	c.Env = append(os.Environ(), "ALASS_FFMPEG_PATH="+r.env.FFmpeg.FFmpegPath(), "ALASS_FFPROBE_PATH="+r.env.FFmpeg.FFprobePath())
 	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	c.Cancel = func() error { return syscall.Kill(-c.Process.Pid, syscall.SIGKILL) }

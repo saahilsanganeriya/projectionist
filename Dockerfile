@@ -10,7 +10,8 @@ COPY . .
 ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /out/projectionist ./cmd/projectionist \
- && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o /out/subocr ./cmd/subocr
+ && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o /out/subocr ./cmd/subocr \
+ && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "-s -w" -o /out/subvad ./cmd/subvad
 
 # The same image tag the NAS runs, so the ffmpeg we exec is byte-identical to Jellyfin's (QSV/VAAPI, iHD driver).
 FROM ${JELLYFIN_IMAGE} AS jellyfin
@@ -29,6 +30,9 @@ ADD --checksum=sha256:a5ed5a3cac51fbb2e90da632ae43d19212faaa20e76484e62bcb7c23dd
     https://github.com/microsoft/onnxruntime/releases/download/v1.30.0/onnxruntime-linux-x64-1.30.0.tgz /ort.tgz
 ADD --chmod=644 --checksum=sha256:6f327246b50388f3c176ae304bd95767ea6dc0c9ae92153ef8cbe210b3c14884 \
     https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.9.2/onnx/PP-OCRv6/rec/PP-OCRv6_rec_small.onnx /out/PP-OCRv6_rec_small.onnx
+# subvad hears speech for the subtitles stage's alignments with Silero VAD v6.2 on the same ONNX Runtime.
+ADD --chmod=644 --checksum=sha256:1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3 \
+    https://raw.githubusercontent.com/snakers4/silero-vad/v6.2/src/silero_vad/data/silero_vad.onnx /out/silero_vad.onnx
 RUN tar -xzf /ort.tgz -C / && cp /onnxruntime-linux-x64-1.30.0/lib/libonnxruntime.so.1.30.0 /out/
 
 FROM debian:trixie-slim
@@ -43,7 +47,9 @@ COPY --from=jellyfin /usr/lib/jellyfin-ffmpeg /usr/lib/jellyfin-ffmpeg
 COPY --from=alass /out/bin/alass-cli /usr/local/bin/alass
 COPY --from=ocr /out/libonnxruntime.so.1.30.0 /usr/local/lib/libonnxruntime.so
 COPY --from=ocr /out/PP-OCRv6_rec_small.onnx /usr/local/share/subocr/PP-OCRv6_rec_small.onnx
+COPY --from=ocr /out/silero_vad.onnx /usr/local/share/subvad/silero_vad.onnx
 COPY --from=build /out/subocr /usr/local/bin/subocr
+COPY --from=build /out/subvad /usr/local/bin/subvad
 COPY --from=build /out/projectionist /usr/local/bin/projectionist
 ENTRYPOINT ["/usr/local/bin/projectionist"]
 CMD ["serve", "-config", "/config/projectionist.toml"]

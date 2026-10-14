@@ -913,12 +913,54 @@ func TestAlassFit(t *testing.T) {
 		want   bool
 	}{{"uniform", uniform.String(), true}, {"scattered", scattered.String(), false}, {"uniform", srt(otherTimes(), 0), false},
 		{"uniform", retime(uniform.String(), 1, 1.2), false}} {
-		ref := reference{label: "alass", dir: dir, speech: filepath.Join(dir, "speech.srt"), talk: spanBits(cues(c.speech), 1)}
+		ref := reference{label: "alass", dir: dir, hearings: []hearing{{label: "level", speech: filepath.Join(dir, "speech.srt"), talk: spanBits(cues(c.speech), 1)}}}
 		os.WriteFile(filepath.Join(dir, "mode"), []byte(c.mode), 0o644)
 		attempt := map[string]any{}
 		out, result, ok := r.fit(context.Background(), &ref, cand.String(), attempt)
 		if ok != c.want || ok && (result != "retimed" || out != uniform.String() || attempt["offset_ms"] != 1500.0) {
 			t.Errorf("%s against its speech %v: ok %v result %q attempt %v", c.mode, c.want, ok, result, attempt)
+		}
+	}
+}
+
+// Catches a subtitle in sync with the speech given to alass anyway (alass tore the in-sync release sidecars of Batman:
+// The Animated Series S04E03 and a Friends episode apart, and they were archived), a candidate the level detector cannot
+// judge (a laugh track heard as speech: no lag stands out) refused instead of judged by the next hearing (Silero's),
+// and one no hearing can judge refused rather than left unjudged.
+func TestFitHearings(t *testing.T) {
+	h := fake.NewEnv(t, nil)
+	dir := t.TempDir()
+	alass := h.Script(t, "alass", `echo ran >> "`+dir+`/alass.calls"; cp "$2" "$3"; echo "info: 'reference file FPS/input file FPS' ratio is 1"`+"\n")
+	r := &run{env: h.Env, opt: Options{Alass: alass}}
+	var spoken []span
+	for _, s := range captionTimes() {
+		spoken = append(spoken, span{s, s + 1.5})
+	}
+	speech := filepath.Join(dir, "speech.srt")
+	os.WriteFile(speech, []byte(srt(captionTimes(), 0)), 0o644)
+	laughter := hearing{label: "level", speech: speech, talk: spanBits([]span{{0, 3000}}, 1)}
+	dialogue := hearing{label: "silero", speech: speech, talk: spanBits(spoken, 1)}
+	inSync := srt(captionTimes(), 0)
+	for _, c := range []struct {
+		why      string
+		hearings []hearing
+		result   string
+		via      string
+	}{
+		{"in sync, heard clearly", []hearing{dialogue}, "kept", "silero"},
+		{"the levels hear a laugh track, Silero the lines", []hearing{laughter, dialogue}, "kept", "silero"},
+		{"nothing stands out to any hearing", []hearing{laughter}, "unjudged", "level"},
+	} {
+		os.Remove(filepath.Join(dir, "alass.calls"))
+		ref := reference{label: "alass", dir: dir, hearings: c.hearings}
+		attempt := map[string]any{}
+		out, result, ok := r.fit(context.Background(), &ref, inSync, attempt)
+		calls, _ := os.ReadFile(filepath.Join(dir, "alass.calls"))
+		ranAlass := strings.Count(string(calls), "ran")
+		if result != c.result || ok != (c.result == "kept") || ok && out != inSync || attempt["hearing"] != c.via ||
+			c.result == "kept" && ranAlass != 0 {
+			t.Errorf("%s: %q (ok %v) via %v, alass ran %d time(s); want %q via %s, alass never run on a subtitle in sync",
+				c.why, result, ok, attempt["hearing"], ranAlass, c.result, c.via)
 		}
 	}
 }
@@ -929,7 +971,9 @@ func TestAlassFit(t *testing.T) {
 // last whole one; and a stereo mix dressed as 5.1 heard as silence (Rocky III, T-34: the centre channel at -91 dB, the
 // dialogue in the front pair), an empty speech.srt alass cannot read ("could not determine character encoding"). A
 // steady tone 28 dB under the lines plays throughout, as a score would; where the centre speaks, the front pair speaks
-// other lines, so a centre heard from the front pair is heard wrong.
+// other lines, so a centre heard from the front pair is heard wrong. And subvad not given the dialogue channel, or its
+// speech not taken as the second hearing (only what both detectors heard), which is what lets a laugh-track episode be
+// judged; Silero's speech of a silent centre is never paired with the front pair's levels.
 func TestHearVoiceBand(t *testing.T) {
 	lines := []span{{10, 12}, {40, 41.5}, {89, 91.5}, {130, 133}, {185, 186.5}} // the third crosses 90 s, the last is past 180 s
 	others := []span{{20, 22}, {60, 61.5}, {150, 152}}
@@ -972,13 +1016,19 @@ func TestHearVoiceBand(t *testing.T) {
 case "$*" in *pan=stereo*) f=both;; *c0=FC*) f=centre;; *) f=front;; esac
 dd if="`+ff+`/$f.pcm" bs=4099 2>/dev/null
 `)
-		r := &run{env: h.Env, opt: Options{Alass: h.Script(t, "alass", "exit 1\n")}}
+		r := &run{env: h.Env, opt: Options{Alass: h.Script(t, "alass", "exit 1\n")},
+			vadBin: h.Script(t, "subvad", `cat > "`+ff+`/vad.in"; printf '9.5 12.5\n39 42\n'`+"\n")}
 		ti := &title{path: "/v.mkv", info: probe.Info{Audio: []probe.Audio{{Index: 1, Layout: "stereo"}, {Index: 2, Layout: "5.1", Default: true}}}}
 		ref := reference{label: "alass"}
 		if err := r.hear(context.Background(), ti, &ref); err != nil {
 			t.Errorf("%s: %v", c.why, err)
 		}
-		raw, _ := os.ReadFile(ref.speech)
+		raw, _ := os.ReadFile(ref.hearings[0].speech)
+		var both []span
+		if len(ref.hearings) == 2 {
+			second, _ := os.ReadFile(ref.hearings[1].speech)
+			both = cues(string(second))
+		}
 		ref.cleanup()
 		heard := cues(string(raw))
 		calls, _ := os.ReadFile(filepath.Join(ff, "helper.calls"))
@@ -986,8 +1036,22 @@ dd if="`+ff+`/$f.pcm" bs=4099 2>/dev/null
 		for i := range heard {
 			ok = ok && i < len(lines) && math.Abs(heard[i].start-lines[i].start) <= 0.03 && math.Abs(heard[i].end-lines[i].end) <= 0.03
 		}
-		if !ok || !slices.Equal(ref.talk, spanBits(heard, 1)) {
+		if !ok || !slices.Equal(ref.hearings[0].talk, spanBits(heard, 1)) {
 			t.Errorf("%s: heard %v from %q; want %v from the default track", c.why, heard, calls, lines)
+		}
+		vadIn, _ := os.ReadFile(filepath.Join(ff, "vad.in"))
+		centre, _ := os.ReadFile(filepath.Join(ff, "centre.pcm"))
+		want := []span{{10, 12}, {40, 41.5}} // the lines Silero also heard
+		if c.why == "the centre is silent" {
+			want = nil
+		}
+		match := len(both) == len(want) && len(ref.hearings) == 1+min(1, len(want))
+		for i := range both {
+			match = match && math.Abs(both[i].start-want[i].start) <= 0.03 && math.Abs(both[i].end-want[i].end) <= 0.03
+		}
+		if !bytes.Equal(vadIn, centre) || !match {
+			t.Errorf("%s: subvad given %d bytes of the centre's %d; hearings %d, the second %v; want the centre's PCM, Silero's lines %v",
+				c.why, len(vadIn), len(centre), len(ref.hearings), both, want)
 		}
 	}
 }
@@ -1342,7 +1406,7 @@ func TestRunQueueFallsThrough(t *testing.T) {
 			blu = 2 // the refused download, then the one that came back
 		}
 		var first string
-		f.h.Env.Store.DB().QueryRow(`SELECT json_extract(fields, '$.id') FROM events WHERE item=? AND status='rejected_misaligned' ORDER BY id LIMIT 1`,
+		f.h.Env.Store.DB().QueryRow(`SELECT json_extract(fields, '$.id') FROM events WHERE item=? AND status IN ('rejected_offsync', 'unjudged') ORDER BY id LIMIT 1`,
 			f.path(show)).Scan(&first)
 		if c == "falls through" && first != "opensubtitles:bluray" {
 			t.Errorf("%s: %s refused first; want OpenSubtitles' Blu-ray (tier 2) before Gestdown's WEB (tier 3)", c, first)

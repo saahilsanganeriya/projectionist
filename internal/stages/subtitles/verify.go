@@ -9,12 +9,14 @@ package subtitles
 //	  fits, no cue moves more than keptWithin   -> kept: nothing written
 //	  fits, the cues move further                -> retimed: the old file moved to the archive, the retimed one created
 //	                                                under the very same name (O_EXCL)
-//	  not an SRT (under 40 cues), the windows    -> refused: moved to the archive; once a video has none left, its record
+//	  not an SRT (no cues), the windows          -> refused: moved to the archive; once a video has none left, its record
 //	  disagree on the offset, or the retimed        is dropped, so the next run searches for it as for any title lacking
 //	  cues do not fit the video's length            a subtitle
 //	  the windows cannot judge it (one without   -> undecided: left as it is, the title queued behind every title lacking
 //	  evidence, no dialogue in them, no index,      a subtitle; the queue's alignment (here or on an align worker) runs
-//	  a ratio they cannot tell apart)               on the sidecars themselves, and settle acts on what it says
+//	  a ratio they cannot tell apart, fewer         on the sidecars themselves, and settle acts on what it says: it
+//	  than 40 cues)                                 refuses a sidecar only on evidence (the speech placed it, off);
+//	                                                one no hearing can place stays, its title unjudged
 //
 // Each verdict is an event naming the sidecar; a kept or retimed one names its file (size:mtime) as judged, so a sidecar
 // is judged once, and a title is verified once all its sidecars are. Forced tracks, .ass/.ssa/.vtt sidecars and embedded
@@ -95,8 +97,10 @@ func (r *run) verifyPass(ctx context.Context, t *title) outcome {
 		fields := map[string]any{"sidecar": filepath.Base(p), "file": t.key}
 		verdict, out := "undecided", ""
 		switch n := len(cues(texts[i])); {
-		case n < minCues:
-			verdict, fields["detail"] = "refused", fmt.Sprintf("not an SRT a video could carry: %d cues", n)
+		case n == 0:
+			verdict, fields["detail"] = "refused", "not an SRT: no cues"
+		case n < minCues: // a short special's: too few for any fit to judge, so the full alignment leaves it unjudged
+			fields["detail"] = fmt.Sprintf("%d cues: too few to judge", n)
 		case smp == nil:
 			fields["detail"] = why
 		default:
