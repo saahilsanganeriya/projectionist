@@ -165,7 +165,7 @@ func readSubFacts(raw []byte, ext string) SubFacts {
 		f.SDH, _ = strconv.ParseFloat(fmt.Sprintf("%.3f", float64(sdh)/float64(len(body))), 64)
 		f.Ad = float64(ads) >= float64(len(body))*0.8
 	}
-	f.Script = textScript(text)
+	f.Script = textScript(markupRe.ReplaceAllString(text, " ")) // a font name in a <font face> tag is not the text's script
 	if f.Script == "latin" {
 		f.Guess = guessLang(body)
 	}
@@ -244,7 +244,8 @@ var factExt = set(".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx", ".smi")
 // The cache table is named for the facts' version: a change to how facts are read must bump it, so every file is
 // read again rather than planned from stale facts.
 const subFactsSchema = `DROP TABLE IF EXISTS rename_subfacts;
-CREATE TABLE IF NOT EXISTS rename_subfacts_v2 (
+DROP TABLE IF EXISTS rename_subfacts_v2;
+CREATE TABLE IF NOT EXISTS rename_subfacts_v3 (
   path     TEXT PRIMARY KEY,
   size     INTEGER NOT NULL,
   mtime_ns INTEGER NOT NULL,
@@ -269,7 +270,7 @@ func subFacts(ctx context.Context, env *stage.Env, files map[string]int64) (map[
 		facts       SubFacts
 	}
 	cached := map[string]row{}
-	rows, err := db.QueryContext(ctx, `SELECT path, size, mtime_ns, facts FROM rename_subfacts_v2`)
+	rows, err := db.QueryContext(ctx, `SELECT path, size, mtime_ns, facts FROM rename_subfacts_v3`)
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +298,7 @@ func subFacts(ctx context.Context, env *stage.Env, files map[string]int64) (map[
 		defer tx.Rollback()
 		for p, r := range fresh {
 			raw, _ := json.Marshal(r.facts)
-			if _, err := tx.Exec(`INSERT OR REPLACE INTO rename_subfacts_v2(path, size, mtime_ns, facts) VALUES (?, ?, ?, ?)`,
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO rename_subfacts_v3(path, size, mtime_ns, facts) VALUES (?, ?, ?, ?)`,
 				p, r.size, r.mtime, string(raw)); err != nil {
 				return err
 			}
@@ -337,7 +338,7 @@ func subFacts(ctx context.Context, env *stage.Env, files map[string]int64) (map[
 	}
 	for p := range cached {
 		if _, live := out[p]; !live {
-			if _, err := db.ExecContext(ctx, `DELETE FROM rename_subfacts_v2 WHERE path = ?`, p); err != nil {
+			if _, err := db.ExecContext(ctx, `DELETE FROM rename_subfacts_v3 WHERE path = ?`, p); err != nil {
 				return nil, err
 			}
 		}
