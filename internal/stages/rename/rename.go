@@ -602,6 +602,7 @@ func apply(ctx context.Context, env *stage.Env, rep *stage.Report, opt Options, 
 	}
 	defer logf.Close()
 	x := newExec(opt.Root, logf, env.Now)
+	x.quiet = opt.Quiet
 	defer func() {
 		for k, v := range x.stats {
 			rep.Count(k, v)

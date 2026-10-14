@@ -46,6 +46,7 @@ type executor struct {
 	media string   // the share: clutter goes to <media>/_archive/clutter/<its path>
 	roots []string // library roots a prune never removes, nor climbs above
 	now   func() time.Time
+	quiet time.Duration // a source changed more recently is still being written: its unit waits (0: no check)
 	stats map[string]int
 }
 
@@ -64,6 +65,12 @@ func isVideo(p string) bool { return videoExt[lowerExt(p)] }
 func lexists(p string) bool {
 	_, err := os.Lstat(p)
 	return err == nil
+}
+
+// emptyFile reports whether p is a regular file with nothing in it.
+func emptyFile(p string) bool {
+	st, err := os.Lstat(p)
+	return err == nil && st.Mode().IsRegular() && st.Size() == 0
 }
 
 // runUnit executes one unit's ops and returns the folders it changed.
@@ -96,6 +103,12 @@ func (x *executor) runUnit(ctx context.Context, unit string, ops []Op) (touched 
 			}
 			continue
 		}
+		if x.quiet > 0 && o.Op != "delete" {
+			// The plan is from the scan; a copy can start over the file since (a second copy's Replace truncates it)
+			if info, err := os.Lstat(o.Src); err == nil && changedSince(info, x.now().Add(-x.quiet)) {
+				return touched, fmt.Errorf("%w: still being written (changed within %s): %s", ErrUnitStopped, x.quiet, o.Src)
+			}
+		}
 		if o.Op == "delete" {
 			same, err := identical(ctx, o.Src, o.Dst)
 			if err != nil {
@@ -108,11 +121,17 @@ func (x *executor) runUnit(ctx context.Context, unit string, ops []Op) (touched 
 		} else if o.Op == "archive" {
 			o.Dst = archiveDst(o.Dst)
 		} else if lexists(o.Dst) {
-			x.count("target_exists")
-			if isVideo(o.Src) {
-				return touched, fmt.Errorf("%w: a video's target exists, so its sidecars stay too: %s", ErrUnitStopped, o.Dst)
+			if isVideo(o.Src) && emptyFile(o.Dst) && !emptyFile(o.Src) { // a copy that never finished: archived, so the video lands
+				todo = append(todo, Op{o.Unit, "archive", o.Dst, archiveDst(x.media + "/_archive/clutter/" + strings.TrimPrefix(o.Dst, x.media+"/")),
+					"an empty file at the video's target"})
+				x.count("empty_target_archived")
+			} else {
+				x.count("target_exists")
+				if isVideo(o.Src) {
+					return touched, fmt.Errorf("%w: a video's target exists, so its sidecars stay too: %s", ErrUnitStopped, o.Dst)
+				}
+				continue
 			}
-			continue
 		}
 		todo = append(todo, o)
 	}

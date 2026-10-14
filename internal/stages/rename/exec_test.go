@@ -151,3 +151,48 @@ func TestUndoGatedPerUnitAndOnce(t *testing.T) {
 		t.Fatalf("held = %v, want A and B where undo put them", held)
 	}
 }
+
+// Catches a file moved while a copy still writes it: a household member's second copy of Matchbox (Finder's Replace)
+// truncated the first to 0 bytes at 10:26, the stage's plan from before then moved it at 10:29, and the copy landed
+// beside a 0-byte file at the target that blocked every later run. A source changed within the quiet window stops its
+// unit before anything is logged or moved; once quiet, it moves.
+func TestRunUnitWaitsForACopyStillBeingWritten(t *testing.T) {
+	root := t.TempDir()
+	m := filepath.Join(root, "Movies")
+	src, dst := filepath.Join(m, "M.2026.1080p.mkv"), filepath.Join(m, "M (2026) {tmdb-9}/M (2026) {tmdb-9}.mkv")
+	write(t, src, "still arriving")
+	log := &countingLog{}
+	x := newExecutor(root, log)
+	x.quiet, x.now = 10*time.Minute, time.Now
+	op := []Op{{"movie:tmdb-9", "move", src, dst, ""}}
+	if _, err := x.runUnit(context.Background(), "movie:tmdb-9", op); !errors.Is(err, ErrUnitStopped) ||
+		!strings.Contains(err.Error(), "still being written") || !lexists(src) || lexists(dst) || log.Len() != 0 {
+		t.Fatalf("a source written just now: err %v, moved %v, logged %q; want ErrUnitStopped naming the write, nothing moved or logged",
+			err, lexists(dst), log.String())
+	}
+	x.now = func() time.Time { return time.Now().Add(11 * time.Minute) }
+	if _, err := x.runUnit(context.Background(), "movie:tmdb-9", op); err != nil || !lexists(dst) {
+		t.Fatalf("once quiet: err %v, moved %v", err, lexists(dst))
+	}
+}
+
+// Catches an empty file at a video's target (a copy that never finished) blocking the video for good, as Matchbox's did
+// from 2026-10-10 until it was moved by hand: the empty file is archived (never deleted) and the video lands; a target
+// with anything in it still stops the unit.
+func TestRunUnitArchivesAnEmptyTarget(t *testing.T) {
+	root := t.TempDir()
+	m := filepath.Join(root, "Movies")
+	src, dst := filepath.Join(m, "M.2026.1080p.mkv"), filepath.Join(m, "M (2026) {tmdb-9}/M (2026) {tmdb-9}.mkv")
+	write(t, src, "the film")
+	write(t, dst, "")
+	x := newExecutor(root, &countingLog{})
+	if _, err := x.runUnit(context.Background(), "movie:tmdb-9", []Op{{"movie:tmdb-9", "move", src, dst, ""}}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(dst)
+	archived := filepath.Join(root, "_archive/clutter/Movies/M (2026) {tmdb-9}/M (2026) {tmdb-9}.mkv")
+	if st, err := os.Stat(archived); string(got) != "the film" || lexists(src) || err != nil || st.Size() != 0 {
+		t.Errorf("target holds %q, source left %v, empty file archived %v; want the film at the target, the empty file in the archive",
+			got, lexists(src), err == nil)
+	}
+}
