@@ -165,7 +165,7 @@ func readSubFacts(raw []byte, ext string) SubFacts {
 		f.SDH, _ = strconv.ParseFloat(fmt.Sprintf("%.3f", float64(sdh)/float64(len(body))), 64)
 		f.Ad = float64(ads) >= float64(len(body))*0.8
 	}
-	f.Script = textScript(text)
+	f.Script = textScript(markupRe.ReplaceAllString(text, " ")) // a font name in a <font face> tag is not the text's script
 	if f.Script == "latin" {
 		f.Guess = guessLang(body)
 	}
