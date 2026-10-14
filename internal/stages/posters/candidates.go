@@ -117,11 +117,21 @@ func (r *run) gather(ctx context.Context, it *row) error {
 	if cover := r.covers[t.Key]; cover != "" {
 		criterion = append(criterion, Candidate{URL: cover, Thumb: cover, Source: srcCriterion, Lang: "en", Caption: criterionCaption})
 	}
-	langs := []string{"", "xx", "00", "en", info.lang}
+	langs := titledLangs(info.lang)
 	keep := func(c Candidate) bool { return slices.Contains(langs, c.Lang) }
 	it.Cands = r.fill(ctx, pool, r.setPosters[t.Key], criterion, slices.DeleteFunc(info.posters, func(c Candidate) bool { return !keep(c) }),
 		slices.DeleteFunc(fan, func(c Candidate) bool { return !keep(c) }))
 	return nil
+}
+
+// titledLangs are the languages a TMDB or fanart.tv poster may carry its text in: English and the title's own. Every
+// poster must show the title (owner 2026-10-14), so a textless one ("", "xx" on TMDB, "00" on fanart.tv: no language)
+// stays out; the judge looks for the title on the rest, and on art that carries no language tag at all.
+func titledLangs(own string) []string {
+	if own == "" || own == "xx" {
+		return []string{"en"}
+	}
+	return []string{"en", own}
 }
 
 // ownerUnreadable alerts once about a title whose owner poster cannot be read (a truncated JPEG in the export) and

@@ -7,7 +7,7 @@
 //	inventory   folder names under the Movies and TV roots → titles (identity from {tmdb-N}; no app is asked)
 //	owner       per export: which poster Plex showed at a Plex DB backup and whether the owner uploaded or picked it
 //	candidates  the owner's poster + a Criterion release's cover (criterion.go) + TMDB's (every language, from
-//	            env.TMDB) + fanart.tv's (env.Fanart), filtered to English, textless or the title's own language, best
+//	            env.TMDB) + fanart.tv's (env.Fanart), filtered to English or the title's own language (never textless), best
 //	            voted first, near-duplicates dropped by dHash
 //	judge       one vision call per title through the AI gateway (env.LLM: the posters task's model, the collections
 //	            task's for a collection), as many at once as the client allows, under a hard budget. The owner's

@@ -59,8 +59,9 @@ His taste, in his words: "I like illustrated artistic posters, fanart usually, n
 minimalism, something creative is often good. The only text on the poster should be the movie name."
 
 Reward: illustrated, painted or drawn art, fan art, and an original, creative idea; one look carried through every
-film; a mood true to the series; each film's title set as part of the design, or no text at all. Creative beats plain:
-a bare minimalist set scores below an inventive illustrated one.
+film; a mood true to the series; each film's title set as part of the design. Creative beats plain: a bare minimalist
+set scores below an inventive illustrated one. Every poster must show its film's title, his rule: a set whose posters
+carry no text at all is a heavy penalty, however good its art.
 
 Penalise mainstream studio key art (floating heads, rows of star faces, photo collages) and any text besides the
 titles: credit blocks, taglines, review quotes, dates and logos are a heavy penalty. Also penalise heavily: text in a
