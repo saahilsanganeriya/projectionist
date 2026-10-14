@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"projectionist/internal/stage"
+	"projectionist/internal/store"
 )
 
 // verifyFixture is sampledFixture with the verify pass on and Show already carrying the given sidecars (by suffix);
@@ -115,25 +116,28 @@ func TestVerifyRetimed(t *testing.T) {
 	}
 }
 
-// Catches a sidecar the stage wrote as downloaded because its release matched (release_matched: no timing check, The
-// Game 15.7 s off) left unjudged as if verified: once due on the usual schedule, the verify pass fits it to the windows
-// and retimes it onto them, the old file archived.
+// Catches a sidecar the stage wrote without fitting it left unjudged: one it wrote as downloaded because its release
+// matched (release_matched: The Game sat 15.7 s off), or one it extracted from the video's own English text track
+// (extracted: Colin from Accounts S01E05's runs 1.2 s early), or one judged only after the retry wait a failed search
+// gets (a week): it was written, so the verify pass judges it on the next run.
 func TestVerifyJudgesAReleaseMatch(t *testing.T) {
 	truth := dense(1000, 7)
 	late := srtOf(cueSpans(truth, 1, -15.7))
-	f := verifyFixture(t, true, map[string]string{".en.srt": late})
-	db := f.h.Env.Store.DB()
-	db.Exec(schema)
-	if _, err := db.Exec(`INSERT INTO subtitles_titles(path, outcome, detail, tries, last_try) VALUES (?, 'release_matched', '', 1, '2020-01-01T00:00:00.000000000Z')`,
-		f.path(show)); err != nil {
-		t.Fatal(err)
-	}
-	f.run(t)
-	got := cues(f.sidecar(t, show))
-	if o := f.outcomes()[f.path(show)]; o != "retimed" || f.archived()[showArchive+".en.srt"] != late || len(got) != len(truth) ||
-		math.Abs(got[0].start-truth[0]) > 0.05 {
-		t.Errorf("Show %q, archived %v, first cue %v; want retimed, the old one archived, on the captions", o,
-			f.archived()[showArchive+".en.srt"] == late, got[:min(1, len(got))])
+	for _, written := range []string{"release_matched", "extracted"} {
+		f := verifyFixture(t, true, map[string]string{".en.srt": late})
+		db := f.h.Env.Store.DB()
+		db.Exec(schema)
+		if _, err := db.Exec(`INSERT INTO subtitles_titles(path, outcome, detail, tries, last_try) VALUES (?, ?, '', 1, ?)`,
+			f.path(show), written, f.h.Now.UTC().Format(store.TimeFormat)); err != nil {
+			t.Fatal(err)
+		}
+		f.run(t)
+		got := cues(f.sidecar(t, show))
+		if o := f.outcomes()[f.path(show)]; o != "retimed" || f.archived()[showArchive+".en.srt"] != late || len(got) != len(truth) ||
+			math.Abs(got[0].start-truth[0]) > 0.05 {
+			t.Errorf("%s: Show %q, archived %v, first cue %v; want retimed on the next run, the old one archived, on the captions", written, o,
+				f.archived()[showArchive+".en.srt"] == late, got[:min(1, len(got))])
+		}
 	}
 }
 
