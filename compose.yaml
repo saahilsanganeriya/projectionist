@@ -3,7 +3,7 @@
 name: projectionist
 services:
   projectionist:
-    image: projectionist:latest # built on the Mac (make image), shipped with `docker save | docker load`
+    image: projectionist:latest # built with make image, shipped with `docker save | docker load`
     container_name: projectionist
     network_mode: host # Plex 127.0.0.1:32400, Jellyfin 127.0.0.1:8096, /health on 127.0.0.1:8097
     restart: unless-stopped
@@ -29,45 +29,30 @@ services:
     read_only: true
     tmpfs: [/tmp]
     volumes:
+      # Paths as in config.example.toml: change them to your NAS's, here and in the config alike.
       - /volume1/docker/projectionist/config:/config:ro
       - /volume1/docker/projectionist/state:/state
       # The only writable media mount: renames, 4K copies, .details, subtitles.
       - /volume1/media:/volume1/media
-      # Preferences.xml (token, GPU settings), Plex's log, its codecs and VA driver: read-only.
+      # Synology's Plex package: Preferences.xml (token, GPU settings), its log, its codecs and VA driver: read-only.
       - /volume1/PlexMediaServer/AppData/Plex Media Server:/volume1/PlexMediaServer/AppData/Plex Media Server:ro
       - /volume1/@appstore/PlexMediaServer:/volume1/@appstore/PlexMediaServer:ro
-      # GPU self-test sample and the old scripts' state files (imported once at cutover): read-only.
-      - /volume1/PlexMediaServer/scripts:/volume1/PlexMediaServer/scripts:ro
-      - /volume1/PlexMediaServer/remote4k:/volume1/PlexMediaServer/remote4k # STATUS.txt the owner reads
-      # The Python renamers' logs (undo.tsv, undo_auto.tsv): each video's original name for its .details note.
-      # Read-only; the rename stage's own logs live under /volume1/media/.projectionist/rename.
-      - /volume1/PlexMediaServer/rename:/volume1/PlexMediaServer/rename:ro
+      # Plex's library database (subtitles' plex_db): SQLite's readers share its -shm, so its folder is writable.
+      - type: bind
+        source: /volume1/PlexMediaServer/AppData/Plex Media Server/Plug-in Support/Databases
+        target: /volume1/PlexMediaServer/AppData/Plex Media Server/Plug-in Support/Databases
+        bind: { create_host_path: false }
+      # projectionist's own folders beside the media: the GPU sample, the Plex backups and customizations export,
+      # the poster and subtitle archives, remote4k's STATUS.txt, appbackup's versions, the unzipped Letterboxd exports.
+      - /volume1/projectionist:/volume1/projectionist
       # health stage: inspect containers, restart the ones in [stages.health].restartable. The socket is root on the
       # host and ":ro" would not limit its API; the allow-list in code is the bound.
       - /var/run/docker.sock:/var/run/docker.sock
-      # subtitles: subfetch2.py's quota.csv and downloads.csv, imported once at cutover (OpenSubtitles' per-IP quota).
-      # rename: the aligner's log2.csv (its aligned copy takes the primary subtitle name).
-      - /volume1/PlexMediaServer/subtitle-downloads:/volume1/PlexMediaServer/subtitle-downloads:ro
-      # posters: the owner's poster exports and the Plex DB backups they are matched with, read when they change.
-      - /volume1/PlexMediaServer/backups:/volume1/PlexMediaServer/backups:ro
-      # posters: every candidate a title was judged on and its chosen poster, at full size (archive_dir), on the HDD.
-      - /volume1/PlexMediaServer/poster-archive:/volume1/PlexMediaServer/poster-archive
-      # The unzipped Letterboxd exports: lists' export_dir (a missing or empty folder is an alert on every run), the
-      # letterboxd stage's and tonight's people export_dir (for those two, a missing folder is no export; each person
-      # reads only the letterboxd-<user>-* folders named for them).
-      - /volume1/docker/projectionist/data/letterboxd:/volume1/docker/projectionist/data/letterboxd:ro
-      # health: the NVMe app-data volume's mount, fullness and top-level entries; appbackup reads its roots here.
+      # health: the app-data volume's mount, fullness and top-level entries (volume2); appbackup reads its roots here.
       # The superblock's own rw/ro still shows through this read-only bind, so health sees a read-only remount.
       - { type: bind, source: /volume2, target: /volume2, read_only: true, bind: { create_host_path: false } }
-      # appbackup: SQLite's online backup opens each database's -shm read-write, so these folders are writable.
-      # subtitles reads Plex's library database here (plex_db, opened read-only): the item a new sidecar's video is.
-      - type: bind
-        source: /volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases
-        target: /volume2/PlexAppData/AppData/Plex Media Server/Plug-in Support/Databases
-        bind: { create_host_path: false }
-      - { type: bind, source: /volume2/jellyfin/config/data, target: /volume2/jellyfin/config/data, bind: { create_host_path: false } }
-      - { type: bind, source: /volume2/projectionist/state, target: /volume2/projectionist/state, bind: { create_host_path: false } } # = /state
-      - /volume1/PlexMediaServer/nvme-backup:/volume1/PlexMediaServer/nvme-backup # appbackup's nightly versions
+      # appbackup: SQLite's online backup opens each listed database's -shm read-write, so their folders are writable.
+      - { type: bind, source: /volume2/apps/jellyfin, target: /volume2/apps/jellyfin, bind: { create_host_path: false } }
     secrets: [jellyfin_key, tmdb_read_token, tmdb_api_key, fanart_api_key, ai_gateway_api_key] # /run/secrets/<name>, read-only
     # Optional, for subtitles' keyed providers (one without its files is skipped): append subsource_api_key, or
     # opensubtitles_api_key, opensubtitles_username and opensubtitles_password, and uncomment their entries below. A
@@ -85,7 +70,7 @@ secrets:
     file: /volume1/docker/projectionist/secrets/tmdb_api_key
   fanart_api_key:
     file: /volume1/docker/projectionist/secrets/fanart_api_key
-  ai_gateway_api_key: # the owner's Vercel AI Gateway key: every model call whose task names no API of its own ([llm] key_file)
+  ai_gateway_api_key: # the AI gateway's key: every model call whose task names no API of its own ([llm] key_file)
     file: /volume1/docker/projectionist/secrets/ai_gateway_api_key
   # subsource_api_key: # subtitles: SubSource, a free key (subsource.net, My Profile)
   #   file: /volume1/docker/projectionist/secrets/subsource_api_key

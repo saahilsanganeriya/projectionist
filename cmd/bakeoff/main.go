@@ -12,11 +12,11 @@
 //
 // Run it on the NAS, where the library, the thumbnails and the owner's posters sit at the stage's paths, on copies:
 //
-//	S=/volume1/PlexMediaServer/projectionist-test/llm-gateway
-//	sqlite3 /volume1/docker/projectionist/data/projectionist.db ".backup $S/state.db"
-//	cp -r /volume1/docker/projectionist/data/posters $S/posters-cache
-//	cp /volume1/PlexMediaServer/projectionist-test/tonight/state-r5b.db $S/tonight.db # tonight's facts, maps and Letterboxd caches
-//	$S/bakeoff -config /volume1/docker/projectionist/config/projectionist.toml -db $S/state.db -tonight-db $S/tonight.db \
+//	S=<a scratch folder on the NAS>; STATE=<the folder mounted at /state>; CONFIG=<the folder mounted at /config>
+//	sqlite3 $STATE/projectionist.db ".backup $S/state.db"
+//	cp -r $STATE/posters $S/posters-cache
+//	cp <a store from a tonight test run> $S/tonight.db # tonight's facts, maps and Letterboxd caches
+//	$S/bakeoff -config $CONFIG/projectionist.toml -db $S/state.db -tonight-db $S/tonight.db \
 //	    -posters-cache $S/posters-cache -out $S/run-$(date -u +%Y%m%dT%H%MZ) [-fake]
 //
 // The key is AI_GATEWAY_API_KEY from the environment, else the file -key-file names (default: [llm] key_file, which
