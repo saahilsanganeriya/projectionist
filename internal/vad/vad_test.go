@@ -3,6 +3,7 @@ package vad
 import (
 	"math"
 	"os"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -41,7 +42,7 @@ func TestSpeechFollowsSileroRules(t *testing.T) {
 // every window's probability must match what silero-vad 6.2.0's OnnxWrapper gave for the same clip (speech.probs),
 // which a clean clip's stretches alone do not show. The clip is synthetic (macOS say): 2 s silence, 4.9 s speech,
 // 2 s silence. It runs where ONNX Runtime is (ORT_LIB, else the image's path) and skips elsewhere.
-func TestModelHearsSpeechNotSilence(t *testing.T) {
+func TestModelMatchesSilerosWrapper(t *testing.T) {
 	lib := os.Getenv("ORT_LIB")
 	if lib == "" {
 		lib = "/usr/local/lib/libonnxruntime.so"
@@ -63,6 +64,7 @@ func TestModelHearsSpeechNotSilence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
+	defer debug.SetGCPercent(debug.SetGCPercent(1)) // a collection mid-run frees data a tensor still points at
 	probs, samples, err := d.Probabilities(f)
 	if err != nil {
 		t.Fatal(err)

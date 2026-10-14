@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"runtime"
 
 	"github.com/shota3506/onnxruntime-purego/onnxruntime"
 )
@@ -59,11 +60,13 @@ func (d *Detector) Close() {
 // Probabilities reads s16le PCM to its end and returns the speech probability of each 32 ms window (the last padded
 // with silence) and the number of samples read.
 func (d *Detector) Probabilities(r io.Reader) ([]float32, int, error) {
-	sr, err := onnxruntime.NewTensorValue(d.rt, []int64{Rate}, []int64{})
+	rate := []int64{Rate}
+	sr, err := onnxruntime.NewTensorValue(d.rt, rate, []int64{})
 	if err != nil {
 		return nil, 0, err
 	}
 	defer sr.Close()
+	defer runtime.KeepAlive(rate) // a tensor holds a pointer into Go memory, not a reference: the GC would free it
 	state := make([]float32, 2*128)
 	x := make([]float32, carried+window)
 	raw := make([]byte, 2*window)
@@ -109,6 +112,8 @@ func (d *Detector) step(x, state []float32, sr *onnxruntime.Value) (float32, err
 	}
 	defer st.Close()
 	out, err := d.sess.Run(context.Background(), map[string]*onnxruntime.Value{"input": in, "state": st, "sr": sr})
+	runtime.KeepAlive(x)
+	runtime.KeepAlive(state)
 	if err != nil {
 		return 0, err
 	}

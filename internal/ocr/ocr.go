@@ -11,6 +11,7 @@ import (
 	"image"
 	"math"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/shota3506/onnxruntime-purego/onnxruntime"
@@ -102,6 +103,7 @@ func (r *Reader) line(img *image.Gray) (string, error) {
 	}
 	defer in.Close()
 	out, err := r.sess.Run(context.Background(), map[string]*onnxruntime.Value{r.input: in})
+	runtime.KeepAlive(x) // the tensor points into x without holding it: the GC could free it mid-run
 	if err != nil {
 		return "", err
 	}
