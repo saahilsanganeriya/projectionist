@@ -383,7 +383,14 @@ func (r *run) request(ctx context.Context, it *row) (llm.Request, error) {
 // prompt cache, so after the first call it costs a tenth of its tokens. A taste_references key that is not his upload
 // or pick fails the run: the list stands for his taste, and a wrong key would quietly teach the judge Plex's.
 func (r *run) references(ctx context.Context) (refs, error) {
-	keys := append(slices.Clone(r.opt.TasteReferences), r.opt.TasteReferencesCurrent...)
+	room := maxImages - poolSize // a full pool must still fit: the ones named by their current poster first, then his favourites in order
+	current := r.opt.TasteReferencesCurrent[:min(len(r.opt.TasteReferencesCurrent), room)]
+	favourites := r.opt.TasteReferences[:min(len(r.opt.TasteReferences), room-len(current))]
+	if left := len(r.opt.TasteReferences) + len(r.opt.TasteReferencesCurrent) - len(current) - len(favourites); left > 0 {
+		r.env.Log.Warn("taste references over the model's image limit", "event", "references_trimmed", "left_out", left,
+			"max_images", maxImages, "pool", poolSize)
+	}
+	keys := append(slices.Clone(favourites), current...)
 	if len(keys) == 0 {
 		return refs{}, nil
 	}
@@ -391,7 +398,7 @@ func (r *run) references(ctx context.Context) (refs, error) {
 	tokens := llm.EstimateTokens(referencesHead)
 	for i, k := range keys {
 		var file string
-		if i < len(r.opt.TasteReferences) {
+		if i < len(favourites) {
 			p := r.owners[k]
 			if p.State != ownerUpload && p.State != ownerPick {
 				return refs{}, fmt.Errorf("posters: taste_references: %s is not a poster the owner uploaded or picked (%q)", k, p.State)
