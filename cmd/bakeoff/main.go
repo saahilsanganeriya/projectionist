@@ -1,5 +1,5 @@
-// Command bakeoff compares models on the AI gateway for the posters judge and tonight's picks, on the owner's real
-// data, by sending each exactly what the stage would (posters.Bakeoff, tonight.Today). It is a tool, not a test.
+// Command bakeoff compares models on the AI gateway for the posters judge, on the owner's real data, by sending each
+// exactly what the stage would (posters.Bakeoff). It is a tool, not a test.
 //
 // POSTERS: -titles (60) titles from a copy of the production store whose stored verdict is Claude Sonnet's: the owner's
 // picks and Plex defaults (his uploads are never judged, so none has a verdict), movies, shows and seasons, plus known
@@ -8,15 +8,13 @@
 // schema). Per model: % valid answers, top-1 agreement with Sonnet, mean Spearman correlation of the scores, how often
 // its top pick is a candidate Sonnet scored 4 or less, cost per title, p50 and p95 latency, and a contact sheet of its
 // disagreements with Sonnet (contact-<model>.jpg: Sonnet's pick left, the model's right).
-// TONIGHT: today's pick prompt, sized as the stage sizes it, on each -tonight-models model: validity and the picks.
 //
 // Run it on the NAS, where the library, the thumbnails and the owner's posters sit at the stage's paths, on copies:
 //
 //	S=<a scratch folder on the NAS>; STATE=<the folder mounted at /state>; CONFIG=<the folder mounted at /config>
 //	sqlite3 $STATE/projectionist.db ".backup $S/state.db"
 //	cp -r $STATE/posters $S/posters-cache
-//	cp <a store from a tonight test run> $S/tonight.db # tonight's facts, maps and Letterboxd caches
-//	$S/bakeoff -config $CONFIG/projectionist.toml -db $S/state.db -tonight-db $S/tonight.db \
+//	$S/bakeoff -config $CONFIG/projectionist.toml -db $S/state.db \
 //	    -posters-cache $S/posters-cache -out $S/run-$(date -u +%Y%m%dT%H%MZ) [-fake]
 //
 // The key is AI_GATEWAY_API_KEY from the environment, else the file -key-file names (default: [llm] key_file, which
@@ -61,26 +59,18 @@ import (
 	"projectionist/internal/obs"
 	"projectionist/internal/stage"
 	"projectionist/internal/stages/posters"
-	"projectionist/internal/stages/tonight"
 	"projectionist/internal/store"
-	"projectionist/internal/tmdb"
 )
 
-var (
-	visionModels  = "deepseek/deepseek-v4.1-flash,google/gemma-4-31b-it,zai/glm-5.3-flash,alibaba/qwen3.8-27b,deepseek/deepseek-v4-flash-vision-exp"
-	tonightModels = "deepseek/deepseek-v4-flash-0731,deepseek/deepseek-v4.1-flash"
-)
+var visionModels = "deepseek/deepseek-v4.1-flash,google/gemma-4-31b-it,zai/glm-5.3-flash,alibaba/qwen3.8-27b,deepseek/deepseek-v4-flash-vision-exp"
 
 func main() {
-	cfgPath := flag.String("config", "", "projectionist config (its [stages.posters], [stages.tonight] and [llm])")
+	cfgPath := flag.String("config", "", "projectionist config (its [stages.posters] and [llm])")
 	dbPath := flag.String("db", "", "a copy of the production store")
-	tonightDB := flag.String("tonight-db", "", "a store holding tonight's facts, maps and Letterboxd caches (default: -db)")
 	cache := flag.String("posters-cache", "", "the posters cache_dir to read thumbnails from (a copy)")
 	out := flag.String("out", "", "output directory")
 	models := flag.String("models", visionModels, "vision models to judge posters, comma-separated")
-	tmodels := flag.String("tonight-models", tonightModels, "models for tonight's prompt, comma-separated")
 	titles := flag.Int("titles", 60, "titles to draw")
-	only := flag.String("only", "", `"posters" or "tonight"; empty = both`)
 	maxUSD := flag.Float64("max-usd", 1, "stop sending once spend plus the next call's worst case passes this")
 	keyFile := flag.String("key-file", "", "the gateway key file (default: [llm] key_file)")
 	fake := flag.Bool("fake", false, "answer from an in-process fake gateway: spends nothing")
@@ -89,8 +79,7 @@ func main() {
 		flag.Usage()
 		os.Exit(2)
 	}
-	if err := run(*cfgPath, *dbPath, cmp.Or(*tonightDB, *dbPath), *cache, *out, split(*models), split(*tmodels), *titles, *only,
-		*maxUSD, *keyFile, *fake); err != nil {
+	if err := run(*cfgPath, *dbPath, *cache, *out, split(*models), *titles, *maxUSD, *keyFile, *fake); err != nil {
 		fmt.Fprintln(os.Stderr, "bakeoff:", err)
 		os.Exit(1)
 	}
@@ -125,8 +114,7 @@ func (s *spend) settle(held, cost float64) {
 	s.spent += cost
 }
 
-func run(cfgPath, dbPath, tonightDB, cache, out string, models, tmodels []string, n int, only string, maxUSD float64,
-	keyFile string, fake bool) error {
+func run(cfgPath, dbPath, cache, out string, models []string, n int, maxUSD float64, keyFile string, fake bool) error {
 	ctx := context.Background()
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -139,12 +127,9 @@ func run(cfgPath, dbPath, tonightDB, cache, out string, models, tmodels []string
 	now := func() time.Time { return time.Now().UTC() }
 	base := llm.New(cfg.LLM, nil, now)
 	lc := cfg.LLM
-	lc.Tasks = map[string]llm.Task{"tonight": base.Task("tonight")}
+	lc.Tasks = map[string]llm.Task{}
 	for _, m := range models {
 		lc.Tasks["posters "+m] = llm.Task{Model: m, Reasoning: base.Task("posters").Reasoning}
-	}
-	for _, m := range tmodels {
-		lc.Tasks["tonight "+m] = llm.Task{Model: m, Reasoning: base.Task("tonight").Reasoning}
 	}
 	if keyFile != "" {
 		lc.KeyFile = keyFile
@@ -169,36 +154,21 @@ func run(cfgPath, dbPath, tonightDB, cache, out string, models, tmodels []string
 	var report strings.Builder
 	fmt.Fprintf(&report, "# Bake-off %s\n\nGateway %s%s; key from %s.\n\n", now().Format(time.RFC3339), cmp.Or(lc.API, llm.Defaults().API),
 		map[bool]string{true: " (FAKE: in-process llmtest, nothing spent)"}[fake], map[bool]string{true: "AI_GATEWAY_API_KEY", false: "the key file"}[os.Getenv("AI_GATEWAY_API_KEY") != ""])
-	if only != "tonight" {
-		st, err := store.Open(dbPath)
-		if err != nil {
-			return err
-		}
-		defer st.Close()
-		env := &stage.Env{Log: log.With("stage", "posters"), Store: st, Now: now, Loc: cfg.Location(), LLM: ai,
-			Options: func(v any) error {
-				if err := cfg.StageOptions("posters", v); err != nil || cache == "" {
-					return err
-				}
-				_, err := toml.Decode(fmt.Sprintf("cache_dir = %q", cache), v)
-				return err
-			}}
-		if err := bakePosters(ctx, env, models, n, budget, out, &report); err != nil {
-			return err
-		}
+	st, err := store.Open(dbPath)
+	if err != nil {
+		return err
 	}
-	if only != "posters" {
-		st, err := store.Open(tonightDB)
-		if err != nil {
+	defer st.Close()
+	env := &stage.Env{Log: log.With("stage", "posters"), Store: st, Now: now, Loc: cfg.Location(), LLM: ai,
+		Options: func(v any) error {
+			if err := cfg.StageOptions("posters", v); err != nil || cache == "" {
+				return err
+			}
+			_, err := toml.Decode(fmt.Sprintf("cache_dir = %q", cache), v)
 			return err
-		}
-		defer st.Close()
-		env := &stage.Env{Log: log.With("stage", "tonight"), Store: st, Now: now, Loc: cfg.Location(), LLM: ai,
-			TMDB:    tmdb.New(tmdb.Options{ReadTokenFile: cfg.TMDB.ReadTokenFile, APIKeyFile: cfg.TMDB.APIKeyFile, CacheTTL: cfg.TMDB.CacheTTL}, st),
-			Options: func(v any) error { return cfg.StageOptions("tonight", v) }}
-		if err := bakeTonight(ctx, env, tmodels, budget, &report); err != nil {
-			return err
-		}
+		}}
+	if err := bakePosters(ctx, env, models, n, budget, out, &report); err != nil {
+		return err
 	}
 	fmt.Fprintf(&report, "\nSpent: $%.4f of the $%.2f cap%s.\n", budget.spent, budget.max, map[bool]string{true: " (simulated: the fake's usage at catalogue prices)"}[fake])
 	fmt.Print(report.String())
@@ -529,69 +499,11 @@ func write(dst draw.Image, x, y int, s string) {
 	d.DrawString(s)
 }
 
-// ---- tonight ----
-
-func bakeTonight(ctx context.Context, env *stage.Env, models []string, budget *spend, report *strings.Builder) error {
-	req, check, err := tonight.Today(ctx, env)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(report, "\n## Tonight: today's prompt (%d estimated input tokens)\n", req.InputTokens)
-	for _, m := range models {
-		s := env.LLM.Session("tonight " + m)
-		fmt.Fprintf(report, "\n### %s\n\n", m)
-		held, err := s.WorstCase(ctx, req)
-		if err != nil {
-			fmt.Fprintf(report, "Not sent: %v\n", err)
-			continue
-		}
-		if !budget.reserve(held) {
-			fmt.Fprintln(report, "Not sent: past -max-usd.")
-			continue
-		}
-		r, err := s.Chat(ctx, req)
-		budget.settle(held, r.CostUSD)
-		if err != nil {
-			fmt.Fprintf(report, "Failed: %v\n", err)
-			continue
-		}
-		picks, violations := check(r.Text)
-		verdict := "VALID"
-		if len(violations) > 0 {
-			verdict = "INVALID: " + strings.Join(violations, "; ")
-		}
-		fmt.Fprintf(report, "%s. %d input + %d output tokens, $%.5f, %d ms, finish %s.\n\n", verdict, r.Usage.PromptTokens,
-			r.Usage.CompletionTokens, r.CostUSD, r.Took.Milliseconds(), r.Finish)
-		for _, p := range picks {
-			fmt.Fprintf(report, "- %s\n", p)
-		}
-	}
-	return nil
-}
-
 // ---- the fake gateway's answers (-fake) ----
 
-var (
-	unseenLine = regexp.MustCompile(`(?m)^(\d+) \| `)
-	lovedLine  = regexp.MustCompile(`[45](?:\.5)?★: ([^\n]+? \(\d{4}\))`)
-)
-
 // fakeAnswer scores posters by a hash of each image and the model (one model in ten answers prose, to show an
-// invalid answer), and picks tonight's first unseen films with a film he loved (the second model names one film
-// outside the list, to show a violation).
+// invalid answer).
 func fakeAnswer(n int, req llm.Request) llmtest.Answer {
-	if req.ResponseFormat != nil && req.ResponseFormat.JSONSchema.Name == "picks" {
-		ids := unseenLine.FindAllStringSubmatch(req.Messages[len(req.Messages)-1].Content[0].Text, 5)
-		liked := lovedLine.FindStringSubmatch(req.Messages[0].Content[0].Text)
-		var picks []string
-		for i, id := range ids {
-			if i == 0 && strings.Contains(req.Model, "v4.1") {
-				id[1] = "1"
-			}
-			picks = append(picks, fmt.Sprintf(`{"id":%s,"title":"t","mood":"quiet","liked":%q,"reason":"Shares the patience of %s."}`, id[1], liked[1], liked[1]))
-		}
-		return llmtest.Answer{Text: `{"picks":[` + strings.Join(picks, ",") + `]}`, In: 20000, Out: 400}
-	}
 	h := fnv.New32a()
 	h.Write([]byte(req.Model))
 	if req.Model == "google/gemma-4-31b-it" && n%10 == 0 {

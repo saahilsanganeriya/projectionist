@@ -24,7 +24,6 @@ func TestRestrictionsAreMergedNotReplaced(t *testing.T) {
 		w.tv.shares[i]["sharingSettings"].(map[string]any)["filterMovies"] = f
 	}
 	w.tv.mu.Unlock()
-	w.ai.script(threeDays...)
 	if rep := w.run(t); len(rep.Alerts) != 0 {
 		t.Fatalf("alerts %q\n%s", rep.Alerts, w.logs)
 	}
@@ -63,7 +62,6 @@ func TestRestrictionsAreMergedNotReplaced(t *testing.T) {
 func TestUnreadableRestrictionsHoldShelvesAndAlertOnce(t *testing.T) {
 	w := newOwn(t, threeWithPlex)
 	w.tv.failRead = true
-	w.ai.script(threeDays...)
 	rep := w.run(t)
 	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "sharing restrictions could not be read") {
 		t.Fatalf("alerts %q, want one\n%s", rep.Alerts, w.logs)
@@ -80,8 +78,8 @@ func TestUnreadableRestrictionsHoldShelvesAndAlertOnce(t *testing.T) {
 	w.tv.failRead = false
 	w.tv.mu.Unlock()
 	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	if rep := w.run(t); len(rep.Alerts) != 0 || w.shelfItems("Tonight · Viewer B") != plexKeys(559907, 954, 13) ||
-		w.shelfItems("Tonight · Viewer-a") != plexKeys(843, 419704, 10948) {
+	if rep := w.run(t); len(rep.Alerts) != 0 || w.shelfItems("Tonight · Viewer B") != plexKeys(w.picksOf(t, "viewer-b")...) ||
+		w.shelfItems("Tonight · Viewer-a") != plexKeys(w.picksOf(t, "viewer-a")...) {
 		t.Fatalf("readable again: alerts %q, Viewer B's shelf %q, Viewer-a's %q\n%s", rep.Alerts, w.shelfItems("Tonight · Viewer B"),
 			w.shelfItems("Tonight · Viewer-a"), w.logs)
 	}
@@ -101,7 +99,6 @@ func TestUnreadableRestrictionsHoldShelvesAndAlertOnce(t *testing.T) {
 // restrictions take the labels, both shelves come back.
 func TestUnwritableRestrictionsTakeDownWhatTheyWouldShow(t *testing.T) {
 	w := newOwn(t, threeWithPlex)
-	w.ai.script(threeDays...)
 	w.run(t)
 	w.tv.mu.Lock()
 	w.tv.shares[0]["sharingSettings"] = shareOf("machine1", 578, "viewer-b", nil, "")["sharingSettings"]
@@ -126,7 +123,7 @@ func TestUnwritableRestrictionsTakeDownWhatTheyWouldShow(t *testing.T) {
 	w.tv.mu.Unlock()
 	w.h.Now = w.h.Now.Add(30 * time.Minute)
 	w.run(t)
-	if w.shelfItems("Tonight · Viewer B") != plexKeys(559907, 954, 13) || w.shelfItems("Tonight · Viewer-a") != plexKeys(843, 419704, 10948) {
+	if w.shelfItems("Tonight · Viewer B") != plexKeys(w.picksOf(t, "viewer-b")...) || w.shelfItems("Tonight · Viewer-a") != plexKeys(w.picksOf(t, "viewer-a")...) {
 		t.Fatalf("writable again: Viewer B's shelf %q, Viewer-a's %q\n%s", w.shelfItems("Tonight · Viewer B"), w.shelfItems("Tonight · Viewer-a"), w.logs)
 	}
 }
@@ -149,7 +146,6 @@ func TestOwnPlaylistsAreRemovedOnceTheShelfIsUp(t *testing.T) {
 	if err := w.h.Env.Store.PutJSON(context.Background(), name, "state", deployed); err != nil {
 		t.Fatal(err)
 	}
-	w.ai.script(threeDays...)
 	rep := w.run(t)
 	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "viewer-a") {
 		t.Fatalf("alerts %q, want one, for Viewer-a's shelf\n%s", rep.Alerts, w.logs)

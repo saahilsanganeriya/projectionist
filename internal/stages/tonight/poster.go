@@ -9,6 +9,7 @@ import (
 	"image/jpeg"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"golang.org/x/image/draw"
@@ -94,4 +95,13 @@ func fetchImage(ctx context.Context, hc *http.Client, base, path string) (image.
 	}
 	img, _, err := image.Decode(io.LimitReader(resp.Body, 8<<20))
 	return img, err
+}
+
+// oneLine is s on one line, cut to max characters with an ellipsis.
+func oneLine(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max-1]) + "…"
+	}
+	return s
 }

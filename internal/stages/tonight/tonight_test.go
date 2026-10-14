@@ -24,10 +24,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BurntSushi/toml"
+
 	"projectionist/internal/fake"
 	"projectionist/internal/lbpace"
-	"projectionist/internal/llm"
-	"projectionist/internal/llm/llmtest"
 	"projectionist/internal/stage"
 	"projectionist/internal/watch"
 )
@@ -78,89 +78,66 @@ func TestSeen(t *testing.T) {
 	}
 }
 
-// Catches: a pick outside the unseen set, a duplicate or a reasonless pick reaching Plex, a reason drawing on a film
-// no viewer rated 4★ or more (a hallucinated or low-rated "liked", told apart by year), a reason quoting a review on
-// the shared row (6 words of a long one, or a short one whole, through case, accents and punctuation; a 2-word review
-// and 5 words of a long one are not quotes), a short answer accepted without a retry, and a note or a stray JSON
-// bracket the model glued onto a reason (both seen on 2026-10-05; the third glued reason is a real answer's,
-// verbatim) reaching the Home row.
-func TestValidate(t *testing.T) {
-	unseen := map[int]candidate{389: {film: film{TMDB: 389, Title: "12 Angry Men", Year: 1957}},
-		346: {film: film{TMDB: 346, Title: "Seven Samurai", Year: 1954}}, 12548: {film: film{TMDB: 12548, Title: "I Vitelloni", Year: 1953}}}
-	loved := lovedFilms([]rated{{Name: "Rope", Year: 1948, Rating: 4.5}, {Name: "Dune", Year: 2021, Rating: 5},
-		{Name: "Dune", Year: 1984, Rating: 2}, {Name: "La Dolce Vita", Year: 1960, Rating: 5}})
-	picks, v, _ := validate(`{"picks":[{"id":389,"title":"12 Angry Men","liked":"Rope","reason":"Like  Rope,\nall in one room."},
-		{"id":389,"title":"12 Angry Men","liked":"Rope","reason":"again"},{"id":680,"title":"Pulp Fiction","liked":"Rope","reason":"seen"},
-		{"id":346,"title":"Seven Samurai","liked":"Rope","reason":" "},
-		{"id":346,"title":"Seven Samurai","liked":"Dune (1984)","reason":"An epic like Dune."}]}`, unseen, loved, nil, 2)
-	if len(picks) != 1 || picks[0].TMDB != 389 || picks[0].Reason != "Like Rope, all in one room." {
-		t.Fatalf("picks = %+v", picks)
+// Catches a pick that fails the owner's bars (Letterboxd 3.5 stars or less; critics 75 % or less where there is a
+// critics score), a film with no critics score kept out although its Letterboxd average passes, a film without ratings
+// or one TMDB no longer knows picked, a film the person has seen picked, a recent pick repeated while enough others
+// pass (and none at all once too few do), and picks that change between two runs of one day or stay the same the
+// next day, or are the same for two people on one day.
+func TestShuffledFollowsTheFilter(t *testing.T) {
+	lib := map[int]film{}
+	for id := 1; id <= 12; id++ {
+		lib[id] = film{TMDB: id, Title: fmt.Sprintf("Film %d", id), Year: 2000}
 	}
-	want := []string{"pick 2: id 389 is picked twice", `pick 3: id 680 ("Pulp Fiction") is not in the UNSEEN list`,
-		"pick 4: id 346 has no reason", `pick 5: liked "Dune (1984)" is not a film a viewer rated 4 stars or more`,
-		"1 valid picks; 2 are needed"}
-	if !slices.Equal(v, want) {
-		t.Fatalf("violations = %q", v)
+	lib[13] = film{TMDB: 13, Missing: true}
+	ratings := map[int]rating{1: {80, 90}, 2: {80, -1}, 3: {70, 90}, 4: {80, 75}, 5: {90, 76}, 6: {72, 100}, 7: {80, 90}, 8: {80, 90},
+		9: {80, 90}, 10: {80, 90}, 11: {80, 90}, 13: {95, 99}} // 12 has no ratings
+	pass := []int{1, 2, 5, 6, 7, 8, 9, 10, 11}
+	opt := defaults()
+	w := newWatched()
+	w.IDs[11] = "server"
+	recent := map[int]string{7: "2026-10-04", 8: "2026-10-04"}
+	ids := func(ps []pick) []int { return slices.Sorted(slices.Values(tmdbIDs(ps))) }
+	got := shuffled(lib, ratings, w, recent, opt, "2026-10-05", "owner")
+	fresh := []int{1, 2, 5, 6, 9, 10} // over the bars, unseen, not picked lately
+	if len(got) != 5 || slices.ContainsFunc(got, func(p pick) bool { return !slices.Contains(fresh, p.TMDB) }) {
+		t.Errorf("picks %v; want 5 of %v (over the bars, unseen, not picked in the last two weeks)", ids(got), fresh)
 	}
-	if _, v, _ := validate("Sure! Here are", unseen, loved, nil, 2); len(v) != 1 || !strings.Contains(v[0], "not JSON") {
-		t.Fatalf("non-JSON violations = %q", v)
-	}
-	picks, _, glued := validate(`{"picks":[{"id":389,"title":"x","liked":"Rope","reason":"Hazy longing in a short package.12"},
-		{"id":346,"title":"y","liked":"Dune (2021)","reason":"An L.A. noir like Heat, beauty-in-sorrow of Moonlight.Quiet and slow.Hmm."},
-		{"id":12548,"title":"I Vitelloni","mood":"wistful, drifting","liked":"La Dolce Vita","reason":"Fellini's earlier look at aimless men in a small town shares the restless yearning and bittersweet drift of La Dolce Vita.}"}]}`,
-		unseen, loved, nil, 3)
-	if len(picks) != 3 || picks[0].Reason != "Hazy longing in a short package." ||
-		picks[1].Reason != "An L.A. noir like Heat, beauty-in-sorrow of Moonlight." ||
-		!strings.HasSuffix(picks[2].Reason, "drift of La Dolce Vita.") || len(glued) != 3 {
-		t.Fatalf("glued notes kept or unreported: %+v, glued %q", picks, glued)
-	}
-
-	quotes := newQuoteGuard([]string{"Quiet buildings and quieter people, I could live inside this film forever.",
-		"Café society at its most brittle", "sad astra", "a perfectly tuned machine"})
-	for _, c := range []struct {
-		reason string
-		quoted bool
-	}{
-		{"Like Rope: QUIET buildings, and quieter people; I could stay.", true}, // 6 words of a long review
-		{"Like Rope, a perfectly tuned machine of a thriller.", true},           // a short review whole
-		{"Like Rope, a cafe society at its most brittle.", true},                // accents dropped
-		{"Like Rope, quiet buildings and quieter people.", false},               // 5 words of a long one
-		{"Like Rope, a sad astral drift.", false},                               // a 2-word review is not a quote
-	} {
-		answer := fmt.Sprintf(`{"picks":[{"id":389,"title":"x","liked":"Rope","reason":%q}]}`, c.reason)
-		picks, v, _ := validate(answer, unseen, loved, quotes, 1)
-		if quoted := len(picks) == 0 && len(v) == 2 && strings.Contains(v[0], "quotes a viewer's review"); quoted != c.quoted {
-			t.Errorf("reason %q: picks %+v, violations %q; want quoted=%v", c.reason, picks, v, c.quoted)
+	for _, p := range got {
+		r := ratings[p.TMDB]
+		want := fmt.Sprintf("Letterboxd ★%.1f · Rotten Tomatoes %d%%", float64(r.Letterboxd)/20, r.Tomatoes)
+		if r.Tomatoes < 0 {
+			want = fmt.Sprintf("Letterboxd ★%.1f", float64(r.Letterboxd)/20)
 		}
+		if p.Reason != want || p.Title != lib[p.TMDB].Title {
+			t.Errorf("pick %d: reason %q, title %q; want %q", p.TMDB, p.Reason, p.Title, want)
+		}
+	}
+	if again := shuffled(lib, ratings, w, recent, opt, "2026-10-05", "owner"); !slices.Equal(tmdbIDs(again), tmdbIDs(got)) {
+		t.Errorf("a second run of the day picked %v, the first %v", tmdbIDs(again), tmdbIDs(got))
+	}
+	differ := func(a, b []pick) bool { return !slices.Equal(tmdbIDs(a), tmdbIDs(b)) }
+	if !differ(shuffled(lib, ratings, w, recent, opt, "2026-10-06", "owner"), got) ||
+		!differ(shuffled(lib, ratings, w, recent, opt, "2026-10-05", "viewer-b"), got) {
+		t.Error("the next day, or another person, got the same picks in the same order")
+	}
+	many := map[int]string{}
+	for _, id := range pass {
+		many[id] = "2026-10-04"
+	}
+	delete(many, 1)
+	if got := ids(shuffled(lib, ratings, w, many, opt, "2026-10-05", "owner")); len(got) != 5 || !slices.Contains(got, 1) ||
+		slices.ContainsFunc(got, func(id int) bool { return !slices.Contains(pass, id) || id == 11 }) {
+		t.Errorf("with one fresh film over the bars: picks %v; want it and 4 recent ones, none seen", got)
+	}
+	if got := ids(shuffled(lib, map[int]rating{2: {80, -1}, 3: {70, 90}}, w, nil, opt, "2026-10-05", "owner")); !slices.Equal(got, []int{2}) {
+		t.Errorf("a film with no critics score and Letterboxd 4.0: picks %v; want it, Letterboxd alone deciding", got)
+	}
+	if got := shuffled(lib, map[int]rating{3: {70, 90}}, w, nil, opt, "2026-10-05", "owner"); len(got) != 0 {
+		t.Errorf("nothing over the bars: picks %v", ids(got))
 	}
 }
 
-// Catches a taste block that grows with his diary until the sizing finds no room for even 4 x picks candidates and
-// the day gets no call, and a bound that sheds what the reasons rely on: his 4★+ films go last, his oldest review
-// first. 260 bytes holds the headings (160 counted), both 4★+ ratings (22 each) and the newest review (46), but not
-// the old review (43) as well.
-func TestTasteTextKeepsTheBestWithinItsBudget(t *testing.T) {
-	films := []rated{
-		{Name: "Old Favourite", Year: 1990, Rating: 5, Last: "2022-01-01"},
-		{Name: "New Favourite", Year: 2020, Rating: 4, Last: "2026-01-01", Review: "new review text"},
-		{Name: "Old Review", Year: 2000, Rating: 3, Last: "2022-06-01", Review: "old review text"},
-		{Name: "Meh", Year: 2010, Rating: 2, Last: "2025-01-01"},
-	}
-	got := tasteText("A", films, 400, 260)
-	for _, want := range []string{"5★: Old Favourite (1990)", "4★: New Favourite (2020)", "new review text"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("lost %q", want)
-		}
-	}
-	if len(got) > 260 {
-		t.Errorf("%d bytes, past the 260 budget", len(got))
-	}
-	if strings.Contains(got, "old review text") || strings.Contains(got, "Meh") {
-		t.Errorf("kept what should go first:\n%s", got)
-	}
-}
-
-// ---- the stage against fake Plex, Jellyfin, Anthropic, TMDB and Letterboxd ----
+// ---- the stage against fake Plex, plex.tv, Jellyfin, MDBList, TMDB and Letterboxd ----
 
 type libFilm struct {
 	tmdb        int
@@ -197,9 +174,12 @@ type world struct {
 	base    string // the options every run carries; options() adds a test's own
 	h       *fake.Harness
 	logs    *bytes.Buffer
-	ai      *aiFake
+	mdb     *mdbFake
 	plex    *plexFake
 	jf      *jfFake
+	px      *plexPlaylists
+	jp      *jfPlaylists
+	tv      *plexTVFake
 	lbHits  []string        // the path of each Letterboxd request
 	lbWaits []time.Duration // what each Letterboxd request waited on the limiter, which runs on a frozen clock
 	feeds   map[string][]lbItem
@@ -348,27 +328,37 @@ func newWorld(t *testing.T, options string, fillers int) *world {
 	}))
 	t.Cleanup(ext.Close)
 
-	w.ai = newAIFake(t, w.h, nil)
+	w.mdb = newMDBFake(t, lib)
 	w.plex = newPlexFake(w.h.Plex)
 	w.jf = newJFFake(w.h.Jellyfin)
+	w.px, w.jp, w.tv = newPlexPlaylists(w.h.Plex), newJFPlaylists(w.h.Jellyfin, w.jf), newPlexTV(t)
+	key := filepath.Join(t.TempDir(), "mdblist_api_key")
+	write(t, key, "test-mdb-key\n")
 	w.base = fmt.Sprintf(`
 picks = 3
 movies_dir = %q
 letterboxd_url = %q
 image_base = %q
-`, movies, ext.URL, ext.URL+"/img")
+plex_tv = %q
+mdblist_url = %q
+mdblist_key_file = %q
+`, movies, ext.URL, ext.URL+"/img", w.tv.srv.URL, w.mdb.srv.URL, key)
+	w.h.Env.PeerOptions = func(stage string, v any) error {
+		if stage != "jfsync" {
+			return nil
+		}
+		_, err := toml.Decode(jfsyncUsers, v)
+		return err
+	}
 	w.options(options)
 	return w
 }
 
-// options sets what the next runs read: the world's base, then text. Unless text names them, the household is the owner
-// alone with his export, and no one gets a playlist of their own.
+// options sets what the next runs read: the world's base, then text. Unless text names them, the people are the owner
+// alone, with his export.
 func (w *world) options(text string) {
 	if !strings.Contains(text, "people") {
-		text += `people = [{ person = "owner", user = "owner-lb", export_dir = "testdata/export" }]` + "\n"
-	}
-	if !strings.Contains(w.base+text, "playlist") {
-		text += "playlist = \"\"\n"
+		text += `people = [{ person = "owner", user = "owner-lb", plex_user = "owner-plex", export_dir = "testdata/export" }]` + "\n"
 	}
 	w.h.SetOptions(w.base + text)
 }
@@ -426,111 +416,103 @@ func (w *world) state(t *testing.T) state {
 	return st
 }
 
-// ---- the fake AI gateway ----
+// ---- fake MDBList: every library film over the bars unless a test rates it otherwise ----
 
-// pricey is a tonight task on a model at $20 per million tokens either way, where the daily cap binds on the test
-// library's small prompt; at DeepSeek's prices a day costs a few tenths of a cent.
-var pricey = map[string]llm.Task{"tonight": {Model: "test/pricey"}}
-
-const outputTokens = 422
-
-type aiFake struct {
-	gw *llmtest.Gateway
-	mu sync.Mutex
-	// answers is the picks JSON each call returns, in order. "CUT:" = cut off at max_tokens (with nothing after it,
-	// reasoning took them all and there is no text); "MAX:" = a whole answer billed all of max_tokens.
-	answers []string
-	drop    bool // the gateway hangs up after reading the request, as a lost answer does
+type mdbFake struct {
+	srv     *httptest.Server
+	mu      sync.Mutex
+	ratings map[int][2]int // tmdb → Letterboxd, critics scores (-1: none); a film absent is one MDBList does not know
+	asked   [][]int        // each request's ids
+	quota   bool           // answers 429
 }
 
-// newAIFake bills a request's input at 4 bytes a token, under the stage's estimate of 3, as real tokenizers do on his
-// prompt.
-func newAIFake(t *testing.T, h *fake.Harness, tasks map[string]llm.Task) *aiFake {
-	a := &aiFake{}
-	a.gw = llmtest.New(func(_ int, req llm.Request) llmtest.Answer {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		if a.drop {
-			return llmtest.Answer{Drop: true}
+func newMDBFake(t *testing.T, lib []libFilm) *mdbFake {
+	m := &mdbFake{ratings: map[int][2]int{}}
+	for _, f := range lib {
+		m.ratings[f.tmdb] = [2]int{80, 90}
+	}
+	m.srv = httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.quota || r.URL.Query().Get("apikey") != "test-mdb-key" {
+			rw.WriteHeader(http.StatusTooManyRequests)
+			return
 		}
-		if len(a.answers) == 0 {
-			return llmtest.Answer{Status: 400, Type: "invalid_request_error", Message: "unscripted call"}
-		}
-		in := 0
-		for _, m := range req.Messages {
-			for _, p := range m.Content {
-				in += len(p.Text) / 4
+		var body struct{ IDs []int }
+		json.NewDecoder(r.Body).Decode(&body)
+		m.asked = append(m.asked, body.IDs)
+		out := []map[string]any{}
+		for _, id := range body.IDs {
+			if s, ok := m.ratings[id]; ok {
+				out = append(out, map[string]any{"ids": map[string]int{"tmdb": id}, "ratings": []map[string]any{
+					{"source": "letterboxd", "score": s[0]}, {"source": "tomatoes", "score": s[1]}}})
 			}
 		}
-		answer, finish, out := a.answers[0], "stop", outputTokens
-		a.answers = a.answers[1:]
-		if cut, ok := strings.CutPrefix(answer, "CUT:"); ok {
-			answer, finish, out = cut, "length", req.MaxTokens
-		}
-		if whole, ok := strings.CutPrefix(answer, "MAX:"); ok {
-			answer, out = whole, req.MaxTokens
-		}
-		return llmtest.Answer{Text: answer, Finish: finish, In: in, Out: out}
-	})
-	a.gw.Models = append(a.gw.Models, llmtest.Model{ID: "test/pricey", In: 20, Out: 20})
-	h.Env.LLM = llmtest.Client(t, a.gw, h.Env.Store, func() time.Time { return h.Env.Now() }, llm.Config{Tasks: tasks})
-	return a
+		json.NewEncoder(rw).Encode(out)
+	}))
+	t.Cleanup(m.srv.Close)
+	return m
 }
 
-func (a *aiFake) script(answers ...string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.answers = append(a.answers, answers...)
-}
-
-func (a *aiFake) calls() int { return len(a.gw.Calls()) }
-
-// messages is call i's conversation as sent.
-func (a *aiFake) messages(i int) string {
-	raw, _ := json.Marshal(a.gw.Calls()[i].Messages)
-	return string(raw)
-}
-
-// effort is what call i asked for in reasoning.effort ("" = none).
-func (a *aiFake) effort(i int) string {
-	if r := a.gw.Calls()[i].Reasoning; r != nil {
-		return r.Effort
-	}
-	return ""
-}
-
-func answer3(ids ...int) string {
-	var picks []string
+// rate gives films these scores; a test calls it before the run that first asks about them (they are then kept).
+func (m *mdbFake) rate(lb, rt int, ids ...int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for _, id := range ids {
-		picks = append(picks, fmt.Sprintf(`{"id":%d,"title":"t%d","mood":"patient, warm","liked":"Licorice Pizza (2021)",`+
-			`"reason":"Shares the patience of Licorice Pizza, which he gave 5 stars."}`, id, id))
+		m.ratings[id] = [2]int{lb, rt}
 	}
-	return `{"picks":[` + strings.Join(picks, ",") + `]}`
 }
 
-// ---- fake Plex: one Movies section with the films above, and whatever collections the stage makes ----
+// onlyPass leaves ids alone over the bars among films.
+func (m *mdbFake) onlyPass(ids ...int) {
+	for _, f := range films {
+		if !slices.Contains(ids, f.tmdb) {
+			m.rate(60, 90, f.tmdb)
+		}
+	}
+}
 
-// The first collection made is the household's (900, its fields below); each one after it is a person's own shelf
-// (901, 902, ...).
+func (m *mdbFake) requests() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.asked)
+}
+
+// ---- fake Plex: one Movies section with the films above, and the shelves the stage makes ----
+
+// Every collection the stage makes is a shelf: the first is 900, the next 901, and so on. Its fault switches (a lost
+// create answer, a failed read-back, poster or hub write, a stop inside a member's removal) act on any shelf.
 type plexFake struct {
 	srv     *fake.Server
 	mu      sync.Mutex
 	viewed  map[string]bool // ratingKey → played
-	coll    []string        // the collection's members; nil until created
-	title   string          // the collection's title
-	summary string
-	labeled bool
 	hubs    []plexHub
-	home    []string // the members his Home row lists: Plex's cached hub, refreshed only by a manage call on it
-	posters [][]byte
 	shelves []*fakeShelf
 	foreign []map[string]any // collections not ours beside 777, listed and readable, with no route that writes them
 
-	dropCreate   bool           // POST /library/collections makes the collection, then hangs up: its answer is lost
-	failReadBack int            // GET /library/metadata/900 answers 503 this many times first
+	dropCreate   bool           // POST /library/collections makes the shelf, then hangs up: its answer is lost
+	failReadBack int            // GET /library/metadata/<shelf> answers 503 this many times first
 	onCreate     func()         // runs inside the create, e.g. to stop the run there
 	fail         map[string]int // "poster" | "hub" (the hub's manage PUT): answers 503 this many times first
 	stopInRemove func()         // a member DELETE takes the film out, runs this (e.g. to stop the run), then hangs up
+}
+
+// fakeShelf is one collection the stage made.
+type fakeShelf struct {
+	rk, title, summary string
+	index              int
+	labels, items      []string // labels as sent; Plex answers each with its first letter upper-cased
+	home               []string // the members its Home row lists: Plex's cached hub, refreshed only by a manage call on it
+	posters            [][]byte
+	gone               bool // deleted
+}
+
+func (s *fakeShelf) metadata() map[string]any {
+	var labels []map[string]string
+	for _, l := range s.labels {
+		labels = append(labels, map[string]string{"tag": strings.ToUpper(l[:1]) + l[1:]})
+	}
+	return map[string]any{"ratingKey": s.rk, "index": s.index, "type": "collection", "title": s.title, "summary": s.summary, "Label": labels}
 }
 
 // failing reports whether the write named key fails this time; the caller holds p.mu.
@@ -542,6 +524,9 @@ func (p *plexFake) failing(rw http.ResponseWriter, key string) bool {
 	http.Error(rw, "busy", http.StatusServiceUnavailable)
 	return true
 }
+
+// ownerShelf is the owner's shelf title, which his own collection 777 also carries (no label: never written).
+const ownerShelf = "Tonight · Owner"
 
 func newPlexFake(srv *fake.Server) *plexFake {
 	p := &plexFake{srv: srv, viewed: map[string]bool{}, fail: map[string]int{},
@@ -558,8 +543,8 @@ func newPlexFake(srv *fake.Server) *plexFake {
 		}
 		all = append(all, item)
 	}
-	// One listing serves the daily map, the collection's members (filtered by its tag index) and the picks' play
-	// state (filtered by id): Plex's per-item endpoints are too slow under load to use.
+	// One listing serves the daily map, a shelf's members (filtered by its tag index) and the picks' play state
+	// (filtered by id): Plex's per-item endpoints are too slow under load to use.
 	srv.HandleFunc("GET", "/library/sections/4/all", func(rw http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
@@ -568,9 +553,8 @@ func newPlexFake(srv *fake.Server) *plexFake {
 		for _, it := range all {
 			k := it["ratingKey"].(string)
 			switch c := q.Get("collection"); {
-			case c == "90000" && !slices.Contains(p.coll, k),
-				q.Has("id") && !slices.Contains(strings.Split(q.Get("id"), ","), k),
-				c != "" && c != "90000" && !slices.ContainsFunc(p.shelves, func(s *fakeShelf) bool {
+			case q.Has("id") && !slices.Contains(strings.Split(q.Get("id"), ","), k),
+				c != "" && !slices.ContainsFunc(p.shelves, func(s *fakeShelf) bool {
 					return strconv.Itoa(s.index) == c && !s.gone && slices.Contains(s.items, k)
 				}):
 				continue
@@ -590,12 +574,7 @@ func newPlexFake(srv *fake.Server) *plexFake {
 	srv.HandleFunc("POST", "/library/collections", func(rw http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		if p.coll != nil {
-			s := p.addShelf(r.URL.Query().Get("title"), members(r))
-			mc(rw, map[string]any{"Metadata": []map[string]string{{"ratingKey": s.rk}}})
-			return
-		}
-		p.coll, p.title = members(r), r.URL.Query().Get("title")
+		s := p.addShelf(r.URL.Query().Get("title"), members(r))
 		if p.onCreate != nil {
 			p.onCreate()
 		}
@@ -604,27 +583,16 @@ func newPlexFake(srv *fake.Server) *plexFake {
 			conn.Close()
 			return
 		}
-		mc(rw, map[string]any{"Metadata": []map[string]string{{"ratingKey": "900"}}})
+		mc(rw, map[string]any{"Metadata": []map[string]string{{"ratingKey": s.rk}}})
 	})
-	// 777 is his own collection with our title, with no label: no route writes to it, so a write fails the sink.
-	his := map[string]any{"ratingKey": "777", "index": 77700, "type": "collection", "title": household, "summary": "his"}
+	his := map[string]any{"ratingKey": "777", "index": 77700, "type": "collection", "title": ownerShelf, "summary": "his"}
 	srv.HandleFunc("GET", "/library/metadata/777", func(rw http.ResponseWriter, _ *http.Request) {
 		mc(rw, map[string]any{"Metadata": []any{his}})
 	})
-	collection := func() []map[string]any {
-		if p.coll == nil {
-			return nil
-		}
-		c := map[string]any{"ratingKey": "900", "index": 90000, "type": "collection", "title": p.title, "summary": p.summary}
-		if p.labeled { // Plex answers the tag title-cased, whatever case it was sent in
-			c["Label"] = []map[string]string{{"tag": "Projectionist"}}
-		}
-		return []map[string]any{c}
-	}
 	srv.HandleFunc("GET", "/library/sections/4/collections", func(rw http.ResponseWriter, _ *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		list := append([]map[string]any{his}, collection()...)
+		list := []map[string]any{his}
 		for _, s := range p.shelves {
 			if !s.gone {
 				list = append(list, s.metadata())
@@ -632,73 +600,27 @@ func newPlexFake(srv *fake.Server) *plexFake {
 		}
 		mc(rw, map[string]any{"Metadata": append(list, p.foreign...)})
 	})
-	srv.HandleFunc("GET", "/library/metadata/900", func(rw http.ResponseWriter, _ *http.Request) {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		if p.failReadBack > 0 {
-			p.failReadBack--
-			http.Error(rw, "busy", http.StatusServiceUnavailable)
-			return
-		}
-		mc(rw, map[string]any{"Metadata": collection()})
-	})
-	srv.HandleFunc("PUT", "/library/collections/900/items", func(rw http.ResponseWriter, r *http.Request) {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		p.coll = append(p.coll, members(r)...)
-	})
-	for _, f := range films {
-		key := rk(f.tmdb)
-		srv.HandleFunc("DELETE", "/library/collections/900/items/"+key, func(rw http.ResponseWriter, _ *http.Request) {
-			p.mu.Lock()
-			defer p.mu.Unlock()
-			p.coll = slices.DeleteFunc(p.coll, func(k string) bool { return k == key })
-			if p.stopInRemove != nil {
-				p.stopInRemove()
-				conn, _, _ := rw.(http.Hijacker).Hijack()
-				conn.Close()
-			}
-		})
-	}
 	srv.HandleFunc("PUT", "/library/sections/4/all", func(rw http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		if q := r.URL.Query(); q.Get("type") == "18" && q.Get("id") == "900" {
+		q := r.URL.Query()
+		for _, s := range p.shelves {
+			if q.Get("type") != "18" || q.Get("id") != s.rk || s.gone {
+				continue
+			}
 			if q.Has("summary.value") {
-				p.summary = q.Get("summary.value")
+				s.summary = q.Get("summary.value")
 			}
 			if q.Has("title.value") {
-				p.title = q.Get("title.value")
+				s.title = q.Get("title.value")
 			}
 			if q.Has("label[0].tag.tag") {
-				p.labeled = q.Get("label[0].tag.tag") == "projectionist"
-			}
-		}
-		for _, s := range p.shelves {
-			if q := r.URL.Query(); q.Get("type") == "18" && q.Get("id") == s.rk && !s.gone {
-				if q.Has("summary.value") {
-					s.summary = q.Get("summary.value")
-				}
-				if q.Has("title.value") {
-					s.title = q.Get("title.value")
-				}
-				if q.Has("label[0].tag.tag") {
-					s.labels = nil
-					for i := 0; q.Has(fmt.Sprintf("label[%d].tag.tag", i)); i++ {
-						s.labels = append(s.labels, q.Get(fmt.Sprintf("label[%d].tag.tag", i)))
-					}
+				s.labels = nil
+				for i := 0; q.Has(fmt.Sprintf("label[%d].tag.tag", i)); i++ {
+					s.labels = append(s.labels, q.Get(fmt.Sprintf("label[%d].tag.tag", i)))
 				}
 			}
 		}
-	})
-	srv.HandleFunc("POST", "/library/metadata/900/posters", func(rw http.ResponseWriter, r *http.Request) {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		if p.failing(rw, "poster") {
-			return
-		}
-		body, _ := io.ReadAll(r.Body)
-		p.posters = append(p.posters, body)
 	})
 	srv.HandleFunc("GET", "/hubs/sections/4/manage", func(rw http.ResponseWriter, _ *http.Request) {
 		p.mu.Lock()
@@ -708,26 +630,96 @@ func newPlexFake(srv *fake.Server) *plexFake {
 	srv.HandleFunc("POST", "/hubs/sections/4/manage", func(rw http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		if q := r.URL.Query(); q.Get("metadataItemId") == "900" {
-			p.hubs = append(p.hubs, hubFlags("custom.collection.4.900", q))
-			p.home = slices.Clone(p.coll)
-		} else if slices.ContainsFunc(p.shelves, func(s *fakeShelf) bool { return s.rk == q.Get("metadataItemId") && !s.gone }) {
-			p.hubs = append(p.hubs, hubFlags("custom.collection.4."+q.Get("metadataItemId"), q))
+		q := r.URL.Query()
+		for _, s := range p.shelves {
+			if s.rk == q.Get("metadataItemId") && !s.gone {
+				p.hubs = append(p.hubs, hubFlags("custom.collection.4."+s.rk, q))
+				s.home = slices.Clone(s.items)
+			}
 		}
 	})
-	srv.HandleFunc("PUT", "/hubs/sections/4/manage/custom.collection.4.900", func(rw http.ResponseWriter, r *http.Request) {
+	return p
+}
+
+// addShelf makes a shelf and its routes; the caller holds p.mu.
+func (p *plexFake) addShelf(title string, items []string) *fakeShelf {
+	n := len(p.shelves)
+	s := &fakeShelf{rk: strconv.Itoa(900 + n), index: 90000 + 100*n, title: title, items: items}
+	p.shelves = append(p.shelves, s)
+	mc := func(rw http.ResponseWriter, v any) { json.NewEncoder(rw).Encode(map[string]any{"MediaContainer": v}) }
+	live := func(rw http.ResponseWriter, r *http.Request) bool {
+		if s.gone {
+			http.NotFound(rw, r)
+		}
+		return !s.gone
+	}
+	p.srv.HandleFunc("GET", "/library/metadata/"+s.rk, func(rw http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.failReadBack > 0 {
+			p.failReadBack--
+			http.Error(rw, "busy", http.StatusServiceUnavailable)
+			return
+		}
+		if live(rw, r) {
+			mc(rw, map[string]any{"Metadata": []any{s.metadata()}})
+		}
+	})
+	p.srv.HandleFunc("PUT", "/library/collections/"+s.rk+"/items", func(rw http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if live(rw, r) {
+			u := r.URL.Query().Get("uri")
+			s.items = append(s.items, strings.Split(u[strings.LastIndex(u, "/")+1:], ",")...)
+		}
+	})
+	for _, f := range films {
+		key := rk(f.tmdb)
+		p.srv.HandleFunc("DELETE", "/library/collections/"+s.rk+"/items/"+key, func(rw http.ResponseWriter, r *http.Request) {
+			p.mu.Lock()
+			defer p.mu.Unlock()
+			if !live(rw, r) {
+				return
+			}
+			s.items = slices.DeleteFunc(s.items, func(k string) bool { return k == key })
+			if p.stopInRemove != nil {
+				p.stopInRemove()
+				conn, _, _ := rw.(http.Hijacker).Hijack()
+				conn.Close()
+			}
+		})
+	}
+	p.srv.HandleFunc("POST", "/library/metadata/"+s.rk+"/posters", func(rw http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if p.failing(rw, "poster") || !live(rw, r) {
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		s.posters = append(s.posters, body)
+	})
+	ident := "custom.collection.4." + s.rk
+	p.srv.HandleFunc("PUT", "/hubs/sections/4/manage/"+ident, func(rw http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		if p.failing(rw, "hub") {
 			return
 		}
-		if i := slices.IndexFunc(p.hubs, func(h plexHub) bool { return h.Identifier == "custom.collection.4.900" }); i >= 0 {
-			p.hubs[i] = hubFlags(p.hubs[i].Identifier, r.URL.Query())
-			p.home = slices.Clone(p.coll)
+		if i := slices.IndexFunc(p.hubs, func(h plexHub) bool { return h.Identifier == ident }); i >= 0 {
+			p.hubs[i] = hubFlags(ident, r.URL.Query())
+			s.home = slices.Clone(s.items)
 		}
 	})
-	srv.HandleFunc("PUT", "/hubs/sections/4/manage/custom.collection.4.900/move", p.move("custom.collection.4.900"))
-	return p
+	p.srv.HandleFunc("PUT", "/hubs/sections/4/manage/"+ident+"/move", p.move(ident))
+	p.srv.HandleFunc("DELETE", "/library/collections/"+s.rk, func(rw http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		if live(rw, r) {
+			s.gone = true
+			p.hubs = slices.DeleteFunc(p.hubs, func(h plexHub) bool { return h.Identifier == ident })
+		}
+	})
+	return s
 }
 
 // move serves a hub's move: to the top of the section's order, or after the hub its "after" names.
@@ -757,87 +749,6 @@ func (p *plexFake) move(ident string) http.HandlerFunc {
 	}
 }
 
-// fakeShelf is a collection made after the household's: a person's own shelf.
-type fakeShelf struct {
-	rk, title, summary string
-	index              int
-	labels, items      []string // labels as sent; Plex answers each with its first letter upper-cased
-	posters            int
-	gone               bool // deleted
-}
-
-func (s *fakeShelf) metadata() map[string]any {
-	var labels []map[string]string
-	for _, l := range s.labels {
-		labels = append(labels, map[string]string{"tag": strings.ToUpper(l[:1]) + l[1:]})
-	}
-	return map[string]any{"ratingKey": s.rk, "index": s.index, "type": "collection", "title": s.title, "summary": s.summary, "Label": labels}
-}
-
-// addShelf makes a shelf and its routes; the caller holds p.mu.
-func (p *plexFake) addShelf(title string, items []string) *fakeShelf {
-	n := len(p.shelves) + 1
-	s := &fakeShelf{rk: strconv.Itoa(900 + n), index: 90000 + 100*n, title: title, items: items}
-	p.shelves = append(p.shelves, s)
-	mc := func(rw http.ResponseWriter, v any) { json.NewEncoder(rw).Encode(map[string]any{"MediaContainer": v}) }
-	live := func(rw http.ResponseWriter, r *http.Request) bool {
-		if s.gone {
-			http.NotFound(rw, r)
-		}
-		return !s.gone
-	}
-	p.srv.HandleFunc("GET", "/library/metadata/"+s.rk, func(rw http.ResponseWriter, r *http.Request) {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		if live(rw, r) {
-			mc(rw, map[string]any{"Metadata": []any{s.metadata()}})
-		}
-	})
-	p.srv.HandleFunc("PUT", "/library/collections/"+s.rk+"/items", func(rw http.ResponseWriter, r *http.Request) {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		if live(rw, r) {
-			u := r.URL.Query().Get("uri")
-			s.items = append(s.items, strings.Split(u[strings.LastIndex(u, "/")+1:], ",")...)
-		}
-	})
-	for _, f := range films {
-		key := rk(f.tmdb)
-		p.srv.HandleFunc("DELETE", "/library/collections/"+s.rk+"/items/"+key, func(rw http.ResponseWriter, r *http.Request) {
-			p.mu.Lock()
-			defer p.mu.Unlock()
-			if live(rw, r) {
-				s.items = slices.DeleteFunc(s.items, func(k string) bool { return k == key })
-			}
-		})
-	}
-	p.srv.HandleFunc("POST", "/library/metadata/"+s.rk+"/posters", func(rw http.ResponseWriter, r *http.Request) {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		if live(rw, r) {
-			s.posters++
-		}
-	})
-	ident := "custom.collection.4." + s.rk
-	p.srv.HandleFunc("PUT", "/hubs/sections/4/manage/"+ident, func(rw http.ResponseWriter, r *http.Request) {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		if i := slices.IndexFunc(p.hubs, func(h plexHub) bool { return h.Identifier == ident }); i >= 0 {
-			p.hubs[i] = hubFlags(ident, r.URL.Query())
-		}
-	})
-	p.srv.HandleFunc("PUT", "/hubs/sections/4/manage/"+ident+"/move", p.move(ident))
-	p.srv.HandleFunc("DELETE", "/library/collections/"+s.rk, func(rw http.ResponseWriter, r *http.Request) {
-		p.mu.Lock()
-		defer p.mu.Unlock()
-		if live(rw, r) {
-			s.gone = true
-			p.hubs = slices.DeleteFunc(p.hubs, func(h plexHub) bool { return h.Identifier == ident })
-		}
-	})
-	return s
-}
-
 // addForeign adds a collection that is not ours (no label), listed and readable; no route writes it.
 func (p *plexFake) addForeign(key, title string) {
 	c := map[string]any{"ratingKey": key, "index": 77800, "type": "collection", "title": title, "summary": "hers"}
@@ -856,6 +767,7 @@ func (p *plexFake) shelf(title string) (s *fakeShelf, hub plexHub, at int) {
 		if x.title == title && !x.gone {
 			c := *x
 			c.items = slices.Sorted(slices.Values(x.items))
+			c.home = slices.Sorted(slices.Values(x.home))
 			at = slices.IndexFunc(p.hubs, func(h plexHub) bool { return h.Identifier == "custom.collection.4."+x.rk })
 			if at >= 0 {
 				hub = p.hubs[at]
@@ -871,35 +783,17 @@ func hubFlags(ident string, q url.Values) plexHub {
 		PromotedToSharedHome: q.Get("promotedToSharedHome") == "1", PromotedToRecommended: q.Get("promotedToRecommended") == "1"}
 }
 
-func (p *plexFake) members() []string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return slices.Sorted(slices.Values(p.coll))
-}
-
-func (p *plexFake) homeRow() []string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return slices.Sorted(slices.Values(p.home))
-}
-
-// ---- fake Jellyfin: user "owner", the films above, and the BoxSet the stage makes ----
+// ---- fake Jellyfin: users "owner", "viewer-b" and "viewer-a", the films above, and what the stage deletes ----
 
 type jfFake struct {
-	mu         sync.Mutex
-	playlists  func(q map[string][]string) ([]map[string]any, bool) // answers a playlist query first, when set
-	box        []string                                             // nil until created
-	name       string
-	overview   string
-	tags       []string
-	images     int
-	dropCreate bool   // POST /Collections makes the BoxSet, then hangs up: its answer is lost
-	onCreate   func() // runs inside the create, e.g. to stop the run there
+	mu        sync.Mutex
+	playlists func(q map[string][]string) ([]map[string]any, bool) // answers a playlist query first, when set
+	deleted   []string                                             // the ids of DELETE /Items/<id>
 }
 
 func newJFFake(srv *fake.Server) *jfFake {
 	j := &jfFake{}
-	srv.Handle("GET", "/Users", 200, `[{"Name":"guest","Id":"u2"},{"Name":"owner","Id":"u1"}]`)
+	srv.Handle("GET", "/Users", 200, `[{"Name":"guest","Id":"u2"},{"Name":"owner","Id":"u1"},{"Name":"viewer-b","Id":"u3"},{"Name":"viewer-a","Id":"u4"}]`)
 	item := func(f libFilm) map[string]any {
 		return map[string]any{"Id": jfID(f.tmdb), "Name": f.title, "Type": "Movie",
 			"ProviderIds": map[string]string{"Tmdb": strconv.Itoa(f.tmdb)}, "UserData": map[string]bool{"Played": f.jellyPlayed}}
@@ -914,81 +808,22 @@ func newJFFake(srv *fake.Server) *jfFake {
 				return
 			}
 		}
-		var out []map[string]any
-		switch {
-		case q.Get("IncludeItemTypes") == "BoxSet", q.Get("Ids") == "box1":
-			if q.Get("Ids") == "" { // box9 is his own, with our title, untagged; no route writes to it
-				out = append(out, map[string]any{"Id": "box9", "Name": household, "Type": "BoxSet"})
-			}
-			if j.box != nil {
-				out = append(out, map[string]any{"Id": "box1", "Name": j.name, "Type": "BoxSet", "Tags": j.tags})
-			}
-		case q.Get("ParentId") == "box1":
-			for _, id := range j.box {
-				out = append(out, map[string]any{"Id": id})
-			}
-		default: // all movies, the played ones, or the given Ids
-			ids := strings.Split(q.Get("Ids"), ",")
-			for _, f := range films {
-				if (q.Get("Filters") != "IsPlayed" || f.jellyPlayed) && (q.Get("Ids") == "" || slices.Contains(ids, jfID(f.tmdb))) {
-					out = append(out, item(f))
-				}
+		var out []map[string]any // all movies, the played ones, or the given Ids
+		ids := strings.Split(q.Get("Ids"), ",")
+		for _, f := range films {
+			if (q.Get("Filters") != "IsPlayed" || f.jellyPlayed) && (q.Get("Ids") == "" || slices.Contains(ids, jfID(f.tmdb))) {
+				out = append(out, item(f))
 			}
 		}
 		json.NewEncoder(rw).Encode(map[string]any{"Items": out})
 	})
-	srv.HandleFunc("POST", "/Collections", func(rw http.ResponseWriter, r *http.Request) {
+	srv.HandleFunc("DELETE", "/Items/box1", func(rw http.ResponseWriter, _ *http.Request) {
 		j.mu.Lock()
 		defer j.mu.Unlock()
-		j.box, j.name = strings.Split(r.URL.Query().Get("Ids"), ","), r.URL.Query().Get("Name")
-		if j.onCreate != nil {
-			j.onCreate()
-		}
-		if j.dropCreate {
-			conn, _, _ := rw.(http.Hijacker).Hijack()
-			conn.Close()
-			return
-		}
-		io.WriteString(rw, `{"Id":"box1"}`)
-	})
-	srv.HandleFunc("POST", "/Collections/box1/Items", func(rw http.ResponseWriter, r *http.Request) {
-		j.mu.Lock()
-		defer j.mu.Unlock()
-		j.box = append(j.box, strings.Split(r.URL.Query().Get("Ids"), ",")...)
-	})
-	srv.HandleFunc("DELETE", "/Collections/box1/Items", func(rw http.ResponseWriter, r *http.Request) {
-		j.mu.Lock()
-		defer j.mu.Unlock()
-		gone := strings.Split(r.URL.Query().Get("Ids"), ",")
-		j.box = slices.DeleteFunc(j.box, func(id string) bool { return slices.Contains(gone, id) })
-	})
-	srv.HandleFunc("GET", "/Items/box1", func(rw http.ResponseWriter, _ *http.Request) {
-		j.mu.Lock()
-		defer j.mu.Unlock()
-		json.NewEncoder(rw).Encode(map[string]any{"Id": "box1", "Name": j.name, "Overview": j.overview, "Tags": j.tags})
-	})
-	srv.HandleFunc("POST", "/Items/box1", func(rw http.ResponseWriter, r *http.Request) {
-		j.mu.Lock()
-		defer j.mu.Unlock()
-		var body struct {
-			Name, Overview string
-			Tags           []string
-		}
-		json.NewDecoder(r.Body).Decode(&body)
-		j.name, j.overview, j.tags = body.Name, body.Overview, body.Tags
-	})
-	srv.HandleFunc("POST", "/Items/box1/Images/Primary", func(rw http.ResponseWriter, r *http.Request) {
-		j.mu.Lock()
-		defer j.mu.Unlock()
-		j.images++
+		j.deleted = append(j.deleted, "box1")
+		rw.WriteHeader(http.StatusNoContent)
 	})
 	return j
-}
-
-func (j *jfFake) members() []string {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	return slices.Sorted(slices.Values(j.box))
 }
 
 // Catches: the movie listing left to collapse collections. Jellyfin then answers each film in a collection with the
@@ -1012,358 +847,225 @@ func TestJellyfinMapListsFilmsInCollections(t *testing.T) {
 	}
 }
 
-// Catches, across four runs: a watched film offered (export, feed, Plex, Jellyfin); a pick outside the unseen set
-// kept instead of retried; the taste block missing from the system message, the call sent to another task's model,
-// without the tonight task's reasoning or without the picks schema; a second AI call on the same day; a watched pick left in the
-// row (in Plex's cached Home hub too), or a poster uploaded for its removal; yesterday's picks repeated or kept; the row missing from
-// the shared Homes, or shown on the Recommended tab (where an earlier build put it); his own "Tonight" collection or BoxSet adopted and edited; the key reaching a log; an RSS
-// read that skips the process-wide Letterboxd limiter (lbpace.Shared, at most one request per 2 s across stages).
+// ---- runs ----
+
+// picksOf is who's picks in the state, sorted.
+func (w *world) picksOf(t *testing.T, who string) []int {
+	t.Helper()
+	o := w.state(t).Persons[who]
+	if o == nil {
+		return nil
+	}
+	return slices.Sorted(slices.Values(tmdbIDs(o.Picks)))
+}
+
+// Catches, across four runs of the owner's shelf: a pick he has seen (export, feed, Plex, Jellyfin) or under the bars;
+// a second pick on the same day, or ratings asked for again within ratings_every; a watched pick left on the shelf (in
+// Plex's cached Home hub too) or a poster uploaded for its removal; yesterday's picks repeated while others pass; the
+// shelf missing from his Home, shown to others, or on the Recommended tab (where an earlier build put rows); his own
+// collection with the shelf's title adopted and edited; an RSS read that skips the process-wide Letterboxd limiter
+// (lbpace.Shared, at most one request per 2 s across stages).
 func TestRunAcrossDays(t *testing.T) {
 	w := newWorld(t, "", 0)
-	w.ai.script(answer3(559907, 389, 346), answer3(389, 346, 655)) // the first answer offers a film he has seen
-
+	six := []int{389, 346, 655, 1398, 949, 18148}
+	w.mdb.onlyPass(six...)
+	w.mdb.rate(80, -1, 949) // no critics score: Letterboxd alone decides
 	rep := w.run(t)
-	if len(rep.Alerts) != 0 || rep.Counts["plex_retry"]+rep.Counts["jellyfin_retry"] != 0 {
+	if len(rep.Alerts) != 0 || rep.Counts["owner.plex_retry"]+rep.Counts["owner.jellyfin_retry"] != 0 {
 		t.Fatalf("run 1: alerts %q counts %v\n%s", rep.Alerts, rep.Counts, w.logs)
 	}
-	if n := w.ai.calls(); n != 2 {
-		t.Fatalf("run 1: %d AI calls, want 2 (the answer and one retry)\n%s", n, w.logs)
+	picks1 := w.picksOf(t, "owner")
+	if w.state(t).Persons["owner"].Day != "2026-10-05" || len(picks1) != 3 || slices.ContainsFunc(picks1, func(id int) bool { return !slices.Contains(six, id) }) {
+		t.Fatalf("run 1 picks %v; want 3 of %v", picks1, six)
 	}
-	if spent := w.state(t).Spend["2026-10-05"]; spent > 0.15 {
-		t.Fatalf("run 1 spent $%.5f, over the $0.15 cap", spent)
+	s, _, _ := w.plex.shelf(ownerShelf)
+	if s == nil || strings.Join(s.items, ",") != plexKeys(picks1...) || !slices.Equal(s.labels, []string{"projectionist", "Tonight-owner"}) ||
+		len(s.posters) != 1 || !bytes.HasPrefix(s.posters[0], []byte{0xFF, 0xD8}) || strings.Count(s.summary, "\n") != 2 ||
+		!strings.Contains(s.summary, "Letterboxd ★4.0") {
+		t.Fatalf("his shelf %+v; want %s, labelled, one poster, a summary of the picks' scores", s, plexKeys(picks1...))
 	}
-	first := w.ai.gw.Calls()[0]
-	if first.Model != "deepseek/deepseek-v4.1-flash" || w.ai.effort(0) != "none" || first.ResponseFormat == nil ||
-		!first.ResponseFormat.JSONSchema.Strict || !strings.Contains(string(first.ResponseFormat.JSONSchema.Schema), `"required":["id","title","mood","liked","reason"]`) {
-		t.Fatalf("model %s, effort %q, response format %+v; want the tonight task's model with no reasoning, held to the picks schema",
-			first.Model, w.ai.effort(0), first.ResponseFormat)
+	own := plexHub{Identifier: "custom.collection.4.900", PromotedToOwnHome: true}
+	if w.plex.hubs[0] != own {
+		t.Fatalf("hubs %+v: his shelf is not first on his own Home alone", w.plex.hubs)
 	}
-	if system := first.Messages[0]; system.Role != "system" || !strings.Contains(system.Content[0].Text, "5★: Licorice Pizza (2021)") {
-		t.Fatalf("the system message lacks the taste profile: %+v", system)
+	if got := w.jp.owned("u1"); !slices.Equal(got, []string{"Tonight: " + jfKeys(picks1...)}) {
+		t.Fatalf("his Jellyfin playlists %q", got)
 	}
-	userText := w.ai.messages(0)
-	for _, f := range films { // a line carries TMDB's facts, the director from the credits included
-		listed := strings.Contains(userText, fmt.Sprintf(`\n%d | %s | %d | %s | Drama | US | %d | en | First sentence.`,
-			f.tmdb, f.title, f.year, f.director, f.runtime))
-		if unseen := f.tmdb != 559907 && slices.Index(films, f) < 7; listed != unseen {
-			t.Errorf("%s listed=%v, want %v", f.title, listed, unseen)
-		}
-	}
-	if retry := w.ai.messages(1); !strings.Contains(retry, `id 559907 (\"t559907\") is not in the UNSEEN list`) ||
-		!strings.Contains(retry, `{"role":"assistant","content":"{\"picks\"`) {
-		t.Fatalf("retry does not send the answer back and name the violation: %s", retry)
-	}
-	st := w.state(t)
-	if st.Day != "2026-10-05" || !slices.Equal(tmdbIDs(st.Picks), []int{389, 346, 655}) {
-		t.Fatalf("state = %s %v", st.Day, tmdbIDs(st.Picks))
-	}
-	if got := w.plex.members(); !slices.Equal(got, []string{rk(346), rk(389), rk(655)}) {
-		t.Fatalf("plex collection = %v", got)
-	}
-	if !strings.HasPrefix(w.plex.summary, "12 Angry Men (1957): Shares") || strings.Count(w.plex.summary, "\n") != 2 {
-		t.Fatalf("plex summary = %q", w.plex.summary)
-	}
-	if len(w.plex.posters) != 1 || !bytes.HasPrefix(w.plex.posters[0], []byte{0xFF, 0xD8}) {
-		t.Fatalf("plex posters = %d", len(w.plex.posters))
-	}
-	homes := plexHub{Identifier: "custom.collection.4.900", PromotedToOwnHome: true, PromotedToSharedHome: true}
-	if w.plex.hubs[0] != homes {
-		t.Fatalf("hubs = %+v: the row is not first on the Homes (his and those shared) alone", w.plex.hubs)
-	}
-	if !w.plex.labeled {
-		t.Fatal("our Plex collection carries no ownership label")
-	}
-	for _, c := range w.h.Plex.Calls("PUT", "/library/sections/4/all") {
-		if strings.Contains(c.RawQuery, "id=777") {
-			t.Fatalf("his collection was edited: %s", c.RawQuery)
-		}
-	}
-	if got := w.jf.members(); !slices.Equal(got, []string{jfID(346), jfID(389), jfID(655)}) || w.jf.overview != w.plex.summary || w.jf.images != 1 {
-		t.Fatalf("jellyfin box = %v, overview %q, images %d", got, w.jf.overview, w.jf.images)
-	}
-	if !slices.Contains(w.jf.tags, "projectionist") {
-		t.Fatalf("jellyfin box tags = %q", w.jf.tags)
-	}
-	if !strings.Contains(w.logs.String(), "event=tonight_ai_call for=household attempt=2 model=deepseek/deepseek-v4.1-flash") ||
-		!strings.Contains(w.logs.String(), "output_tokens=422 finish=stop") {
-		t.Fatalf("no token/cost log for the call and its retry:\n%s", w.logs)
+	if w.mdb.requests() != 1 {
+		t.Fatalf("MDBList asked %d times for 14 films, want once", w.mdb.requests())
 	}
 
-	// 30 min later: nothing new to do, except to take the row off the Recommended tab, where an earlier build put it.
+	// 30 min later: nothing new to do, except to take the shelf off the Recommended tab, where an earlier build put rows.
 	w.h.Now = w.h.Now.Add(30 * time.Minute)
 	w.plex.mu.Lock()
 	w.plex.hubs[0].PromotedToRecommended = true
 	w.plex.mu.Unlock()
-	if rep := w.run(t); len(rep.Alerts) != 0 {
-		t.Fatalf("run 2 alerts %q: a same-day run tried to pick again", rep.Alerts)
+	if rep := w.run(t); len(rep.Alerts) != 0 || !slices.Equal(w.picksOf(t, "owner"), picks1) {
+		t.Fatalf("run 2: alerts %q, picks %v: a same-day run picked again", rep.Alerts, w.picksOf(t, "owner"))
 	}
-	if n := w.ai.calls(); n != 2 || len(w.plex.posters) != 1 || len(w.h.Plex.Calls("POST", "/library/collections")) != 1 {
-		t.Fatalf("run 2: AI calls %d, posters %d, creates %d", n, len(w.plex.posters), len(w.h.Plex.Calls("POST", "/library/collections")))
-	}
-	if w.plex.hubs[0] != homes {
-		t.Fatalf("run 2 hubs = %+v: the Recommended promotion was left in place", w.plex.hubs)
+	if s, _, _ := w.plex.shelf(ownerShelf); len(s.posters) != 1 || len(w.h.Plex.Calls("POST", "/library/collections")) != 1 || w.plex.hubs[0] != own {
+		t.Fatalf("run 2: posters %d, creates %d, hubs %+v", len(s.posters), len(w.h.Plex.Calls("POST", "/library/collections")), w.plex.hubs)
 	}
 	labels := 0
 	for _, c := range w.h.Plex.Calls("PUT", "/library/sections/4/all") {
 		if strings.Contains(c.RawQuery, "label") {
 			labels++
 		}
+		if strings.Contains(c.RawQuery, "id=777") {
+			t.Fatalf("his collection was edited: %s", c.RawQuery)
+		}
 	}
 	if labels != 1 {
 		t.Fatalf("run 2: %d label writes, want the one from run 1", labels)
 	}
 
-	// He watches Seven Samurai on Plex: it leaves both rows at once, without a new pick.
+	// He watches one pick on Plex: it leaves the shelf, and his cached Home row, at once, without a new pick.
+	gone := picks1[0]
 	w.plex.mu.Lock()
-	w.plex.viewed[rk(346)] = true
+	w.plex.viewed[rk(gone)] = true
 	w.plex.mu.Unlock()
 	w.h.Now = w.h.Now.Add(30 * time.Minute)
 	w.run(t)
-	if got := w.plex.members(); !slices.Equal(got, []string{rk(389), rk(655)}) || strings.Contains(w.plex.summary, "Seven Samurai") {
-		t.Fatalf("run 3: plex %v, summary %q", got, w.plex.summary)
+	left := picks1[1:]
+	if s, _, _ := w.plex.shelf(ownerShelf); strings.Join(s.items, ",") != plexKeys(left...) || !slices.Equal(s.home, s.items) || len(s.posters) != 1 {
+		t.Fatalf("run 3: shelf %v, Home row %v, posters %d; want %s on both, no new poster", s.items, s.home, len(s.posters), plexKeys(left...))
 	}
-	if got := w.plex.homeRow(); !slices.Equal(got, []string{rk(389), rk(655)}) {
-		t.Fatalf("run 3: his Home row lists %v: Plex's cached hub was not refreshed after the members changed", got)
-	}
-	if got := w.jf.members(); !slices.Equal(got, []string{jfID(389), jfID(655)}) || w.ai.calls() != 2 {
-		t.Fatalf("run 3: jellyfin %v, AI calls %d", got, w.ai.calls())
-	}
-	if len(w.plex.posters) != 1 || w.jf.images != 1 {
-		t.Fatalf("run 3: posters plex %d, jellyfin %d: a watched pick's removal uploaded another (Plex keeps every one)",
-			len(w.plex.posters), w.jf.images)
+	if got := w.jp.owned("u1"); !slices.Equal(got, []string{"Tonight: " + jfKeys(left...)}) {
+		t.Fatalf("run 3: his Jellyfin playlists %q", got)
 	}
 
-	// Next morning: new picks replace yesterday's, and none of yesterday's is offered again.
+	// Next morning: the other three of the six, none of yesterday's, the ratings from the cache.
 	w.h.Now = time.Date(2026, 10, 6, 13, 0, 0, 0, time.UTC)
-	w.ai.script(answer3(1398, 949, 18148))
 	w.run(t)
-	if !slices.Equal(tmdbIDs(w.state(t).Picks), []int{1398, 949, 18148}) {
-		t.Fatalf("run 4 picks = %v", tmdbIDs(w.state(t).Picks))
+	picks2 := w.picksOf(t, "owner")
+	rest := slices.DeleteFunc(slices.Clone(six), func(id int) bool { return slices.Contains(picks1, id) })
+	if !slices.Equal(picks2, slices.Sorted(slices.Values(rest))) {
+		t.Fatalf("run 4 picks %v; want the three not picked yesterday, %v", picks2, rest)
 	}
-	if again := w.ai.messages(2); strings.Contains(again, `\n389 | 12 Angry Men`) || !strings.Contains(again, `\n843 | In the Mood for Love`) {
-		t.Fatalf("run 4 candidates repeat yesterday's picks: %s", again)
+	if s, _, _ := w.plex.shelf(ownerShelf); strings.Join(s.items, ",") != plexKeys(picks2...) || !slices.Equal(s.home, s.items) || len(s.posters) != 2 {
+		t.Fatalf("run 4: shelf %v, Home row %v, posters %d", s.items, s.home, len(s.posters))
 	}
-	if got := w.plex.members(); !slices.Equal(got, []string{rk(949), rk(1398), rk(18148)}) || len(w.plex.posters) != 2 {
-		t.Fatalf("run 4: plex %v, posters %d", got, len(w.plex.posters))
-	}
-	if got := w.plex.homeRow(); !slices.Equal(got, []string{rk(949), rk(1398), rk(18148)}) {
-		t.Fatalf("run 4: his Home row lists %v: Plex's cached hub was not refreshed after the members changed", got)
-	}
-	for _, k := range w.ai.gw.Keys() {
-		if k != "Bearer test-SECRET-gateway-key" {
-			t.Fatalf("Authorization header = %q", k)
-		}
-	}
-	if strings.Contains(w.logs.String(), "SECRET") {
-		t.Fatal("the gateway key reached the log")
+	if w.mdb.requests() != 1 {
+		t.Fatalf("MDBList asked %d times; the cached ratings were not used", w.mdb.requests())
 	}
 	if len(w.lbHits) != 4 || !slices.Equal(w.lbWaits, []time.Duration{2 * time.Second, 4 * time.Second, 6 * time.Second}) {
 		t.Fatalf("letterboxd requests = %q (want his feed once per run), limiter waits %v (want each queued behind the last)", w.lbHits, w.lbWaits)
 	}
 }
 
-// Catches the daily cap being soft, on a model priced so that it binds, with the household's three taste blocks. Row
-// 1: the 190 candidates' pair (the call and its retry, each at its worst) does not fit $0.15, so the list must be cut
-// until it does; the retry then fits too. Row 2: a call sent although even an empty list's pair would not fit.
-func TestDailyCapIsHard(t *testing.T) {
-	for _, c := range []struct {
-		name  string
-		cap   string
-		calls int
-	}{
-		{"the list is cut until the pair fits", "0.15", 2},
-		{"no room for the pair: no call", "0.07", 0},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			w := newWorld(t, household+"max_tokens = 1000\ndaily_cap_usd = "+c.cap+"\n", 190)
-			w.ai = newAIFake(t, w.h, pricey)
-			w.ai.script(answer3(559907, 389, 346), answer3(389, 346, 655)) // the first offers a film he has seen
-			rep := w.run(t)
-			spent := w.state(t).Spend["2026-10-05"]
-			if w.ai.calls() != c.calls || spent > 0.15 {
-				t.Fatalf("%d AI calls (want %d), $%.5f spent against the cap\n%s", w.ai.calls(), c.calls, spent, w.logs)
-			}
-			if c.calls == 0 {
-				if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "exceed the daily AI budget") || spent != 0 {
-					t.Fatalf("alerts %q, spent $%.5f", rep.Alerts, spent)
-				}
-				return
-			}
-			shown := strings.Count(w.ai.messages(0), `\n70`) // filler lines: "\n700000 | Filler 0 | ..."
-			if shown == 0 || shown >= 190 {
-				t.Fatalf("%d filler candidates shown; want the list cut below 190\n%s", shown, w.logs)
-			}
-		})
-	}
-}
-
-// Catches: an attempt whose answer was lost after it may have run (a dropped connection) counted as $0, which lets
-// the client's retries bill a day several calls past the cap; and a later run that day calling again past it.
-func TestLostAnswerStaysCounted(t *testing.T) {
-	w := newWorld(t, "max_tokens = 1000\n", 0)
-	w.ai = newAIFake(t, w.h, pricey)
-	w.ai.mu.Lock()
-	w.ai.drop = true
-	w.ai.mu.Unlock()
-	rep := w.run(t)
-	counted := w.state(t).Spend["2026-10-05"]
-	if w.ai.calls() != 4 || counted < 4*1000*20e-6 || len(rep.Alerts) != 1 || !strings.Contains(w.logs.String(), "event=tonight_ai_unknown_outcome") {
-		t.Fatalf("run 1: %d attempts, $%.5f counted, alerts %q; want 4 attempts each counted at its worst\n%s", w.ai.calls(), counted, rep.Alerts, w.logs)
-	}
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	rep = w.run(t)
-	if w.ai.calls() != 4 || w.state(t).Spend["2026-10-05"] != counted || len(rep.Alerts) != 1 ||
-		!strings.Contains(rep.Alerts[0], "exceed the daily AI budget") {
-		t.Fatalf("run 2: %d attempts, $%.5f counted, alerts %q", w.ai.calls(), w.state(t).Spend["2026-10-05"], rep.Alerts)
-	}
-}
-
-// Catches: a gateway that refuses calls until the owner adds a card counted as spend (the day's cap used up by
-// nothing), its alert missing since when calls are refused, the alert and the call repeated every 30 minutes, or the
-// picks not made once the gateway is tried again and answers.
-func TestGatewayRefusesForBilling(t *testing.T) {
-	w := newWorld(t, "", 0)
-	refuse := true
-	reply := w.ai.gw.Reply
-	w.ai.gw.Reply = func(n int, req llm.Request) llmtest.Answer {
-		if refuse {
-			return llmtest.Answer{Status: 403, Type: "customer_verification_required", Message: "requires a valid credit card on file"}
+// Catches MDBList asked one request a film, or for more than 200 films a request; asked again within ratings_every, or
+// never after it; and a spent quota costing the day its picks: with 450 films beside the library's 14 (one MDBList
+// does not know), the first pick asks 3 requests that name each film once, the next day none, and once ratings_every
+// has passed a 429 leaves the cached ratings to pick from, without an alert.
+func TestRatingsAreCachedAndAskedInBatches(t *testing.T) {
+	w := newWorld(t, "", 450)
+	w.mdb.mu.Lock()
+	delete(w.mdb.ratings, 700000)
+	w.mdb.mu.Unlock()
+	w.run(t)
+	seen := map[int]int{}
+	for _, ids := range w.mdb.asked {
+		if len(ids) > 200 {
+			t.Errorf("a request named %d films", len(ids))
 		}
-		return reply(n, req)
+		for _, id := range ids {
+			seen[id]++
+		}
 	}
-	rep := w.run(t)
-	if w.ai.calls() != 1 || w.state(t).Spend["2026-10-05"] != 0 || len(rep.Alerts) != 1 ||
-		!strings.Contains(rep.Alerts[0], "refused calls since 2026-10-05T15:00:00Z") {
-		t.Fatalf("%d calls, $%v spent, alerts %q; want one free call and one dated alert", w.ai.calls(), w.state(t).Spend["2026-10-05"], rep.Alerts)
+	if len(w.mdb.asked) != 3 || len(seen) != 464 || slices.Max(slices.Collect(maps.Values(seen))) != 1 {
+		t.Fatalf("%d requests naming %d films (most asked %d times); want 3, each of the 464 once", len(w.mdb.asked), len(seen),
+			slices.Max(slices.Collect(maps.Values(seen))))
 	}
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	if rep := w.run(t); w.ai.calls() != 1 || len(rep.Alerts) != 0 {
-		t.Fatalf("30 min later, still refused: %d calls, alerts %q; want no call and no second alert", w.ai.calls(), rep.Alerts)
+	w.h.Now = time.Date(2026, 10, 6, 13, 0, 0, 0, time.UTC)
+	w.run(t)
+	if w.mdb.requests() != 3 {
+		t.Fatalf("the next day: %d requests, want none more", w.mdb.requests())
 	}
-	refuse = false
-	w.ai.script(answer3(389, 346, 655))
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	if rep := w.run(t); len(rep.Alerts) != 0 || len(w.state(t).Picks) != 3 {
-		t.Fatalf("an hour after the refusal, the gateway answering: alerts %q, picks %v", rep.Alerts, w.state(t).Picks)
+	w.mdb.mu.Lock()
+	w.mdb.quota = true
+	w.mdb.mu.Unlock()
+	w.h.Now = time.Date(2026, 11, 7, 13, 0, 0, 0, time.UTC)
+	if rep := w.run(t); len(rep.Alerts) != 0 || len(w.picksOf(t, "owner")) != 3 || w.state(t).Persons["owner"].Day != "2026-11-07" {
+		t.Fatalf("a spent quota: alerts %q, picks %v for %s; want the day's picks from the cache", rep.Alerts, w.picksOf(t, "owner"),
+			w.state(t).Persons["owner"].Day)
 	}
 }
 
-// Catches a second "Tonight" collection after a failed call around the create, which nothing would ever clean up
-// (run 2 made a second POST /library/collections). Rows: both creates' answers are lost after the apps made the
-// collections; Plex answers the create, then fails the read-back, so the create's answer alone must name the
-// collection; the service stops (SIGTERM) inside either create, where the run's closing save fails with the
-// cancelled context and only the record saved before the create survives.
+// Catches the household row an earlier build kept left in place (its Plex collection, and with it its Home row, and its
+// Jellyfin BoxSet), or taken down again on a later run: the state names them, the first run deletes both and forgets
+// them, and the next deletes nothing.
+func TestHouseholdRowIsTakenDown(t *testing.T) {
+	w := newWorld(t, "", 0)
+	if err := w.h.Env.Store.PutJSON(context.Background(), name, "state", state{Plex: sinkState{ID: "555"}, Jellyfin: sinkState{ID: "box1"}}); err != nil {
+		t.Fatal(err)
+	}
+	w.h.Plex.Handle("DELETE", "/library/collections/555", 200, "")
+	w.run(t)
+	w.h.Now = w.h.Now.Add(30 * time.Minute)
+	w.run(t)
+	st := w.state(t)
+	if n := len(w.h.Plex.Calls("DELETE", "/library/collections/555")); n != 1 || !slices.Equal(w.jf.deleted, []string{"box1"}) ||
+		st.Plex.ID != "" || st.Jellyfin.ID != "" {
+		t.Fatalf("Plex deletes %d, Jellyfin deletes %v, state plex %+v jellyfin %+v; want each deleted once and forgotten",
+			n, w.jf.deleted, st.Plex, st.Jellyfin)
+	}
+}
+
+// Catches a second shelf made after a create whose answer was lost (Plex made it, the stage never heard its id), whose
+// read-back failed, or inside which the service stopped: the next run must adopt the one made, not make another that
+// nothing would ever take away.
 func TestCreateNeverDuplicates(t *testing.T) {
 	for _, c := range []struct {
 		name  string
 		fault func(*world, context.CancelFunc)
 	}{
-		{"create answers lost", func(w *world, _ context.CancelFunc) { w.plex.dropCreate, w.jf.dropCreate = true, true }},
-		{"plex read-back fails", func(w *world, _ context.CancelFunc) { w.plex.failReadBack = 1 }},
-		{"stopped inside the plex create", func(w *world, stop context.CancelFunc) { w.plex.dropCreate, w.plex.onCreate = true, stop }},
-		{"stopped inside the jellyfin create", func(w *world, stop context.CancelFunc) { w.jf.dropCreate, w.jf.onCreate = true, stop }},
+		{"create answer lost", func(w *world, _ context.CancelFunc) { w.plex.dropCreate = true }},
+		{"read-back fails", func(w *world, _ context.CancelFunc) { w.plex.failReadBack = 1 }},
+		{"stopped inside the create", func(w *world, stop context.CancelFunc) { w.plex.dropCreate, w.plex.onCreate = true, stop }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			w := newWorld(t, "", 0)
-			w.ai.script(answer3(389, 346, 655))
 			ctx, stop := context.WithCancel(context.Background())
 			defer stop()
 			c.fault(w, stop)
 			rep := &stage.Report{}
 			err := (Stage{}).Run(ctx, w.h.Env, rep)
-			if stopped := ctx.Err() != nil; stopped != (err != nil) || (!stopped && rep.Counts["plex_retry"] != 1) {
+			if stopped := ctx.Err() != nil; stopped != (err != nil) || (!stopped && rep.Counts["owner.plex_retry"] != 1) {
 				t.Fatalf("run 1: err %v, counts %v\n%s", err, rep.Counts, w.logs)
 			}
-			if st := w.state(t); c.name == "plex read-back fails" && (st.Plex.ID != "900" || st.Plex.Pending != nil) {
+			if st := w.state(t).Persons["owner"]; c.name == "read-back fails" && (st.Plex.ID != "900" || st.Plex.Pending != nil) {
 				t.Fatalf("after the create answered 900: plex state %+v", st.Plex)
 			}
 			w.plex.mu.Lock()
 			w.plex.dropCreate, w.plex.onCreate = false, nil
 			w.plex.mu.Unlock()
-			w.jf.mu.Lock()
-			w.jf.dropCreate, w.jf.onCreate = false, nil
-			w.jf.mu.Unlock()
 			w.h.Now = w.h.Now.Add(16 * time.Minute) // past the first 15 min backoff
-			if rep := w.run(t); rep.Counts["plex_synced"]+rep.Counts["jellyfin_synced"] != 2 {
+			if rep := w.run(t); rep.Counts["owner.plex_synced"] != 1 {
 				t.Fatalf("run 2: counts %v\n%s", rep.Counts, w.logs)
 			}
-			creates := len(w.h.Plex.Calls("POST", "/library/collections"))
-			boxes := len(w.h.Jellyfin.Calls("POST", "/Collections"))
-			if creates != 1 || boxes != 1 || !w.plex.labeled || !slices.Contains(w.jf.tags, "projectionist") {
-				t.Fatalf("plex creates %d (labelled %v), jellyfin creates %d (tags %q): want one each, owned", creates, w.plex.labeled, boxes, w.jf.tags)
-			}
-			if st := w.state(t); st.Plex.ID != "900" || st.Jellyfin.ID != "box1" || st.Plex.Pending != nil || st.Jellyfin.Pending != nil {
-				t.Fatalf("state: plex %+v jellyfin %+v", st.Plex, st.Jellyfin)
-			}
-			if got := w.plex.members(); !slices.Equal(got, []string{rk(346), rk(389), rk(655)}) {
-				t.Fatalf("plex members %v", got)
+			s, _, _ := w.plex.shelf(ownerShelf)
+			st := w.state(t).Persons["owner"]
+			if n := len(w.h.Plex.Calls("POST", "/library/collections")); n != 1 || s == nil || !slices.Contains(s.labels, "projectionist") ||
+				st.Plex.ID != "900" || st.Plex.Pending != nil || strings.Join(s.items, ",") != plexKeys(w.picksOf(t, "owner")...) {
+				t.Fatalf("plex creates %d, shelf %+v, state %+v; want one shelf, ours, holding the picks", n, s, st.Plex)
 			}
 		})
 	}
 }
 
-// Catches an answer cut off at max_tokens (reasoning shares them with the JSON) costing the day its picks: the retry
-// must say why and reason less, or it is cut off the same way. In row 2 reasoning took every token, so there is no
-// text to send back, and a retry with an empty assistant turn is refused by some providers, leaving the day with no
-// picks.
-func TestCutOffAnswerRetriesWithLeastReasoning(t *testing.T) {
-	for _, c := range []struct{ name, cut string }{
-		{"cut inside the JSON", `{"picks":[{"id":389,"title":"12 Angry Men","mood":"tense","liked":"Rope","reason":"Like Rope, it`},
-		{"cut inside thinking: no text", ""},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			w := newWorld(t, "", 0)
-			w.ai = newAIFake(t, w.h, map[string]llm.Task{"tonight": {Reasoning: "low"}}) // the default already reasons least
-			w.ai.script("CUT:"+c.cut, answer3(389, 346, 655))
-			w.run(t)
-			if w.ai.calls() != 2 {
-				t.Fatalf("%d AI call(s), want the cut answer and a retry\n%s", w.ai.calls(), w.logs)
-			}
-			retry := w.ai.messages(1)
-			if w.ai.effort(0) != "low" || w.ai.effort(1) != "none" || !strings.Contains(retry, "cut off at the length limit") ||
-				strings.Contains(retry, `"content":""`) {
-				t.Fatalf("efforts %q then %q; retry %s", w.ai.effort(0), w.ai.effort(1), retry)
-			}
-			if got := tmdbIDs(w.state(t).Picks); !slices.Equal(got, []int{389, 346, 655}) {
-				t.Fatalf("picks %v", got)
-			}
-		})
-	}
-}
-
-// Catches the retry being sent although, counted, it no longer fits what is left of the day. Sizing allows the retry
-// the answer (max_tokens) plus retryExtra tokens of violations; an answer that billed all of max_tokens and named 60
-// films outside the list, each with a long title, runs far past that, and only the check before the retry holds the
-// cap (with the fake billing 422 output tokens the check was never reached).
-func TestRetryThatNoLongerFitsIsNotSent(t *testing.T) {
-	w := newWorld(t, "max_tokens = 1000\n", 190)
-	w.ai = newAIFake(t, w.h, pricey)
-	var picks []string
-	for i := range 60 {
-		picks = append(picks, fmt.Sprintf(`{"id":%d,"title":"%s","mood":"m","liked":"l","reason":"r"}`, 900000+i, strings.Repeat("Long Title ", 10)))
-	}
-	w.ai.script("MAX:"+`{"picks":[`+strings.Join(picks, ",")+`]}`, "MAX:"+answer3(389, 346, 655))
-	rep := w.run(t)
-	spent := w.state(t).Spend["2026-10-05"]
-	if w.ai.calls() != 1 || spent > 0.15 || !strings.Contains(w.logs.String(), `msg="no budget left for the retry; keeping the valid picks"`) {
-		t.Fatalf("%d AI calls, $%.5f spent: a retry past what was left of the $0.15 was sent\n%s", w.ai.calls(), spent, w.logs)
-	}
-	if len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "no valid picks") {
-		t.Fatalf("alerts %q", rep.Alerts)
-	}
-}
-
-// Catches his Home row listing films the collection no longer holds after a Plex write following a member edit
-// fails: the next run finds the members right, so only a saved mark refreshes the hub Plex caches. Row 1 is the
-// reviewer's repro (day 2's poster answers 503; 16 min later his Home still listed day 1's picks); in row 2 the
-// refresh itself fails, so the mark must outlive it; row 3 stops the service inside a watched pick's removal after
-// Plex made it, where the run's closing save fails and only a mark saved before the edit survives.
+// Catches his Home row listing films his shelf no longer holds after a Plex write following a member edit fails: the
+// next run finds the members right, so only a saved mark refreshes the hub Plex caches. Row 1 is a reviewer's repro
+// (day 2's poster answers 503; 16 min later his Home still listed day 1's picks); in row 2 the refresh itself fails,
+// so the mark must outlive it; row 3 stops the service inside a watched pick's removal after Plex made it, where the
+// run's closing save fails and only a mark saved before the edit survives.
 func TestHomeRowRefreshedAfterAFailedWrite(t *testing.T) {
-	nextDay := func(w *world) { w.h.Now = time.Date(2026, 10, 6, 13, 0, 0, 0, time.UTC) }
-	watchedOne := func(w *world) { w.plex.viewed[rk(346)], w.h.Now = true, w.h.Now.Add(30*time.Minute) }
+	nextDay := func(t *testing.T, w *world) { w.h.Now = time.Date(2026, 10, 6, 13, 0, 0, 0, time.UTC) }
+	watchedOne := func(t *testing.T, w *world) {
+		w.plex.viewed[rk(w.picksOf(t, "owner")[0])], w.h.Now = true, w.h.Now.Add(30*time.Minute)
+	}
 	for _, c := range []struct {
 		name   string
-		change func(*world)
+		change func(*testing.T, *world)
 		fault  func(*plexFake, context.CancelFunc)
 	}{
 		{"the poster fails after a new day's members", nextDay, func(p *plexFake, _ context.CancelFunc) { p.fail["poster"] = 1 }},
@@ -1372,73 +1074,61 @@ func TestHomeRowRefreshedAfterAFailedWrite(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			w := newWorld(t, "", 0)
-			w.ai.script(answer3(389, 346, 655), answer3(1398, 949, 18148))
 			w.run(t)
 			ctx, stop := context.WithCancel(context.Background())
 			defer stop()
+			c.change(t, w)
 			w.plex.mu.Lock()
-			c.change(w)
 			c.fault(w.plex, stop)
 			w.plex.mu.Unlock()
 			rep := &stage.Report{}
 			err := (Stage{}).Run(ctx, w.h.Env, rep)
-			if stopped := ctx.Err() != nil; stopped != (err != nil) || (!stopped && rep.Counts["plex_retry"] != 1) {
+			if stopped := ctx.Err() != nil; stopped != (err != nil) || (!stopped && rep.Counts["owner.plex_retry"] != 1) {
 				t.Fatalf("run A: err %v, counts %v\n%s", err, rep.Counts, w.logs)
 			}
 			w.plex.mu.Lock()
 			w.plex.stopInRemove = nil
 			w.plex.mu.Unlock()
 			w.h.Now = w.h.Now.Add(16 * time.Minute) // past the first 15 min backoff
-			if rep := w.run(t); rep.Counts["plex_synced"] != 1 {
+			if rep := w.run(t); rep.Counts["owner.plex_synced"] != 1 {
 				t.Fatalf("run B: counts %v\n%s", rep.Counts, w.logs)
 			}
-			if home, members := w.plex.homeRow(), w.plex.members(); !slices.Equal(home, members) || len(members) == 0 {
-				t.Fatalf("STALE: his Home row lists %v while the collection holds %v", home, members)
+			if s, _, _ := w.plex.shelf(ownerShelf); !slices.Equal(s.home, s.items) || len(s.items) == 0 {
+				t.Fatalf("STALE: his Home row lists %v while the shelf holds %v", s.home, s.items)
 			}
 		})
 	}
 }
 
-// Catches: a Plex outage failing the run, raising an alert on the first miss, retrying every run instead of
-// backing off, or holding up Jellyfin.
+// Catches: a Plex outage failing the run, raising an alert on the first miss, retrying every run instead of backing
+// off, or holding up Jellyfin.
 func TestPlexOutageNeverFailsTheRun(t *testing.T) {
 	w := newWorld(t, "", 0)
-	w.ai.script(answer3(389, 346, 655))
 	w.h.Plex.Handle("GET", "/library/sections/4/all", http.StatusServiceUnavailable, "scanning")
 	rep := w.run(t)
-	if len(rep.Alerts) != 0 || rep.Counts["plex_retry"] != 1 || len(w.jf.members()) != 3 {
-		t.Fatalf("run 1: alerts %q counts %v jellyfin %v", rep.Alerts, rep.Counts, w.jf.members())
+	if len(rep.Alerts) != 0 || rep.Counts["owner.plex_retry"] != 1 || len(w.jp.owned("u1")) != 1 {
+		t.Fatalf("run 1: alerts %q counts %v jellyfin %v", rep.Alerts, rep.Counts, w.jp.owned("u1"))
 	}
 	w.h.Now = w.h.Now.Add(10 * time.Minute) // inside the 15 min backoff
-	if rep := w.run(t); rep.Counts["plex_deferred"] != 1 {
-		t.Fatalf("run 2 counts %v, want plex_deferred", rep.Counts)
+	if rep := w.run(t); rep.Counts["owner.plex_deferred"] != 1 {
+		t.Fatalf("run 2 counts %v, want owner.plex_deferred", rep.Counts)
 	}
 	st := w.state(t)
-	st.Plex.FailingSince = w.h.Now.Add(-25 * time.Hour)
-	st.Plex.RetryAt = time.Time{}
+	o := st.Persons["owner"]
+	o.Plex.FailingSince, o.Plex.RetryAt = w.h.Now.Add(-25*time.Hour), time.Time{}
 	if err := w.h.Env.Store.PutJSON(context.Background(), name, "state", st); err != nil {
 		t.Fatal(err)
 	}
-	if rep := w.run(t); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "plex has not taken the picks for 25h") {
+	if rep := w.run(t); len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], "owner.plex has not taken the picks for 25h") {
 		t.Fatalf("after a day failing: alerts %q", rep.Alerts)
 	}
 }
 
-// ---- the household ----
-
-// unseenSeven are the library films none of them has seen in the default world.
-var unseenSeven = []int{389, 346, 655, 1398, 949, 18148, 843}
-
-// listed reports whether call i's candidate list holds the film.
-func (w *world) listed(i, tmdb int) bool {
-	return strings.Contains(w.ai.messages(i), fmt.Sprintf(`\n%d | `, tmdb))
-}
-
-// Catches a film one person has seen offered to the household: each row has one person see one of the unseen seven
-// one way (her feed's TMDB id, his films page's title and year, her Plex play or his rating in the watch record, an
-// export folder of his own beside the owner's), and that film alone must leave the candidates. The last row catches
-// the reverse: a play by someone outside the household (the watch record holds every jfsync user) hiding a film.
-func TestFilmSeenByAnyoneIsExcluded(t *testing.T) {
+// Catches a film a person has seen picked for them, one way each row (her feed's TMDB id, his films page's title and
+// year, her Plex play or his rating in the watch record, an export of his own), or hidden from the others, who have not
+// seen it; and a play by someone outside the people with shelves (the watch record holds every jfsync user) hiding a
+// film. Four films pass: the one seen and three others, so the one who saw it gets exactly the three.
+func TestFilmSeenByThePersonIsExcluded(t *testing.T) {
 	ownExport := func(t *testing.T) string {
 		dir := t.TempDir()
 		mine := filepath.Join(dir, "letterboxd-viewer-a-lb-2026-09-01-10-00-utc")
@@ -1446,162 +1136,129 @@ func TestFilmSeenByAnyoneIsExcluded(t *testing.T) {
 		for _, f := range []string{"diary.csv", "ratings.csv", "watchlist.csv"} {
 			write(t, filepath.Join(mine, f), "Date,Name,Year,Letterboxd URI\n")
 		}
-		const his = "letterboxd-owner-lb-2026-02-01-14-47-utc"
-		for _, f := range []string{"diary.csv", "ratings.csv", "reviews.csv", "watched.csv", "watchlist.csv"} {
-			body, err := os.ReadFile(filepath.Join("testdata/export", his, f))
-			if err != nil {
-				t.Fatal(err)
-			}
-			write(t, filepath.Join(dir, his, f), string(body))
-		}
-		return fmt.Sprintf(`people = [
-  { person = "owner", user = "owner-lb", export_dir = %[1]q },
-  { person = "viewer-b", user = "viewer-b-lb" },
-  { person = "viewer-a", user = "viewer-a-lb", export_dir = %[1]q },
-]
-`, dir)
+		return strings.Replace(threeWithPlex, `{ person = "viewer-a", user = "viewer-a-lb", plex_user = "viewer-a-plex" }`,
+			fmt.Sprintf(`{ person = "viewer-a", user = "viewer-a-lb", plex_user = "viewer-a-plex", export_dir = %q }`, dir), 1)
 	}
 	for _, c := range []struct {
 		name    string
-		options func(*testing.T) string // nil: household
+		options func(*testing.T) string // nil: the three
 		see     func(*testing.T, *world)
+		who     string // who saw it ("" = no one with a shelf)
 		gone    int
 	}{
 		{"her feed names it", nil, func(_ *testing.T, w *world) {
 			w.feeds["viewer-b-lb"] = append(w.feeds["viewer-b-lb"], lbItem{id: 13, tmdb: 949, title: "Heat", year: 1995, stars: 3})
-		}, 949},
+		}, "viewer-b", 949},
 		{"his films page lists it", nil, func(_ *testing.T, w *world) {
 			w.films["viewer-a-lb"] = append(w.films["viewer-a-lb"], lbItem{title: "Stalker", year: 1979, stars: 4})
-		}, 1398},
-		{"her Plex play is in the watch record", nil, func(t *testing.T, w *world) { w.record(t, "viewer-b", 18148, watch.Finished, 0) }, 18148},
-		{"his rating is in the watch record", nil, func(t *testing.T, w *world) { w.record(t, "viewer-a", 843, watch.Rated, 8) }, 843},
-		{"an export of his own beside the owner's", ownExport, func(*testing.T, *world) {}, 655},
-		{"a play outside the household", nil, func(t *testing.T, w *world) { w.record(t, "guest", 389, watch.Finished, 0) }, 0},
+		}, "viewer-a", 1398},
+		{"her Plex play is in the watch record", nil, func(t *testing.T, w *world) { w.record(t, "viewer-b", 18148, watch.Finished, 0) }, "viewer-b", 18148},
+		{"his rating is in the watch record", nil, func(t *testing.T, w *world) { w.record(t, "viewer-a", 843, watch.Rated, 8) }, "viewer-a", 843},
+		{"an export of his own", ownExport, func(*testing.T, *world) {}, "viewer-a", 655},
+		{"a play outside the people", nil, func(t *testing.T, w *world) { w.record(t, "guest", 389, watch.Finished, 0) }, "", 389},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			options := household
+			options := threeWithPlex
 			if c.options != nil {
 				options = c.options(t)
 			}
 			w := newWorld(t, options, 0)
 			c.see(t, w)
-			kept := slices.DeleteFunc(slices.Clone(unseenSeven), func(id int) bool { return id == c.gone })
-			w.ai.script(answer3(kept[0], kept[1], kept[2]))
-			if rep := w.run(t); len(rep.Alerts) != 0 || w.ai.calls() != 1 {
-				t.Fatalf("alerts %q, %d AI calls\n%s", rep.Alerts, w.ai.calls(), w.logs)
+			others := slices.DeleteFunc([]int{389, 346, 1398, 949}, func(id int) bool { return id == c.gone })[:3]
+			pass := append(slices.Clone(others), c.gone)
+			if c.who == "" {
+				pass = others // the film no one with a shelf saw must reach all three
+				pass[0] = c.gone
 			}
-			for _, id := range unseenSeven {
-				if w.listed(0, id) != (id != c.gone) {
-					t.Errorf("film %d listed=%v, want %v", id, w.listed(0, id), id != c.gone)
+			w.mdb.onlyPass(pass...)
+			w.run(t)
+			for _, who := range []string{"owner", "viewer-b", "viewer-a"} {
+				got := w.picksOf(t, who)
+				switch {
+				case who == c.who && !slices.Equal(got, slices.Sorted(slices.Values(others))):
+					t.Errorf("%s saw %d; their picks %v, want %v", who, c.gone, got, others)
+				case c.who == "" && !slices.Contains(got, c.gone):
+					t.Errorf("%s's picks %v lack %d, which only a guest played", who, got, c.gone)
+				case len(got) != 3:
+					t.Errorf("%s's picks %v; want 3", who, got)
 				}
 			}
 		})
 	}
 }
 
-// Catches a person whose Letterboxd does not answer costing the household its picks, failing the run, or raising an
-// alert per failed request (her feed and her films page both fail) or per run; and the reverse, an alert for a feed
-// that failed now but answered within feedStale. Rows: her feed never answered (she is left out: the prompt holds the
-// two others' blocks and nothing of hers); it answered yesterday (her cached entries still shape the picks, no alert);
-// it last answered three days ago (her cached entries used, one alert dated by that read).
+// Catches a person whose Letterboxd does not answer costing them their picks, failing the run, or raising an alert per
+// failed request (her feed and her films page both fail) or per run; and the reverse, an alert for a feed that failed
+// now but answered within feedStale. Rows: her feed never answered (alerted); it answered yesterday (no alert); it last
+// answered three days ago (one alert dated by that read).
 func TestUnreachableFeedDegrades(t *testing.T) {
 	for _, c := range []struct {
-		name    string
-		upAgo   time.Duration // when her feed last answered, before the failing pick; 0 = never
-		alert   string        // "" = no alert
-		viewers int           // taste blocks sent
+		name  string
+		upAgo time.Duration // when her feed last answered, before the failing pick; 0 = never
+		alert string        // "" = no alert
 	}{
 		{"never answered", 0, "viewer-b (Letterboxd viewer-b-lb: feed unanswered since it was first asked, latest error " +
-			`"letterboxd: challenged: GET `, 2},
-		{"answered yesterday", 24 * time.Hour, "", 3},
-		{"last answered three days ago", 72 * time.Hour, "feed unanswered since 2026-10-02T15:00:00Z", 3},
+			`"letterboxd: challenged: GET `},
+		{"answered yesterday", 24 * time.Hour, ""},
+		{"last answered three days ago", 72 * time.Hour, "feed unanswered since 2026-10-02T15:00:00Z"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			w := newWorld(t, household, 0)
+			w := newWorld(t, threeWithPlex, 0)
 			if c.upAgo > 0 {
 				w.h.Now = w.h.Now.Add(-c.upAgo)
-				w.ai.script(answer3(389, 346, 655))
 				w.run(t)
 				w.h.Now = w.h.Now.Add(c.upAgo)
 			}
 			w.mu.Lock()
 			w.down["viewer-b-lb"] = true
 			w.mu.Unlock()
-			w.ai.script(answer3(1398, 949, 18148))
 			rep := w.run(t)
-			if got := tmdbIDs(w.state(t).Picks); !slices.Equal(got, []int{1398, 949, 18148}) {
-				t.Fatalf("picks %v, alerts %q\n%s", got, rep.Alerts, w.logs)
+			if got := w.picksOf(t, "viewer-b"); len(got) != 3 || w.state(t).Persons["viewer-b"].Day != "2026-10-05" {
+				t.Fatalf("her picks %v, alerts %q\n%s", got, rep.Alerts, w.logs)
 			}
 			switch {
 			case c.alert == "" && len(rep.Alerts) != 0,
 				c.alert != "" && (len(rep.Alerts) != 1 || !strings.Contains(rep.Alerts[0], c.alert) || strings.Contains(rep.Alerts[0], "viewer-a")):
 				t.Fatalf("alerts %q; want %q alone", rep.Alerts, c.alert)
 			}
-			calls := w.ai.gw.Calls()
-			system := calls[len(calls)-1].Messages[0].Content[0].Text
-			if n := strings.Count(system, "'S LETTERBOXD RATINGS"); n != c.viewers || strings.Contains(system, "Columbus") != (c.viewers == 3) {
-				t.Fatalf("%d taste blocks (want %d); hers (Columbus) sent: %v\n%s", n, c.viewers, strings.Contains(system, "Columbus"), system)
-			}
 			w.h.Now = w.h.Now.Add(30 * time.Minute)
-			if rep := w.run(t); len(rep.Alerts) != 0 || len(w.ai.gw.Calls()) != len(calls) {
-				t.Fatalf("30 min later: alerts %q, %d AI calls; want the day's one alert only", rep.Alerts, len(w.ai.gw.Calls()))
+			if rep := w.run(t); len(rep.Alerts) != 0 {
+				t.Fatalf("30 min later: alerts %q; want the day's one alert only", rep.Alerts)
 			}
 		})
 	}
 }
 
-// Catches a pick someone in the household has since watched staying in the row, because only the owner's sources are
-// checked: her feed logs it, or his play reaches the watch record (jfsync).
-func TestPickWatchedByAnyoneLeavesTheRow(t *testing.T) {
+// Catches a pick a person has since watched staying on their shelf, because only the owner's sources are checked (her
+// feed logs it, or his play reaches the watch record), or leaving the others' shelves, who have not watched it.
+func TestPickWatchedLeavesOnlyTheirShelf(t *testing.T) {
 	for _, c := range []struct {
-		name  string
-		watch func(*testing.T, *world)
+		name, who, shelf, user string
+		watch                  func(*testing.T, *world)
 	}{
-		{"her feed logs it", func(_ *testing.T, w *world) {
+		{"her feed logs it", "viewer-b", "Tonight · Viewer B", "u3", func(_ *testing.T, w *world) {
 			w.mu.Lock()
 			defer w.mu.Unlock()
 			w.feeds["viewer-b-lb"] = append(w.feeds["viewer-b-lb"], lbItem{id: 14, tmdb: 346, title: "Seven Samurai", year: 1954, stars: 4.5})
 		}},
-		{"his play reaches the watch record", func(t *testing.T, w *world) { w.record(t, "viewer-a", 346, watch.Finished, 0) }},
+		{"his play reaches the watch record", "viewer-a", "Tonight · Viewer-a", "u4", func(t *testing.T, w *world) {
+			w.record(t, "viewer-a", 346, watch.Finished, 0)
+		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			w := newWorld(t, household, 0)
-			w.ai.script(answer3(389, 346, 655))
+			w := newWorld(t, threeWithPlex, 0)
+			w.mdb.onlyPass(389, 346, 655)
 			w.run(t)
 			c.watch(t, w)
 			w.h.Now = w.h.Now.Add(30 * time.Minute)
 			w.run(t)
-			if p, j := w.plex.members(), w.jf.members(); !slices.Equal(p, []string{rk(389), rk(655)}) ||
-				!slices.Equal(j, []string{jfID(389), jfID(655)}) || w.ai.calls() != 1 {
-				t.Fatalf("plex %v, jellyfin %v, %d AI calls; want Seven Samurai gone without a new pick", p, j, w.ai.calls())
+			s, _, _ := w.plex.shelf(c.shelf)
+			if s == nil || strings.Join(s.items, ",") != plexKeys(389, 655) || !slices.Equal(w.jp.owned(c.user), []string{"Tonight: " + jfKeys(389, 655)}) {
+				t.Fatalf("%s's shelf %v, Jellyfin %q; want Seven Samurai gone without a new pick", c.who, s, w.jp.owned(c.user))
+			}
+			if o, _, _ := w.plex.shelf(ownerShelf); strings.Join(o.items, ",") != plexKeys(389, 346, 655) {
+				t.Fatalf("his shelf %v; want Seven Samurai kept, he has not seen it", o.items)
 			}
 		})
-	}
-}
-
-// Catches the shared row quoting a review: a reason repeating 6 words of Viewer B's feed review must be retried with
-// that named, and must not reach Plex or Jellyfin. Also catches a person's name or Letterboxd username reaching the
-// model, which knows the household only as viewers A to C, and a "liked" film one of the others loved refused.
-func TestReasonQuotingAReviewIsRetried(t *testing.T) {
-	w := newWorld(t, household, 0)
-	quoting := `{"picks":[{"id":389,"title":"t","mood":"m","liked":"Columbus (2017)",` +
-		`"reason":"Quiet buildings and quieter people, I could live inside it."},` +
-		strings.TrimPrefix(answer3(346, 655), `{"picks":[`)
-	w.ai.script(quoting, answer3(389, 346, 655))
-	w.run(t)
-	if w.ai.calls() != 2 || !strings.Contains(w.ai.messages(1), "pick 1: the reason quotes a viewer's review") {
-		t.Fatalf("%d AI calls; the retry does not name the quote\n%s", w.ai.calls(), w.logs)
-	}
-	if strings.Contains(w.plex.summary, "quieter people") || strings.Contains(w.jf.overview, "quieter people") {
-		t.Fatalf("a review was quoted on the row: %q", w.plex.summary)
-	}
-	sent := w.ai.messages(0)
-	for _, who := range []string{"owner", "viewer-b", "viewer-a", "viewer-b-lb"} {
-		if strings.Contains(strings.ToLower(sent), who) {
-			t.Errorf("the model was told %q", who)
-		}
-	}
-	if !strings.Contains(sent, "VIEWER C'S LETTERBOXD RATINGS") || !strings.Contains(sent, "5★: Columbus (2017)") {
-		t.Errorf("the three viewers' blocks were not sent:\n%s", sent)
 	}
 }

@@ -14,8 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/BurntSushi/toml"
-
 	"projectionist/internal/fake"
 	"projectionist/internal/watch"
 )
@@ -348,13 +346,8 @@ func (p *jfPlaylists) owned(user string) []string {
 	return out
 }
 
-// ownWorld is a world where each person also gets their own picks: plex.tv's Home and shares, and jfsync's users above.
-type ownWorld struct {
-	*world
-	px *plexPlaylists
-	jp *jfPlaylists
-	tv *plexTVFake
-}
+// ownWorld is the world every run now has: plex.tv's Home and shares, and jfsync's users below.
+type ownWorld = world
 
 const jfsyncUsers = `users = [
   { name = "owner", plex = "owner-plex", jellyfin = "owner" },
@@ -362,25 +355,7 @@ const jfsyncUsers = `users = [
   { name = "viewer-a", plex = "Viewer A",      jellyfin = "viewer-a" },
 ]`
 
-func newOwn(t *testing.T, people string) *ownWorld {
-	w := newWorld(t, "", 0)
-	o := &ownWorld{world: w, px: newPlexPlaylists(w.h.Plex), jp: newJFPlaylists(w.h.Jellyfin, w.jf), tv: newPlexTV(t)}
-	w.base += fmt.Sprintf("plex_tv = %q\nplaylist = \"Tonight\"\n", o.tv.srv.URL)
-	w.options(people)
-	w.h.Env.PeerOptions = func(stage string, v any) error {
-		if stage != "jfsync" {
-			return nil
-		}
-		_, err := toml.Decode(jfsyncUsers, v)
-		return err
-	}
-	return o
-}
-
-// pickedFor is a valid answer for a viewer who rated liked 4 stars or more.
-func pickedFor(liked string, ids ...int) string {
-	return strings.ReplaceAll(answer3(ids...), "Licorice Pizza (2021)", liked)
-}
+func newOwn(t *testing.T, people string) *ownWorld { return newWorld(t, people, 0) }
 
 func plexKeys(ids ...int) string {
 	keys := make([]string, len(ids))
@@ -407,10 +382,6 @@ const threeWithPlex = `people = [
 ]
 `
 
-// threeDays is a valid answer for the household, then for each of the three, in the order the stage asks.
-var threeDays = []string{answer3(389, 346, 655), pickedFor("Licorice Pizza (2021)", 1398, 949, 18148),
-	pickedFor("Columbus (2017)", 559907, 954, 13), pickedFor("The Matrix (1999)", 843, 419704, 10948)}
-
 // shelfItems is the items of the live shelf titled title, "" when there is none.
 func (w *ownWorld) shelfItems(title string) string {
 	if s, _, _ := w.plex.shelf(title); s != nil {
@@ -420,38 +391,32 @@ func (w *ownWorld) shelfItems(title string) string {
 }
 
 // Catches a person's own picks reaching anyone else. In Plex each person's shelf "Tonight · <name>" must hold their
-// picks alone, labelled for them: his on his own Home alone, Viewer B's and Viewer-a's on the shared Home alone, each below
-// the household row, with every account the server is shared with excluding every shelf but its own in its Movies
-// restrictions (a friend all three, another server's friend none), and no Plex playlist made in anyone's account. In
-// Jellyfin each person's playlist is owned by their user and private (Jellyfin makes a playlist public unless told).
-// Also: a person's candidates taken from the household's unseen films (Viewer B's must include films only the owner has
-// seen), or his own offering a film his Plex or Jellyfin account played; the household's row taking a person's picks;
-// and a run with nothing new writing a restriction, switching to a Home user or reading a playlist.
+// picks alone, labelled for them: his on his own Home alone, Viewer B's and Viewer-a's on the shared Home alone, in that
+// order at the top of the Movies hubs, with every account the server is shared with excluding every shelf but its own in
+// its Movies restrictions (a friend all three, another server's friend none), and no Plex playlist made in anyone's
+// account. In Jellyfin each person's playlist is owned by their user and private (Jellyfin makes a playlist public
+// unless told). Also a run with nothing new writing a restriction, switching to a Home user or reading a playlist.
 func TestOwnPicksReachOnlyTheirPerson(t *testing.T) {
 	w := newOwn(t, threeWithPlex)
-	w.ai.script(threeDays...)
-	if rep := w.run(t); len(rep.Alerts) != 0 || w.ai.calls() != 4 {
-		t.Fatalf("alerts %q, %d AI calls (want the household's and one each)\n%s", rep.Alerts, w.ai.calls(), w.logs)
-	}
-	if w.listed(1, 680) || w.listed(1, 13) || !w.listed(2, 559907) || !w.listed(2, 13) {
-		t.Errorf("his own candidates list a film he played in Plex or Jellyfin, or hers lack films only he has seen")
+	if rep := w.run(t); len(rep.Alerts) != 0 {
+		t.Fatalf("alerts %q\n%s", rep.Alerts, w.logs)
 	}
 	for i, c := range []struct {
 		who, user, shelf, label string
-		ids                     []int
 		own                     bool
 	}{
-		{"owner", "u1", "Tonight · Owner", "Tonight-owner", []int{1398, 949, 18148}, true},
-		{"viewer-b", "u3", "Tonight · Viewer B", "Tonight-viewer-b", []int{559907, 954, 13}, false},
-		{"viewer-a", "u4", "Tonight · Viewer-a", "Tonight-viewer-a", []int{843, 419704, 10948}, false},
+		{"owner", "u1", "Tonight · Owner", "Tonight-owner", true},
+		{"viewer-b", "u3", "Tonight · Viewer B", "Tonight-viewer-b", false},
+		{"viewer-a", "u4", "Tonight · Viewer-a", "Tonight-viewer-a", false},
 	} {
+		ids := w.picksOf(t, c.who)
 		s, hub, at := w.plex.shelf(c.shelf)
-		if s == nil || strings.Join(s.items, ",") != plexKeys(c.ids...) || !slices.Equal(s.labels, []string{"projectionist", c.label}) {
-			t.Errorf("%s's shelf %q: %+v; want %s, labelled %s", c.who, c.shelf, s, plexKeys(c.ids...), c.label)
-		} else if want := (plexHub{Identifier: hub.Identifier, PromotedToOwnHome: c.own, PromotedToSharedHome: !c.own}); hub != want || at != i+1 {
-			t.Errorf("%s's shelf hub %+v at %d; want own Home %v, shared Home %v, at %d below the household row", c.who, hub, at, c.own, !c.own, i+1)
+		if len(ids) != 3 || s == nil || strings.Join(s.items, ",") != plexKeys(ids...) || !slices.Equal(s.labels, []string{"projectionist", c.label}) {
+			t.Errorf("%s's shelf %q: %+v; want their picks %s, labelled %s", c.who, c.shelf, s, plexKeys(ids...), c.label)
+		} else if want := (plexHub{Identifier: hub.Identifier, PromotedToOwnHome: c.own, PromotedToSharedHome: !c.own}); hub != want || at != i {
+			t.Errorf("%s's shelf hub %+v at %d; want own Home %v, shared Home %v, at %d", c.who, hub, at, c.own, !c.own, i)
 		}
-		if got, want := w.jp.owned(c.user), []string{"Tonight: " + jfKeys(c.ids...)}; !slices.Equal(got, want) {
+		if got, want := w.jp.owned(c.user), []string{"Tonight: " + jfKeys(ids...)}; !slices.Equal(got, want) {
 			t.Errorf("%s's Jellyfin playlists %q, want %q", c.who, got, want)
 		}
 	}
@@ -469,9 +434,6 @@ func TestOwnPicksReachOnlyTheirPerson(t *testing.T) {
 		if pl.public == nil || *pl.public || len(pl.shares) != 0 {
 			t.Errorf("Jellyfin playlist %s of %s: IsPublic %v, shared with %v; want private", pl.id, pl.owner, pl.public, pl.shares)
 		}
-	}
-	if got := w.plex.members(); !slices.Equal(got, []string{rk(346), rk(389), rk(655)}) || w.plex.hubs[0].Identifier != "custom.collection.4.900" {
-		t.Errorf("household collection %v, hubs %+v", got, w.plex.hubs)
 	}
 
 	calls := func() [4]int {
@@ -491,42 +453,22 @@ func TestOwnPicksReachOnlyTheirPerson(t *testing.T) {
 // (one playlist, made anew).
 func TestOwnPicksAreReplacedNotAppended(t *testing.T) {
 	w := newOwn(t, `people = [{ person = "viewer-b", user = "viewer-b-lb", plex_user = "viewer-b" }]`+"\n")
-	w.ai.script(pickedFor("Columbus (2017)", 389, 346, 655), pickedFor("Columbus (2017)", 559907, 954, 13))
 	w.run(t)
-	w.record(t, "viewer-b", 954, watch.Finished, 0)
+	played := w.picksOf(t, "viewer-b")[1]
+	w.record(t, "viewer-b", played, watch.Finished, 0)
 	w.h.Now = w.h.Now.Add(30 * time.Minute)
 	w.run(t)
-	if p, j := w.shelfItems("Tonight · Viewer-b"), w.jp.owned("u3"); p != plexKeys(559907, 13) || !slices.Equal(j, []string{"Tonight: " + jfKeys(559907, 13)}) {
-		t.Fatalf("after she played her pick Mission - Impossible: shelf %q, Jellyfin %q\n%s", p, j, w.logs)
+	left := w.picksOf(t, "viewer-b")
+	if p, j := w.shelfItems("Tonight · Viewer-b"), w.jp.owned("u3"); len(left) != 2 || slices.Contains(left, played) || p != plexKeys(left...) ||
+		!slices.Equal(j, []string{"Tonight: " + jfKeys(left...)}) {
+		t.Fatalf("after she played her pick %d: picks %v, shelf %q, Jellyfin %q\n%s", played, left, p, j, w.logs)
 	}
-	w.ai.script(pickedFor("Columbus (2017)", 1398, 949, 18148), pickedFor("Columbus (2017)", 843, 419704, 10948))
 	w.h.Now = time.Date(2026, 10, 6, 13, 0, 0, 0, time.UTC)
 	w.run(t)
-	if p, j := w.shelfItems("Tonight · Viewer-b"), w.jp.owned("u3"); p != plexKeys(843, 419704, 10948) ||
-		!slices.Equal(j, []string{"Tonight: " + jfKeys(843, 419704, 10948)}) || len(w.plex.shelves) != 1 {
-		t.Fatalf("next day: shelf %q (of %d), Jellyfin %q; want only the day's picks, one shelf and one playlist", p, len(w.plex.shelves), j)
-	}
-}
-
-// Catches the household's shelf made anew instead of renamed when its title changes ("Tonight" became "Tonight ·
-// Household" on 2026-10-06): the collection and the BoxSet this stage made keep their ids and take the new title.
-func TestHouseholdShelfIsRenamedInPlace(t *testing.T) {
-	w := newWorld(t, `collection = "Tonight"`+"\n", 0)
-	w.ai.script(answer3(389, 346, 655))
-	w.run(t)
-	w.options("") // the default title
-	w.h.Now = w.h.Now.Add(30 * time.Minute)
-	if rep := w.run(t); len(rep.Alerts) != 0 || rep.Counts["plex_synced"]+rep.Counts["jellyfin_synced"] != 2 {
-		t.Fatalf("alerts %q, counts %v\n%s", rep.Alerts, rep.Counts, w.logs)
-	}
-	if creates, boxes := len(w.h.Plex.Calls("POST", "/library/collections")), len(w.h.Jellyfin.Calls("POST", "/Collections")); creates != 1 || boxes != 1 {
-		t.Fatalf("plex creates %d, jellyfin creates %d: want the first run's alone", creates, boxes)
-	}
-	if w.plex.title != "Tonight · Household" || w.jf.name != "Tonight · Household" {
-		t.Fatalf("titles: plex %q, jellyfin %q", w.plex.title, w.jf.name)
-	}
-	if st := w.state(t); st.Plex.ID != "900" || st.Jellyfin.ID != "box1" {
-		t.Fatalf("state ids: plex %q, jellyfin %q", st.Plex.ID, st.Jellyfin.ID)
+	next := w.picksOf(t, "viewer-b")
+	if p, j := w.shelfItems("Tonight · Viewer-b"), w.jp.owned("u3"); len(next) != 3 || p != plexKeys(next...) ||
+		!slices.Equal(j, []string{"Tonight: " + jfKeys(next...)}) || len(w.plex.shelves) != 1 {
+		t.Fatalf("next day: picks %v, shelf %q (of %d), Jellyfin %q; want only the day's picks, one shelf and one playlist", next, p, len(w.plex.shelves), j)
 	}
 }
 
@@ -537,12 +479,10 @@ func TestForeignCollectionsAndPlaylistsAreUntouched(t *testing.T) {
 	w := newOwn(t, `people = [{ person = "viewer-b", user = "viewer-b-lb", plex_user = "viewer-b" }]`+"\n")
 	w.plex.addForeign("778", "Tonight · Viewer-b")
 	w.jp.add("jplhers", "u3", "Tonight", jfID(13), jfID(389))
-	w.ai.script(pickedFor("Columbus (2017)", 346, 655, 1398), pickedFor("Columbus (2017)", 389, 346, 655))
 	w.run(t)
-	w.ai.script(pickedFor("Columbus (2017)", 949, 18148, 843), pickedFor("Columbus (2017)", 559907, 954, 13))
 	w.h.Now = time.Date(2026, 10, 6, 13, 0, 0, 0, time.UTC)
 	w.run(t)
-	if p := w.shelfItems("Tonight · Viewer-b"); p != plexKeys(559907, 954, 13) {
+	if p := w.shelfItems("Tonight · Viewer-b"); p != plexKeys(w.picksOf(t, "viewer-b")...) {
 		t.Fatalf("our shelf beside hers holds %q\n%s", p, w.logs)
 	}
 	if j := w.jp.owned("u3"); !slices.Contains(j, "Tonight: "+jfKeys(13, 389)) || len(j) != 2 {
@@ -563,7 +503,6 @@ func TestForeignCollectionsAndPlaylistsAreUntouched(t *testing.T) {
 func TestOwnPlaylistCreateNeverDuplicates(t *testing.T) {
 	w := newOwn(t, `people = [{ person = "viewer-b", user = "viewer-b-lb", plex_user = "viewer-b" }]`+"\n")
 	w.jp.dropCreate = true
-	w.ai.script(pickedFor("Columbus (2017)", 346, 655, 1398), pickedFor("Columbus (2017)", 389, 346, 655))
 	if rep := w.run(t); rep.Counts["viewer-b.jellyfin_retry"] != 1 {
 		t.Fatalf("run 1 counts %v\n%s", rep.Counts, w.logs)
 	}

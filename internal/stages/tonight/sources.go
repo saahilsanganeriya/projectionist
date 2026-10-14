@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -144,7 +143,7 @@ func (m member) export() ([]entry, error) {
 const feedStale = 48 * time.Hour
 
 // outdated describes each person whose feed has not answered for feedStale, and what the picks used of them instead.
-func outdated(members []member, exports map[string]int, now time.Time) []string {
+func outdated(members []member, now time.Time) []string {
 	var out []string
 	for _, m := range members {
 		read := m.cache.Feed.ReadAt
@@ -155,154 +154,10 @@ func outdated(members []member, exports map[string]int, now time.Time) []string 
 		if !read.IsZero() {
 			since = read.Format(time.RFC3339)
 		}
-		used := "their export and cached entries are used"
-		if exports[m.who.Person]+len(m.cache.Entries) == 0 {
-			used = "left out of the taste profile: nothing of theirs is cached"
-		}
-		out = append(out, fmt.Sprintf("%s (Letterboxd %s: feed unanswered since %s, latest error %q; %s)", m.who.Person, m.who.User,
-			since, m.cache.FeedErr, used))
+		out = append(out, fmt.Sprintf("%s (Letterboxd %s: feed unanswered since %s, latest error %q; what is cached of them is used)",
+			m.who.Person, m.who.User, since, m.cache.FeedErr))
 	}
 	return out
-}
-
-// ---- the taste profile: the stable, cached prefix of the prompt ----
-
-type rated struct {
-	Name   string
-	Year   int
-	Rating float64
-	Review string
-	Last   string // the latest day he logged it, YYYY-MM-DD
-}
-
-// history merges one person's export and cached entries into one latest rating (and longest review) per film. The
-// cached entries are newer than the export, so their ratings win.
-func history(export []entry, rss map[string]entry) []rated {
-	byFilm := map[string]*rated{}
-	merge := func(e entry, wins bool) {
-		k := filmKey(e.Name, e.Year)
-		r := byFilm[k]
-		if r == nil {
-			r = &rated{Name: e.Name, Year: e.Year}
-			byFilm[k] = r
-		}
-		if e.Rating > 0 && (wins || r.Rating == 0) {
-			r.Rating = e.Rating
-		}
-		if len(e.Review) > len(r.Review) {
-			r.Review = e.Review
-		}
-		r.Last = max(r.Last, e.Watched)
-	}
-	for _, e := range export {
-		merge(e, false)
-	}
-	guids := make([]string, 0, len(rss))
-	for g := range rss {
-		guids = append(guids, g)
-	}
-	sort.Slice(guids, func(i, j int) bool { return rss[guids[i]].Watched < rss[guids[j]].Watched })
-	for _, g := range guids {
-		merge(rss[g], true)
-	}
-	out := make([]rated, 0, len(byFilm))
-	for _, r := range byFilm {
-		out = append(out, *r)
-	}
-	return out
-}
-
-// tasteBytes bounds the taste blocks together, the prompt's largest part, shared evenly by the viewers: the owner's
-// alone was 40.6 KB (about 18,400 tokens) on 2026-10-05, and his diary added up to 10 KB a year (2022: 279 ratings, 33
-// reviews). At Sonnet prices each 1,000 tokens more leaves room for about 14 fewer candidates under the cap, so
-// unbounded growth would end in no call at all within a few years.
-const tasteBytes = 48 << 10
-
-// tasteText renders one viewer's ratings grouped by stars, then their reviews, in at most maxBytes: past that it keeps
-// the films they rated 4★ or more, then their newest reviews, then the newest of their other ratings. Sorted, so the
-// bytes (and the provider's prompt cache) change only when a diary does. The viewer is named by label alone.
-func tasteText(label string, films []rated, maxReview, maxBytes int) string {
-	sort.Slice(films, func(i, j int) bool {
-		if films[i].Rating != films[j].Rating {
-			return films[i].Rating > films[j].Rating
-		}
-		return filmKey(films[i].Name, films[i].Year) < filmKey(films[j].Name, films[j].Year)
-	})
-	ratingsHead, reviewsHead := "VIEWER "+label+"'S LETTERBOXD RATINGS (stars out of 5):\n", "\n\nVIEWER "+label+"'S REVIEWS:\n"
-	stars := func(r float64) string { return strconv.FormatFloat(r, 'f', -1, 64) + "★" }
-	rating := func(f rated) string { return fmt.Sprintf("%s (%d)", f.Name, f.Year) }
-	review := func(f rated) string {
-		return fmt.Sprintf("- %s (%d), %s: %s\n", f.Name, f.Year, stars(f.Rating), oneLine(f.Review, maxReview))
-	}
-
-	type part struct {
-		film   int
-		review bool
-	}
-	var parts []part
-	for i, f := range films {
-		if f.Rating > 0 {
-			parts = append(parts, part{i, false})
-		}
-		if f.Review != "" {
-			parts = append(parts, part{i, true})
-		}
-	}
-	rank := func(p part) int {
-		switch {
-		case !p.review && films[p.film].Rating >= 4:
-			return 0
-		case p.review:
-			return 1
-		}
-		return 2
-	}
-	sort.SliceStable(parts, func(a, b int) bool {
-		if ra, rb := rank(parts[a]), rank(parts[b]); ra != rb {
-			return ra < rb
-		}
-		return films[parts[a].film].Last > films[parts[b].film].Last
-	})
-	// Every star group's heading ("\n4.5★: ") is counted, and every rating's "; ", so the text never passes maxBytes.
-	used := len(ratingsHead) + len(reviewsHead) + 10*len("\n4.5★: ")
-	keptRating, keptReview := map[int]bool{}, map[int]bool{}
-	for _, p := range parts {
-		size := len("; " + rating(films[p.film]))
-		if p.review {
-			size = len(review(films[p.film]))
-		}
-		if used += size; used > maxBytes {
-			break
-		}
-		if p.review {
-			keptReview[p.film] = true
-		} else {
-			keptRating[p.film] = true
-		}
-	}
-
-	var b strings.Builder
-	b.WriteString(ratingsHead)
-	last := -1.0
-	for i, f := range films {
-		if !keptRating[i] {
-			continue
-		}
-		if f.Rating != last {
-			fmt.Fprintf(&b, "\n%s: ", stars(f.Rating))
-			last = f.Rating
-		} else {
-			b.WriteString("; ")
-		}
-		b.WriteString(rating(f))
-	}
-	b.WriteString(reviewsHead)
-	for i, f := range films {
-		if keptReview[i] {
-			b.WriteString(review(f))
-		}
-	}
-	return b.String()
 }
 
 // filmKey is a title+year key that survives the punctuation and accent differences between Letterboxd's titles
@@ -331,7 +186,6 @@ type film struct {
 	Countries     []string `json:"countries,omitempty"`
 	Runtime       int      `json:"runtime,omitempty"` // minutes
 	Language      string   `json:"language,omitempty"`
-	Overview      string   `json:"overview,omitempty"`
 	PosterPath    string   `json:"poster_path,omitempty"`
 	Vote          float64  `json:"vote,omitempty"`
 	Votes         int      `json:"votes,omitempty"`
@@ -467,7 +321,7 @@ func movieFacts(ctx context.Context, tc *tmdb.Client, id int) (film, error) {
 		return film{}, err
 	}
 	f := film{TMDB: id, TMDBTitle: d.Title, OriginalTitle: d.OriginalTitle, Runtime: d.Runtime,
-		Language: d.Language, Overview: firstSentence(d.Overview, 140), PosterPath: d.PosterPath, Vote: d.VoteAverage,
+		Language: d.Language, PosterPath: d.PosterPath, Vote: d.VoteAverage,
 		Votes: d.VoteCount}
 	if d.OriginalTitle == d.Title {
 		f.OriginalTitle = ""
@@ -484,20 +338,7 @@ func movieFacts(ctx context.Context, tc *tmdb.Client, id int) (film, error) {
 	return f, nil
 }
 
-func firstSentence(s string, max int) string {
-	s = oneLine(s, 1<<20)
-	if i := strings.Index(s, ". "); i > 0 {
-		s = s[:i+1]
-	}
-	return oneLine(s, max)
-}
-
-// ---- the unseen candidates ----
-
-type candidate struct {
-	film
-	Score float64
-}
+// ---- what each person has seen ----
 
 // watchedSets is every way the stage learns someone in the household has seen a film: Letterboxd ids (feeds),
 // Letterboxd title+year (export rows and films pages have no ids), the watch record, and the play state Plex and
@@ -563,63 +404,4 @@ func (w watchedSets) seen(f film) bool {
 		}
 	}
 	return false
-}
-
-// rankCandidates returns the unseen films, best first: TMDB's vote shrunk toward a prior (so a 9.0 from 12
-// votes does not beat a 8.1 from 20 000), plus the household's average rating for the film's director, plus a per-day
-// jitter so the list the model sees rotates from day to day. history holds every person's ratings.
-func rankCandidates(lib map[int]film, w watchedSets, history []rated, recent map[int]string, day string) []candidate {
-	dirRatings := map[string][]float64{}
-	ratingsOf := map[string][]float64{}
-	for _, h := range history {
-		if h.Rating > 0 {
-			k := filmKey(h.Name, h.Year)
-			ratingsOf[k] = append(ratingsOf[k], h.Rating)
-		}
-	}
-	for _, f := range lib {
-		for _, r := range ratingsOf[filmKey(f.Title, f.Year)] {
-			for _, d := range f.Directors {
-				dirRatings[d] = append(dirRatings[d], r)
-			}
-		}
-	}
-	var out []candidate
-	for _, f := range lib {
-		if f.Missing || w.seen(f) || recent[f.TMDB] != "" {
-			continue
-		}
-		const priorVote, priorWeight = 6.5, 300.0
-		score := (f.Vote*float64(f.Votes) + priorVote*priorWeight) / (float64(f.Votes) + priorWeight)
-		for _, d := range f.Directors {
-			if rs := dirRatings[d]; len(rs) > 0 {
-				score += 0.6 * (mean(rs) - 3)
-			}
-		}
-		h := fnv.New32a()
-		fmt.Fprintf(h, "%s/%d", day, f.TMDB)
-		score += float64(h.Sum32()%1000) / 1000
-		out = append(out, candidate{film: f, Score: score})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Score != out[j].Score {
-			return out[i].Score > out[j].Score
-		}
-		return out[i].TMDB < out[j].TMDB
-	})
-	return out
-}
-
-func mean(xs []float64) float64 {
-	var s float64
-	for _, x := range xs {
-		s += x
-	}
-	return s / float64(len(xs))
-}
-
-// line is one compact candidate row: id | title | year | director | genres | countries | minutes | language | overview.
-func (c candidate) line() string {
-	return strings.Join([]string{strconv.Itoa(c.TMDB), c.Title, strconv.Itoa(c.Year), strings.Join(c.Directors, ", "),
-		strings.Join(c.Genres, "/"), strings.Join(c.Countries, "/"), strconv.Itoa(c.Runtime), c.Language, c.Overview}, " | ")
 }
