@@ -83,8 +83,9 @@ func TestConfident(t *testing.T) {
 // Catches a show taking the name of a film with the same TMDB id (the two id spaces overlap); a new arrival named
 // after a same-titled show already in the library instead of through TMDB's acceptance rule (the UK "The Office" pack
 // is not the US show the library holds: TMDB lists both, so it goes to review with both); an {imdb-tt} tag not
-// becoming the TMDB id TMDB maps it to, under the folder's own spelling; and a folder without a year not taking it
-// from its episodes (two "Shōgun" on TMDB: only the year tells them apart).
+// becoming the TMDB id TMDB maps it to, under the folder's own spelling; a folder without a year not taking it
+// from its episodes (two "Shōgun" on TMDB: only the year tells them apart); and a {tmdb-N} tag on a name without a
+// year leaving the show without one ("The Great British Bake Off {tmdb-87012}" was filed outside the scheme).
 func TestResolveOrder(t *testing.T) {
 	h := fake.NewEnv(t, nil)
 	tmdbRoutes(h, map[string]string{
@@ -93,6 +94,7 @@ func TestResolveOrder(t *testing.T) {
 			{"id":13862,"name":"Shōgun","first_air_date":"1980-09-15"}]}`,
 		"/search/tv?The Office": `{"results":[{"id":2316,"name":"The Office","first_air_date":"2005-03-24"},
 			{"id":2996,"name":"The Office","first_air_date":"2001-07-09"}]}`,
+		"/tv/87012": `{"id":87012,"name":"The Great British Bake Off","first_air_date":"2017-08-29"}`,
 	})
 	ctx := context.Background()
 	id := newIdentifier(h.Env.TMDB)
@@ -111,6 +113,10 @@ func TestResolveOrder(t *testing.T) {
 	c, err = id.resolve(ctx, "show", "/lib/TV/Shogun", []string{"/lib/TV/Shogun/S01/Shogun.2024.S01E01.1080p.x265-AMBER.mkv"})
 	if err != nil || c.Title.ID != "tmdb-126308" {
 		t.Fatalf("year from the episode names: %+v, %v", c, err)
+	}
+	c, err = id.resolve(ctx, "show", "/lib/TV/The Great British Bake Off S01E01 Cake Week {tmdb-87012}", nil)
+	if err != nil || c.Title.ID != "tmdb-87012" || c.Title.Name != "The Great British Bake Off" || c.Title.Year != 2017 {
+		t.Fatalf("tmdb tag without a year: %+v, %v", c, err)
 	}
 }
 
