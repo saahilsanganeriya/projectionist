@@ -44,7 +44,9 @@ func TestParseRelease(t *testing.T) {
 // Catches the acceptance rule letting a guess through: two exact titles within a year (remakes) must be refused, also
 // when both are rated, an exact title two years off is not exact, and a lone hit is accepted whatever its title; and the
 // reverse, a film left for review beside namesakes nobody has rated (a household member's "Animals.2026" sat in review
-// beside TMDB's "Animals", 304 votes, and "Animals." and "ANIMALS", none, all 2026): the rated one is taken.
+// beside TMDB's "Animals", 304 votes, and "Animals." and "ANIMALS", none, all 2026): the rated one is taken; and a
+// show pack named without a year left for review beside a longer title (a "Friday.Night.Lights.Season.01-05" pack
+// sat in review beside "Murder Under the Friday Night Lights").
 func TestConfident(t *testing.T) {
 	r := func(id int, name string, year int) tmdb.Result {
 		return tmdb.Result{ID: id, Title: name, Date: tmdb.Date{Time: time.Date(year, 6, 1, 0, 0, 0, 0, time.UTC)}}
@@ -61,6 +63,8 @@ func TestConfident(t *testing.T) {
 		{"two exact", []tmdb.Result{r(10, "Mystery", 2001), r(11, "Mystery", 2002)}, "Mystery", 2001, 0},
 		{"exact but two years off", []tmdb.Result{r(5, "Heat", 1997), r(6, "Heat 2", 1995)}, "Heat", 1995, 0},
 		{"no year, several hits", []tmdb.Result{r(1, "Friends", 1994), r(2, "Friends", 1979)}, "Friends", 0, 0},
+		{"no year, one exact title", []tmdb.Result{rated(335, r(4278, "Friday Night Lights", 2006)),
+			rated(4, r(154877, "Murder Under the Friday Night Lights", 2022))}, "Friday Night Lights", 0, 4278},
 		{"single hit", []tmdb.Result{r(30983, "Detective Conan", 1996)}, "Case Closed", 0, 30983},
 		{"accents folded", []tmdb.Result{r(126308, "Shōgun", 2024), r(2, "Shogun", 1980)}, "Shogun", 2024, 126308},
 		{"one rated among namesakes", []tmdb.Result{rated(304, r(1236045, "Animals", 2026)), r(1713368, "Animals.", 2026),

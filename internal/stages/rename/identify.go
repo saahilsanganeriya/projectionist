@@ -177,14 +177,14 @@ func (id *identifier) byTag(ctx context.Context, kind, source, value, title stri
 	return identity{Title: Title{ID: fmt.Sprintf("tmdb-%d", r.ID), Name: title, Original: r.OriginalTitle, Year: year}}, nil
 }
 
-// confident is the acceptance rule: one exact title within a year, else the one of them people have rated (minVotes,
-// and voteLead times any other's votes), else the only hit.
+// confident is the acceptance rule: one exact title within a year (any year when the name has none, as show packs
+// rarely do), else the one of them people have rated (minVotes, and voteLead times any other's votes), else the only hit.
 func confident(hits []tmdb.Result, title string, year int) (tmdb.Result, bool) {
 	want := normTitle(title)
 	var exact []tmdb.Result
 	for _, r := range hits {
 		y := yearOf(r)
-		if (normTitle(r.Title) == want || normTitle(r.OriginalTitle) == want) && year > 0 && y > 0 && abs(y-year) <= 1 {
+		if (normTitle(r.Title) == want || normTitle(r.OriginalTitle) == want) && (year == 0 || y > 0 && abs(y-year) <= 1) {
 			exact = append(exact, r)
 		}
 	}
