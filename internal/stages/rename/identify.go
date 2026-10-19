@@ -151,7 +151,17 @@ func (id *identifier) lookup(ctx context.Context, kind, name string, videos []st
 func (id *identifier) byTag(ctx context.Context, kind, source, value, title string, year int) (identity, error) {
 	switch {
 	case source == "tmdb":
-		return identity{Title: Title{ID: "tmdb-" + value, Name: title, Year: year}}, nil
+		t := Title{ID: "tmdb-" + value, Name: title, Year: year}
+		if year == 0 { // the scheme names a year: a name without one takes TMDB's
+			d, err := id.tmdb.Details(ctx, kindOf(kind), atoi(value))
+			if err != nil && !errors.Is(err, tmdb.ErrNotFound) {
+				return identity{}, err
+			}
+			if !d.Date.IsZero() {
+				t.Year = d.Date.Year()
+			}
+		}
+		return identity{Title: t}, nil
 	case source == "tvdb" && kind == "show":
 		if t, ok := id.byID["show:tvdb-"+value]; ok {
 			return identity{Title: t}, nil
